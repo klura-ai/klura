@@ -6,7 +6,7 @@
 
 Thank you for your interest in Klura. To clarify the intellectual property license granted with Contributions from any person or entity, the Licensor must have on file a signed Contributor License Agreement ("CLA") from each Contributor, indicating agreement with the license terms below. This agreement is for your protection as a Contributor as well as the protection of the Licensor and its users. It does not change your rights to use your own Contributions for any other purpose.
 
-Signing is handled electronically through [CLA Assistant](https://cla-assistant.io/). On your first pull request to a Klura repository, the bot will comment with a link; sign in with your GitHub account and follow the prompt. Your signed agreement is recorded against your GitHub identity and covers all future Contributions to Klura repositories under the same terms.
+Signing is handled electronically by an in-repo GitHub Action ([contributor-assistant/github-action](https://github.com/contributor-assistant/github-action)). On your first pull request to a Klura repository, the bot will comment with the CLA text and instructions; reply with `I have read the CLA Document and I hereby sign the CLA` to record your signature. Signatures are stored as commits to `signatures/version1/cla.json` in the repo, against your GitHub identity, and cover all future Contributions to that repository under the same terms.
 
 You accept and agree to the following terms and conditions for Your Contributions (present and future) that you submit to the Licensor. Except for the license granted herein to the Licensor and recipients of software distributed by the Licensor, You reserve all right, title, and interest in and to Your Contributions.
 
