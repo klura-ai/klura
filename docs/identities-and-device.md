@@ -99,8 +99,12 @@ Or in an MCP client config:
 ```json
 {
   "mcpServers": {
-    "klura-desktop": { "command": "klura-mcp" },
-    "klura-mobile": { "command": "klura-mcp", "env": { "KLURA_HOME": "/home/alice/.klura-mobile" } }
+    "klura-desktop": { "command": "npx", "args": ["-y", "@klura/mcp"] },
+    "klura-mobile": {
+      "command": "npx",
+      "args": ["-y", "@klura/mcp"],
+      "env": { "KLURA_HOME": "/home/alice/.klura-mobile" }
+    }
   }
 }
 ```

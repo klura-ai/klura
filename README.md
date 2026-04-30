@@ -61,7 +61,7 @@ Add klura to your MCP client (Claude Code, Claude Desktop, Cursor, Windsurf, Ope
 ```json
 {
   "mcpServers": {
-    "klura": { "command": "npx", "args": ["klura-mcp"] }
+    "klura": { "command": "npx", "args": ["-y", "@klura/mcp"] }
   }
 }
 ```
