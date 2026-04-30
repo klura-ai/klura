@@ -26,6 +26,10 @@ the terms of the Licensed Work above; it is provided here for attribution.
   Copyright (c) Einar Otto Stangvik and contributors
   Licensed under the MIT License.
 
+- zod (https://zod.dev/)
+  Copyright (c) Colin McDonnell
+  Licensed under the MIT License.
+
 The Apache License 2.0 text is available at
 https://www.apache.org/licenses/LICENSE-2.0. Copies of the MIT License for
 the listed packages are distributed inside their respective directories
