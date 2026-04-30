@@ -1,6 +1,6 @@
 // Default driver uses plain `playwright`. A subclass (or caller) can pass a
 // different BrowserType instance through the constructor — e.g. the external
-// `klura-driver-playwright-stealth` package passes playwright-extra's patched
+// `@klura/driver-playwright-stealth` package passes playwright-extra's patched
 // chromium — and inherit every other behavior unchanged (screencast, network
 // capture, focus tracker, viewport sync, touch dispatch).
 import { chromium as defaultChromium } from 'playwright';

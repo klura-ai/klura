@@ -88,7 +88,7 @@ interface BrowserDriver {
 | ------------ | ------------ | ------------------------------------------- |
 | `playwright` | All          | Default. Full-featured, headless or headed. |
 
-`klura-driver-playwright-stealth` ships as a separate npm package — install it and set `pool.driver` to its package name (or to an absolute path / relative path / BYO npm name) to swap drivers. See [runtime.md#drivers](runtime.md#drivers) for the full driver-selection mechanics.
+`@klura/driver-playwright-stealth` ships as a separate npm package — install it and set `pool.driver` to its package name (or to an absolute path / relative path / BYO npm name) to swap drivers. See [runtime.md#drivers](runtime.md#drivers) for the full driver-selection mechanics.
 
 **Stealth vs bot-evasion:** Stealth (making the browser's fingerprint consistent and realistic) is fine and encouraged — the user is a real human using a real browser. Bot-evasion (faking human mouse movements, solving CAPTCHAs programmatically, residential proxies) is not the marketed feature surface. When a site challenges the session, a human solves it via the remote viewer. See [principles.md](principles.md#stealth-vs-bot-evasion).
 

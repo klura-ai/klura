@@ -40,7 +40,7 @@ See [pool.md](pool.md) for the warm-pool / ready-page checkout protocol and [dri
 | --- | --- | --- | --- |
 | `pool.channel` | `auto` \| `chrome` \| `chromium` | `auto` | Chromium channel. `chrome` uses the installed Google Chrome (real TLS); `chromium` uses Playwright's bundled binary; `auto` tries chrome first. |
 | `pool.headful` | boolean | `false` | Show a visible browser window. Debug-only. |
-| `pool.driver` | string | (unset) | Driver. `playwright` (default), `klura-driver-playwright-stealth`, or a BYO path / package name. |
+| `pool.driver` | string | (unset) | Driver. `playwright` (default), `@klura/driver-playwright-stealth`, or a BYO path / package name. |
 | `pool.idleTimeout` | number, 0–86400 | `300` | Seconds a session may sit idle before the pool tears it down. |
 | `pool.maxSessions` | number, 1–128 | `8` | Maximum concurrent browser sessions. |
 | `pool.warm.enabled` | boolean | `false` | Keep browser backends alive across klura sessions (~2-3s warm vs ~10-20s cold). |

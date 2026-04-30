@@ -7,17 +7,17 @@ import './runtime-state';
 
 // Absolute path to SKILL.md inside the installed klura package. At runtime
 // __dirname is <pkg>/dist, so SKILL.md sits one level up. Consumers (mcp,
-// benchmark, ClawHub skill) should resolve via `require('klura').SKILL_MD_PATH`
+// benchmark, ClawHub skill) should resolve via `require('@klura/runtime').SKILL_MD_PATH`
 // rather than guessing relative paths.
 export const SKILL_MD_PATH = path.join(__dirname, '..', 'SKILL.md');
 export const REFERENCE_MD_PATH = path.join(__dirname, '..', 'REFERENCE.md');
 
-/** Read SKILL.md from the installed klura package. */
+/** Read SKILL.md from the installed @klura/runtime package. */
 export function getSkillMd(): string {
   return fs.readFileSync(SKILL_MD_PATH, 'utf-8');
 }
 
-/** Read REFERENCE.md from the installed klura package. */
+/** Read REFERENCE.md from the installed @klura/runtime package. */
 export function getReferenceMd(): string {
   return fs.readFileSync(REFERENCE_MD_PATH, 'utf-8');
 }

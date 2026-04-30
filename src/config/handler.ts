@@ -245,7 +245,7 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     optional: true,
     default: undefined,
     description:
-      'Driver. "playwright" (default), "playwright-stealth", or a BYO path / package name.',
+      'Driver. "playwright" (default), "@klura/driver-playwright-stealth", or a BYO path / package name.',
     needsRestart: false,
   },
   {

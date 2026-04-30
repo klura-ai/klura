@@ -339,7 +339,7 @@ When klura needs to communicate something _about_ a saved skill — observed com
 
 **Klura is not a bot-evasion tool.** It automates websites on behalf of the user who is signed in, using their own credentials and sessions, driven by an LLM the user is explicitly running. The one human on the other end of a klura session is the legitimate account holder.
 
-The only thing klura ships in this neighborhood is **fingerprint parity**: the automated browser should look like the same real browser the user would otherwise be driving themselves. That means correcting automation artifacts a normal Chrome session does not have — `navigator.webdriver`, inconsistent WebGL/canvas readings, plugin-enumeration anomalies. `klura-driver-playwright-stealth` exists for exactly this, and nothing else.
+The only thing klura ships in this neighborhood is **fingerprint parity**: the automated browser should look like the same real browser the user would otherwise be driving themselves. That means correcting automation artifacts a normal Chrome session does not have — `navigator.webdriver`, inconsistent WebGL/canvas readings, plugin-enumeration anomalies. `@klura/driver-playwright-stealth` exists for exactly this, and nothing else.
 
 **What klura does not do:**
 

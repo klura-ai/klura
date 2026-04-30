@@ -147,12 +147,12 @@ See also [remote.md](remote.md) for the viewer protocol.
 `pool.driver` picks the browser driver:
 
 - **`playwright`** (default) — plain Playwright, no stealth patches. Clean baseline.
-- **`klura-driver-playwright-stealth`** (separate package) — install with `npm i klura-driver-playwright-stealth` and set `pool.driver` to the package name. Same driver with `puppeteer-extra-plugin-stealth` applied at launch.
+- **`@klura/driver-playwright-stealth`** (separate package) — install with `npm i @klura/driver-playwright-stealth` and set `pool.driver` to the package name. Same driver with `puppeteer-extra-plugin-stealth` applied at launch.
 - **BYO absolute path** — `pool.driver: "/Users/x/my-driver.js"`. The runtime `require()`s the file and instantiates the exported class (must extend `BrowserDriver`). See `runtime/examples/custom-driver.js`.
 - **BYO package** — `pool.driver: "my-klura-driver"`. Bare module name, resolved against `node_modules`.
 
 ```json
-{ "pool": { "driver": "klura-driver-playwright-stealth" } }
+{ "pool": { "driver": "@klura/driver-playwright-stealth" } }
 ```
 
 See [drivers.md](drivers.md) for the `BrowserDriver` interface and capability matrix.

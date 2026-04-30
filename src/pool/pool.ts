@@ -51,7 +51,7 @@ type DriverCtor = new (opts?: DriverConstructorOptions) => BrowserDriver;
 
 // Built-in driver names. `pool.driver` picks one of these short names, or
 // alternatively passes an absolute path / bare npm package name to require()
-// for BYO (e.g. `klura-driver-playwright-stealth`). Each entry is lazy so only
+// for BYO (e.g. `@klura/driver-playwright-stealth`). Each entry is lazy so only
 // the driver we actually use gets loaded.
 const BUILTIN_DRIVERS: Record<string, () => DriverCtor> = {
   playwright: () => {
@@ -217,7 +217,7 @@ export class Pool implements BrowserPool {
         throw new Error(
           `Failed to load pool.driver "${opts.driver ?? 'playwright'}": ${String(err)}. ` +
             `Install playwright or set pool.driver to a valid built-in name ("playwright"), ` +
-            `a BYO package name (e.g. "klura-driver-playwright-stealth"), or an absolute ` +
+            `a BYO package name (e.g. "@klura/driver-playwright-stealth"), or an absolute ` +
             `path in ~/.klura/config.json`,
           { cause: err },
         );

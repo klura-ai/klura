@@ -1,6 +1,9 @@
 {
-  "name": "klura",
+  "name": "@klura/runtime",
   "version": "0.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "Runtime for klura — discovers and executes web automation skills",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
