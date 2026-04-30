@@ -1,0 +1,32 @@
+Klura runtime
+Copyright (c) 2026 Narek Mailian and Klura contributors
+
+This product is licensed under the Business Source License 1.1 (BUSL-1.1)
+with an Additional Use Grant. See LICENSE for the full terms, including the
+production-use restrictions and the Change Date on which the Licensed Work
+converts to the Apache License, Version 2.0.
+
+-----------------------------------------------------------------------------
+Third-party components
+-----------------------------------------------------------------------------
+
+This product bundles or depends on the following third-party software, each
+under its own license. The inclusion of these dependencies does not alter
+the terms of the Licensed Work above; it is provided here for attribution.
+
+- Playwright (https://playwright.dev/)
+  Copyright (c) Microsoft Corporation
+  Licensed under the Apache License, Version 2.0.
+
+- cheerio (https://cheerio.js.org/)
+  Copyright (c) The cheerio contributors
+  Licensed under the MIT License.
+
+- ws (https://github.com/websockets/ws)
+  Copyright (c) Einar Otto Stangvik and contributors
+  Licensed under the MIT License.
+
+The Apache License 2.0 text is available at
+https://www.apache.org/licenses/LICENSE-2.0. Copies of the MIT License for
+the listed packages are distributed inside their respective directories
+under node_modules/ when installed.

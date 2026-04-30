@@ -1,0 +1,62 @@
+// Remote handoff backend — the pluggable primitive for "open a human-solve
+// surface, wait for done, tear down." klura ships one implementation (the local
+// HTTP+WS viewer reachable via optional cloudflared tunnel); deployments can
+// register alternative backends at startup without touching strategy schema or
+// executor code.
+//
+// Strategy authors never name a backend; it's a deployment-layer concern. The
+// interrupt system's `user-assist` handler routes through
+// `getActiveRemoteBackend()` so swapping the backend swaps every human-handoff
+// touchpoint uniformly.
+//
+// See runtime/docs/principles.md §"Pluggability is welcome" — the interface
+// shape is the formal extension point.
+
+import type { BrowserDriver } from '../drivers/interface';
+import type { Session } from '../drivers/types/session';
+import type { RemoteConfig } from './index';
+
+/** Opaque backend-chosen identifier for an in-flight handoff. The local
+ *  backend uses the sessionId; others may wrap additional state. */
+interface RemoteHandle {
+  readonly sessionId: string;
+  /** Optional URL for the operator to visit; present when the backend
+   *  surfaces a viewer UI (local, docker), absent for backends that
+   *  dispatch elsewhere. */
+  readonly viewerUrl?: string;
+  /** Backend-specific bag; typed as unknown to keep this interface
+   *  narrow. Each backend reads its own keys. */
+  readonly backendState?: unknown;
+}
+
+interface RemoteHandoffBackend {
+  readonly name: string;
+  start(
+    sessionId: string,
+    driver: BrowserDriver,
+    session: Session,
+    opts: RemoteConfig,
+  ): Promise<RemoteHandle>;
+  waitForDone(handle: RemoteHandle, timeoutMs: number): Promise<{ done: boolean; reason?: string }>;
+  stop(handle: RemoteHandle): Promise<void>;
+}
+
+const registry = new Map<string, RemoteHandoffBackend>();
+const ACTIVE_NAME = 'local';
+
+export function registerRemoteBackend(backend: RemoteHandoffBackend): void {
+  if (registry.has(backend.name)) {
+    throw new Error(`remote backend "${backend.name}" is already registered`);
+  }
+  registry.set(backend.name, backend);
+}
+
+export function getActiveRemoteBackend(): RemoteHandoffBackend {
+  const backend = registry.get(ACTIVE_NAME);
+  if (!backend) {
+    throw new Error(
+      `no remote backend registered under "${ACTIVE_NAME}" — the default "local" backend should always be registered at module load`,
+    );
+  }
+  return backend;
+}

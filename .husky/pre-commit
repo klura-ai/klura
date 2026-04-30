@@ -1,0 +1,9 @@
+npx lint-staged
+
+# Budget guard: every level-2 section of REFERENCE.md must fit inside the
+# MCP tool-output budget so agents can fetch it in one round via
+# `klura://reference#<slug>`. Also verifies every fragment pointer in
+# SKILL.md resolves to a real section. Runs on every commit (test is fast)
+# rather than gating on file changes — reference drift is the exact class
+# of regression that's easy to miss on a commit that "shouldn't" touch it.
+npm run --silent check:reference

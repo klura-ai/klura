@@ -1,0 +1,73 @@
+{
+  "name": "klura",
+  "version": "0.1.0",
+  "description": "Runtime for klura — discovers and executes web automation skills",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "klura": "./bin/klura.js"
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "bin/",
+    "SKILL.md",
+    "README.md",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node bin/klura.js daemon",
+    "test": "node --test test/*.test.js",
+    "coverage": "node --test --experimental-test-coverage test/*.test.js",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
+    "format": "prettier --write 'src/**/*.ts'",
+    "format:check": "prettier --check 'src/**/*.ts'",
+    "format:md": "prettier --write '**/*.md' --ignore-path .gitignore",
+    "format:md:check": "prettier --check '**/*.md' --ignore-path .gitignore",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run lint && npm run format:check",
+    "check:reference": "tsc && node --test test/reference-size-budget.test.js",
+    "prepublishOnly": "npm run check && npm run build",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "src/**/*.ts": [
+      "eslint --max-warnings=0",
+      "prettier --write"
+    ],
+    "**/*.md": [
+      "prettier --write"
+    ]
+  },
+  "keywords": [
+    "web-automation",
+    "skill",
+    "browser",
+    "discovery"
+  ],
+  "license": "BUSL-1.1",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "cheerio": "^1.2.0",
+    "playwright": "^1.50.0",
+    "ws": "^8.20.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^25.5.2",
+    "@types/ws": "^8.18.1",
+    "eslint": "^10.2.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-sonarjs": "^4.0.3",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0",
+    "prettier": "^3.8.1",
+    "typescript": "^6.0.2",
+    "typescript-eslint": "^8.58.0"
+  }
+}
