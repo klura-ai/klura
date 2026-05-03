@@ -179,6 +179,32 @@ async function isStructurallySafeMapAction(
   return false;
 }
 
+/**
+ * When playwright's click trace ends in "...from <X> subtree intercepts
+ * pointer events", a page overlay is sitting on top of the target — a
+ * cookie banner, modal, or fullscreen consent dialog. Returns a structural
+ * hint naming the intercepting element and the dismiss-first move order;
+ * empty string when the trace doesn't carry that pattern. Exported for
+ * unit tests; also called inline by the click failure path.
+ */
+export function buildOverlayInterceptHint(msg: string): string {
+  // The trace usually carries a closing tag + truncation between the opening
+  // tag and the "subtree intercepts" marker (e.g. `<div class="overlay">…</div> subtree…`),
+  // so allow arbitrary content (including newlines) between the captured tag
+  // and the marker. Lazy match so we stop at the first marker, not the last.
+  const m = /from\s+<([^>]+)>[\s\S]*?subtree intercepts pointer events/.exec(msg);
+  if (!m) return '';
+  const interceptor = m[1] ?? '<unknown overlay>';
+  return (
+    `\n\nA page overlay is intercepting clicks (intercepting element: \`<${interceptor}>\`). ` +
+    `**Dismiss the overlay first** before retrying — this is NOT a "gate you cannot pass," it's a banner/modal sitting on top. Try in order:\n` +
+    `  1. \`perform_action({action: "key_press", selector: "Escape"})\` — closes most modals.\n` +
+    `  2. If Escape doesn't dismiss: scan the a11y tree for a Decline / Close / Reject / Got it / Allow button and click it.\n` +
+    `  3. Then retry your original click.\n` +
+    `\nDo NOT call \`start_remote_session\` for an overlay you can dismiss yourself — escalate only when the underlying interaction (login, captcha, 2FA) genuinely needs a human.`
+  );
+}
+
 function mineSelectorCandidatesFromA11yTree(tree: string, failedSelector: string): string[] {
   const ROLE_TOKENS = new Set([
     'button',
@@ -440,7 +466,8 @@ export async function performAction(
       const msg = err instanceof Error ? err.message : String(err);
       if (!/Timeout.*exceeded|waiting for locator/i.test(msg)) throw err;
       recordFailedSelector();
-      const hint = await buildSelectorHint();
+      const overlay = buildOverlayInterceptHint(msg);
+      const hint = overlay ? overlay : await buildSelectorHint();
       throw new Error(msg + hint, { cause: err });
     }
   };
