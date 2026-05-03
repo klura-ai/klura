@@ -111,3 +111,26 @@ test('message text mentions end_drive and LIFT', () => {
   assert.match(obl.message, /LIFT/);
   assert.match(obl.message, /klura:\/\/reference/);
 });
+
+test('TRIAGE phase points at submit_triage_plan, not save_strategy', () => {
+  const session = mkSession({
+    phase: 'triage',
+    performActionHistory: [{ at: 1, action: 'click' }],
+  });
+  const obl = computeSessionObligation(session);
+  assert.match(obl.message, /TRIAGE/);
+  assert.match(obl.message, /submit_triage_plan/);
+  assert.match(obl.message, /DO NOT tell the user the task is complete/);
+  assert.doesNotMatch(obl.message, /MUST be `save_strategy`/);
+});
+
+test('LIFT phase points at save_strategy with don\'t-claim-done', () => {
+  const session = mkSession({
+    phase: 'lift',
+    performActionHistory: [{ at: 1, action: 'click' }],
+  });
+  const obl = computeSessionObligation(session);
+  assert.match(obl.message, /LIFT/);
+  assert.match(obl.message, /MUST be `save_strategy`/);
+  assert.match(obl.message, /DO NOT tell the user the task is complete/);
+});

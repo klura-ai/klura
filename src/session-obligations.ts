@@ -97,18 +97,34 @@ export function computeSessionObligation(session: Session): SessionObligation | 
   // save_strategy with audit_token + audit_answers until ok:true".
   const phase = session.phase ?? 'drive';
 
-  if (phase === 'triage' || phase === 'lift') {
+  if (phase === 'triage') {
     return {
       kind: 'lift_required',
       session_id: session.id,
       mutating_actions: mutations.length,
       message:
-        `Session ${session.id} is in ${phase.toUpperCase()} but no strategy has been saved yet. ` +
-        `Your next tool call MUST be \`save_strategy\` — and if it returns \`save_strategy_rejected\`, ` +
+        `Session ${session.id} is in TRIAGE with no strategy saved. ` +
+        `**DO NOT tell the user the task is complete.** A user-visible action through the viewer (or your own clicks) ` +
+        `is NOT klura-task-complete — klura has persisted nothing, the next run starts from zero. ` +
+        `Your next tool call MUST be \`submit_triage_plan\` (this response's \`triage_authoring_contract\` field has the schema). ` +
+        `Once approved you enter LIFT, where \`save_strategy\` unlocks. Calling \`save_strategy\` directly in TRIAGE is hard-blocked. ` +
+        `See klura://reference#triage.`,
+    };
+  }
+
+  if (phase === 'lift') {
+    return {
+      kind: 'lift_required',
+      session_id: session.id,
+      mutating_actions: mutations.length,
+      message:
+        `Session ${session.id} is in LIFT with no strategy saved. ` +
+        `**DO NOT tell the user the task is complete.** klura has persisted nothing — the next run starts from zero. ` +
+        `Your next tool call MUST be \`save_strategy\`. If it returns \`save_strategy_rejected\`, ` +
         `re-call save_strategy WITH the returned \`audit_token\` plus \`audit_answers\` for any open items ` +
         `(don't end your turn after a rejection — the rejection IS the iteration loop, not a stop signal). ` +
         `In unattended runs, retry with just \`audit_token\` and the embedder's decider auto-resolves user_confirmation. ` +
-        `Expect 1-3 retries before the save lands — that's normal. Ending your turn now without a save_strategy ok:true persists nothing. ` +
+        `Expect 1-3 retries before the save lands — that's normal. ` +
         `See klura://reference#save-strategy-audit.`,
     };
   }

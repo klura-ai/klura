@@ -17,6 +17,8 @@ Klura lets you automate any website. When the user asks you to do something on a
 
 That's it. The runtime handles capability + args → strategy; you handle the browser interaction.
 
+**Definition of klura-task-complete:** `save_strategy` returned `ok: true`. A user-visible action (the message sent through the viewer, the form submitted, etc.) is not enough — without a saved strategy the next run starts from zero. If you're tempted to end your turn telling the user "done" while a session is in TRIAGE or LIFT with no save, re-read the `[klura obligation]` block on the latest tool response.
+
 ## When the goal is ambiguous about _who_ or _what_
 
 If the user's goal names a target ambiguously (first-name-only person, unqualified product, unspecified account), ask once and end the turn text-only — no tool calls in the same turn, or the harness won't forward the question. Carve-out for overwhelmingly obvious referents (mononyms, single-referent surnames in context).
