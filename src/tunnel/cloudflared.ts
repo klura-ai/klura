@@ -74,13 +74,13 @@ async function ensureCloudflared(): Promise<string> {
   const localPath = path.join(BIN_DIR, 'cloudflared');
   if (fs.existsSync(localPath)) return localPath;
 
-  console.log('[tunnel] Downloading cloudflared...');
+  console.error('[tunnel] Downloading cloudflared...');
   fs.mkdirSync(BIN_DIR, { recursive: true });
 
   await downloadFile(downloadUrl(), localPath);
 
   fs.chmodSync(localPath, 0o700);
-  console.log('[tunnel] cloudflared downloaded');
+  console.error('[tunnel] cloudflared downloaded');
   return localPath;
 }
 

@@ -1,6 +1,7 @@
 import fs from 'fs';
 import http from 'http';
 import os from 'os';
+import crypto from 'crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { BrowserDriver } from '../drivers/interface';
 import type { FocusState, Session, SubPage } from '../drivers/types/session';
@@ -650,7 +651,18 @@ export async function startViewer(
 
   wss.on('connection', (ws, req) => {
     const connUrl = new URL(req.url ?? '/', 'http://localhost');
-    if (connUrl.searchParams.get('token') !== token) {
+    const supplied = connUrl.searchParams.get('token');
+    if (supplied !== token) {
+      const fp = (s: string | null): string => {
+        if (s === null) return 'absent';
+        const sha = crypto.createHash('sha256').update(s).digest('hex').slice(0, 16);
+        const mid = s.slice(40, 60);
+        return `len=${s.length} sha256[0..16]=${sha} mid[40..60]=${mid} typeof=${typeof s}`;
+      };
+      const reqUrl = req.url ?? '<no-url>';
+      console.error(
+        `[viewer] WS rejected for session ${sessionId}: token mismatch\n  reqUrl=${reqUrl}\n  expected: ${fp(token)}\n  supplied: ${fp(supplied)}`,
+      );
       ws.close(4001, 'Invalid token');
       return;
     }
@@ -668,7 +680,7 @@ export async function startViewer(
 
     function startViewerSession(): void {
       validated = true;
-      console.log(`[viewer] Client connected for session ${sessionId} (touchMode=${touchMode})`);
+      console.error(`[viewer] Client connected for session ${sessionId} (touchMode=${touchMode})`);
 
       try {
         ws.send(JSON.stringify({ type: 'prompt', text: viewer.prompt }));
@@ -746,7 +758,7 @@ export async function startViewer(
             if (layoutMismatch) {
               const clientClass = clientIsMobileSize ? 'mobile device' : 'desktop';
               const suggested = clientIsMobileSize ? 'iphone-15' : 'desktop';
-              console.log(
+              console.error(
                 `[viewer] Layout mismatch warning for session ${sessionId}: ` +
                   `session=${profile.viewport.width}w, client=${clientWidth}w`,
               );
@@ -776,7 +788,7 @@ export async function startViewer(
           // User accepted the device mismatch warning
           if (event.type === 'proceed') {
             if (!validated) {
-              console.log(`[viewer] User accepted device mismatch for session ${sessionId}`);
+              console.error(`[viewer] User accepted device mismatch for session ${sessionId}`);
               startViewerSession();
             }
             return;
@@ -1026,7 +1038,7 @@ export async function startViewer(
   viewer.port = typeof addr === 'object' && addr ? addr.port : 0;
 
   activeViewers.set(sessionId, viewer);
-  console.log(`[viewer] Started on port ${viewer.port} for session ${sessionId}`);
+  console.error(`[viewer] Started on port ${viewer.port} for session ${sessionId}`);
 
   return {
     token,
@@ -1059,5 +1071,5 @@ export async function stopViewer(sessionId: string): Promise<void> {
   });
 
   activeViewers.delete(sessionId);
-  console.log(`[viewer] Stopped for session ${sessionId}`);
+  console.error(`[viewer] Stopped for session ${sessionId}`);
 }

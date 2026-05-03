@@ -38,7 +38,7 @@ export function restartRuntime(args: { force?: boolean } = {}): {
   // Respond, then exit after the HTTP layer flushes. Next klura call respawns
   // the daemon via the normal auto-start path in bin/klura.js.
   setImmediate(() => {
-    console.log('[runtime] restart requested — exiting for respawn');
+    console.error('[runtime] restart requested — exiting for respawn');
     process.exit(0);
   });
   return {

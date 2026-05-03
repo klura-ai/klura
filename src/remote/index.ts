@@ -61,7 +61,7 @@ export async function startRemoteSession(
     try {
       tunnel = await openTunnel(viewer.port);
       viewerUrl = `${tunnel.url.replace(/\/$/, '')}/?token=${viewer.token}`;
-      console.log(`[remote] Tunnel open: ${tunnel.url}`);
+      console.error(`[remote] Tunnel open: ${tunnel.url}`);
     } catch (err) {
       if (cfg.mode === 'cloudflared') throw err;
       console.warn(`[remote] Tunnel failed, using localhost: ${String(err)}`);
@@ -71,7 +71,7 @@ export async function startRemoteSession(
 
   const timeoutTimer = setTimeout(
     () => {
-      console.log(`[remote] Session ${sessionId} timed out`);
+      console.error(`[remote] Session ${sessionId} timed out`);
       void stopRemoteSession(sessionId);
     },
     (cfg.timeout ?? 600) * 1000,
@@ -86,7 +86,7 @@ export async function startRemoteSession(
   };
 
   activeSessions.set(sessionId, remote);
-  console.log(`[remote] Session started: ${viewerUrl}`);
+  console.error(`[remote] Session started: ${viewerUrl}`);
   return remote;
 }
 
@@ -105,7 +105,7 @@ export async function stopRemoteSession(sessionId: string): Promise<void> {
 
   if (remote.tunnel) remote.tunnel.kill();
   activeSessions.delete(sessionId);
-  console.log(`[remote] Session stopped: ${sessionId}`);
+  console.error(`[remote] Session stopped: ${sessionId}`);
 }
 
 /**
