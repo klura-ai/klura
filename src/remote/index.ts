@@ -15,9 +15,22 @@ function hostDoneFile(sessionId: string): string {
   return `/tmp/klura-remote-done-${sessionId}`;
 }
 
+/**
+ * Where the viewer URL is reachable from. Used to shape the verbatim-relay
+ * preface — local URLs need a "klura runs on the user's machine" framing
+ * (otherwise agents claim the user can't reach localhost), public URLs need
+ * a "don't paste in a public channel" caution.
+ *
+ * Computed from the actual outcome (which exposure path won), not the
+ * configured mode — `auto` mode falls back to local when the tunnel fails,
+ * and a missing `publicUrl` in `direct` mode also falls back to local.
+ */
+export type ViewerExposure = 'local' | 'public';
+
 interface RemoteSession {
   sessionId: string;
   viewerUrl: string;
+  exposure: ViewerExposure;
   tunnel: Tunnel | null;
   timeoutTimer: NodeJS.Timeout;
 }
@@ -54,20 +67,23 @@ export async function startRemoteSession(
 
   let viewerUrl = viewer.localUrl;
   let tunnel: Tunnel | null = null;
+  let exposure: ViewerExposure = 'local';
 
   if (cfg.mode === 'direct' && cfg.publicUrl) {
     viewerUrl = `${cfg.publicUrl.replace(/\/$/, '')}:${viewer.port}/?token=${viewer.token}`;
+    exposure = 'public';
   } else if (cfg.mode === 'auto' || cfg.mode === 'cloudflared') {
     try {
       tunnel = await openTunnel(viewer.port);
       viewerUrl = `${tunnel.url.replace(/\/$/, '')}/?token=${viewer.token}`;
+      exposure = 'public';
       console.error(`[remote] Tunnel open: ${tunnel.url}`);
     } catch (err) {
       if (cfg.mode === 'cloudflared') throw err;
       console.warn(`[remote] Tunnel failed, using localhost: ${String(err)}`);
     }
   }
-  // cfg.mode === 'local' falls through with the localhost viewerUrl.
+  // cfg.mode === 'local' falls through with the localhost viewerUrl + exposure.
 
   const timeoutTimer = setTimeout(
     () => {
@@ -81,6 +97,7 @@ export async function startRemoteSession(
   const remote: RemoteSession = {
     sessionId,
     viewerUrl,
+    exposure,
     tunnel,
     timeoutTimer,
   };
@@ -125,7 +142,7 @@ registerRemoteBackend({
   name: 'local',
   async start(sessionId, driver, session, opts) {
     const remote = await startRemoteSession(sessionId, driver, session, opts);
-    return { sessionId, viewerUrl: remote.viewerUrl };
+    return { sessionId, viewerUrl: remote.viewerUrl, exposure: remote.exposure };
   },
   async waitForDone(handle, timeoutMs) {
     return waitForRemoteDone(handle.sessionId, timeoutMs);

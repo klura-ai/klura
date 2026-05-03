@@ -80,3 +80,42 @@ test('ignores malformed obligation (missing message string)', () => {
   assert.equal(blocks[0].type, 'text');
   assert.match(blocks[0].text, /^\[Tool result for perform_action\]:/);
 });
+
+test('hoists _render_verbatim_block into a leading text block with preface', () => {
+  const blocks = formatToolResult('start_remote_session', {
+    viewerUrl: 'http://localhost:54000?token=abc',
+    _render_verbatim_block: {
+      preface: 'Surface this URL to the user verbatim:',
+      content: 'http://localhost:54000?token=abc',
+    },
+  });
+  assert.equal(blocks.length, 2);
+  assert.equal(blocks[0].type, 'text');
+  assert.match(blocks[0].text, /Surface this URL to the user verbatim:/);
+  assert.match(blocks[0].text, /http:\/\/localhost:54000\?token=abc/);
+  assert.equal(blocks[1].type, 'text');
+  assert.match(blocks[1].text, /^\[Tool result for start_remote_session\]:/);
+  assert.doesNotMatch(blocks[1].text, /_render_verbatim_block/);
+});
+
+test('default render-verbatim preface fires when none supplied', () => {
+  const blocks = formatToolResult('start_remote_session', {
+    viewerUrl: 'http://x',
+    _render_verbatim_block: { content: 'http://x' },
+  });
+  assert.equal(blocks.length, 2);
+  assert.match(blocks[0].text, /verbatim/i);
+  assert.match(blocks[0].text, /http:\/\/x/);
+});
+
+test('obligation + render-verbatim coexist as two leading blocks', () => {
+  const blocks = formatToolResult('start_remote_session', {
+    viewerUrl: 'http://x',
+    _session_obligation: obligation,
+    _render_verbatim_block: { content: 'http://x' },
+  });
+  assert.equal(blocks.length, 3);
+  assert.match(blocks[0].text, /^\[klura obligation\]:/);
+  assert.match(blocks[1].text, /verbatim/i);
+  assert.match(blocks[2].text, /^\[Tool result for start_remote_session\]:/);
+});

@@ -24,6 +24,14 @@ interface RemoteHandle {
    *  surfaces a viewer UI (local, docker), absent for backends that
    *  dispatch elsewhere. */
   readonly viewerUrl?: string;
+  /** Where the URL is reachable from. `'local'` = same host as klura
+   *  (typical local mode); `'public'` = reachable across the network
+   *  (cloudflare tunnel / direct mode / docker with port-forward). Used
+   *  by `start_remote_session` to shape its verbatim-relay preface —
+   *  local URLs need a "klura runs on the user's machine" framing,
+   *  public URLs need a "do not paste in a public channel" caution.
+   *  Backends without a viewer URL omit this field. */
+  readonly exposure?: 'local' | 'public';
   /** Backend-specific bag; typed as unknown to keep this interface
    *  narrow. Each backend reads its own keys. */
   readonly backendState?: unknown;

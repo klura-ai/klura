@@ -75,6 +75,39 @@ function extractObligation(result: unknown): { block: TextBlock | null; rest: un
 }
 
 /**
+ * Pull `_render_verbatim_block` off a result object and return it as a
+ * standalone text block before the JSON payload. Used by tools that
+ * emit content the agent must surface to the user without modification —
+ * specifically `start_remote_session`'s viewer URL, which carries an
+ * HMAC-signed JWT that breaks on any retype/edit/abbreviation.
+ *
+ * Field shape: `{ preface?: string, content: string }`. The preface
+ * names the verbatim contract; the content is the literal text the
+ * agent must paste.
+ */
+function extractRenderVerbatim(result: unknown): { block: TextBlock | null; rest: unknown } {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) {
+    return { block: null, rest: result };
+  }
+  const obj = result as Record<string, unknown>;
+  const blockSpec = obj._render_verbatim_block as
+    | { preface?: string; content?: string }
+    | undefined;
+  if (!blockSpec || typeof blockSpec.content !== 'string') {
+    return { block: null, rest: result };
+  }
+  const rest = { ...obj };
+  delete rest._render_verbatim_block;
+  const preface =
+    blockSpec.preface ??
+    'Render the following to the user verbatim — do not retype, edit, summarize, or omit any part:';
+  return {
+    block: { type: 'text', text: `${preface}\n\n${blockSpec.content}` },
+    rest,
+  };
+}
+
+/**
  * Convert a raw tool result into LLM-ready content blocks. Screenshots become
  * image blocks so vision-capable models can actually see them.
  *
@@ -95,8 +128,12 @@ export function formatToolResult(toolName: string, result: unknown): ContentBloc
     ];
   }
 
-  const { block: obligationBlock, rest } = extractObligation(result);
-  const prefix: ContentBlock[] = obligationBlock ? [obligationBlock] : [];
+  const { block: obligationBlock, rest: afterObligation } = extractObligation(result);
+  const { block: renderBlock, rest } = extractRenderVerbatim(afterObligation);
+  const prefix: ContentBlock[] = [
+    ...(obligationBlock ? [obligationBlock] : []),
+    ...(renderBlock ? [renderBlock] : []),
+  ];
 
   // Tool result with embedded screenshot
   if (rest && typeof rest === 'object' && 'screenshot' in (rest as Record<string, unknown>)) {
