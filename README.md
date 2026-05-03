@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<p align="center"><strong>Turn any website into an API</strong></p>
+<p align="center"><strong>Run a browser task once. Skip the UI forever.</strong></p>
 
 <p align="center">
   <a href="https://discord.gg/YJQ2zZYJ"><img alt="Discord" src="https://img.shields.io/discord/1496415213765791774?color=5865F2&label=Discord&logo=discord&logoColor=white&style=flat-square"></a>
@@ -14,41 +14,47 @@
 
 ---
 
-Klura makes browser automation a discovery step, not a permanent tax.
+# Turn any website into an API
 
-On a fresh task, the agent starts from scratch: opens the site, clicks buttons, types into fields, and finishes the job in the browser. Klura records what happened underneath: requests, responses, cookies, page state, and the action trail. Afterward, klura runs **[LIFT](#lift)** (Learn Interface From Traffic) — its own analysis pass that reads the captured trace and turns the repeatable parts of the flow into a saved strategy that bypasses the UI.
+Klura lets an agent use the browser once, learn the underlying interface, and turn future runs into direct API calls.
 
 ```text
 First run:
 > message Amanda in the team chat using klura
-  browser opens, task completes, traffic is captured
+  opens browser, completes the task, captures traffic
 
 Lift:
 > yes, analyze the capture
+  learns the real request behind the UI
 
 Later:
 > message Bob in the team chat using klura
-  klura → saved skill → ~0.3 s · 0 tokens
+  direct saved strategy → ~0.3s · 0 tokens
 ```
-
-If the lift succeeds, future runs start from the saved strategy instead of rediscovering the page. Your agent stays in the loop in case the site changes, and self-heals any degraded skills.
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="hero-dark.gif">
-    <img alt="klura: one run, lift, then blaze through the saved skill" src="hero-light.gif" width="900">
+    <img alt="klura: one run, lift, then execute the saved skill directly" src="hero-light.gif" width="900">
   </picture>
 </p>
 
+Klura watches what the browser actually does — requests, responses, cookies, page state, tokens, and action trails — then turns repeatable flows into saved executable strategies.
+
+The next time your agent needs the same task, it does not rediscover the page. It calls the saved strategy.
+
+---
+
 <p align="center"><sub>
   <a href="#quick-start">Quick Start</a> &nbsp;·&nbsp;
-  <a href="#benchmarks">Benchmarks</a> &nbsp;·&nbsp;
-  <a href="#lift">LIFT</a> &nbsp;·&nbsp;
-  <a href="#under-the-hood">Under the Hood</a> &nbsp;·&nbsp;
   <a href="#how-it-works">How It Works</a> &nbsp;·&nbsp;
+  <a href="#lift">LIFT</a> &nbsp;·&nbsp;
+  <a href="#self-healing">Self-Healing</a> &nbsp;·&nbsp;
+  <a href="#map-mode">Map Mode</a> &nbsp;·&nbsp;
+  <a href="#benchmarks">Benchmarks</a> &nbsp;·&nbsp;
+  <a href="#under-the-hood">Under the Hood</a> &nbsp;·&nbsp;
   <a href="#use-cases">Use Cases</a> &nbsp;·&nbsp;
-  <a href="#model-variance--reliability">Model Variance</a> &nbsp;·&nbsp;
-  <a href="#is-it-legal-will-i-get-banned">Legal &amp; ToS</a> &nbsp;·&nbsp;
+  <a href="#legal--tos">Legal &amp; ToS</a> &nbsp;·&nbsp;
   <a href="#docs">Docs</a>
 </sub></p>
 
@@ -56,77 +62,68 @@ If the lift succeeds, future runs start from the saved strategy instead of redis
 
 ## Quick Start
 
-Add klura to your MCP client (Claude Code, Claude Desktop, Cursor, Windsurf, OpenClaw, ...), then restart the client:
+Add klura to your MCP client — Claude Code, Claude Desktop, Cursor, Windsurf, OpenClaw, or any MCP-compatible host — then restart the client:
 
 ```json
 {
   "mcpServers": {
-    "klura": { "command": "npx", "args": ["-y", "@klura/mcp"] }
+    "klura": {
+      "command": "npx",
+      "args": ["-y", "@klura/mcp"]
+    }
   }
 }
 ```
 
-Now ask your agent for a website task:
+Now ask your agent to do a website task:
 
-> message Adam in the team chat using klura
+```text
+message Adam in the team chat using klura
+```
 
-If klura already knows the task, it runs the saved strategy. If not, the agent opens a browser and completes the task normally while klura records the traffic. Klura records the underlying traffic — requests, responses, cookies, and state — and analyzes it to infer the real interface behind the UI. Some sites need to see the same action two or three times before klura can pin down the underlying call — the agent will ask you to do it again. If a clean lift isn't possible yet, klura still saves the flow as a slower replay you can use right away, and revisit lifting later.
+If klura already knows the task, it runs the saved strategy.
 
-The next time, you can ask:
+If not, your agent opens a browser and completes the task normally while klura records what happens underneath. Afterward, klura can analyze the captured trace and learn the real interface behind the UI.
 
-> message Bob in the team chat using klura
+The next time you ask:
 
-This time, no LLM tokens are spent walking the DOM — klura will fire directly against the API, returning an answer in milliseconds.
+```text
+message Bob in the team chat using klura
+```
 
-You can also scout a site up front without picking a task — ask your agent to map a website with klura and it walks the surface area and records what's there. The next real task starts, klura is already familiar with the platform. See [Under the hood](#under-the-hood).
-
----
-
-## Why klura exists
-
-Agents are slow because they keep using the UI as the interface. The UI is not the real interface; it is the human layer over requests, responses, tokens, and state. Klura captures that lower layer and turns it into something reusable.
-
-|            | Browser agent              | klura                                        |
-| ---------- | -------------------------- | -------------------------------------------- |
-| First run  | Browser exploration        | Browser exploration + network capture        |
-| Lift step  | Starts over next time      | Optional traffic analysis after the task     |
-| Later runs | Browser exploration again  | Same saved strategy, with runtime safeguards |
-| Tokens     | ~10–25k per run, every run | ~10–25k once at lift, then **0**             |
-| Latency    | Seconds per UI step        | One request, ~hundreds of ms                 |
-
-The saved output is not "agent memory." It is executable strategy data built from the observed session — the agent calls it, and the runtime handles tier escalation, prereqs, and recovery when the page drifts.
+klura can skip the page entirely and execute the saved strategy directly.
 
 ---
 
-## Benchmarks
+## How It Works
 
-The point of LIFT is that the second run looks nothing like the first. Once a task is saved as a `fetch` or `page-script` strategy, the agent stops driving the browser and the runtime fires the request directly — no page load, no DOM walk, no LLM tokens spent on UI. **You don't need to know any of this.** The cold agent (Claude Sonnet 4.6, no human in the loop) figures it out: locates encoders, decodes envelope structure, derives rotating IDs, saves a runnable strategy. Call it vibe reverse-engineering — the LLM does the protocol work; you just ask for a github issue or a messenger send. All measured on Sonnet 4.6 through the same agent SDK loop (rows 1-2) and via the runtime's programmatic API with no LLM in the loop (row 3). Benchmark suite will be released soon for reproducability.
+Browser agents are slow because they keep using the UI as the interface.
 
-|  | HackerNews search | github/create_issue (`page-script`, auth + signed) [^github-re] | messenger/send_message (`page-script`, binary WebSocket) [^messenger-re] |
-| --- | --- | --- | --- |
-| Raw Playwright agent (no klura) | 22.9 s · 63k tok · $0.054 | 160 s · 634k tok · $0.29 | 134 s · 435k tok · $1.06 |
-| Klura cold — discovery + LIFT [^cold-includes-lift] | 43.8 s · 363k tok · $0.191 | 318 s · 1.29M tok · $0.84 | 1469 s · 1.78M tok · $1.56 |
-| Klura warm — runtime, no LLM [^runtime-only] | **0.33 s · 0 tok · $0** | **1.23 s · 0 tok · $0** | **5 ms · 0 tok · $0** |
+Klura treats the UI as a discovery step.
 
-Cold pays for tier — public reads lift cheaply; signed mutations need `page-script` plus signal-extraction prereqs; binary-WebSocket protocols need full RE work (locate the encoder, decode the envelope, reproduce the byte layout). **Warm collapses regardless of how exotic cold was**: the runtime's `execute()` call fires the saved strategy directly, no LLM in the loop, no agent rounds. github's page-script runs the persisted GraphQL query inside a live browser context with two `js-eval` prereqs extracting the rotating nonce and client-version; messenger's page-script rebuilds the binary MQTT frame from scratch and sends it through the page's already-authenticated WebSocket — many orders of magnitude faster than the cold agent doing the same work via UI.
+```text
+1. First run
+   The agent uses the browser normally.
 
-When klura is wrapped in an agent SDK (the Claude SDK loop, an MCP host, etc.), the warm path adds 2-3 LLM round-trips for the agent to recognise the saved skill, dispatch `execute`, and report the answer — roughly 15-20 s on top, dominated by per-turn LLM latency. Numbers above are the runtime call itself; that's what the saved strategy actually does.
+2. Capture
+   Klura records traffic, cookies, page state, and action history.
 
-[^cold-includes-lift]: Klura cold time includes **discovery + triage + LIFT** — the agent first completes the user's task (comparable cost to the raw Playwright row), then reverse-engineers the protocol and persists a runnable strategy. The "actual sending" portion of cold is roughly the raw Playwright number; the remainder is one-time RE work that amortizes across every future warm call.
+3. Lift
+   Klura analyzes the trace and learns the underlying request or script.
 
-[^runtime-only]: No agent SDK in the loop, n=5 sequential, median wall-clock. github's number is the median of a clean 5/5-ok page-script. When this same path is dispatched from inside an agent loop, add 15–20 s of LLM turns on top — the runtime call itself is what these numbers reflect.
+4. Later runs
+   The saved strategy executes directly.
+```
 
-[^github-re]: GitHub's web flow posts to `/_graphql` with a persisted-query hash, an `X-Fetch-Nonce` header that the in-page bundle rotates, and a numeric repository ID pulled from the rendered page. Sonnet 4.6 identifies the call, isolates the rotating signal, and saves a `page-script` with two `js-eval` prereqs that read the nonce and client-version off the live page on every invocation. You ask for an issue; the runtime returns one.
-
-[^messenger-re]: Messenger's send is an MQTT PUBLISH (QoS 1) on `/ls_req`, with a JSON body whose snowflake `epoch_id` and `otid` exceed `Number.MAX_SAFE_INTEGER` (so the saved script builds them with `BigInt`), a packet-id counter that lives on the in-page MQTT client, and binary framing via the page's `MqttProtocolCodec`. Sonnet 4.6 located the encoder via `search_js_source`, intercepted `MqttConnection.publish` to capture a live connection handle, decoded the LightSpeed envelope, and saved a script that builds the QoS-1 PUBLISH packet from scratch and dispatches it through the page's already-authenticated socket. The user never sees a frame or a packet ID.
+The saved output is not “agent memory.” It is executable strategy data built from the observed session.
 
 ---
 
 ## LIFT
 
-**LIFT** means **Learn Interface From Traffic** — the analysis pass that turns a captured browser session into a saved strategy.
+**LIFT** means **Learn Interface From Traffic**.
 
-Most websites are a UI over a smaller set of HTTP or WebSocket calls. Klura reads the captured trace and binds each repeatable action to the underlying call:
+It is the analysis pass that turns a captured browser session into a reusable strategy.
 
 ```text
 Before LIFT:                    After LIFT:
@@ -135,7 +132,14 @@ Before LIFT:                    After LIFT:
   read confirmation               ~200ms, 0 LLM tokens
 ```
 
-The saved strategy is a small JSON file under `~/.klura/skills/<platform>/`. A `fetch`-tier example:
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="learn-graph-dark.gif">
+    <img alt="Learn graph: drive the task in the browser, capture traffic, lift into a saved strategy" src="learn-graph-light.gif" width="900">
+  </picture>
+</p>
+
+A saved `fetch` strategy looks like this:
 
 ```json
 {
@@ -147,143 +151,373 @@ The saved strategy is a small JSON file under `~/.klura/skills/<platform>/`. A `
     {
       "kind": "capability",
       "capability": "list_conversations",
-      "args": { "name": "{{recipient}}" },
-      "vars": { "thread_id": "conversations[0].id" }
+      "args": {
+        "name": "{{recipient}}"
+      },
+      "vars": {
+        "thread_id": "conversations[0].id"
+      }
     }
   ],
-  "body": { "to": "{{thread_id}}", "text": "{{text}}" },
-  "auth": { "type": "session-cookie" }
+  "body": {
+    "to": "{{thread_id}}",
+    "text": "{{text}}"
+  },
+  "auth": {
+    "type": "session-cookie"
+  }
 }
 ```
 
-The runtime reads this file on every later run, runs the prerequisite first to look up `thread_id` from a sibling capability, fills the rest of the placeholders from the call args, and fires the request directly. See [REFERENCE.md](REFERENCE.md#fetch-schema) for the full schema and [REFERENCE.md#capability-prereq](REFERENCE.md#capability-prereq) for the prereq machinery.
+On later runs, klura reads this strategy, resolves prerequisites, fills placeholders from the call arguments, and fires the request directly.
 
-Strategies fall into three tiers, picked by what the page actually requires:
+Strategies are saved as ordinary JSON files under:
 
-| Tier | Strategy        | Used when                                         |
-| ---- | --------------- | ------------------------------------------------- |
-| T0   | `fetch`         | A templated HTTP or WebSocket call is enough      |
-| T1   | `page-script`   | The page must run JS to build or sign the request |
-| T2   | `recorded-path` | The safest available path is replaying the UI     |
+```text
+~/.klura/skills/<platform>/
+```
 
-If the page can't be lifted to `fetch` or `page-script` cleanly, klura still saves the flow as a `recorded-path`. That's slower than a direct call, but it still avoids re-planning the page from scratch on every run, and the same skill can graduate to a faster tier on a later session.
-
-For the detailed mechanics, see [ARCHITECTURE.md](ARCHITECTURE.md) and [docs/strategies.md](docs/strategies.md).
+See [REFERENCE.md](REFERENCE.md#fetch-schema) for the full schema and [REFERENCE.md#capability-prereq](REFERENCE.md#capability-prereq) for prerequisite handling.
 
 ---
 
-## Under the hood
+## Strategy Tiers
 
-Klura is built around a few simple ideas: keep the LLM in charge of the smart bits, refuse silent failures, and put real engineering into the parts of the loop that benefit from it. A handful of the things the runtime does underneath:
+Klura saves the simplest strategy that actually works.
 
-- **The runtime is plumbing; the LLM is the brains.** Klura offers tools, validates output, and stays out of the way. There's no workflow engine — capability composition (search a contact, then message them) happens in the agent's turn, where conversation context already lives. The runtime stays simple, and gets smarter with whatever model you bring.
-- **Audits push the agent toward a clean API surface.** Discovery breaks flows into the smallest stand-alone capabilities — searching for a contact gets its own skill, separate from sending a message. So even if your first session only messaged Adam, klura quietly captured the contact-search step underneath. The next time you ask to message Bob, the agent composes the two without re-opening the page. Any ambiguity (two contacts named Bob) gets resolved by the LLM in the moment.
-- **Loud failures, never silent acceptance.** Every saved strategy passes a structural audit before it hits disk; issues are batched into one rejection so the agent fixes everything in one retry.
-- **Push streams, not just request/response.** Listener capabilities subscribe to WebSocket, SSE, and polled feeds. _Saved skills like `on_new_message` are first-class._
-- **Sessions accrete a per-platform memory.** Every run contributes to a logbook under `~/.klura/workdir/<platform>/` — form observations, URL graph nodes, observed capabilities the agent spotted but didn't lift. The next session inlines a `platform_map` summary so the agent walks in already knowing the surface area. Run `start_session({graph: "map"})` to scout a platform up front before picking a real task. See [docs/logbook.md](docs/logbook.md).
-- **Browser sessions persist between runs.** Cookies, login state, and storage stay warm across agent turns because the daemon outlives any single conversation. A site that asks for 2FA once a week stays logged in for days, not until the next restart.
-- **Refreshes tokens before they expire.** Klura tracks each token's estimated lifetime and quietly refreshes a few minutes early, so long-running sessions don't fail-then-retry every time a CSRF rotates.
-- **Picks the right network stack per request.** Some sites work fine over plain Node `fetch`; others sniff the TLS handshake and reject anything that isn't a real browser. Klura picks at execute time and falls over to the in-browser path automatically.
-- **Skills get faster over time.** A skill saved as a slow click-replay today can be re-lifted to a direct HTTP call later — same skill ID, same args, less work. No re-discovery.
-- **Locators survive DOM churn.** Recorded paths key on accessibility-tree names first, CSS as a fallback, so they don't break when a site rewrites its class names overnight.
-- **Hands off to a human when the site needs one.** CAPTCHAs, 2FA, "confirm this is you" prompts, password walls — klura opens a live viewer of the in-progress browser session, you solve the blocker in your own hands, and the agent picks up from the same session. The viewer reaches you wherever you are: solve a 2FA prompt on your phone while the agent runs on your laptop. Passwords specifically resolve via three modes in order: remote viewer, user-supplied shell command, ask-in-chat as the last resort. See [docs/remote.md](docs/remote.md) and [docs/interruptions.md](docs/interruptions.md).
+| Tier | Strategy        | Used when                                                            |
+| ---- | --------------- | -------------------------------------------------------------------- |
+| T0   | `fetch`         | A direct HTTP or WebSocket call is enough                            |
+| T1   | `page-script`   | The page must run JavaScript to build, sign, or dispatch the request |
+| T2   | `recorded-path` | The safest available path is replaying the UI                        |
 
-And when a site is genuinely hard — signed requests, binary WebSocket frames with rotating IDs, encoders hidden in minified bundles — there's a deeper toolkit:
+If a site cannot be lifted cleanly to `fetch` or `page-script`, klura still saves a `recorded-path`.
 
-- **Reads encoders the page hides from itself.** When a site signs requests inside a private function no one ever exports, klura sets a breakpoint at the moment the request fires and reads the signing code straight out of the live page.
-- **Tells the agent it's making progress.** Failed probe attempts come back labelled — _getting closer_, _stuck_, _oscillating_ — so the agent stops looping blind and either keeps iterating or folds.
-- **Forgiving when bytes don't round-trip.** When two payloads look the same in shape but differ in bytes (binary envelopes, JSON wrapped in JSON, gRPC-Web), klura matches on shape so the loop doesn't stall on cosmetic noise.
-
-Deeper toolkit and plumbing in [docs/reverse-engineering.md](docs/reverse-engineering.md).
+That is slower than a direct API call, but still avoids replanning the page from scratch. The same skill can later be re-lifted into a faster tier.
 
 ---
 
-## How It Works
+## Self-Healing
 
-Every klura session belongs to one of three small state machines — **graphs** — picked at `start_session`. The graphs share a handful of phases (`drive`, `triage`, `lift`, `execute`) but compose them differently because they do different jobs.
+Websites change. Endpoints move. Tokens rotate. Response shapes drift.
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="learn-graph-dark.gif">
-    <img alt="Learn graph: drive the task in the browser, klura captures traffic, lift turns it into a saved strategy file." src="learn-graph-light.gif" width="900">
-  </picture>
-</p>
-
-### Learn — the `discover` graph
-
-The default mode, used whenever the user names a task and no saved strategy fits. Three phases:
-
-- **Drive** — the agent uses MCP tools (`perform_action`, `read_page`, etc.) to complete the task in the live browser. Klura records every action and every network exchange underneath.
-- **Triage** — when the agent calls `close_session`, klura asks it to read the captured traffic and propose a per-surface plan: which capability to lift, what the defense surface looks like (cookies, signed headers, dynamic IDs).
-- **Lift** — the runtime and agent collaborate to turn the plan into a saved strategy. See [LIFT](#lift) above for the mechanics.
-
-A clean lift terminates the session with a saved `fetch`, `page-script`, or `recorded-path` strategy under `~/.klura/skills/` (ordinary JSON files). The next time the user asks for the same capability, the saved strategy fires and the LLM stays out of the loop.
+Klura treats those as repairable failures.
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="execute-relearn-dark.gif">
-    <img alt="Execute graph: saved strategy fires; on stale-shape failure klura re-drives the UI, captures the new call, and patches the strategy file in place." src="execute-relearn-light.gif" width="900">
+    <img alt="Execute graph: saved strategy fires; on stale-shape failure klura relearns and patches the strategy" src="execute-relearn-light.gif" width="900">
   </picture>
 </p>
 
-### Execute + Relearn — the `execute` graph
+When a saved strategy fails, klura classifies the failure:
 
-The fast path. When a saved strategy matches the user's request, klura starts the session in `execute` and the runtime fires the strategy directly — no DOM, no LLM tokens, no agent turn at all. The runtime can be called programmatically too, bypassing the LLM completely.
+| Failure type          | What happens                                                  |
+| --------------------- | ------------------------------------------------------------- |
+| Structural            | Klura returns a clear error the agent can act on              |
+| Stale strategy        | Klura routes back through capture and LIFT to patch the skill |
+| Auth or session issue | Klura asks for the minimum required human help                |
 
-On success, the session terminates clean. On failure, klura classifies the error:
+The goal is not silent retries. The goal is loud, structured failure and repair.
 
-- **Structural** (bad arg, auth missing, schema mismatch) terminates with `failed` and a structured error the agent can act on.
-- **Stale strategy** (page changed, token rotated, response shape drifted) routes the session into `triage → lift` to repair the strategy in place. Same skill ID, refreshed mechanics, no rediscovery from scratch.
+---
 
-This is what "klura self-heals" means: the relearn branch is part of the graph, not a manual step.
+## Map Mode
+
+You do not need to start with a specific task.
+
+Klura can scout a site first.
+
+```text
+map this CRM with klura
+```
+
+The agent walks the surface area — pages, forms, settings, search, account flows — while klura records what it sees in a platform logbook.
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="map-graph-dark.gif">
-    <img alt="Map graph: scout a platform's surface area; the logbook accretes URL graph nodes and observed capabilities for the next session." src="map-graph-light.gif" width="900">
+    <img alt="Map graph: scout a platform and build a persistent logbook of pages and observed capabilities" src="map-graph-light.gif" width="900">
   </picture>
 </p>
 
-### Map — the `map` graph
+The logbook lives under:
 
-A scout mode for platforms an operator wants to scope out before picking a real task. The agent walks the surface area — homepage, search, settings, account flows — and the runtime records what it sees in the **platform logbook**: form observations, URL graph nodes, and a list of `observed_capabilities` the agent spotted but didn't act on. No strategy is saved; mutating clicks gate behind an explicit consent checkpoint. The logbook persists across sessions and feeds the next `discover` run on the same platform.
+```text
+~/.klura/workdir/<platform>/
+```
+
+It stores things like:
+
+- URL graph nodes
+- form observations
+- observed capabilities
+- page notes
+- useful surface-area hints for future sessions
+
+No strategy is saved in map mode. Mutating actions require explicit consent.
+
+The next real task starts with klura already familiar with the platform.
+
+See [docs/logbook.md](docs/logbook.md).
+
+---
+
+## Why Klura Exists
+
+Agents should not have to rediscover the same UI forever.
+
+The UI is not the real interface. It is the human layer over requests, responses, tokens, cookies, state, and event streams.
+
+Klura captures that lower layer and turns it into something reusable.
+
+|               | Browser agent             | Klura                                 |
+| ------------- | ------------------------- | ------------------------------------- |
+| First run     | Browser exploration       | Browser exploration + network capture |
+| Learning step | None                      | Optional LIFT pass                    |
+| Later runs    | Browser exploration again | Saved strategy                        |
+| Tokens        | Paid every run            | Paid once, then zero in runtime       |
+| Latency       | Seconds per UI step       | Usually one request                   |
+
+The agent stays in the loop when judgment is needed. The runtime takes over when the task has become mechanical.
+
+---
+
+## Benchmarks
+
+The point of LIFT is that the second run looks nothing like the first.
+
+First run: slow, like any browser agent.
+
+Second run: direct execution.
+
+That is the whole point.
+
+|  | Hacker News search | GitHub create issue | Messenger send message |
+| --- | --: | --: | --: |
+| Raw Playwright agent | 22.9s · 63k tok · $0.054 | 160s · 634k tok · $0.29 | 134s · 435k tok · $1.06 |
+| Klura cold — discovery + LIFT | 43.8s · 363k tok · $0.191 | 318s · 1.29M tok · $0.84 | 1469s · 1.78M tok · $1.56 |
+| Klura warm — runtime only | **0.33s · 0 tok · $0** | **1.23s · 0 tok · $0** | **5ms · 0 tok · $0** |
+
+Cold includes the actual browser task plus one-time reverse-engineering work.
+
+Warm is the runtime call itself, with no LLM in the loop.
+
+When klura is wrapped inside an agent SDK, MCP host, or conversational loop, the host may still spend extra LLM turns to decide to call the saved skill and report the result. The saved strategy execution itself is what the warm row measures.
+
+Benchmark suite will be released soon for reproducibility.
+
+### Notes
+
+[^cold-includes-lift]: Klura cold time includes discovery, triage, and LIFT. The agent first completes the user's task, then reverse-engineers the protocol and persists a runnable strategy. The actual sending or searching portion is roughly comparable to the raw Playwright row; the remainder is one-time work that amortizes across future runs.
+
+[^runtime-only]: No agent SDK in the loop. n=5 sequential, median wall-clock. GitHub's number is the median of a clean 5/5-ok page-script. When this same path is dispatched from inside an agent loop, add the host's LLM latency on top.
+
+[^github-re]: GitHub's web flow posts to `/_graphql` with a persisted-query hash, an `X-Fetch-Nonce` header that the in-page bundle rotates, and a numeric repository ID pulled from the rendered page. Sonnet 4.6 identified the call, isolated the rotating signal, and saved a `page-script` with `js-eval` prerequisites that read the nonce and client-version off the live page on each invocation.
+
+[^messenger-re]: Messenger send is an MQTT PUBLISH on `/ls_req`, with a JSON body whose snowflake IDs exceed `Number.MAX_SAFE_INTEGER`, a packet-id counter in the in-page MQTT client, and binary framing through the page's `MqttProtocolCodec`. Sonnet 4.6 located the encoder, intercepted the live connection, decoded the envelope, and saved a script that rebuilds and dispatches the frame through the already-authenticated socket.
+
+---
+
+## Under the Hood
+
+Klura is built around a few constraints:
+
+- Keep the LLM in charge of judgment.
+- Keep the runtime boring where possible.
+- Never silently accept broken strategies.
+- Prefer real observed traffic over guesses.
+- Fall back safely when a clean lift is not possible.
+
+### Runtime and Agent
+
+The runtime provides tools, captures data, validates output, executes strategies, and handles recovery.
+
+The agent performs the reasoning: deciding what task is being done, choosing capabilities, composing prerequisites, and resolving ambiguity.
+
+There is no heavy workflow engine. Capability composition happens in the agent turn, where user context already lives.
+
+Example:
+
+```text
+message Bob in team chat
+```
+
+may compose:
+
+```text
+list_conversations(name="Bob")
+send_message(thread_id=..., text=...)
+```
+
+The runtime executes the saved pieces.
+
+### Audits
+
+Every saved strategy passes a structural audit before it hits disk.
+
+The audit checks for problems like:
+
+- dynamic values baked into static requests
+- missing arguments
+- missing auth assumptions
+- weak or non-generalized selectors
+- response-shape mismatches
+- unsafe endpoint behavior
+
+Issues are batched into one rejection so the agent can fix everything in one retry.
+
+### Sessions Persist
+
+Browser sessions persist between runs.
+
+Cookies, login state, and storage stay warm because the daemon outlives any single conversation. A site that asks for 2FA once a week should not require login every time an agent starts a new task.
+
+### Token Refresh
+
+Klura tracks estimated token lifetimes and refreshes before expiry when possible.
+
+The goal is to avoid the common failure mode where long-running automation fails only after a CSRF token, nonce, or session value has already expired.
+
+### Network Stack Selection
+
+Some sites work over plain Node `fetch`.
+
+Others reject anything that does not look like the real browser stack.
+
+Klura picks the execution path per request and can fall back to an in-browser path when needed.
+
+### Streams
+
+Klura supports listener-style capabilities for push streams:
+
+- WebSocket
+- Server-Sent Events
+- polling feeds
+
+Saved skills like `on_new_message` are first-class.
+
+### Human Handoff
+
+Some interruptions need a human:
+
+- CAPTCHA
+- 2FA
+- “confirm this is you”
+- password prompts
+- account recovery walls
+
+Klura opens a live viewer of the in-progress browser session. You solve the blocker, and the agent continues from the same state.
+
+Password handling resolves in this order:
+
+1. remote viewer
+2. user-supplied shell command
+3. ask-in-chat as a last resort
+
+See [docs/remote.md](docs/remote.md) and [docs/interruptions.md](docs/interruptions.md).
+
+---
+
+## Reverse Engineering Toolkit
+
+Most sites are simple. Some are not.
+
+For signed requests, binary protocols, minified encoders, rotating IDs, and hidden request builders, klura exposes deeper tools to the agent.
+
+Examples:
+
+- find the request builder in bundled JavaScript
+- set breakpoints when a request fires
+- inspect signing functions from the live page
+- locate WebSocket encoders
+- compare binary payloads by structure instead of exact bytes
+- classify failed probes as getting closer, stuck, or oscillating
+
+The runtime does not brute-force endpoints, enumerate IDs outside the user's scope, or fuzz inputs.
+
+See [docs/reverse-engineering.md](docs/reverse-engineering.md).
 
 ---
 
 ## Use Cases
 
-- Automate internal tools and legacy systems that don't expose usable APIs.
-- Send messages or submit forms on web products that do not expose an API.
-- Automate workflows inside SaaS tools that sit behind login, cookies, 2FA, and dynamic tokens.
-- Give your agent a fast, reusable tool for any browser task it has done once before.
+Klura is useful when the task is repetitive, browser-based, and not well-served by a public API.
+
+Good fits:
+
+- internal tools
+- legacy admin panels
+- SaaS products behind login
+- web apps with private APIs but no public API
+- repeated form submissions
+- customer support workflows
+- message sending
+- issue creation
+- CRM updates
+- dashboard reads
+- workflows that currently require brittle Playwright scripts
+
+Bad fits:
+
+- one-off tasks
+- sites you are not authorized to use
+- high-scale scraping
+- endpoint or ID enumeration
+- tasks that violate platform policy
+- flows where the UI is intentionally the security boundary
 
 ---
 
-## Model variance & reliability
+## Model Variance and Reliability
 
-Klura depends on the model driving it. Models extract capabilities differently — some follow instructions tightly, others improvise; some handle signed/encoded flows, others struggle. Even the same model can produce different results across runs.
+Klura depends on the model driving it.
 
-Klura's audits push the agent toward a clean, reusable API surface — separate capabilities for separate intents, no dynamic values baked into requests, strategies that generalize across inputs. The audits catch most structural issues and force retries when something's off, but while the system nudges; it doesn't fully control the model.
+Models extract capabilities differently. Some follow instructions tightly. Some improvise. Some handle signed or encoded flows well. Others struggle.
 
-**Current snapshot:**
+Current snapshot:
 
-- **Sonnet 4.6 and newer** — strongest overall; often one-shots complex LIFTs and heavy reverse-engineering on signed-payload sites reliably.
-- **GLM 4.7** — solid across most tasks.
-- **GPT models** — not yet extensively tested.
+| Model | Status |
+| --- | --- |
+| Sonnet 4.6 and newer | Strongest tested overall; often one-shots complex LIFTs and reverse-engineering flows |
+| GLM 4.7 | Solid across most ordinary tasks |
+| GPT models | Not yet extensively tested |
 
-Expect some variability on first runs. Retry when lifts fail — convergence is normal. Saved strategies replay deterministically — variance lives only in the discovery phase. When a saved strategy drifts (the page changes, a token rotates), klura surfaces the failure so the agent can re-lift, not silently retry.
+Expect variability during discovery.
+
+Saved strategies replay deterministically. Variance lives mostly in the learning phase.
+
+Useful reliability metrics we track or intend to track:
+
+- LIFT success rate
+- percentage of skills saved as `fetch`
+- percentage saved as `page-script`
+- percentage stuck at `recorded-path`
+- time-to-warm-execution
+- relearn frequency
+- stale-strategy repair success rate
 
 ---
 
-## Is it legal? Will I get banned?
+## Legal & ToS
 
-**Legal?** — Probably. **Banned?** — Please respect the platform's Terms of Service. If you do, and you're using the tool as intended: likely not.
+Klura drives a real browser session you are already logged into and replays the same kinds of calls your own UI makes on your own account.
 
-Klura drives a real browser session you're already logged into and replays the same calls your own UI makes on your own account — generally on the authorized side of unauthorized-access laws (CFAA, UK Computer Misuse Act, StGB §202a–c). The runtime explicitly blocks endpoint enumeration, ID enumeration outside your scope, and input fuzzing — the behaviors that typically cross legal lines.
+That is generally on the authorized side of unauthorized-access law.
 
-Platform ToS is a separate matter. Most major platforms restrict automation in their terms; whether your usage triggers enforcement depends on the platform and how you use the tool. Stealth fingerprinting makes the browser look like a real session (because it is), but it does not protect you from ToS violations.
+Platform Terms of Service are separate.
 
-Practical: read the policy of any site you automate, avoid doing at scale what you wouldn't reasonably do manually, and use klura's built-in policy tools to cap the strategy tier per platform.
+Many major platforms restrict automation. Whether your usage triggers enforcement depends on the platform and how you use klura.
+
+Practical guidance:
+
+- read the policy of any site you automate
+- stay within your own account and authorization scope
+- avoid doing at scale what you would not reasonably do manually
+- do not enumerate endpoints
+- do not enumerate IDs outside your own scope
+- do not fuzz inputs
+- use klura's policy tools to cap strategy tiers per platform
 
 See [docs/policy.md](docs/policy.md), [docs/trust.md](docs/trust.md), and [docs/principles.md#stealth-not-bot-evasion](docs/principles.md#stealth-not-bot-evasion).
 
@@ -291,7 +525,17 @@ See [docs/policy.md](docs/policy.md), [docs/trust.md](docs/trust.md), and [docs/
 
 ## Configuration
 
-Runtime settings live in `~/.klura/config.json`. You can edit it directly or ask your agent to use klura's `describe_config`, `configure`, and `restart_runtime` tools.
+Runtime settings live in:
+
+```text
+~/.klura/config.json
+```
+
+You can edit the file directly or ask your agent to use klura's configuration tools:
+
+- `describe_config`
+- `configure`
+- `restart_runtime`
 
 See [docs/run-lifecycle.md#settings-reference-kluraconfigjson](docs/run-lifecycle.md#settings-reference-kluraconfigjson) and [REFERENCE.md#configure](REFERENCE.md#configure).
 
@@ -301,41 +545,78 @@ See [docs/run-lifecycle.md#settings-reference-kluraconfigjson](docs/run-lifecycl
 
 Start here:
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) - lifecycle, strategy tiers, secondary capabilities, and the docs map.
-- [REFERENCE.md](REFERENCE.md) - strategy schemas and agent-facing reference details.
-- [docs/discovery.md](docs/discovery.md) - how discovery works and what gets saved.
-- [docs/reverse-engineering.md](docs/reverse-engineering.md) - the deeper toolkit for signed, encoded, or binary requests.
-- [docs/principles.md](docs/principles.md) - the design principles behind the runtime.
+- [ARCHITECTURE.md](ARCHITECTURE.md) — lifecycle, strategy tiers, secondary capabilities, and docs map
+- [REFERENCE.md](REFERENCE.md) — strategy schemas and agent-facing reference
+- [docs/discovery.md](docs/discovery.md) — how discovery works and what gets saved
+- [docs/reverse-engineering.md](docs/reverse-engineering.md) — deeper toolkit for signed, encoded, and binary requests
+- [docs/logbook.md](docs/logbook.md) — platform maps and persistent observations
+- [docs/run-lifecycle.md](docs/run-lifecycle.md) — daemon lifecycle and runtime settings
+- [docs/principles.md](docs/principles.md) — design principles behind the runtime
+- [docs/policy.md](docs/policy.md) — policy controls and safety boundaries
+- [docs/trust.md](docs/trust.md) — trust model and operational guidance
+- [docs/remote.md](docs/remote.md) — live viewer and human handoff
+- [docs/interruptions.md](docs/interruptions.md) — CAPTCHA, 2FA, passwords, and blockers
 
 ---
 
 ## Built By
 
-[Narek Mailian](mailto:hello@klura.ai) - freelance engineer. Klura is a standalone project.
+[Narek Mailian](mailto:hello@klura.ai) — freelance engineer.
 
-Commercial licensing, strategic partnerships, or integration conversations: [hello@klura.ai](mailto:hello@klura.ai).
+Klura is a standalone project.
+
+Commercial licensing, strategic partnerships, or integration conversations:
+
+[hello@klura.ai](mailto:hello@klura.ai)
 
 ---
 
 ## Contributing
 
-Before opening a PR, skim [docs/principles.md](docs/principles.md). Contributions that fit especially well: drivers, pool backends, listener transports, prereq methods, better validation, and focused benchmark or test sites.
+Before opening a PR, skim [docs/principles.md](docs/principles.md).
 
-Please avoid endpoint probing, ID enumeration outside the user's own scope, mainline bot-evasion features, platform-specific runtime heuristics, and brand names in agent-facing docs.
+Contributions that fit especially well:
 
-Contributors sign the **klura Individual Contributor License Agreement** before a PR can be merged. Full text: [CLA.md](CLA.md).
+- drivers
+- pool backends
+- listener transports
+- prerequisite methods
+- validation improvements
+- benchmark sites
+- focused test fixtures
+- better docs for real workflows
+
+Please avoid:
+
+- endpoint probing
+- ID enumeration outside the user's own scope
+- mainline bot-evasion features
+- platform-specific runtime heuristics
+- brand names in agent-facing docs
+
+Contributors sign the **klura Individual Contributor License Agreement** before a PR can be merged.
+
+Full text: [CLA.md](CLA.md).
 
 ---
 
 ## License
 
-Business Source License 1.1 (BUSL-1.1) with an Additional Use Grant. The Licensed Work converts to the Apache License, Version 2.0 on the Change Date specified in [LICENSE](LICENSE). See [LICENSE](LICENSE) and [NOTICE](NOTICE) for the full terms.
+Business Source License 1.1 with an Additional Use Grant.
 
-You may copy, modify, and use the Licensed Work freely for non-production use. Production use is permitted under the Additional Use Grant, except that you may **not**:
+The Licensed Work converts to the Apache License, Version 2.0 on the Change Date specified in [LICENSE](LICENSE).
+
+See [LICENSE](LICENSE) and [NOTICE](NOTICE) for the full terms.
+
+You may copy, modify, and use the Licensed Work freely for non-production use.
+
+Production use is permitted under the Additional Use Grant, except that you may **not**:
 
 - offer the Licensed Work, in whole or in part, to third parties as a hosted or managed service;
 - expose the Licensed Work's functionality to third parties via an API, SDK, or other interface;
 - use the Licensed Work to build, offer, or operate a Competing Service; or
 - sublicense, sell, or resell access to the Licensed Work or its functionality.
 
-For a commercial license that lifts these restrictions, contact [hello@klura.ai](mailto:hello@klura.ai).
+For a commercial license that lifts these restrictions, contact:
+
+[hello@klura.ai](mailto:hello@klura.ai)

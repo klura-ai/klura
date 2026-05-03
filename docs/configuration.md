@@ -12,7 +12,7 @@ The MCP server exposes the config as four agent-facing tools, so the user can ch
 | --- | --- |
 | `describe_config` | Lists every tunable field with type, valid values, default, and whether a runtime restart is needed. The agent should call this before `configure` so it never hallucinates a path. |
 | `get_config` | Returns the current merged `DaemonConfig`. |
-| `configure` | Sets one field by dot-path: `{path: "pool.driver", value: "playwright-stealth"}`. Returns `{config, changed, runtime_restart_required, suggested_user_prompt}`. |
+| `configure` | Sets one field by dot-path: `{path: "pool.driver", value: "playwright"}`. Returns `{config, changed, runtime_restart_required, suggested_user_prompt}`. |
 | `restart_runtime` | Restarts the daemon so boot-time fields (`runtime.listen`, `runtime.idleTimeout`) take effect. Refuses while sessions are active unless `force: true`. |
 
 In practice the user can say "show me the browser," "turn on the warm pool," or "use the stealth driver" and the agent will pick the right field via `describe_config` and call `configure` for them. When `runtime_restart_required` comes back true, the agent surfaces `suggested_user_prompt` and waits for confirmation before restarting.
