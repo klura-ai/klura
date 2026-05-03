@@ -180,6 +180,26 @@ async function isStructurallySafeMapAction(
 }
 
 /**
+ * When the supplied selector is neither valid CSS nor a klura a11y form,
+ * playwright surfaces "is not a valid selector" inside a SyntaxError.
+ * Agents have been inventing pseudo-shorthands like `link:Messenger`
+ * thinking it's a klura dialect — this hint names the structural
+ * mismatch and points at the closest valid form. Empty string when
+ * the trace doesn't carry the pattern. Exported for unit tests.
+ */
+export function buildInvalidSelectorDialectHint(msg: string, selector: string): string {
+  if (!/is not a valid selector/i.test(msg)) return '';
+  return (
+    `\n\nYour selector \`${selector}\` is not valid CSS AND not a klura a11y form. ` +
+    `klura accepts two dialects:\n` +
+    `  - **a11y role+name** (the canonical klura form): \`role "name"\` — e.g. \`button "Submit"\`, \`link "Messenger"\`, \`textbox "Search"\` (note the space and double-quotes around the name).\n` +
+    `  - **a11y role+attr**: \`role[attr="value"]\` — e.g. \`searchbox[name="q"]\`, \`button[aria-label="Close"]\`.\n` +
+    `  - **standard CSS**: same shapes you'd use in querySelector — \`button.primary\`, \`#login\`, \`[data-testid="submit"]\`.\n` +
+    `If you wrote \`role:name\` or \`role-name\`, that's not valid in either dialect. Pick the role+name form (role + space + double-quoted name) from the closest-candidates list below.`
+  );
+}
+
+/**
  * When playwright's click trace ends in "...from <X> subtree intercepts
  * pointer events", a page overlay is sitting on top of the target — a
  * cookie banner, modal, or fullscreen consent dialog. Returns a structural
@@ -464,10 +484,17 @@ export async function performAction(
       return await fn();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (!/Timeout.*exceeded|waiting for locator/i.test(msg)) throw err;
+      if (!/Timeout.*exceeded|waiting for locator|is not a valid selector/i.test(msg)) throw err;
       recordFailedSelector();
+      const dialectHint = buildInvalidSelectorDialectHint(msg, selector);
       const overlay = buildOverlayInterceptHint(msg);
-      const hint = overlay ? overlay : await buildSelectorHint();
+      // Dialect mismatch is highest priority — fixes the root cause. Then
+      // overlay-intercept (the click was valid but blocked). Otherwise fall
+      // back to closest-candidates from the a11y tree.
+      let hint: string;
+      if (dialectHint) hint = dialectHint + (await buildSelectorHint());
+      else if (overlay) hint = overlay;
+      else hint = await buildSelectorHint();
       throw new Error(msg + hint, { cause: err });
     }
   };
