@@ -37,6 +37,7 @@ import {
   inlineArtifactForResponse,
   NETWORKLOG_TRIM_HINT,
 } from './_internals';
+import { checkCapabilityArgs } from '../well-known-capabilities';
 
 export const GRAPH_MODES = ['discover', 'map', 'execute'] as const;
 
@@ -1159,6 +1160,17 @@ export async function startSession(
         `When close_session returns phase:"lift", investigate or save before re-calling — repeat close_session calls without intervening progress return the same refusal. Full playbook: klura://reference#reverse-engineer-playbook.`,
     };
   }
+  // Capability-arg shape check. Well-known slugs (send_message, etc.) have
+  // canonical arg keys; agents fumble these despite SKILL.md examples
+  // (`{message: "Hello"}` instead of `{recipient, text}`). Surface a hint
+  // before the start hint so the agent fixes args before driving.
+  if (opts.capability) {
+    const argHint = checkCapabilityArgs(opts.capability, opts.args);
+    if (argHint) {
+      result._hint = result._hint ? `${argHint}\n\n${result._hint}` : argHint;
+    }
+  }
+
   // Per-graph start hint. When the active graph defines `startSessionHint`,
   // surface it once per session — only when no higher-priority hint claimed
   // the slot upstream (auto-execute, declined start).
