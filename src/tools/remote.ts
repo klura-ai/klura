@@ -19,17 +19,23 @@ export function setStartRemoteHandler(fn: StartRemoteHandler | null): void {
   startRemoteHandler = fn;
 }
 
+const VIEWER_URL_HINT =
+  "Render `viewerUrl` to the user verbatim — it carries a JWT and any retype/edit/abbreviation breaks the signature. The URL is reachable because klura runs on the user's machine. Login happens inside the viewer's browser, not the user's regular Chrome.";
+
 export async function startRemote(
   sessionId: string,
   options: { prompt?: string } = {},
-): Promise<{ viewerUrl: string }> {
-  if (startRemoteHandler) return startRemoteHandler(sessionId, options);
+): Promise<{ viewerUrl: string; _hint: string }> {
+  if (startRemoteHandler) {
+    const handled = await startRemoteHandler(sessionId, options);
+    return { ...handled, _hint: VIEWER_URL_HINT };
+  }
   const session = pool.getSession(sessionId);
   const driver = pool.driverFor(sessionId);
   const remote = await startRemoteSession(sessionId, driver, session, {
     prompt: options.prompt,
   });
-  return { viewerUrl: remote.viewerUrl };
+  return { viewerUrl: remote.viewerUrl, _hint: VIEWER_URL_HINT };
 }
 
 export async function stopRemote(sessionId: string): Promise<{ ok: true }> {
