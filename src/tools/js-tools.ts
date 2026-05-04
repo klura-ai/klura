@@ -15,6 +15,8 @@ import {
 import { guardLargeResult, MAX_TOOL_OUTPUT_CHARS } from '../response/response-size';
 import { wrapAgentExpression } from '../response/js-eval-wrapper';
 import { recordObservations } from '../observation-trace';
+import { maybeFireSurfaceChanged } from '../session-phase/surface-changed';
+import type { CheckpointEnvelope } from '../checkpoints';
 
 export interface GetJsSourceArgs {
   session_id: string;
@@ -428,7 +430,11 @@ export async function jsEval(args: JsEvalArgs): Promise<
     // Surface-map: js_eval can mutate `window.location` to drive a SPA
     // navigation. Drain the framenavigated buffer + capture forms so those
     // url_graph nodes / dom_form_observed events land alongside the
-    // perform_action pathway.
+    // perform_action pathway. When the eval'd code crossed surfaces (e.g.
+    // `window.location.href = '/checkout'` on a /search page), fire the
+    // surface_changed checkpoint so the agent re-triages — the same
+    // checkpoint that fires when navigation rides perform_action.
+    let surfaceCheckpoint: CheckpointEnvelope | undefined;
     try {
       const pending = await driver.consumePendingNavs(session);
       if (pending.length > 0) {
@@ -440,6 +446,10 @@ export async function jsEval(args: JsEvalArgs): Promise<
             ...(p.title ? { title: p.title } : {}),
             via: 'nav',
           });
+        }
+        const newest = pending[pending.length - 1];
+        if (newest) {
+          surfaceCheckpoint = await maybeFireSurfaceChanged(session, newest.url);
         }
       }
       const forms = await driver.captureFormSummary(session);
@@ -454,6 +464,7 @@ export async function jsEval(args: JsEvalArgs): Promise<
       ok: true,
       ...guarded,
       duration_ms: Date.now() - t0,
+      ...(surfaceCheckpoint ? { _checkpoint: surfaceCheckpoint } : {}),
     };
   } catch (err) {
     const rawMessage = err instanceof Error ? err.message : String(err);

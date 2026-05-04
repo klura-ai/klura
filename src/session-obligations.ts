@@ -16,6 +16,12 @@
 // handoff → user consult → save OR third-call force-tear-down + auto-synth).
 // See runtime/docs/gates.md for the once-vs-many criterion that drives this
 // being Level-2-style.
+//
+// Honest framing: the prose names "before ending your turn" rather than
+// "next tool call MUST be X" because perform_action and read tools are still
+// admissible mid-drive — claiming the literal next call MUST be end_drive
+// trains agents to read klura's MUST claims as advisory, devaluing the
+// structurally-true MUSTs in checkpoint / interruption gates.
 
 import type { Session } from './drivers/types/session';
 import { graphConfig } from './session-phase/registry';
@@ -24,11 +30,31 @@ import { graphConfig } from './session-phase/registry';
  * Action kinds that count as mutating — the agent intentionally changed
  * something on the site. `navigate` and `wait` are excluded (read-only).
  * `click` is included even though it's ambiguous (a click can be a read-only
- * link follow); false positives surface a LIFT prompt the agent can
- * decline via the existing end_drive third-call path. False negatives
- * leak sessions, which is the bug we're fixing.
+ * link follow); the nav-only-click filter below demotes clicks that landed
+ * a real browser navigation into the navigation bucket.
  */
 const MUTATING_ACTIONS = new Set(['click', 'type', 'fill_editor', 'key_press', 'select']);
+
+/**
+ * Write-shaped actions: typing text into a field is a strong commitment
+ * signal even without a declared capability. Used to gate the exploration
+ * exemption — clicks (including select / key_press, which are navigation-
+ * shaped) allow the exemption; once the agent typed, they committed and the
+ * runtime nudges to declare a capability.
+ */
+const WRITE_ACTIONS = new Set(['type', 'fill_editor']);
+
+/**
+ * Navigation channels that demote a preceding click from "mutation" to
+ * "navigation". A click that lands a `submit`-shaped nav (form post →
+ * redirect) IS a mutation regardless; a click that triggers a `pushState`
+ * route change or a top-nav link follow is not.
+ */
+const NAV_ONLY_VIAS = new Set(['click', 'pushState', 'replaceState', 'popstate', 'hashchange']);
+
+/** Window after a click within which a nav must land to count as caused by
+ *  that click. Beyond this, the nav was caused by a later action. */
+const NAV_FILTER_WINDOW_MS = 1500;
 
 export interface SessionObligation {
   kind: 'lift_required';
@@ -42,22 +68,55 @@ export interface SessionObligation {
  *
  * Obligation fires when ALL of:
  *   - session.liftMode !== 'skip'
- *   - performActionHistory contains ≥1 mutating action
- *   - no saved strategy exists for any declared capability since the last
+ *   - performActionHistory contains ≥1 mutating action (after demoting
+ *     nav-only clicks via the dom-navigation correlation window)
+ *   - The session shows commitment to RE: at least one of declaredCapabilities
+ *     is non-empty, saveAttemptCount > 0, OR a write-shaped action occurred.
+ *     Pure click-only exploration with no declared capability is research,
+ *     not RE — the obligation is silent.
+ *   - No saved strategy exists for any declared capability since the last
  *     mutation (i.e., the most recent mutation has not been "covered" by a
- *     save)
- *
- * The "covered by save" check compares the timestamp of the most recent
- * mutation against the most recent save: if the save came AFTER the
- * mutation, the obligation is cleared. If a fresh mutation happens after a
- * save, the obligation re-fires.
+ *     save). If a fresh mutation happens after a save, the obligation
+ *     re-fires.
  */
 export function computeSessionObligation(session: Session): SessionObligation | null {
   if (session.liftMode === 'skip') return null;
 
   const history = session.performActionHistory ?? [];
-  const mutations = history.filter((rec) => MUTATING_ACTIONS.has(rec.action));
+  const domNavs = session.domNavigations ?? [];
+
+  // Nav-only click filter: a click followed within NAV_FILTER_WINDOW_MS by
+  // a navigation event with a nav-only `via` (top-nav link, SPA route) is a
+  // navigation, not a mutation. via:'submit' counts as mutation regardless
+  // of any subsequent navigation.
+  const isNavOnlyClick = (rec: { action: string; at: number }): boolean => {
+    if (rec.action !== 'click') return false;
+    return domNavs.some(
+      (n) =>
+        typeof n.at === 'number' &&
+        n.at >= rec.at &&
+        n.at <= rec.at + NAV_FILTER_WINDOW_MS &&
+        n.via !== undefined &&
+        NAV_ONLY_VIAS.has(n.via),
+    );
+  };
+
+  const mutations = history.filter(
+    (rec) => MUTATING_ACTIONS.has(rec.action) && !isNavOnlyClick(rec),
+  );
   if (mutations.length === 0) return null;
+
+  // Exploration exemption: a session with no declared capability, no save
+  // attempts, and no write-shaped actions is research, not RE — the agent
+  // is navigating to look around. Forcing a fake capability declaration
+  // here produces the surface_triage_missing → unobserved_url deadlock with
+  // no path out. Mirrors the parallel exemption in audit/end-drive.ts.
+  const declared = session.declaredCapabilities ?? [];
+  const saveAttempts = session.saveAttemptCount ?? 0;
+  const writeActionCount = mutations.filter((rec) => WRITE_ACTIONS.has(rec.action)).length;
+  if (declared.length === 0 && saveAttempts === 0 && writeActionCount === 0) {
+    return null;
+  }
 
   const lastMutation = mutations[mutations.length - 1];
   const lastMutationAt = lastMutation ? lastMutation.at : 0;
@@ -70,9 +129,7 @@ export function computeSessionObligation(session: Session): SessionObligation | 
   // RE mode, and don't expect a save. The agent SHOULD keep exploring;
   // end_drive is the natural end-of-session, not the next step after each
   // mutation. Wording reflects "eventually" rather than "MUST be next call"
-  // so the obligation reads as a flush reminder, not a roadblock. Re-emits
-  // each mutation are fine: the cost is one extra sentence per response,
-  // not a forced ack/close.
+  // so the obligation reads as a flush reminder, not a roadblock.
   if (graphConfig(session).obligationStyle === 'flush_reminder') {
     return {
       kind: 'lift_required',
@@ -93,8 +150,7 @@ export function computeSessionObligation(session: Session): SessionObligation | 
   // session is in the phase machine. Telling an agent in triage/lift to
   // "call end_drive next" contradicts the audit guidance they just got
   // back from save_strategy and makes them give up after a single audit
-  // rejection. Drive → "call end_drive". Triage/lift → "iterate
-  // save_strategy with audit_token + audit_answers until ok:true".
+  // rejection.
   const phase = session.phase ?? 'drive';
 
   if (phase === 'triage') {
@@ -104,10 +160,12 @@ export function computeSessionObligation(session: Session): SessionObligation | 
       mutating_actions: mutations.length,
       message:
         `Session ${session.id} is in TRIAGE with no strategy saved. ` +
-        `**DO NOT tell the user the task is complete.** A user-visible action through the viewer (or your own clicks) ` +
-        `is NOT klura-task-complete — klura has persisted nothing, the next run starts from zero. ` +
-        `Your next tool call MUST be \`submit_triage_plan\` (this response's \`triage_authoring_contract\` field has the schema). ` +
-        `Once approved you enter LIFT, where \`save_strategy\` unlocks. Calling \`save_strategy\` directly in TRIAGE is hard-blocked. ` +
+        `Do not tell the user the task is complete — klura has persisted nothing, the next run starts from zero. ` +
+        `Before ending your turn, call \`submit_triage_plan\` ` +
+        `(this response's \`triage_authoring_contract\` field has the schema). ` +
+        `Once approved you enter LIFT, where \`save_strategy\` unlocks. ` +
+        `Calling \`save_strategy\` directly in TRIAGE is hard-blocked. ` +
+        `Do not end your turn yet. ` +
         `See klura://reference#triage.`,
     };
   }
@@ -119,12 +177,13 @@ export function computeSessionObligation(session: Session): SessionObligation | 
       mutating_actions: mutations.length,
       message:
         `Session ${session.id} is in LIFT with no strategy saved. ` +
-        `**DO NOT tell the user the task is complete.** klura has persisted nothing — the next run starts from zero. ` +
-        `Your next tool call MUST be \`save_strategy\`. If it returns \`save_strategy_rejected\`, ` +
-        `re-call save_strategy WITH the returned \`audit_token\` plus \`audit_answers\` for any open items ` +
-        `(don't end your turn after a rejection — the rejection IS the iteration loop, not a stop signal). ` +
+        `Do not tell the user the task is complete — klura has persisted nothing, the next run starts from zero. ` +
+        `Before ending your turn, call \`save_strategy\`. ` +
+        `If it returns \`save_strategy_rejected\`, re-call save_strategy WITH the returned \`audit_token\` plus ` +
+        `\`audit_answers\` for any open items — the rejection IS the iteration loop, not a stop signal. ` +
         `In unattended runs, retry with just \`audit_token\` and the embedder's decider auto-resolves user_confirmation. ` +
         `Expect 1-3 retries before the save lands — that's normal. ` +
+        `Do not end your turn yet. ` +
         `See klura://reference#save-strategy-audit.`,
     };
   }
@@ -136,9 +195,11 @@ export function computeSessionObligation(session: Session): SessionObligation | 
     message:
       `Session ${session.id} performed ${mutations.length} mutating action(s) ` +
       `(click/type/fill_editor/key_press/select) but no strategy has been saved. ` +
-      `Your next tool call MUST be end_drive — that opens LIFT, where you save a reusable strategy ` +
-      `for the declared capability. end_drive will not terminate the session until save_strategy ` +
-      `lands; repeat calls return the same handoff. ` +
+      `Do not tell the user the task is complete — klura has persisted nothing, the next run starts from zero. ` +
+      `Keep driving via \`perform_action\` and reads as needed. ` +
+      `Before ending your turn, call \`end_drive\` — ` +
+      `that opens LIFT, where you save a reusable strategy for the declared capability. ` +
+      `end_drive will not terminate the session until save_strategy lands; repeat calls return the same handoff. ` +
       `Do not end your turn yet. Ending now leaks session ${session.id} and forfeits LIFT. ` +
       `See klura://reference#reverse-engineer-playbook.`,
   };

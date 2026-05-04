@@ -16,12 +16,9 @@ import {
 import { correlateUiAction, CORRELATION_WINDOW_MS } from '../response/action-correlator';
 import { asNonEmptyBoundedString, ValidationError } from '../validators';
 import { captureAndAppendForms, enumerateStringParams } from './_internals';
-import { isPathDistinct, lookupSurface } from '../session-phase/surface-binding';
-import { currentPhase, graphConfig } from '../session-phase/registry';
-import { dispatch } from '../session-phase/state-machine';
-import { invokeCheckpointAndGate, type CheckpointEnvelope } from '../checkpoints';
-import { composeTriageAuthoringContract } from '../triage-authoring-contract';
-import { loadConfig } from '../config/handler';
+import { graphConfig } from '../session-phase/registry';
+import { maybeFireSurfaceChanged } from '../session-phase/surface-changed';
+import type { CheckpointEnvelope } from '../checkpoints';
 
 export interface ActionResult {
   a11yTree: string;
@@ -728,61 +725,6 @@ export async function performAction(
     ...subPagesField,
     ...checkpointField,
   };
-}
-
-/** Detects path-distinct navigation to an un-triaged surface during lift /
- *  triage and fires the `surface_changed` checkpoint. Returns the envelope
- *  to attach to the tool response, or `undefined` when no fire is due.
- *  Always updates `session.lastSurfaceUrl`. */
-async function maybeFireSurfaceChanged(
-  session: import('../drivers/types/session').Session,
-  currentUrl: string,
-): Promise<CheckpointEnvelope | undefined> {
-  if (!currentUrl) return undefined;
-  if (!('phase' in session)) {
-    session.lastSurfaceUrl = currentUrl;
-    return undefined;
-  }
-  const phase = currentPhase(session);
-  // From DRIVE, fire only when the agent did real mutating work on the
-  // surface they're leaving — multi-surface flows (search → checkout) need
-  // each side triaged separately, but landing→link nav journeys shouldn't
-  // get spammed with TRIAGE re-entry.
-  const fireFromDrive = phase === 'drive' && !!session.priorSurfaceHadMutation;
-  if (phase !== 'lift' && phase !== 'triage' && !fireFromDrive) {
-    session.lastSurfaceUrl = currentUrl;
-    return undefined;
-  }
-  const priorUrl = session.lastSurfaceUrl;
-  const distinct = isPathDistinct(priorUrl, currentUrl);
-  session.lastSurfaceUrl = currentUrl;
-  if (!distinct) return undefined;
-  // The mutation flag tracks the SURFACE we just left; reset on any
-  // path-distinct nav whether or not we end up firing the checkpoint.
-  session.priorSurfaceHadMutation = false;
-  if (lookupSurface(session, currentUrl) !== undefined) return undefined;
-
-  const priorSurface = priorUrl ? lookupSurface(session, priorUrl) : undefined;
-
-  dispatch(session, { kind: 'surface_changed' });
-  // Surface the reset triage budget in the checkpoint context — the
-  // default handler bakes it into the user-visible prompt so the agent
-  // sees the actual budget shape on re-entry, not an inferred prior.
-  // Per arxiv 2604.19780 (Curriculum-Aware Budget Scheduling) explicit
-  // per-phase budgets outperform inferred ones.
-  const triageBudget = session.triage?.budget ?? loadConfig().triage.max_rounds;
-  const triageContract = composeTriageAuthoringContract(session);
-  const { envelope } = await invokeCheckpointAndGate('surface_changed', {
-    session_id: session.id,
-    context: {
-      kind: 'surface_changed',
-      new_url: currentUrl,
-      triage_budget: triageBudget,
-      triage_authoring_contract: triageContract,
-      ...(priorSurface ? { prior_surface: priorSurface } : {}),
-    },
-  });
-  return envelope;
 }
 
 /**
