@@ -6,7 +6,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { BrowserDriver } from '../drivers/interface';
 import type { FocusState, Session, SubPage } from '../drivers/types/session';
 import { getDeviceProfile } from '../identity/devices';
-import { signViewerToken } from './jwt';
+import { signViewerToken, tokenIntegrity } from './jwt';
 import { getRemoteSecret } from './secret';
 
 interface ViewerSession {
@@ -102,6 +102,34 @@ function sendSubPagesSnapshot(ws: WebSocket, viewer: ViewerSession, subPages: Su
 // server browser advertises — it's not about evading detection, it's about
 // being truthful: if the context is mobile-emulated, input should be touch; if
 // desktop, mouse.
+// Served when ?v doesn't match the recomputed hash of ?token at HTTP
+// page-load — the URL bytes were modified somewhere between server-mint
+// and browser-load (chat renderer, clipboard extension, etc.). The token
+// is dead either way (string-eq vs in-memory minted token would also
+// fail), but a clear "URL was corrupted" message gives the user a
+// recoverable next step instead of a silent "Disconnected."
+const URL_CORRUPTED_HTML = `<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>klura viewer — URL corrupted</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 36em; margin: 4em auto; padding: 0 1em; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.4em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  .hint { background: #fff8e0; border-left: 3px solid #d4b400; padding: 0.7em 1em; margin: 1em 0; }
+</style>
+</head>
+<body>
+<h1>This URL got corrupted in transit</h1>
+<p>The viewer URL carries a JWT signed by the klura runtime. Some byte of the URL changed between when the server minted it and when your browser loaded it — typically because a chat renderer, clipboard handler, or browser extension rewrote one or more characters of the token.</p>
+<div class="hint">
+  <strong>To recover:</strong> ask the agent to call <code>start_remote_session</code> again. Open the new URL by clicking the link directly (don't copy-paste through anything that might rewrite it). If the problem repeats, switch <code>~/.klura/config.json</code> <code>remote.mode</code> from <code>"cloudflared"</code> / <code>"auto"</code> to <code>"local"</code>: the localhost URL is shorter and skips the tunnel.
+</div>
+<p>This URL is dead — the corrupted token won't authenticate. Closing this tab is safe.</p>
+</body>
+</html>`;
+
 const VIEWER_HTML = `<!DOCTYPE html>
 <html>
 <head>
@@ -216,8 +244,15 @@ window.visualViewport?.addEventListener('resize',()=>{
   if(_resizeTimer)clearTimeout(_resizeTimer);
   _resizeTimer=setTimeout(sendViewportSize,200);
 });
-ws.onclose=()=>{
-  setStatus('Disconnected','connecting');
+ws.onclose=(e)=>{
+  // 4002 = URL corrupted in transit (server-side integrity check).
+  // Distinguish from generic disconnect so the user sees a recoverable
+  // remedy instead of a silent "Disconnected."
+  if(e.code===4002){
+    setStatus('URL was corrupted in transit. Ask the agent for a fresh start_remote_session call and click the new URL directly.','connecting');
+  }else{
+    setStatus('Disconnected','connecting');
+  }
   doneBtn.style.display='none';
   kbdBtn.style.display='none';
 };
@@ -590,7 +625,7 @@ export async function startViewer(
   driver: BrowserDriver,
   session: Session,
   opts: { fps?: number; quality?: number; prompt?: string } = {},
-): Promise<{ token: string; localUrl: string; port: number }> {
+): Promise<{ token: string; integrity: string; localUrl: string; port: number }> {
   // HS256 JWT (see ./jwt.ts) signed with ~/.klura/remote-secret.key. The
   // viewer mints once at startup and verifies on every WS upgrade.
   const token = signViewerToken({
@@ -619,6 +654,22 @@ export async function startViewer(
       res.writeHead(200);
       res.end('ok');
     } else {
+      // Integrity check on the page-load query string. When ?v doesn't
+      // match the recomputed hash of ?token, the URL was corrupted between
+      // server-mint and browser-load. Serve a short error page instead of
+      // the viewer; the WS handler also rejects with code 4002 if the page
+      // somehow loads anyway.
+      const suppliedToken = url.searchParams.get('token');
+      const suppliedV = url.searchParams.get('v');
+      if (
+        suppliedToken !== null &&
+        suppliedV !== null &&
+        suppliedV !== tokenIntegrity(suppliedToken)
+      ) {
+        res.writeHead(400, { 'Content-Type': 'text/html' });
+        res.end(URL_CORRUPTED_HTML);
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(renderedHtml);
     }
@@ -652,6 +703,23 @@ export async function startViewer(
   wss.on('connection', (ws, req) => {
     const connUrl = new URL(req.url ?? '/', 'http://localhost');
     const supplied = connUrl.searchParams.get('token');
+    const suppliedV = connUrl.searchParams.get('v');
+    // Integrity check first — distinguishes "URL got corrupted in transit"
+    // (single-character change between server-mint and browser-handshake)
+    // from "wrong token" (an attacker or stale session). Both reject, but
+    // the corruption case has a recoverable user-facing remedy: ask the
+    // agent for a fresh URL.
+    if (supplied !== null && suppliedV !== tokenIntegrity(supplied)) {
+      const expectedV = tokenIntegrity(supplied);
+      console.error(
+        `[viewer] WS rejected for session ${sessionId}: url_corrupted_in_transit\n` +
+          `  reqUrl=${req.url ?? '<no-url>'}\n` +
+          `  supplied v=${suppliedV ?? '<v-absent>'} but recompute(token)=${expectedV}\n` +
+          `  → token bytes were modified somewhere between server-mint and browser-handshake (chat renderer, clipboard, proxy)`,
+      );
+      ws.close(4002, 'URL corrupted in transit');
+      return;
+    }
     if (supplied !== token) {
       const fp = (s: string | null): string => {
         if (s === null) return 'absent';
@@ -1042,7 +1110,8 @@ export async function startViewer(
 
   return {
     token,
-    localUrl: `http://localhost:${viewer.port}?token=${token}`,
+    integrity: tokenIntegrity(token),
+    localUrl: `http://localhost:${viewer.port}?token=${token}&v=${tokenIntegrity(token)}`,
     port: viewer.port,
   };
 }

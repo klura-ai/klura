@@ -22,6 +22,23 @@ const KNOWN_KIDS = new Set(['v1']);
 const DEFAULT_TTL_SECONDS = 3600;
 const DEFAULT_SKEW_SECONDS = 30;
 
+/**
+ * Short integrity-check hash for the viewer URL. Detects single-character
+ * corruption introduced between server-mint and browser-handshake — chat
+ * renderers, clipboard extensions, or proxies that rewrite one byte of
+ * the JWT b64 payload. Without this, a 1-char corruption produces a
+ * silent "Disconnected" because the WS string-eq fails and the client
+ * has no way to tell whether the token is genuinely wrong or just
+ * mangled in transit.
+ *
+ * Not a security boundary — it's deterministic from the token, so an
+ * attacker with the token can compute it. The actual auth is the JWT
+ * signature check + WS string-eq against the in-memory minted token.
+ */
+export function tokenIntegrity(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex').slice(0, 8);
+}
+
 interface ViewerTokenPayload {
   iss: typeof ISSUER;
   aud: typeof AUDIENCE;

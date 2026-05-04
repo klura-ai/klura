@@ -70,12 +70,12 @@ export async function startRemoteSession(
   let exposure: ViewerExposure = 'local';
 
   if (cfg.mode === 'direct' && cfg.publicUrl) {
-    viewerUrl = `${cfg.publicUrl.replace(/\/$/, '')}:${viewer.port}/?token=${viewer.token}`;
+    viewerUrl = `${cfg.publicUrl.replace(/\/$/, '')}:${viewer.port}/?token=${viewer.token}&v=${viewer.integrity}`;
     exposure = 'public';
   } else if (cfg.mode === 'auto' || cfg.mode === 'cloudflared') {
     try {
       tunnel = await openTunnel(viewer.port);
-      viewerUrl = `${tunnel.url.replace(/\/$/, '')}/?token=${viewer.token}`;
+      viewerUrl = `${tunnel.url.replace(/\/$/, '')}/?token=${viewer.token}&v=${viewer.integrity}`;
       exposure = 'public';
       console.error(`[remote] Tunnel open: ${tunnel.url}`);
     } catch (err) {
