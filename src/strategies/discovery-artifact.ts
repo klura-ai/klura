@@ -676,7 +676,7 @@ export function listArtifactsForPlatform(platform: string): string[] {
 }
 
 /** Per-capability character budget for the inlined artifact on agent-facing
- * responses (list_platform_skills, start_session, execute, close_session RE handoff's
+ * responses (list_platform_skills, start_session, execute, end_drive RE handoff's
  * triage block). Left of the MCP tool-output budget so the artifact can
  *  coexist with the rest of the response fields. */
 export const LIST_PLATFORM_SKILLS_ARTIFACT_BUDGET = 8_000;
@@ -784,7 +784,7 @@ export function inlineArtifactForResponse(
  * accumulator. Called from `try_generator` / `try_generator_in_page` on every
  * ok:true — the runtime has ground truth that this code produced the captured
  * bytes, so the write is safe without a tool call. Keys to the session's first
- * declared capability; close_session flushes the artifact to disk. Resets the
+ * declared capability; end_drive flushes the artifact to disk. Resets the
  * hardness-check counter the same way an explicit `save_verified_expression`
  * call would.
  *

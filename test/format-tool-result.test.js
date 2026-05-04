@@ -13,7 +13,7 @@ const obligation = {
   kind: 'lift_required',
   session_id: 'sess_x',
   mutating_actions: 1,
-  message: 'TESTMSG: call close_session next.',
+  message: 'TESTMSG: call end_drive next.',
 };
 
 test('hoists obligation into a leading text block (default branch)', () => {
@@ -24,7 +24,7 @@ test('hoists obligation into a leading text block (default branch)', () => {
   assert.equal(blocks.length, 2);
   assert.deepEqual(blocks[0], {
     type: 'text',
-    text: '[klura obligation]: TESTMSG: call close_session next.',
+    text: '[klura obligation]: TESTMSG: call end_drive next.',
   });
   assert.equal(blocks[1].type, 'text');
   assert.match(blocks[1].text, /^\[Tool result for perform_action\]:/);
@@ -39,7 +39,7 @@ test('hoists obligation ahead of embedded screenshot (text + image)', () => {
     _session_obligation: obligation,
   });
   assert.equal(blocks.length, 3);
-  assert.equal(blocks[0].text, '[klura obligation]: TESTMSG: call close_session next.');
+  assert.equal(blocks[0].text, '[klura obligation]: TESTMSG: call end_drive next.');
   assert.equal(blocks[1].type, 'text');
   assert.match(blocks[1].text, /^\[Tool result for perform_action\]:/);
   assert.doesNotMatch(blocks[1].text, /_session_obligation/);

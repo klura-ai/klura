@@ -1,7 +1,7 @@
 // Platform working dir — capture-event model + disk schema.
 //
 // The working dir is klura's per-platform persistent archive. Every session
-// (today: agent-driven) flushes a stream of CaptureEvents at close_session;
+// (today: agent-driven) flushes a stream of CaptureEvents at end_drive;
 // these modules partition them into session archives and update a platform-
 // level logbook. Cross-run derived signals (field-stability, bundle-drift,
 // signer-history) are computed from the archives.
@@ -9,7 +9,7 @@
 // Critical design rule: this module accepts a CaptureEvent[] stream. It has
 // zero dependency on runtime Session / pool / driver / MCP types. The only
 // bridge is a thin adapter in runtime/src/index.ts that reshapes live session
-// state into CaptureEvents at close_session time. Keep the asymmetry: the
+// state into CaptureEvents at end_drive time. Keep the asymmetry: the
 // adapter knows about both layers, these modules don't.
 
 // ---------------------------------------------------------------------------

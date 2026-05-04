@@ -40,9 +40,9 @@ function mkPool(warmEnabled = true) {
 test('tryCheckoutReadySession: probe passes on warm slot → returns session, no resetSession call', async () => {
   const pool = mkPool(true);
   const driver = pool.driver;
-  // Seed a warm slot: create a session, then closeSession to release it.
+  // Seed a warm slot: create a session, then endDrive to release it.
   const s = await pool.createSession({ platform: 'test-platform' });
-  await pool.closeSession(s.id);
+  await pool.endDrive(s.id);
   // Rig probe to succeed.
   driver.probeResult = { page_on_url: true, ws_open: true };
   const preReset = driver.resetCount;
@@ -58,7 +58,7 @@ test('tryCheckoutReadySession: probe passes on warm slot → returns session, no
 test('tryCheckoutReadySession: probe returns false → null (caller cold-spawns)', async () => {
   const pool = mkPool(true);
   const s = await pool.createSession({ platform: 'p' });
-  await pool.closeSession(s.id);
+  await pool.endDrive(s.id);
 
   const borrowed = await pool.tryCheckoutReadySession('p', async () => false);
 
@@ -69,7 +69,7 @@ test('tryCheckoutReadySession: probe returns false → null (caller cold-spawns)
 test('tryCheckoutReadySession: probe throws → treated as false, returns null', async () => {
   const pool = mkPool(true);
   const s = await pool.createSession({ platform: 'p' });
-  await pool.closeSession(s.id);
+  await pool.endDrive(s.id);
 
   const borrowed = await pool.tryCheckoutReadySession('p', async () => {
     throw new Error('boom');
@@ -83,7 +83,7 @@ test('tryCheckoutReadySession: warm disabled → returns null without iterating'
   const pool = mkPool(false);
   // No warm slot will be created because warmEnabled=false.
   const s = await pool.createSession({ platform: 'p' });
-  await pool.closeSession(s.id);
+  await pool.endDrive(s.id);
 
   let probeCalls = 0;
   const borrowed = await pool.tryCheckoutReadySession('p', async () => {
@@ -111,7 +111,7 @@ test('registerSharedSession: dispose fn removes session from candidate set', asy
   // Works before dispose.
   const b1 = await pool.tryCheckoutReadySession('p', async () => true);
   assert.equal(b1?.id, shared.id);
-  b1.borrowed = false; // simulate release without going through closeSession
+  b1.borrowed = false; // simulate release without going through endDrive
 
   dispose();
   const b2 = await pool.tryCheckoutReadySession('p', async () => true);
@@ -119,12 +119,12 @@ test('registerSharedSession: dispose fn removes session from candidate set', asy
   await pool.shutdown();
 });
 
-test('closeSession on borrowed session: does not destroy the underlying session', async () => {
+test('endDrive on borrowed session: does not destroy the underlying session', async () => {
   const pool = mkPool(true);
   const driver = pool.driver;
   // Seed warm slot.
   const s = await pool.createSession({ platform: 'p' });
-  await pool.closeSession(s.id);
+  await pool.endDrive(s.id);
   const preDestroy = driver.destroyCount;
 
   // Borrow via ready-checkout.
@@ -132,7 +132,7 @@ test('closeSession on borrowed session: does not destroy the underlying session'
   assert.ok(borrowed);
 
   // Release.
-  await pool.closeSession(borrowed.id);
+  await pool.endDrive(borrowed.id);
 
   assert.equal(driver.destroyCount, preDestroy, 'destroySession NOT called on borrowed release');
   // Warm slot should be idle again.
@@ -141,7 +141,7 @@ test('closeSession on borrowed session: does not destroy the underlying session'
   await pool.shutdown();
 });
 
-test('closeSession on shared (listener-owned) borrowed session: no-op for the owner', async () => {
+test('endDrive on shared (listener-owned) borrowed session: no-op for the owner', async () => {
   const pool = mkPool(false);
   const driver = pool.driver;
   const listenerSess = await pool.createSession({ platform: 'p' });
@@ -153,7 +153,7 @@ test('closeSession on shared (listener-owned) borrowed session: no-op for the ow
   assert.equal(borrowed?.id, listenerSess.id);
 
   // Execute releases.
-  await pool.closeSession(borrowed.id);
+  await pool.endDrive(borrowed.id);
 
   assert.equal(driver.destroyCount, preDestroy, 'listener still owns the session; no destroy');
   // The listener still tracks the same session object (mutable), so it
@@ -168,7 +168,7 @@ test('tryCheckoutReadySession missing (test stubs): executors should handle grac
   // method is absent.
   const bareBones = {
     createSession: async () => ({ id: 'x', intercepted: [], intercepting: false }),
-    closeSession: async () => {},
+    endDrive: async () => {},
     getSession: () => ({ id: 'x', intercepted: [], intercepting: false }),
     driverFor: () => ({}),
     shutdown: async () => {},

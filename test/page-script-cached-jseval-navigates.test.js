@@ -42,7 +42,7 @@ function makePool({ driver, jsEvalCacheValue }) {
     driverFor() {
       return driver;
     },
-    async closeSession() {},
+    async endDrive() {},
   };
 }
 

@@ -1,18 +1,18 @@
 # Per-call session lifecycle
 
-Every klura invocation runs through the same lifecycle. The flowchart and a high-level walkthrough live in `../ARCHITECTURE.md`. This file covers the mechanics in detail: what `start_session` loads, what `close_session` persists, the per-platform working dir that backs cross-session memory, lift_mode, the full `~/.klura/config.json` settings reference, and the CLI-only controls that bypass the agent.
+Every klura invocation runs through the same lifecycle. The flowchart and a high-level walkthrough live in `../ARCHITECTURE.md`. This file covers the mechanics in detail: what `start_session` loads, what `end_drive` persists, the per-platform working dir that backs cross-session memory, lift_mode, the full `~/.klura/config.json` settings reference, and the CLI-only controls that bypass the agent.
 
 ## start_session
 
 `start_session(url, {platform, capability, args, graph, lift_mode, on_complexity_signal})` opens (or borrows) a browser session and returns the initial context the agent needs to drive. Internally:
 
 1. **Load policy.** `~/.klura/skills/<platform>/policy.json` — user-set tier caps and forbid lists. If the requested capability is capped at `recorded-path` by user policy or by a fresh agent decline hypothesis, the response carries `prior_decline` so the agent doesn't try to RE again.
-2. **Load saved strategies.** All on-disk strategies for `{platform, capability}` are read. If a complete strategy exists AND the served tier is at or above `fetch` (the LIFT threshold), the runtime auto-executes it and returns `executed: true` with the result. The agent skips straight to `close_session`. See [Auto-execute session topology](#auto-execute-session-topology) for what "auto-executes" means at the session-graph level — `fetch` and `page-script` cold-spawn an isolated session that closes when execute returns; `recorded-path` does the same and additionally pauses the session intact when a step fails.
+2. **Load saved strategies.** All on-disk strategies for `{platform, capability}` are read. If a complete strategy exists AND the served tier is at or above `fetch` (the LIFT threshold), the runtime auto-executes it and returns `executed: true` with the result. The agent skips straight to `end_drive`. See [Auto-execute session topology](#auto-execute-session-topology) for what "auto-executes" means at the session-graph level — `fetch` and `page-script` cold-spawn an isolated session that closes when execute returns; `recorded-path` does the same and additionally pauses the session intact when a step fails.
 3. **Otherwise return drive context.** If no strategy auto-fires, the response carries the a11y tree, current URL, a `task_contract` describing what the agent is supposed to accomplish (graph-aware — `discover` and `map` shape it differently), and the active complexity-signal opt-out.
 
-The `graph` parameter selects the FSM topology and per-graph behavior. Three graphs ship — `discover` (default goal-directed flow), `map` (surface mapping), `execute` (run-a-saved-strategy with auto-fall into triage on stale failure). Full topology + per-graph `GraphConfig` reference: [session-phases.md](session-phases.md). When the `discover` graph drives a session and the agent doesn't save a strategy, `close_session` either auto-synthesizes a recorded-path from the action history or hands LIFT to the agent depending on `lift_mode`.
+The `graph` parameter selects the FSM topology and per-graph behavior. Three graphs ship — `discover` (default goal-directed flow), `map` (surface mapping), `execute` (run-a-saved-strategy with auto-fall into triage on stale failure). Full topology + per-graph `GraphConfig` reference: [session-phases.md](session-phases.md). When the `discover` graph drives a session and the agent doesn't save a strategy, `end_drive` either auto-synthesizes a recorded-path from the action history or hands LIFT to the agent depending on `lift_mode`.
 
-`on_complexity_signal: "skip"` at start_session disables the close-session RE nag for this one call. Used when the caller doesn't want a complexity-driven re-prompt — benchmarks, anything with no human in the loop.
+`on_complexity_signal: "skip"` at start_session disables the end-drive RE nag for this one call. Used when the caller doesn't want a complexity-driven re-prompt — benchmarks, anything with no human in the loop.
 
 ### Drive-start contextual hints
 
@@ -50,20 +50,20 @@ For `recorded-path`, the asymmetry surfaces when a step fails mid-flow. The runt
 
 This is a known sharp edge of the topology. A future change can either alias outer↔inner so resume_execution(outer_id) finds the right paused entry, or unify auto-execute and the agent-driving session for recorded-path. Until then, callers that programmatically drive auto-execute → resume should read the resume target from the failure envelope's `session_id`, not from `start_session`.
 
-## close_session
+## end_drive
 
-`close_session(sessionId, platform?)` is the most consequential per-call surface. Four steps:
+`end_drive(sessionId, platform?)` is the most consequential per-call surface. Four steps:
 
-1. **Auto-synth recorded-path.** If the agent saved no strategy AND `performActionHistory` is structurally rich (multiple navigations / clicks / inputs), the runtime synthesizes a `recorded-path` strategy from the action history. If the captured WS frames carry a literal that's also in `args` (the `synth_fetch` path scans both URL and body), it instead synthesizes a `fetch`. The synth is best-effort and never fails close_session. When the agent's `perform_action` selector matched Playwright's a11y-snapshot syntax (`<role> "<name>"` — the typical shape after reading an a11y tree), the synthesizer decomposes it into a structured `locators.a11y: {role, name}` alongside the original string in `locators.css`. This shape is what the cascade and warm-execute self-heal expect; without it, drift recovery on the warm path is css-only and skips the role-based rescan layers.
+1. **Auto-synth recorded-path.** If the agent saved no strategy AND `performActionHistory` is structurally rich (multiple navigations / clicks / inputs), the runtime synthesizes a `recorded-path` strategy from the action history. If the captured WS frames carry a literal that's also in `args` (the `synth_fetch` path scans both URL and body), it instead synthesizes a `fetch`. The synth is best-effort and never fails end_drive. When the agent's `perform_action` selector matched Playwright's a11y-snapshot syntax (`<role> "<name>"` — the typical shape after reading an a11y tree), the synthesizer decomposes it into a structured `locators.a11y: {role, name}` alongside the original string in `locators.css`. This shape is what the cascade and warm-execute self-heal expect; without it, drift recovery on the warm path is css-only and skips the role-based rescan layers.
 2. **Flush captures.** Every captured request, every WebSocket frame, every `perform_action` call, the tool-call trace, the JS bundles fetched during the session, and the storage state at close are written to `~/.klura/workdir/<platform>/sessions/<sid>/`. These are the inputs to cross-session memory and to the `discovery_artifact` that travels with each capability.
 3. **Recompute derived signals.** `field-stability.json`, `bundle-history.json`, and `signer-history.json` get recomputed with this session's contributions folded in.
 4. **Compute unresolved capabilities.** Anything the agent declared via `start_session({capability})` or `declare_capability` that didn't end up with a saved strategy AND isn't user-policy-capped becomes a candidate for the LIFT handoff.
 
-If unresolved capabilities exist, the close response carries a handoff payload whose shape depends on `lift_mode` (see below). Otherwise close_session returns clean.
+If unresolved capabilities exist, the close response carries a handoff payload whose shape depends on `lift_mode` (see below). Otherwise end_drive returns clean.
 
 ## Per-platform working dir (logbook)
 
-Persistent per-platform archive at `~/.klura/workdir/<platform>/` — the substrate for cross-session memory. `close_session` flushes captures, recomputes derived signals, and updates the logbook. The logbook backs the inline `triage[<cap>]` block on the LIFT handoff (current_tier + prior_attempts + discovery_artifact), `get_platform_logbook` (pull-on-demand cross-session derived signals), the revisit prompt on warm execute, and the `lift_mode` decision path.
+Persistent per-platform archive at `~/.klura/workdir/<platform>/` — the substrate for cross-session memory. `end_drive` flushes captures, recomputes derived signals, and updates the logbook. The logbook backs the inline `triage[<cap>]` block on the LIFT handoff (current_tier + prior_attempts + discovery_artifact), `get_platform_logbook` (pull-on-demand cross-session derived signals), the revisit prompt on warm execute, and the `lift_mode` decision path.
 
 Full on-disk layout, schema, writers, and readers: see [logbook.md](logbook.md).
 
@@ -90,10 +90,10 @@ User-facing settings live in `~/.klura/config.json`, not in `KLURA_*` env vars. 
 
 ## lift_mode
 
-`lift_mode` controls whether the close_session handoff fires and how it's framed. The on-disk effect is identical regardless of who answers the prompt; only the handoff message shape changes.
+`lift_mode` controls whether the end_drive handoff fires and how it's framed. The on-disk effect is identical regardless of who answers the prompt; only the handoff message shape changes.
 
 - `explicit_learn` (default) — handoff fires; the agent writes a user-facing prompt in its own voice from the inline triage bundle + captures and waits for a reply. Standard interactive user flow.
-- `skip` — no handoff fires; close_session tears down. Use for one-shot reads where you never want RE.
+- `skip` — no handoff fires; end_drive tears down. Use for one-shot reads where you never want RE.
 
 For autonomous runs without a human, register a checkpoint handler that auto-resolves the relevant kinds to `continue` — see `field-reports/lib/checkpoint-stubs.js` for the canonical example. Behavior is plugin-orchestrated via the checkpoint registry; no flag-driven branches in runtime hot paths.
 

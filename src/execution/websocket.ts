@@ -453,7 +453,7 @@ async function executeWebSocketBrowser(
       body: { ok: true, sent: true, wsUrl: resolvedWsUrl },
     };
   } finally {
-    await pool.closeSession(session.id);
+    await pool.endDrive(session.id);
   }
 }
 

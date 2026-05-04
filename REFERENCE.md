@@ -12,7 +12,7 @@ A klura session belongs to one of three named graphs. The `graph` parameter on `
 | `map` | `drive → terminal{closed}` | Surface-mapping — walk the platform to enrich the cross-session logbook. Mutating `perform_action` calls (POST/PUT/DELETE-shaped clicks, `type` into write-shaped inputs, etc.) gate behind a per-(action, selector) consent prompt. Auto-synth is skipped at close. The re-persistence gate fires when ≥5 perform_actions land with zero persistence calls. |
 | `execute` | `execute → triage → lift → terminal{closed | failed}` | Runs a saved strategy as the whole session. On stale-strategy failure (rolling success rate below `pool.rediscoverThreshold`) the FSM auto-falls into triage with the failure as defense-surface input — the agent re-plans and re-lifts. Arg/auth/structural failures terminate `failed`. |
 
-The runtime tracks the active graph on `session.graph` and the lifecycle status on `session.status` (`'active' | 'closed' | 'failed'`). Universal tools (`ack_checkpoint`, memory reads, control plane) admit on terminal sessions; phase-scoped tools reject. Mid-session, the active phase plus the active graph's `GraphConfig` together determine which tools are admissible and how `perform_action` / `close_session` behave. Generate a Mermaid diagram of any graph by reading `runtime/src/session-phase/graphs/<name>.ts` and the dumper at `runtime/src/session-phase/dump.ts`.
+The runtime tracks the active graph on `session.graph` and the lifecycle status on `session.status` (`'active' | 'closed' | 'failed'`). Universal tools (`ack_checkpoint`, memory reads, control plane) admit on terminal sessions; phase-scoped tools reject. Mid-session, the active phase plus the active graph's `GraphConfig` together determine which tools are admissible and how `perform_action` / `end_drive` behave. Generate a Mermaid diagram of any graph by reading `runtime/src/session-phase/graphs/<name>.ts` and the dumper at `runtime/src/session-phase/dump.ts`.
 
 ## Strategy schemas — overview
 
@@ -656,9 +656,9 @@ Module/protocol-anchored saves whose ack contains ONLY `dom-poll` (no module/pro
 
 Also consider validating each declared `notes.params.<name>` value before the call fires (e.g., the recipient lookup actually found a thread before typing into the composer) — a missing recipient is exactly the misroute the verification step should catch.
 
-## close-session-audit
+## end-drive-audit
 
-Every `close_session` call funnels through a single consolidated audit (`runtime/src/audit/close-session.ts`) — sibling shape to the `save-strategy-audit`. It composes structural detectors and token-gated classifiers into ONE rejection envelope.
+Every `end_drive` call funnels through a single consolidated audit (`runtime/src/audit/end-drive.ts`) — sibling shape to the `save-strategy-audit`. It composes structural detectors and token-gated classifiers into ONE rejection envelope.
 
 **Detector — `capability_declaration_required` (no ack-through path).** Refuses close on attempts 1 and 2 when the session typed or submitted content but never declared a capability. Auto-save needs a capability slug to key under; without one, the session degrades to a keyless recorded-path that nobody can look up at warm execute. Fix is to call `declare_capability({session_id, capability, args})` before retrying. A third close attempt force-tears-down regardless — the orchestrator skips the audit on attempt 3.
 
@@ -675,9 +675,9 @@ The token binds to `{sessionId, reCallCount, persistCallCount, actionCallCount, 
 **Rejection shape (first call):**
 
 ```
-invalid_strategy: close_session_rejected (pending)
-  → Your close_session call is NOT committed. Nothing was saved.
-  → To commit: call close_session again with {audit_token, audit_answers, acks} (fix the issues above).
+invalid_strategy: end_drive_rejected (pending)
+  → Your end_drive call is NOT committed. Nothing was saved.
+  → To commit: call end_drive again with {audit_token, audit_answers, acks} (fix the issues above).
   audit_token: aB12cD34
   warnings:
     - [capability_declaration_required] CANNOT CLOSE: this session typed or submitted content but no capability was declared…
@@ -689,7 +689,7 @@ invalid_strategy: close_session_rejected (pending)
       persist_via: ["save_verified_expression(...)", "add_discovery_note(...)", "add_resume_pointer(...)"],
       acknowledge_shape: "{re_persistence: {acknowledge_no_progress: true}} — only when there is genuinely nothing to persist"
     }
-  See klura://reference#close-session-audit.
+  See klura://reference#end-drive-audit.
 ```
 
 **Escape path 1 — persist then retry (preferred when real findings exist):**
@@ -704,14 +704,14 @@ save_verified_expression({
 add_discovery_note({
   body: "Send path: ui click → dispatchMessage → __ls.encode → ws.send.",
 })
-close_session({session_id, platform})   // gate now passes — persistCallCount ≥ 1
+end_drive({session_id, platform})   // gate now passes — persistCallCount ≥ 1
 ```
 
 **Escape path 2 — acknowledge no progress (when the probing genuinely turned up nothing):**
 
 ```
 // Agent read the token from the first rejection body:
-close_session({
+end_drive({
   session_id,
   platform,
   audit_token: "aB12cD34",
@@ -721,7 +721,7 @@ close_session({
 
 The token-bound + structural-answer shape defeats self-gate bypasses: because the token is bound to the payload hash AND the answer must say `acknowledge_no_progress: true`, the agent can't hard-code any constant string — it must actually read the rejection.
 
-**Module location.** `runtime/src/audit/close-session.ts` (the Audit instance), `runtime/src/audit/index.ts` (the framework). See `runtime/docs/gates.md` for the Detector/Classifier shapes and `runtime/docs/principles.md` §pre-commit gates for the taxonomy.
+**Module location.** `runtime/src/audit/end-drive.ts` (the Audit instance), `runtime/src/audit/index.ts` (the framework). See `runtime/docs/gates.md` for the Detector/Classifier shapes and `runtime/docs/principles.md` §pre-commit gates for the taxonomy.
 
 ## js-eval
 
@@ -1014,7 +1014,7 @@ Every recorded-path step carries a stable slug `id` plus the usual `action` / `l
 - Must not be purely numeric.
 - Must be unique within the strategy. Collisions reject with a suggestion to append `_2` / `_3` or use a more specific name.
 - On hand-crafted `save_strategy` saves the id is **required** — the agent authors it consciously.
-- On the auto-synth-on-`close_session` path the runtime generates ids deterministically from the step's action + locator name or URL pathname (`navigate_inbox`, `click_compose`, `type_recipient`, `click_send`). Collisions append `_2`, `_3`, …; empty slugs fall back to `{action}_{index}`.
+- On the auto-synth-on-`end_drive` path the runtime generates ids deterministically from the step's action + locator name or URL pathname (`navigate_inbox`, `click_compose`, `type_recipient`, `click_send`). Collisions append `_2`, `_3`, …; empty slugs fall back to `{action}_{index}`.
 
 ### Locator rules (enforced at save)
 
@@ -1055,7 +1055,7 @@ Cookie banners / tutorial dismisses / one-time modals are maybe-visible. Hard-re
 
 Runtime probes each candidate with a 1000ms timeout; if no locator resolves within the combined budget, the step is skipped silently. Don't use `optional` on critical-path steps (the one that sends the message / places the order). `navigate` and `wait` steps ignore the field.
 
-**Optionality is LLM-authored, not runtime-inferred.** Auto-synth on `close_session` emits every captured step as required — if you traversed a dismiss overlay during discovery, save your own recorded-path explicitly with those clicks flagged.
+**Optionality is LLM-authored, not runtime-inferred.** Auto-synth on `end_drive` emits every captured step as required — if you traversed a dismiss overlay during discovery, save your own recorded-path explicitly with those clicks flagged.
 
 ### Wait step variants
 
@@ -1200,7 +1200,7 @@ execute("<platform>", "send_message", {to: "brother", text: "yo"}, {identity: "p
 
 ### First-time login on a named identity
 
-When a named identity has no jar yet, the session opens unauthenticated. Drive a login (manually via the remote viewer, or programmatically if the saved strategy supports it). On `close_session`, the cookies persist to `<platform>--<identity>.json`. The next `start_session` with the same identity opens already-logged-in.
+When a named identity has no jar yet, the session opens unauthenticated. Drive a login (manually via the remote viewer, or programmatically if the saved strategy supports it). On `end_drive`, the cookies persist to `<platform>--<identity>.json`. The next `start_session` with the same identity opens already-logged-in.
 
 ### Profile fields under named identities
 
@@ -1627,7 +1627,7 @@ Hardcode when the value is the same for every caller: site-wide paths/hostnames,
 
 ## Discovery artifact
 
-A protocol-neutral cross-run handoff carrier. Every tool call the agent makes during investigative work — `inspect_ws_frame`, `try_generator`, `get_js_source`, `get_send_encoder`, `find_in_page`, `get_network_log`, `get_attribute` — appends a structural record (tool name, args digest, outcome flag) to the session's accumulator. On `save_strategy` / `close_session`, the runtime merges the accumulator with any prior on-disk artifact for the same `(platform, capability)` pair and writes the result. Next-session responses (`list_platform_skills`, `start_session`, `execute`) inline the artifact so the agent sees the handoff without extra tool calls.
+A protocol-neutral cross-run handoff carrier. Every tool call the agent makes during investigative work — `inspect_ws_frame`, `try_generator`, `get_js_source`, `get_send_encoder`, `find_in_page`, `get_network_log`, `get_attribute` — appends a structural record (tool name, args digest, outcome flag) to the session's accumulator. On `save_strategy` / `end_drive`, the runtime merges the accumulator with any prior on-disk artifact for the same `(platform, capability)` pair and writes the result. Next-session responses (`list_platform_skills`, `start_session`, `execute`) inline the artifact so the agent sees the handoff without extra tool calls.
 
 **On-disk layout** — under `<KLURA_HOME>/workdir/<platform>/artifacts/`:
 
@@ -1811,7 +1811,7 @@ Source-level debugger on top of CDP's `Debugger` domain. Use when the bundle is 
 6. evaluate_on_frame({frame_index: 0, expression: "JSON.stringify(arguments)"}) → exact pre-encode args
 7. evaluate_on_frame({frame_index: 0, expression: "encodeSend.toString()"}) → encoder source
 8. resume() → page continues
-9. remove_breakpoint({breakpoint_id}) — or let close_session clean up
+9. remove_breakpoint({breakpoint_id}) — or let end_drive clean up
 ```
 
 **Mechanics:**
@@ -1822,7 +1822,7 @@ Source-level debugger on top of CDP's `Debugger` domain. Use when the bundle is 
 - `evaluate_on_frame` is CDP `Debugger.evaluateOnCallFrame` — the expression runs in the paused frame's scope, so locals and closure-captured names resolve directly. Since execution is frozen, there is no async IIFE wrap (unlike `js_eval`); expressions run synchronously. Result comes back as a string (JSON-stringified when possible, else the remote-object description). Timeout default 5000, max 30000.
 - `step` advances by one line (`over`), descends into a function (`into`), or runs to the end of the current function (`out`). Returns `{paused_at: {file, line, column, function_name}}` on the next pause, or `{done: true}` when execution completes without pausing again (5s window).
 - `resume` releases the pause. Idempotent — no-op when not paused.
-- **Cleanup is automatic.** `close_session` resumes any active pause, removes every breakpoint, and disables the Debugger domain before cookie save. You never need to manually tear down; `remove_breakpoint` is for mid-session hygiene only.
+- **Cleanup is automatic.** `end_drive` resumes any active pause, removes every breakpoint, and disables the Debugger domain before cookie save. You never need to manually tear down; `remove_breakpoint` is for mid-session hygiene only.
 
 **What belongs on this surface vs. `js_eval`:** `js_eval` runs at global scope and sees only module exports the page chose to pin on globals. It cannot see closure-captured locals, private class fields, or values the minifier inlined. `evaluate_on_frame` _at a paused frame_ sees all of them because the frame is literally parked in that scope. Use `js_eval` for "probe a global I can name," use `evaluate_on_frame` for "read the closure I just parked in."
 
@@ -1857,8 +1857,8 @@ A map-mode session explores a platform and enriches the per-platform logbook wit
 
 Two behaviors differ from the default `intent: "task"`:
 
-1. **No auto-synth on `close_session`.** Task mode synthesizes a recorded-path from your action history when you didn't land a complete strategy; map mode skips this — map-mode clicks aren't meant to be replayed, they're probes. Nothing lands on `skills/<platform>/`.
-2. **Per-action consent prompt.** Every mutating `perform_action` (`click`, `type`, `fill_editor`, `key_press`, `select`) raises a consent prompt before the driver dispatches. The runtime can't reliably judge destructiveness from selectors or DOM shape — that's a semantic property of the surrounding page context. The gate's job is to keep the constraint adjacent to every fresh decision. The prompt names the action + selector and asks the agent to either ack with a one-sentence rationale or cancel with a reason. Sticky cache: once a `(action, selector)` tuple is acked, subsequent identical `perform_action` calls fire without re-prompting (so a re-click on the same target is a one-step no-op pass). The cache is session-local; `close_session` clears it.
+1. **No auto-synth on `end_drive`.** Task mode synthesizes a recorded-path from your action history when you didn't land a complete strategy; map mode skips this — map-mode clicks aren't meant to be replayed, they're probes. Nothing lands on `skills/<platform>/`.
+2. **Per-action consent prompt.** Every mutating `perform_action` (`click`, `type`, `fill_editor`, `key_press`, `select`) raises a consent prompt before the driver dispatches. The runtime can't reliably judge destructiveness from selectors or DOM shape — that's a semantic property of the surrounding page context. The gate's job is to keep the constraint adjacent to every fresh decision. The prompt names the action + selector and asks the agent to either ack with a one-sentence rationale or cancel with a reason. Sticky cache: once a `(action, selector)` tuple is acked, subsequent identical `perform_action` calls fire without re-prompting (so a re-click on the same target is a one-step no-op pass). The cache is session-local; `end_drive` clears it.
 
 Read-only actions (`navigate`, `scroll`, `wait`) are not gated.
 
@@ -1877,7 +1877,7 @@ What does NOT land:
 - No `skills/<platform>/<capability>.json` strategy files.
 - No `artifacts/<capability>.json` discovery artifacts.
 
-Storage state (cookies) still persists via the normal `close_session` path so the next session doesn't have to re-login.
+Storage state (cookies) still persists via the normal `end_drive` path so the next session doesn't have to re-login.
 
 ### `platform_map` on `start_session` response
 
@@ -1918,7 +1918,7 @@ start_session("https://klura-eats.example/", {platform: "klura-eats", intent: "m
       hypothesis: "GET /search?q=<query> returns JSON list of restaurants"})
   → record_observed_capability({platform: "klura-eats", name: "place_order", ...})
   → record_observed_capability({platform: "klura-eats", name: "list_orders", ...})
-close_session(session_id, "klura-eats")
+end_drive(session_id, "klura-eats")
   → logbook updated; no strategies saved; auto-synth skipped
 ```
 
@@ -1977,7 +1977,7 @@ The 4-char nonce in `checkpoint_token` is just a "you read THIS prompt" handshak
 
 ### Re-persistence gate in map mode
 
-Map sessions don't expect RE; they do expect records. The re-persistence gate in map mode triggers on `close_session` when `perform_action` count ≥ 5 AND `record_observed_capability` count = 0 AND no strategies saved — i.e. the agent clicked through the site but wrote nothing to the logbook. Escape the same way as the RE gate: call `record_observed_capability` at least once, or retry `close_session({..., acknowledge_no_progress: "<token>"})` with the server-minted token from the rejection.
+Map sessions don't expect RE; they do expect records. The re-persistence gate in map mode triggers on `end_drive` when `perform_action` count ≥ 5 AND `record_observed_capability` count = 0 AND no strategies saved — i.e. the agent clicked through the site but wrote nothing to the logbook. Escape the same way as the RE gate: call `record_observed_capability` at least once, or retry `end_drive({..., acknowledge_no_progress: "<token>"})` with the server-minted token from the rejection.
 
 ## Network log — discovery workflow
 
@@ -2096,7 +2096,7 @@ Reverse-engineering an encoded payload — binary WebSocket frame, signed HTTP b
 
 The toolkit supports both patterns; the runtime doesn't steer. Pick based on the envelope, not on habit.
 
-## try_generator
+## try-generator
 
 A dry-run + byte-diff harness for `generated.<name>.code` snippets. Runs a candidate in the warm-execute vm sandbox, then optionally diffs its output against a captured ws frame (or explicit base64 ground truth).
 
@@ -2136,7 +2136,7 @@ try_generator({
 - `bytes` (default) — byte-for-byte equality; the established convergence loop.
 - `structural` — use after ~3 iterations where the advisory says "encoder header verified; diffs are in the body." Runtime parses JSON out of both sides (handles length-prefixed binary envelopes, recursively unwraps stringified-JSON-in-strings), compares parsed shapes. Value differences within the same type accepted; different types, missing keys, array-length changes still fail. Response carries `structural_match: { kind, expected_json_bytes, got_json_bytes, depth_compared }` on success or `structural_match.diff` on failure. Raw-binary protocols (protobuf without text, pure MQTT control frames) fall back with `info.kind: "no_json_found"`.
 
-**Auto-persist on `ok:true`.** When the session has a declared capability, the match is written to the session's discovery artifact under `verified_expressions[<capability>]` automatically — the response carries `auto_persisted_as_verified_expression: {capability, binds_args, returns}`. Hardness-check counter resets; the expression survives `close_session` via the artifact. Without a declared capability (or when code exceeds the per-expression length cap), auto-persist is skipped silently. Declare via `declare_capability({session_id, capability, args})`.
+**Auto-persist on `ok:true`.** When the session has a declared capability, the match is written to the session's discovery artifact under `verified_expressions[<capability>]` automatically — the response carries `auto_persisted_as_verified_expression: {capability, binds_args, returns}`. Hardness-check counter resets; the expression survives `end_drive` via the artifact. Without a declared capability (or when code exceeds the per-expression length cap), auto-persist is skipped silently. Declare via `declare_capability({session_id, capability, args})`.
 
 **Constraints.** No side effects — pure sandbox exec + byte-compare. 100ms execution budget. Must return a string (base64 for binary). `args` are frozen.
 
@@ -2208,10 +2208,10 @@ Every `save_strategy` call passes through `surface_triage_missing` on the consol
 
 ### Behavior by lift_mode
 
-`lift_mode` controls whether the close-session LIFT handoff fires at all.
+`lift_mode` controls whether the end-drive LIFT handoff fires at all.
 
-- `explicit_learn` (default) — close-session emits the LIFT handoff prompt for relay to the user.
-- `skip` — close-session tears down silently; no handoff.
+- `explicit_learn` (default) — end-drive emits the LIFT handoff prompt for relay to the user.
+- `skip` — end-drive tears down silently; no handoff.
 
 For autonomous runs (benchmark / CI), register a checkpoint handler claiming `triage_plan` + `surface_changed` whose `continue` resolution pre-empts the default interactive handover — see `field-reports/lib/checkpoint-stubs.js`.
 
@@ -2240,8 +2240,8 @@ revisit_prompt?: {
 
 The agent should relay `user_prompt_suggestion` VERBATIM as a text-only turn after delivering the user's answer. Reply shapes:
 
-- **YES / try / lift** — proceed with the LIFT playbook (inspect_ws_frame / try_generator / set_breakpoint, then `save_strategy` against the captured request). Even though execute succeeded, this session enters LIFT to attempt a tier upgrade. (Triage runs automatically on close_session's LIFT handoff; no separate call needed.)
-- **NO / skip / later** — call `close_session`. The next natural invocation surfaces the same prompt; no urgency.
+- **YES / try / lift** — proceed with the LIFT playbook (inspect_ws_frame / try_generator / set_breakpoint, then `save_strategy` against the captured request). Even though execute succeeded, this session enters LIFT to attempt a tier upgrade. (Triage runs automatically on end_drive's LIFT handoff; no separate call needed.)
+- **NO / skip / later** — call `end_drive`. The next natural invocation surfaces the same prompt; no urgency.
 
 Recorded-path is ~10× slower and brittle to DOM drift. DOM-anchored page-scripts survive until the next UI refactor. Surface this prompt every time it fires; we always want to hunt for durable-anchor upgrades when the saved strategy is below ceiling or fragile.
 
@@ -2374,15 +2374,15 @@ Free-form prose describing what the agent saw. Typical values:
 
 ## reverse-engineer-mode
 
-Role-shift handoff returned by `close_session` when any declared capability is unresolved (no saved strategy + no `max_strategy_tier: "recorded-path"` policy decline). This section covers the **handoff shape** + **LIFT-specific protocol** (check-ins, save-from-capture shortcut, multi-capability time-correlation, third-close escape).
+Role-shift handoff returned by `end_drive` when any declared capability is unresolved (no saved strategy + no `max_strategy_tier: "recorded-path"` policy decline). This section covers the **handoff shape** + **LIFT-specific protocol** (check-ins, save-from-capture shortcut, multi-capability time-correlation, third-close escape).
 
 ### The LIFT flow rhythm
 
-DRIVE ends when `close_session` returns the LIFT handoff. From there, the intended rhythm is:
+DRIVE ends when `end_drive` returns the LIFT handoff. From there, the intended rhythm is:
 
 1. **Quick triage (explicit_learn only).** Emit a text-only turn in your own voice: _"Worth lifting? Rough rounds estimate?"_ Include what you saw (signed requests / binary WS / rotating fields, from the `re_signal` + `candidate_xhrs` on the handoff). Wait for the reply.
    - YES / lift / try → step 2.
-   - NO / skip / later → call `close_session` again; auto-synth drops a recorded-path fallback from your action history.
+   - NO / skip / later → call `end_drive` again; auto-synth drops a recorded-path fallback from your action history.
 
 2. **Plow through on YES.** Attempt every RE trick. There is no pre-emptive fold:
    - `inspect_ws_frame` → get the byte layout + a pre-wired starter generator.
@@ -2397,7 +2397,7 @@ DRIVE ends when `close_session` returns the LIFT handoff. From there, the intend
 
 4. **Quit conditions — exhaustive:**
    - **SUCCESS**: complete, runnable strategy saved. Expected exit.
-   - **User rejects every shape you propose at save time.** If multiple tiers fail user_confirmation, persist findings via `save_verified_expression` / `add_discovery_note` / `add_resume_pointer` and `close_session` — the next session inlines the artifact and continues.
+   - **User rejects every shape you propose at save time.** If multiple tiers fail user_confirmation, persist findings via `save_verified_expression` / `add_discovery_note` / `add_resume_pointer` and `end_drive` — the next session inlines the artifact and continues.
    - Nothing else. Don't fold pre-emptively because the protocol looks complex — the `envelope-advisories` heuristic already flags complexity on `get_network_log`'s `_advisory` specifically to counteract the "fold on complexity" prior. The canonical response to that flag is to reach for the RE toolkit, not to capitulate.
 
 5. **Mid-work user-assistance asks (always allowed).**
@@ -2410,8 +2410,8 @@ DRIVE ends when `close_session` returns the LIFT handoff. From there, the intend
 
 klura sessions have two phases:
 
-- **DRIVE.** The user asks for something; the agent drives the browser to get it. Ends when the agent calls `close_session`. User satisfaction at this boundary is binary: did they get their answer? If yes, DRIVE succeeded.
-- **LIFT.** close_session didn't end the session; it handed off. The user is already off reading the answer. LIFT exists to convert what you just learned (a working browser path to a capability) into **infrastructure** — a saved strategy that future callers run warm-fast without re-discovery.
+- **DRIVE.** The user asks for something; the agent drives the browser to get it. Ends when the agent calls `end_drive`. User satisfaction at this boundary is binary: did they get their answer? If yes, DRIVE succeeded.
+- **LIFT.** end_drive didn't end the session; it handed off. The user is already off reading the answer. LIFT exists to convert what you just learned (a working browser path to a capability) into **infrastructure** — a saved strategy that future callers run warm-fast without re-discovery.
 
 **Who LIFT benefits.** Not the current caller — they're done. Future callers: the same user's next query against the same capability (warm execute → ~100ms vs. ~30s re-discovery), benchmark runs measuring warm latency, other agents using klura's shared skills directory, automated flows firing the capability on a schedule. Every saved strategy amortizes across everyone who ever invokes it. A single save compounds forever.
 
@@ -2438,13 +2438,13 @@ Further toolkit references:
 
 ### Response shape
 
-Top-level: `{ok: false, phase: "lift", session_id, platform, unresolved_capabilities: [...], captures: {http_requests, ws_frames, actions}, triage: {<capability>: TriageBundle}, triage_errors?: {<capability>: string}, tools: {investigate, re_lift, save, escape}, close_attempts, message}`.
+Top-level: `{ok: false, phase: "lift", session_id, platform, unresolved_capabilities: [...], captures: {http_requests, ws_frames, actions}, triage: {<capability>: TriageBundle}, triage_errors?: {<capability>: string}, tools: {investigate, re_lift, save, escape}, end_drive_attempts, message}`.
 
 `triage_errors` is present only when a per-capability `computeTriageBundle` call threw (malformed logbook, missing archive, etc.). The keyed capability is absent from `triage`; treat it as "no triage available" rather than "no action recommended." Errors also go to the runtime's stderr so benchmark / field-report runners surface them in their own logs.
 
 ### Earlier phase: `capability_declaration_required`
 
-Before the LIFT-phase handoff fires, `close_session` checks whether the session observed write-shape `perform_action`s (`type`, `fill_editor`, `fill`, `submit`) without any declared capability. If so, it refuses to tear down with a distinct handoff shape:
+Before the LIFT-phase handoff fires, `end_drive` checks whether the session observed write-shape `perform_action`s (`type`, `fill_editor`, `fill`, `submit`) without any declared capability. If so, it refuses to tear down with a distinct handoff shape:
 
 ```
 {
@@ -2452,14 +2452,14 @@ Before the LIFT-phase handoff fires, `close_session` checks whether the session 
   phase: "capability_declaration_required",
   session_id, platform,
   captured_write_actions: [{action, value_preview?}, ...],
-  close_attempts,
+  end_drive_attempts,
   message: "CANNOT CLOSE: ... call declare_capability({session_id, capability, args}) first."
 }
 ```
 
 Runtime rationale: auto-save keys strategies by capability slug; without one, a session with writes silently degrades to a keyless recorded-path nothing can look up at warm execute. The guard refuses attempts 1 and 2; attempt 3 force-tears-down like the LIFT handoff path. `lift_mode: "skip"` opts out of the guard (intentional "I'm just exploring" sessions).
 
-Fix: call `declare_capability({session_id, capability: "<slug>", args: {...}})` with a verb-phrase slug (`send_message`, `submit_form`) and the user's arg values verbatim. Then re-call `close_session`.
+Fix: call `declare_capability({session_id, capability: "<slug>", args: {...}})` with a verb-phrase slug (`send_message`, `submit_form`) and the user's arg values verbatim. Then re-call `end_drive`.
 
 Per `unresolved_capabilities[]` entry:
 
@@ -2496,7 +2496,7 @@ When multiple capabilities were declared (`login` + `search_user` + `list_videos
 
 ### Third-close escape
 
-`closeAttempts >= 3` force-tears-down regardless of unresolved state. Legitimate for genuinely unliftable sessions (total site breakage, failed login, unrecoverable state). Auto-synth still runs on forced teardown — recorded-path from perform_action history, literal-match fetch — so what can be derived mechanically gets saved.
+`endDriveAttempts >= 3` force-tears-down regardless of unresolved state. Legitimate for genuinely unliftable sessions (total site breakage, failed login, unrecoverable state). Auto-synth still runs on forced teardown — recorded-path from perform_action history, literal-match fetch — so what can be derived mechanically gets saved.
 
 ## configure
 

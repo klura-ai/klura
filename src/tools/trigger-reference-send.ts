@@ -161,8 +161,8 @@ function rejectionToErrorMessage(result: GateResult): string {
 /**
  * Fire a short UI action sequence and surface any new sent WebSocket frames
  * that arrive during / shortly after. Used when the agent wants a fresh
- * reference frame for RE work AFTER the close_session auto-pin window has
- * passed, or on sessions that weren't going to hit close_session at all
+ * reference frame for RE work AFTER the end_drive auto-pin window has
+ * passed, or on sessions that weren't going to hit end_drive at all
  * (execute-only probes, etc).
  *
  * Consent-gated: the first call always returns a checklist + token. The

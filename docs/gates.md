@@ -94,7 +94,7 @@ The audit emits ONE rejection envelope regardless of how many spec entries fired
 | Gate | Level | Where | Why |
 | --- | --- | --- | --- |
 | `save_strategy` audit | 2 + 3 | `runtime/src/audit/save-strategy.ts` | Single Audit instance composing 13 detectors + 4 classifiers. Wrong commit = silently-broken strategy every future caller runs. |
-| `close_session` audit | 2 + 3 | `runtime/src/audit/close-session.ts` | Second Audit instance — `capability_declaration_required` Detector (`ackReason: 'none'`) + `re_persistence` Classifier (token-gated). Same machinery as save-strategy audit, different lifecycle decision point. |
+| `end_drive` audit | 2 + 3 | `runtime/src/audit/end-drive.ts` | Second Audit instance — `capability_declaration_required` Detector (`ackReason: 'none'`) + `re_persistence` Classifier (token-gated). Same machinery as save-strategy audit, different lifecycle decision point. |
 | `trigger_reference_send` consent | 3 | `runtime/src/tools/trigger-reference-send.ts` | Re-fires a real submit on every call. Wrong commit = side-effect fired against a real service without user knowing. |
 
 **Centralization is non-negotiable.** All save-time concerns funnel through the `Audit` class — no roll-your-own gate factories, no roll-your-own rejection envelopes, no roll-your-own token threading. `buildTokenGate` is the underlying primitive; the `Audit` class wraps it with detector composition + ack handling for save-time gates, and standalone gates outside that envelope (`trigger_reference_send` consent, `checkpoint_ack`, `interruption_ack`) reuse `buildTokenGate` directly.

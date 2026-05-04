@@ -29,7 +29,7 @@ Above the reading primitives sits an eight-tool debugger surface that wraps CDP'
 - **`step(session_id, kind)`** (`over` / `into` / `out`)
 - **`resume(session_id)`**
 
-Instead of reading the minified bundle, the agent drops a breakpoint at the `WebSocket.send` file:line reported by `inspect_ws_frame.js_callstack`, re-triggers the flow with `perform_action`, and reads the encoder out of the paused closure via `get_frame_scope` + `evaluate_on_frame`. This collapses the hardest RE case — encoders where the closure captures private state the module never exports globally — from hours of bundle-hunting to a handful of tool calls. Implemented only on the Playwright driver (CDP session per klura session, lazy-initialized on first `set_breakpoint`); the remote driver throws `not_implemented`. Cleanup is automatic at `close_session` (resume → remove bps → disable Debugger). Full workflow in `klura://reference#debugger-surface`.
+Instead of reading the minified bundle, the agent drops a breakpoint at the `WebSocket.send` file:line reported by `inspect_ws_frame.js_callstack`, re-triggers the flow with `perform_action`, and reads the encoder out of the paused closure via `get_frame_scope` + `evaluate_on_frame`. This collapses the hardest RE case — encoders where the closure captures private state the module never exports globally — from hours of bundle-hunting to a handful of tool calls. Implemented only on the Playwright driver (CDP session per klura session, lazy-initialized on first `set_breakpoint`); the remote driver throws `not_implemented`. Cleanup is automatic at `end_drive` (resume → remove bps → disable Debugger). Full workflow in `klura://reference#debugger-surface`.
 
 ## The save shape: `frameFromPage`
 
@@ -51,7 +51,7 @@ The two-part fix lives in `runtime/src/response/ws-pin.ts`:
 - **Pinned slots** — per-session `Session.pinnedWsFrames: Map<hash, WebSocketFrame>` lifts specific frames out of the FIFO ring. Capped at `WS_PINNED_FRAMES_CAP = 8` with LRU eviction; overflow returns the evicted hash so callers can surface it.
 - **Dynamic ring cap** — `Session.wsFramesCap` overrides the driver default. When `detectSessionComplexity` (`runtime/src/strategies/close-complexity.ts`) fires an envelope advisory, it raises the cap to `WS_FRAMES_BUFFER_CAP_RE_MODE = 10_000` for the rest of the session. Complementary to pinning: pinning protects the specific advisory target; the ring bump keeps companion frames (ack, diff candidates) around without explicit pins.
 
-### Auto-pin on the close-session RE nag
+### Auto-pin on the end-drive RE nag
 
 `detectSessionComplexity` is the integration point. When it fires a `recorded_path_only_lift_possible` advisory that attaches to a ws frame, it pins the target frame before returning the signal, and stamps `signal.ws_hash` alongside `signal.ws_i`. The agent's subsequent `inspect_ws_frame(ws_hash)` / `try_generator_in_page({verify_against: {ws_hash}})` calls address the frame by hash and survive any amount of subsequent rotation.
 
@@ -60,7 +60,7 @@ The two-part fix lives in `runtime/src/response/ws-pin.ts`:
 Two tools round out the surface:
 
 - **`pin_ws_frame`** — pins a frame the auto-pin couldn't know about (companion ack, prior-send diff target). Returns `ws_hash`, `pinned_count`, `pinned_cap`, and `evicted_hash` when an LRU overflow happened.
-- **`trigger_reference_send`** — fires a short `perform_action` sequence and returns every new sent-frame candidate that lands within a settle window, each with its hash. For sessions where the auto-pin window already passed or where the agent wants a fresh reference independent of `close_session`.
+- **`trigger_reference_send`** — fires a short `perform_action` sequence and returns every new sent-frame candidate that lands within a settle window, each with its hash. For sessions where the auto-pin window already passed or where the agent wants a fresh reference independent of `end_drive`.
 
 ### Convergence coach
 

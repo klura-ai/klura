@@ -89,7 +89,7 @@ function validateIdentityKey(key: string, field: string): void {
       field,
       `= ${JSON.stringify(key)} is forbidden — identities are for non-secret profile fields only ` +
         `(email, username, phone). Use the secret resolver (\`klura secret add\`) for credentials, ` +
-        `or rely on browser cookies persisted via close_session for sessions.`,
+        `or rely on browser cookies persisted via end_drive for sessions.`,
     );
   }
 }

@@ -255,6 +255,6 @@ To add a new graph: create `graphs/<name>.ts` exporting a `Graph` literal, add i
 
 - Agent-facing compact reference: `runtime/SKILL.md` §"Sessions move through phases"
 - Agent-facing full reference: `runtime/REFERENCE.md#triage-phase`
-- Per-call lifecycle (close_session→end_drive teardown): `runtime/docs/run-lifecycle.md`
+- Per-call lifecycle (end_drive→end_drive teardown): `runtime/docs/run-lifecycle.md`
 - Audit composition pattern (where `surfaceTriageMissingDetector` plugs in): `runtime/docs/gates.md`
 - Checkpoint family (`triage_plan` is a kind here): `runtime/docs/checkpoints.md`

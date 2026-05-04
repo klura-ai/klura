@@ -623,7 +623,7 @@ function itemsAreNonEmpty(items: unknown): boolean {
 
 export interface RejectionFormatOpts {
   /** Tool name the agent calls to retry. Defaults to `save_strategy` for the
-   *  pre-save audit; pass the close-session tool name for the close-session
+   *  pre-save audit; pass the end-drive tool name for the end-drive
    *  audit. */
   toolName?: string;
   /** Reference anchor to point the agent at. Defaults to
@@ -703,7 +703,7 @@ export function rejectionToErrorMessage(
   lines.push(
     `  → In unattended runs (no human present), retry with just {audit_token} and the embedder's registered decider auto-resolves user_confirmation. You still owe answers for any literal_provenance / capability_name_justification / observed_siblings items in the rejection.`,
   );
-  if (toolName !== 'end_drive' && toolName !== 'close_session') {
+  if (toolName !== 'end_drive') {
     lines.push(
       `  → To abandon this draft: call end_drive — that flushes whatever else is pending.`,
     );

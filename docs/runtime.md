@@ -79,7 +79,7 @@ Tools group into eight clusters:
 | Tool | Purpose |
 | --- | --- |
 | `start_session(url, {platform?, capability?, args?, mode?, lift_mode?, on_complexity_signal?})` | Open browser, navigate, return `{sessionId, a11yTree, url, ...}`. Auto-executes if a saved strategy exists. |
-| `close_session(sessionId, platform?)` | Save storage state, run auto-synth, write working/sessions archive, surface LIFT handoff. |
+| `end_drive(sessionId, platform?)` | Save storage state, run auto-synth, write working/sessions archive, surface LIFT handoff. |
 | `declare_capability(args)` | Tell the runtime the capability slug + arg names without driving the browser yet. Required for auto-save when not declared at start_session time. |
 | `status()` | Daemon-level read: active session count + listener count. |
 | `wait_for_remote(sessionId, timeout?)` / `start_remote_session(sessionId, prompt)` / `stop_remote_session(sessionId)` | Hand control to a human via the tunneled viewer. See [remote.md](remote.md). |
@@ -150,7 +150,7 @@ Eight tools wrapping CDP's `Debugger` domain. See [reverse-engineering.md#source
 | `add_resume_pointer(args)` | js_source url+line+frame index pointer the next session reads to resume RE. |
 | `save_verified_expression(args)` | Reproducible JS expression that produced a byte-equivalent encoder result. Capped at 8192 chars. |
 | `get_discovery_artifact_field(args)` | Read a single field from the artifact (e.g. just `verified_expressions`). |
-| `set_capability_policy(args)` | Persist a per-capability tier cap. Triggered by user decline of the close-session RE nag. |
+| `set_capability_policy(args)` | Persist a per-capability tier cap. Triggered by user decline of the end-drive RE nag. |
 | `record_lookup_candidate(args)` | Internal: classifier feeds candidates into the per-session accumulator. |
 
 ### Strategy healing

@@ -90,7 +90,7 @@ Chrome browser contexts maintain their own cookie jars. When cookies expire:
 2. This is a **significant blocker** — triggers the full credential resolution flow (see [remote.md](remote.md))
 3. After re-login, new cookies are stored in the browser context automatically
 
-Cookie persistence across restarts: browser storage state (cookies, localStorage) is saved to `~/.klura/storage-state/<platform>.json`. In local mode it's saved on `close_session`; in daemon mode, it's saved on shutdown and periodically.
+Cookie persistence across restarts: browser storage state (cookies, localStorage) is saved to `~/.klura/storage-state/<platform>.json`. In local mode it's saved on `end_drive`; in daemon mode, it's saved on shutdown and periodically.
 
 ## Listener token refresh
 

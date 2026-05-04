@@ -29,8 +29,8 @@ import { loadCapabilityPolicy as loadCapabilityPolicyFull } from '../strategies/
 import { buildAndMergeArtifact, writeArtifact } from '../strategies/discovery-artifact';
 import { clearStartersForSession } from '../response/starter-cache';
 import { clearForSession as clearSessionObservations } from '../response/session-observations';
-import { computeReverseEngineerHandoff } from './re-handoff';
-import { closeSessionAudit, buildCloseSessionPayload } from '../audit/close-session';
+import { computeReverseEngineerHandoff, wouldReverseEngineerHandoffFire } from './re-handoff';
+import { endDriveAudit, buildEndDrivePayload } from '../audit/end-drive';
 import { rejectionToErrorMessage } from '../audit';
 import { graphConfig } from '../session-phase/registry';
 
@@ -53,7 +53,7 @@ function serializePostData(postData: unknown): string | null {
 
 /**
  * Adapter between the live agent-driven session and the working-dir's
- * CaptureEvent stream. Runs at close_session. Reads driver-held network log +
+ * CaptureEvent stream. Runs at end_drive. Reads driver-held network log +
  * WS frames + session.performActionHistory + session.artifactAccumulator,
  * reshapes into CaptureEvent[], calls ingestCaptureEvents. This is the ONLY
  * place session/pool state touches runtime/src/working-dir/ — the working-dir
@@ -303,7 +303,7 @@ function digestEntry(e: unknown): string {
 // IDs, tokens); enabling callers are responsible for the destination path's
 // privacy.
 //
-// Called on every close_session entry — including LIFT handoffs, which do
+// Called on every end_drive entry — including LIFT handoffs, which do
 // not tear down the browser but may be the last call before the session goes
 // idle. Overwriting the per-session file is intentional: a later close sees
 // more captures, and last-write-wins preserves the final state for inspectors.
@@ -375,9 +375,9 @@ function countPersistCalls(session: ReturnType<typeof pool.getSession>): number 
   );
 }
 
-export type CloseSessionAuditRejection = {
+export type EndDriveAuditRejection = {
   ok: false;
-  phase: 'close_session_audit';
+  phase: 'end_drive_audit';
   session_id: string;
   message: string;
   /** Echoed for the orchestrator's caller — the runtime side has these as
@@ -385,10 +385,10 @@ export type CloseSessionAuditRejection = {
    *  formatted message) want them visible. */
   re_call_count: number;
   persist_call_count: number;
-  close_attempts: number;
+  end_drive_attempts: number;
 };
 
-export async function closeSession(
+export async function endDrive(
   sessionId: string,
   opts: {
     platform?: string;
@@ -398,7 +398,7 @@ export async function closeSession(
 ): Promise<
   | { ok: true; auto_synthesized?: SynthLedgerEntry[] }
   | NonNullable<ReturnType<typeof computeReverseEngineerHandoff>>
-  | CloseSessionAuditRejection
+  | EndDriveAuditRejection
 > {
   const session = pool.getSession(sessionId);
 
@@ -415,10 +415,10 @@ export async function closeSession(
     (opts.auditToken === 'undefined' || opts.auditToken === 'null' || opts.auditToken === '')
   ) {
     throw new Error(
-      `invalid_args: close_session received audit_token: ${JSON.stringify(opts.auditToken)} — ` +
-        `that is not a valid token. Audit tokens are minted ONLY by a prior close_session audit ` +
+      `invalid_args: end_drive received audit_token: ${JSON.stringify(opts.auditToken)} — ` +
+        `that is not a valid token. Audit tokens are minted ONLY by a prior end_drive audit ` +
         `rejection (capability_declaration_required Detector or re_persistence Classifier). If no ` +
-        `prior call returned a token, drop the audit_token field entirely. close_session is gated ` +
+        `prior call returned a token, drop the audit_token field entirely. end_drive is gated ` +
         `on save_strategy success, not on audit answers — fabricating an audit token will not ` +
         `unblock the LIFT handoff.`,
     );
@@ -448,19 +448,27 @@ export async function closeSession(
   }
 
   // Close-session audit (Detector + Classifier) runs BEFORE any state
-  // mutation (including closeAttempts bump). One Audit instance covers both
+  // mutation (including endDriveAttempts bump). One Audit instance covers both
   // the declaration-required check (Detector, ackReason: 'none') and the
   // re-persistence check (Classifier, token-gated). Either fires → unified
   // rejection envelope, agent fixes / declares / acks, retries.
   const reCallCount = countReToolCalls(session);
   const persistCallCount = countPersistCalls(session);
   const actionCallCount = (session.performActionHistory ?? []).length;
-  const auditPayload = buildCloseSessionPayload(
+  // Pre-compute whether the post-audit triage handoff would fire. The
+  // triage_acknowledgment classifier in the end-drive audit reads this to
+  // decide whether to gate: when the runtime would otherwise skip triage
+  // (everything resolved, no stale strategies), the agent must echo an ack
+  // token instead of silently bypassing the triage step.
+  const triageWouldFire = opts.platform
+    ? wouldReverseEngineerHandoffFire(session, opts.platform)
+    : false;
+  const auditPayload = buildEndDrivePayload(
     session,
     { reCallCount, persistCallCount, actionCallCount },
-    { platform: opts.platform },
+    { platform: opts.platform, triageWouldFire },
   );
-  const auditResult = closeSessionAudit.process(
+  const auditResult = endDriveAudit.process(
     auditPayload,
     {},
     {
@@ -471,19 +479,19 @@ export async function closeSession(
   if (auditResult.status === 'rejected') {
     return {
       ok: false,
-      phase: 'close_session_audit',
+      phase: 'end_drive_audit',
       session_id: sessionId,
-      message: rejectionToErrorMessage('close_session', auditResult.rejection, {
-        toolName: 'close_session',
-        referenceUrl: 'klura://reference#close-session-audit',
+      message: rejectionToErrorMessage('end_drive', auditResult.rejection, {
+        toolName: 'end_drive',
+        referenceUrl: 'klura://reference#end-drive-audit',
       }),
       re_call_count: reCallCount,
       persist_call_count: persistCallCount,
-      close_attempts: session.closeAttempts ?? 0,
+      end_drive_attempts: session.endDriveAttempts ?? 0,
     };
   }
 
-  session.closeAttempts = (session.closeAttempts ?? 0) + 1;
+  session.endDriveAttempts = (session.endDriveAttempts ?? 0) + 1;
 
   // Debugger cleanup runs FIRST, before any driver work that touches the page.
   // A session that left the debugger paused (breakpoint hit, pauseOnExceptions,
@@ -521,7 +529,7 @@ export async function closeSession(
         /* non-fatal — handoff still returned */
       }
       // Dump captured requests/frames even on LIFT handoff. The session is
-      // not torn down here, but the handoff may be the last close_session call
+      // not torn down here, but the handoff may be the last end_drive call
       // (agent declines LIFT, field-report transcript cuts, benchmark
       // aborts). Without a dump on this path, post-hoc inspectors see an empty
       // network-logs dir despite the runtime having full captures in memory.
@@ -708,7 +716,7 @@ export async function closeSession(
     }
   }
 
-  await pool.closeSession(sessionId);
+  await pool.endDrive(sessionId);
   clearStartersForSession(sessionId);
   clearSessionObservations(sessionId);
   clearObservedSessionTracking(sessionId);
@@ -730,7 +738,7 @@ export async function closeSession(
   if (autoSynthesized.length > 0) result.auto_synthesized = autoSynthesized;
   if (artifactWrites.length > 0) result.artifacts_updated = artifactWrites;
 
-  // If close-session skipped RE mode because user policy caps the tier, tell
+  // If end-drive skipped RE mode because user policy caps the tier, tell
   // the agent WHY close succeeded without a handoff.
   if (opts.platform) {
     const platformForPolicy = opts.platform;

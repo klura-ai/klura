@@ -1,6 +1,6 @@
 // Classify a captured HTTP request by its "the-page's-data-load" shape — the
 // XHR a page fires at load to populate a list/feed/grid. Used by the no-args
-// branch of synth_fetch at close_session: when a capability was declared
+// branch of synth_fetch at end_drive: when a capability was declared
 // without typed-literal args (a read-only capability like "get popular videos"
 // or "list latest posts"), there's no literal to anchor on. We fall back to
 // picking the request that LOOKS like the page's data load, and save a static
@@ -15,7 +15,7 @@
 // rule in the same shape as `lookup-classifier.ts` and
 // `envelope-advisories.ts`: a bounded set of structural heuristics that turn
 // raw captured traffic into a RANKED CANDIDATE so the agent doesn't have to
-// scan 200 requests by hand at the moment close_session fires.
+// scan 200 requests by hand at the moment end_drive fires.
 //
 // The exception is bounded on purpose: - The classifier outputs CANDIDATES, not
 // judgments. The saved strategy is the best current understanding from the
@@ -45,7 +45,7 @@ interface DataLoadCandidate {
    *  pass before scoring — failing a gate returns null, not score 0. */
   score: number;
   /** Human-readable list of signals that fired. Consumed by the
-   *  close-session candidate ranker (data-load-classifier results feed
+   *  end-drive candidate ranker (data-load-classifier results feed
    *  `candidate_xhrs[].signals`); not stored on the strategy itself. */
   signals: string[];
 }

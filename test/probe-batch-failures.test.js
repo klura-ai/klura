@@ -37,7 +37,7 @@ function mockDriver(urlToResult) {
 function mockPool(driver) {
   return {
     async createSession() { return { id: 's1' }; },
-    async closeSession() {},
+    async endDrive() {},
     driverFor() { return driver; },
   };
 }

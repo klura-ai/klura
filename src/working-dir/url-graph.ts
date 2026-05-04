@@ -318,7 +318,7 @@ function nameForNavigation(urlOrPath: string): string {
 
 /**
  * Infer observed_capabilities from a session's runtime-collected navigations +
- * form observations. Used by close_session for `intent === 'map'` sessions so
+ * form observations. Used by end_drive for `intent === 'map'` sessions so
  * the agent doesn't have to manually call `record_observed_capability` for
  * every page they walked.
  *

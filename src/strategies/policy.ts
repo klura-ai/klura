@@ -158,7 +158,7 @@ export function getEffectivePolicy(platform: string): PlatformPolicy {
 
 /**
  * Merge a per-capability cap into the platform's policy. Typically called when
- * the user declines an RE-lift prompt at close_session time — the runtime
+ * the user declines an RE-lift prompt at end_drive time — the runtime
  * writes the user's decision as a per-capability cap so future sessions don't
  * re-ask.
  */
@@ -197,7 +197,7 @@ export function setCapabilityPolicy(
 }
 
 /**
- * Read the full per-capability policy entry. Used by close_session +
+ * Read the full per-capability policy entry. Used by end_drive +
  * start_session + execute to check for user-owned caps.
  */
 export function loadCapabilityPolicy(

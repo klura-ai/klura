@@ -48,7 +48,7 @@ function makePool(driver, jsEvalCache = null) {
     driverFor() {
       return driver;
     },
-    async closeSession() {},
+    async endDrive() {},
   };
 }
 

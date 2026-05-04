@@ -35,7 +35,7 @@ export function inlineArtifactForResponse(
  * Snapshot every `<form>` element in the active page and append the result to
  * `session.domFormsObserved`. Called after the initial `start_session` nav
  * and after every `perform_action` so SPA route changes that introduce new
- * forms land in the platform's `forms_seen` inventory at close_session.
+ * forms land in the platform's `forms_seen` inventory at end_drive.
  *
  * Best-effort: capture failures (page closed, eval timeout) yield an empty
  * batch and are swallowed — surface mapping is diagnostic, not load-bearing.

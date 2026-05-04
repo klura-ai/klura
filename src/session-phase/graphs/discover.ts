@@ -23,7 +23,7 @@ export const DISCOVER_GRAPH: Graph = {
   ],
   config: {
     obligationStyle: 'lift_required',
-    // Fire the close_session re_persistence classifier when the agent did real
+    // Fire the end_drive re_persistence classifier when the agent did real
     // RE work (jsEval / breakpoint / source-read / inline-script-via-full-network-log)
     // but persisted nothing. Action-only threshold is 0 because normal
     // discover sessions do many drives en route to save_strategy without ever

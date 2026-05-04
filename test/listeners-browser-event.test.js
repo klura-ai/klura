@@ -43,7 +43,7 @@ function createMockPool() {
       mockDriverInstances.push(driver);
       return { id, intercepted: [], intercepting: false };
     },
-    closeSession: async (id) => {
+    endDrive: async (id) => {
       activeSessions.delete(id);
       const idx = mockDriverInstances.findIndex((d) => d._sessionId === id);
       if (idx >= 0) {
@@ -218,7 +218,7 @@ test('browser-event: stream close triggers reconnect with fresh session', async 
   // The old session should be torn down; a new one should be active.
   assert.strictEqual(activeSessions.size, 1, 'one active session after reconnect');
   assert.ok(mockDriverInstances.length >= 1, 'has a fresh driver');
-  // The fresh driver is a new instance (the old one was removed in closeSession).
+  // The fresh driver is a new instance (the old one was removed in endDrive).
   assert.notStrictEqual(mockDriverInstances[0], firstDriver, 'new driver after reconnect');
 
   await mgr.stop(listenerId);
@@ -235,7 +235,7 @@ test('browser-event: gives up after maxRetries consecutive failed reconnects', a
   // each time, accumulating attempts until max_retries fires.
   const failingPool = {
     createSession: () => Promise.reject(new Error('mock create failure')),
-    closeSession: () => Promise.resolve(),
+    endDrive: () => Promise.resolve(),
     getSession: () => {
       throw new Error('not implemented');
     },

@@ -398,7 +398,7 @@ export async function jsEval(args: JsEvalArgs): Promise<
   const driver = pool.driverFor(args.session_id);
   const wrapped = wrapAgentExpression(args.expression);
   // Push the call into the accumulator first so failure / timeout still bumps
-  // the counter (used by close-session nag-suppression). Capture the
+  // the counter (used by end-drive nag-suppression). Capture the
   // expression text in-memory so the close-time auto-promote pass can match
   // results against captured header values; the field is scrubbed before any
   // artifact-disk write.

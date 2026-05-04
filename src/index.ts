@@ -79,8 +79,25 @@ export type {
   InterruptionHandler,
 } from './interruptions';
 
-export { classifyUrlParams, computeReverseEngineerHandoff } from './close-session/re-handoff';
-export { closeSession } from './close-session/orchestrator';
+export { classifyUrlParams, computeReverseEngineerHandoff } from './end-drive/re-handoff';
+export { endDrive } from './end-drive/orchestrator';
+
+// ---- Vocabulary (drift-prevention const maps) ----
+
+export {
+  TOOL_NAMES,
+  AUDIT_KINDS,
+  WARNING_KINDS,
+  DECISION_VALUES,
+  REF_LINKS,
+  refUrl,
+} from './vocab';
+export type { ToolName, AuditKind, WarningKind, DecisionValue, RefLink } from './vocab';
+
+// ---- Tool registry (single source of truth for MCP descriptions) ----
+
+export type { ToolDef, JsonSchema } from './tool-types';
+export { TOOL_REGISTRY } from './tools/registry';
 
 // ---- Tool-surface re-exports ----
 

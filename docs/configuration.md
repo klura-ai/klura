@@ -112,6 +112,6 @@ const pool = await createPool({
 | `KLURA_DAEMON_ADDR` | CLI-side override for which daemon socket / TCP address `bin/klura.js` dials. Bypasses auto-start. |
 | `KLURA_REMOTE_SECRET` | Signing secret for remote-viewer JWTs. Auto-generated and cached in `~/.klura/remote-secret.key` if unset. Set explicitly for cloud / multi-tenant deployments. |
 | `KLURA_VERBOSE` | `1` surfaces `[pool]` trace lines on the daemon's stderr. Diagnostic only. |
-| `KLURA_DUMP_LOGS_TO` | Directory path; on `close_session`, dumps the full intercepted-request list and captured DOM. Diagnostic only. |
+| `KLURA_DUMP_LOGS_TO` | Directory path; on `end_drive`, dumps the full intercepted-request list and captured DOM. Diagnostic only. |
 
 Any setting that applies to every run belongs in `config.json` (or its sibling files), not in a `KLURA_*` var.

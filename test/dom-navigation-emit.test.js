@@ -3,7 +3,7 @@
 // Three guarantees, all without spinning a real browser:
 //   (a) perform_action(navigate) twice in one session lands two
 //       dom_navigations on session state, which fold into 2 url_graph
-//       nodes + 1 edge after close_session flushes.
+//       nodes + 1 edge after end_drive flushes.
 //   (b) A click that triggers a SPA route change (simulated via a fake
 //       driver buffering a pending nav) lands a dom_navigation tagged
 //       `via:'click'`.
@@ -25,7 +25,7 @@ process.on('exit', () => {
 });
 
 const { performAction } = await import('../dist/index.js');
-const { closeSession } = await import('../dist/close-session/orchestrator.js');
+const { endDrive } = await import('../dist/end-drive/orchestrator.js');
 const { pool } = await import('../dist/runtime-state.js');
 const { readUrlGraph, readFormsSeen } = await import('../dist/working-dir/logbook.js');
 
@@ -70,17 +70,17 @@ function makeFakeDriver() {
 function patchPool(session, driver) {
   const origGet = pool.getSession;
   const origDriver = pool.driverFor;
-  const origClose = pool.closeSession;
+  const origClose = pool.endDrive;
   pool.getSession = (id) => (id === session.id ? session : origGet.call(pool, id));
   pool.driverFor = (id) => (id === session.id ? driver : origDriver.call(pool, id));
-  pool.closeSession = async (id) => {
+  pool.endDrive = async (id) => {
     if (id === session.id) return;
     return origClose.call(pool, id);
   };
   return () => {
     pool.getSession = origGet;
     pool.driverFor = origDriver;
-    pool.closeSession = origClose;
+    pool.endDrive = origClose;
   };
 }
 
@@ -97,7 +97,7 @@ function makeSession({ id, graph = 'discover' } = {}) {
     savedCapabilities: [],
     performActionHistory: [],
     artifactAccumulator: undefined,
-    closeAttempts: 0,
+    endDriveAttempts: 0,
     domNavigations: [],
     domFormsObserved: [],
     extractedContentBytes: 0,
@@ -109,9 +109,9 @@ test('two perform_action(navigate) calls → 2 url_graph nodes + 1 edge', async 
   const driver = makeFakeDriver();
   // Map graph here: this test closes after navigation and asserts on
   // url_graph flushing — map's skipDeclarationGuard + skipAutoSynth keep
-  // close-session from tripping on the missing strategy save.
+  // end-drive from tripping on the missing strategy save.
   const session = makeSession({ graph: 'map' });
-  // Map-graph close-session reads observed-capability inference; ensure the
+  // Map-graph end-drive reads observed-capability inference; ensure the
   // helper works against this fake session.
   session.declaredCapabilities = [];
   const restore = patchPool(session, driver);
@@ -122,7 +122,7 @@ test('two perform_action(navigate) calls → 2 url_graph nodes + 1 edge', async 
     assert.equal(session.domNavigations.length, 2,
       `expected 2 dom_navigations, got ${session.domNavigations.length}: ${JSON.stringify(session.domNavigations)}`);
 
-    const result = await closeSession(session.id, { platform: session.platform });
+    const result = await endDrive(session.id, { platform: session.platform });
     assert.equal(result.ok, true);
 
     const graph = readUrlGraph(session.platform);
@@ -189,7 +189,7 @@ test('captureFormSummary results land on session.domFormsObserved and flush to f
     await performAction(session.id, 'navigate', 'https://site.example/login');
     assert.ok(session.domFormsObserved.length >= 1, 'forms captured into session');
 
-    const result = await closeSession(session.id, { platform: session.platform });
+    const result = await endDrive(session.id, { platform: session.platform });
     assert.equal(result.ok, true);
 
     const forms = readFormsSeen(session.platform);

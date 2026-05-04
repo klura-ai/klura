@@ -29,7 +29,7 @@ interface PoolOptions {
    *  driver constructor. Shape is the driver's contract. */
   driverConfig?: Record<string, unknown>;
   /**
-   * Warm-pool settings. When `enabled`, `closeSession` returns the underlying
+   * Warm-pool settings. When `enabled`, `endDrive` returns the underlying
    * BrowserContext to a per-platform idle slot instead of tearing it down, and
    * the next `createSession` for the same platform reuses it via
    * `driver.resetSession` — cutting warm execute from ~10-20s to ~1-2s.
@@ -114,7 +114,7 @@ export function createPool(opts: PoolOptions = {}): BrowserPool {
 import crypto from 'crypto';
 
 /**
- * A warm Session that has been released by closeSession and is idle in the
+ * A warm Session that has been released by endDrive and is idle in the
  * per-platform slot. The underlying BrowserContext + Page are still live inside
  * the shared driver — the Session object itself is reused (identity-keyed
  * driver weakmaps still resolve it) with a fresh id minted when the next
@@ -181,7 +181,7 @@ export class Pool implements BrowserPool {
   // Ready-page checkout protocol: shared sessions that something OTHER than the
   // pool owns (canonical case: a browser-event listener that parks a page+WS
   // open for the listener's lifetime). Registered via `registerSharedSession`,
-  // unregistered on `closeSession` or via the returned dispose fn. Kept as a
+  // unregistered on `endDrive` or via the returned dispose fn. Kept as a
   // plain Set — the owner's explicit teardown removes it, so we don't need
   // WeakRef tricks. Iterated by `tryCheckoutReadySession` in insertion order.
   private _sharedSessions = new Map<string, Set<Session>>();
@@ -191,7 +191,7 @@ export class Pool implements BrowserPool {
   readonly jsEvalCache = new JsEvalCacheImpl();
 
   // Per-session try_generator call counter. Lazy: an entry is created on first
-  // recordTryGeneratorCall for a session, and cleared on closeSession so the
+  // recordTryGeneratorCall for a session, and cleared on endDrive so the
   // next session reusing the warm slot starts at 0.
   private _tryGeneratorStats = new Map<string, TryGeneratorStats>();
 
@@ -344,7 +344,7 @@ export class Pool implements BrowserPool {
       this._warm.delete(warmKey(warm.platform, warm.identity));
       // Restore the old id so callers of getSession with the prior id don't see
       // a mutated phantom — though in practice the old id was already removed
-      // from _sessions when closeSession stashed this entry.
+      // from _sessions when endDrive stashed this entry.
       session.id = oldId;
       return null;
     }
@@ -361,7 +361,7 @@ export class Pool implements BrowserPool {
    * Ready-page checkout protocol. Run `probe` against every candidate session
    * the pool knows about for this platform — warm slot first, then shared
    * sessions (listener-owned, in registration order). Return the first session
-   * whose probe returns true, marked `borrowed: true` so `closeSession`
+   * whose probe returns true, marked `borrowed: true` so `endDrive`
    * releases it rather than tearing down.
    *
    * Returns null when warm pool is disabled, there are no candidates, no
@@ -432,7 +432,7 @@ export class Pool implements BrowserPool {
    * subsystem) as a candidate for `tryCheckoutReadySession`. The caller retains
    * ownership — the pool only holds a reference for iteration. Returns a
    * dispose function the caller can call to unregister early; in practice the
-   * listener also calls `closeSession` at teardown, which removes the
+   * listener also calls `endDrive` at teardown, which removes the
    * registration.
    */
   registerSharedSession(session: Session, platform: string): () => void {
@@ -456,10 +456,10 @@ export class Pool implements BrowserPool {
     if (!session) throw new Error(`Session not found: ${id}`);
     this._touch();
     this._sessionRoundCounts.set(id, (this._sessionRoundCounts.get(id) ?? 0) + 1);
-    // LIFT round counter: once close_session has handed off, every tool-call
+    // LIFT round counter: once end_drive has handed off, every tool-call
     // lookup increments. Drives the LIFT phase budget enforcement in
     // `runtime/src/session-phase/middleware.ts` and the freshly-handed-off
-    // guard in `runtime/src/close-session/re-handoff.ts`.
+    // guard in `runtime/src/end-drive/re-handoff.ts`.
     if (session.lift) {
       session.lift.roundsSinceHandoff += 1;
     }
@@ -518,7 +518,7 @@ export class Pool implements BrowserPool {
     return this._sessionRoundCounts.get(sessionId) ?? 0;
   }
 
-  async closeSession(id: string): Promise<void> {
+  async endDrive(id: string): Promise<void> {
     this._touch();
     // Drop any per-session feedback state for this id. Even if the underlying
     // browser context is returned to the warm pool below, the klura session id
@@ -531,7 +531,7 @@ export class Pool implements BrowserPool {
     if (!session) {
       // Still might be a shared session tracked only in _sharedSessions
       // (listener-owned, never put into _sessions). Let the listener's own
-      // closeSession call catch it when it tears down.
+      // endDrive call catch it when it tears down.
       return;
     }
 
@@ -558,11 +558,11 @@ export class Pool implements BrowserPool {
       // start_session-attached agent session) still holds the id and will
       // make tool calls against it — keep the id valid. The owner's own
       // teardown path drops `_sharedSessions` and routes back through
-      // closeSession, where the warm/cold branches below run for real
+      // endDrive, where the warm/cold branches below run for real
       // teardown. Dropping the id here would invalidate the agent's
       // sessionId mid-run (observed on auto-exec failure: agent calls
       // start_session, auto-exec runs a borrowed-shared browser-prereq,
-      // its finally calls closeSession on the borrowed handle, the agent's
+      // its finally calls endDrive on the borrowed handle, the agent's
       // own sessionId then errors with "Session not found" on any
       // follow-up tool).
       if (session.platform) {
@@ -600,7 +600,7 @@ export class Pool implements BrowserPool {
     }
 
     // Cold path: remove from _sharedSessions too (listener may have registered
-    // it and is now tearing it down via closeSession).
+    // it and is now tearing it down via endDrive).
     if (session.platform) {
       const shared = this._sharedSessions.get(session.platform);
       if (shared?.has(session)) {
@@ -632,9 +632,9 @@ export class Pool implements BrowserPool {
       this._warmSweeper = null;
     }
     for (const id of [...this._sessions.keys()]) {
-      await this.closeSession(id);
+      await this.endDrive(id);
     }
-    // Evict every remaining warm context. closeSession above would have
+    // Evict every remaining warm context. endDrive above would have
     // released in-use warm slots to the idle pool; this final sweep destroys
     // them before closing the browser.
     for (const [key, warm] of this._warm) {

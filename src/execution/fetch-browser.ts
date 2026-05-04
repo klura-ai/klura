@@ -412,7 +412,7 @@ export async function runPrerequisites(opts: {
     );
     return { tokens };
   } finally {
-    await pool.closeSession(session.id);
+    await pool.endDrive(session.id);
   }
 }
 
@@ -596,7 +596,7 @@ export async function executeFetchInBrowser(
 
     return await fireRequestInSession(session, fireStrategy, mergedArgs, platform, pool, fireOpts);
   } finally {
-    await pool.closeSession(session.id);
+    await pool.endDrive(session.id);
   }
 }
 

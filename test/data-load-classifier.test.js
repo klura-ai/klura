@@ -1,5 +1,5 @@
 // Structural classifier for "page's data-load XHR" — used by synth_fetch
-// at close_session when a capability was declared with no typed-literal
+// at end_drive when a capability was declared with no typed-literal
 // args. Gates are strict (same-origin, 2xx, JSON). Soft signals are
 // scored (list-shape +3, size +1, method:GET +1, name-affinity up to +4).
 

@@ -85,7 +85,7 @@ test('evaluateOnFrameTool rejects missing expression', async () => {
 //
 // Spins up a local HTTP server that serves a page + a script with a known
 // breakpoint-worthy closure. Then drives the full debugger flow through
-// klura's startSession → debugger tools → closeSession lifecycle.
+// klura's startSession → debugger tools → endDrive lifecycle.
 
 async function startFixtureServer() {
   const html = `<!doctype html>
@@ -192,10 +192,10 @@ test('integration: breakpoint → trigger → pause → scope → evaluate → r
     const names = scope.properties.map((p) => p.name);
     assert.ok(names.includes('args'), `expected "args" in local scope, got ${names.join(',')}`);
 
-    // Resume and close. close_session also auto-cleans, so we don't need
+    // Resume and close. end_drive also auto-cleans, so we don't need
     // to remove_breakpoint manually.
     await klura.resumeTool({ session_id: sessionId });
-    await klura.closeSession(sessionId);
+    await klura.endDrive(sessionId);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -213,7 +213,7 @@ test('integration: wait_for_pause with no breakpoints → timeout', async (t) =>
     const paused = await klura.waitForPauseTool({ session_id: sessionId, timeout_ms: 200 });
     assert.strictEqual(paused.hit, false);
     assert.strictEqual(paused.reason, 'timeout');
-    await klura.closeSession(sessionId);
+    await klura.endDrive(sessionId);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

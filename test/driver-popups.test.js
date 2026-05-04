@@ -206,7 +206,7 @@ test('integration: popup tracking — open, address, close, re-open', async (t) 
     assert.strictEqual(session.subPages[1].id, 'popup-2', 'next popup gets popup-2, not popup-1');
     assert.strictEqual(session.subPages[1].closedAt, undefined);
 
-    await klura.closeSession(sessionId);
+    await klura.endDrive(sessionId);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

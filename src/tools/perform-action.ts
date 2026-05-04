@@ -564,7 +564,7 @@ export async function performAction(
       throw new Error(`Unknown action: ${action}`);
   }
 
-  // Persist this action on the session so close_session auto-synthesis can
+  // Persist this action on the session so end_drive auto-synthesis can
   // replay it as a recorded-path step. Only record actions that map cleanly to
   // recorded-path steps — skip mouse-level primitives (mouse_click, mouse_drag,
   // scroll) which have no durable replay value on warm runs since they depend

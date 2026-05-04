@@ -33,7 +33,7 @@ export interface WsFrameSummary {
    *  payload. Only present when the slice was taken. */
   payload_hint?: string;
   /** True when this frame is currently pinned (kept out of the FIFO ring).
-   *  Set by `pin_ws_frame` / auto-pin on `close_session`'s RE nag. */
+   *  Set by `pin_ws_frame` / auto-pin on `end_drive`'s RE nag. */
   pinned?: boolean;
   /** Hint pointing at `get_send_encoder` when this frame's `direction` is
    *  `'sent'` — the runtime captured a live handle to the WebSocket the

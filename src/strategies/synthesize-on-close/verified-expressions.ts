@@ -1,7 +1,7 @@
 // Auto-synth pass that templates rotating header / body values out of
 // captured requests using the session's saved verified_expressions.
 //
-// Background. close_session's auto-synth fallback used to dump captured
+// Background. end_drive's auto-synth fallback used to dump captured
 // HTTP headers verbatim. For sites that gate writes on rotating tokens
 // (short-TTL JWTs, sentinel proof tokens, anti-bot headers), every saved
 // strategy was broken before warm execute fired — the literal headers

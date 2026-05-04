@@ -101,7 +101,7 @@ export interface StartSessionResult {
   /**
    * True when start_session auto-executed a matching saved strategy.
    * `execute_result` carries the executor's response. When executed is true the
-   * agent can close_session directly; no more drives needed.
+   * agent can end_drive directly; no more drives needed.
    */
   executed?: boolean;
   execute_result?: ExecuteResult;
@@ -142,7 +142,7 @@ export interface StartSessionResult {
    * re-discovery. Present on every discover-mode start_session with a declared
    * capability (mutating or read-only). Surfaces upfront so the agent's
    * task-completion signal includes the save step — without this, models tend
-   * to treat "answer delivered" as complete and skip close_session's RE
+   * to treat "answer delivered" as complete and skip end_drive's RE
    * handoff.
    */
   task_contract?: {
@@ -671,7 +671,7 @@ async function maybeAutoExecuteOnStart(
         mode: 'force-compact',
         availableHint: NETWORKLOG_TRIM_HINT,
       });
-      // Track stale-strategy auto-executes so close_session's LIFT handoff
+      // Track stale-strategy auto-executes so end_drive's LIFT handoff
       // routes the agent to update the broken strategy. Without this,
       // the existence of the broken strategy keeps `hasAny=true` in
       // computeReverseEngineerHandoff and end_drive closes the session
@@ -886,12 +886,12 @@ function applyAutoExecuteHint(
   if (ok && session.graph === 'execute') {
     // graph:'execute' + saved-strategy ok → FSM is in terminal{closed}.
     // Capability is fully discharged for this turn. Agent should call
-    // close_session and end the turn — no LIFT, no save, no re-drive.
+    // end_drive and end the turn — no LIFT, no save, no re-drive.
     result.session_terminal = true;
     result._hint =
       `${head} ${successNote}${firedNote}` +
       ` SESSION IS TERMINAL. The capability is fully discharged for this turn. ` +
-      `Call close_session({session_id: "${result.sessionId}"}) and end your text turn — that's it. ` +
+      `Call end_drive({session_id: "${result.sessionId}"}) and end your text turn — that's it. ` +
       `Do NOT open another start_session for ${opts.platform}/${opts.capability}. ` +
       `Do NOT call save_strategy — a working strategy already exists on disk. ` +
       `Do NOT attempt to "lift to a better tier" — the saved tier was chosen for the actual signal source ` +
@@ -1144,7 +1144,7 @@ export async function startSession(
   // read-only capabilities (list / search / feed) never see a reminder that
   // "deliver the answer" is only half of klura's contract — the other half is
   // saving a reusable strategy — and the agent's internal "task complete"
-  // signal fires on the answer alone, leading to no-op close_session retries
+  // signal fires on the answer alone, leading to no-op end_drive retries
   // when LIFT fires. Surface user-policy cap when this capability is
   // ToS/compliance-capped. Agent-self-report history lives in the working-dir
   // logbook; read via get_platform_logbook, not via prior_decline on this
@@ -1166,16 +1166,16 @@ export async function startSession(
     result.task_contract = {
       message:
         `klura sessions run in TWO phases. Internalize this now, before DRIVE ends and your "task complete" signal fires:\n\n` +
-        `DRIVE (Drive Real Interactions, View Endpoints): deliver the user's answer. Clicks, reads, reports. Ends when you call close_session.\n\n` +
-        `LIFT (Learn Interface From Traffic): the user is satisfied and off reading your answer. Your new job is to save a reusable strategy for capability "${opts.capability}" so the next caller doesn't redo your work. close_session refuses to tear down the session until LIFT resolves with save_strategy. If you're unsure whether a lift is possible, call get_platform_logbook first — it returns prior sessions' field_stability, signer_history, bundle_history, and the per-capability logbook so you see what earlier agents already discovered. Permanent ToS/compliance caps are user-owned via the CLI (klura policy set); MCP can only create policy at start_session when none exists, never mutate it later.\n\n` +
+        `DRIVE (Drive Real Interactions, View Endpoints): deliver the user's answer. Clicks, reads, reports. Ends when you call end_drive.\n\n` +
+        `LIFT (Learn Interface From Traffic): the user is satisfied and off reading your answer. Your new job is to save a reusable strategy for capability "${opts.capability}" so the next caller doesn't redo your work. end_drive refuses to tear down the session until LIFT resolves with save_strategy. If you're unsure whether a lift is possible, call get_platform_logbook first — it returns prior sessions' field_stability, signer_history, bundle_history, and the per-capability logbook so you see what earlier agents already discovered. Permanent ToS/compliance caps are user-owned via the CLI (klura policy set); MCP can only create policy at start_session when none exists, never mutate it later.\n\n` +
         `Declining LIFT is the infrastructure equivalent of never writing a test — the task works once for this user and costs everyone else ~30s re-discovery + 10-20 LLM rounds + rate-limit exposure on every subsequent invocation. Saving page-script once amortizes after 2 future calls and keeps paying off forever.\n\n` +
         `**Three shapes of backing, in preference order:**\n` +
         `  1. **XHR / WS backing** — captured JSON / binary requests carry the data. Lift to \`fetch\` (unsigned, CORS-open) or \`page-script\` (signed / anti-bot / rotating-token — page runs the signer). Most real-world capabilities land here, INCLUDING signed ones: "request can't replay from Node" = \`page-script\` with a js-eval prereq that calls the page's signer, NOT a recorded-path decline.\n` +
         `  2. **Server-rendered HTML in the initial document** — the posts / list / item details are already in the HTML the browser loaded (view-source: would show them, or the a11y tree carried the content after navigating to an arg-templated URL). Save as \`fetch\` with \`response: {format: "html", extract: {name: {selector, attr?, multiple?, fields?}}}\`. One HTTP call, ~100ms warm, no browser. See klura://reference#fetch-schema.\n` +
         `  3. **Genuinely DOM-only** — data only appears after multi-step client-side work (search-type-submit flows, scroll-to-load pagination that fires unique XHRs per scroll, JS-computed values with no HTML trace, consent-gated content that needs a human click). recorded-path replay.\n\n` +
         `"Server-rendered" and "HTML-only" are NOT synonyms for recorded-path. Check the initial document response in \`get_network_log\` before declining to recorded-path — if the content is there, save \`fetch\` + html-extract.\n\n` +
-        `LIFT RHYTHM: after DRIVE, emit a quick triage turn ("worth lifting? rough rounds?"). Plow through every RE trick — inspect_ws_frame, try_generator iterations, js_eval probes, set_breakpoint + evaluate_on_frame, source-read. Rotating fields → template via js-eval prereqs that re-derive from the live page. The session ends LIFT when save_strategy lands a complete runnable strategy. Every save passes through the user_confirmation classifier (the user approves or rejects the proposed shape at save time, with strategy summary inlined in the prompt); rejection stays in the current phase, so keep working. close_session keeps returning the same handoff until a save lands. Mid-work user-assistance asks ("mind sending another message to verify?" via trigger_reference_send with consent; "could you click X in the viewer?" as a text-only turn) are fine.\n\n` +
-        `When close_session returns phase:"lift", investigate or save before re-calling — repeat close_session calls without intervening progress return the same refusal. Full playbook: klura://reference#reverse-engineer-playbook.`,
+        `LIFT RHYTHM: after DRIVE, emit a quick triage turn ("worth lifting? rough rounds?"). Plow through every RE trick — inspect_ws_frame, try_generator iterations, js_eval probes, set_breakpoint + evaluate_on_frame, source-read. Rotating fields → template via js-eval prereqs that re-derive from the live page. The session ends LIFT when save_strategy lands a complete runnable strategy. Every save passes through the user_confirmation classifier (the user approves or rejects the proposed shape at save time, with strategy summary inlined in the prompt); rejection stays in the current phase, so keep working. end_drive keeps returning the same handoff until a save lands. Mid-work user-assistance asks ("mind sending another message to verify?" via trigger_reference_send with consent; "could you click X in the viewer?" as a text-only turn) are fine.\n\n` +
+        `When end_drive returns phase:"lift", investigate or save before re-calling — repeat end_drive calls without intervening progress return the same refusal. Full playbook: klura://reference#reverse-engineer-playbook.`,
     };
   }
   // Well-known capability arg-shape hint (e.g. send_message → {recipient, text}).

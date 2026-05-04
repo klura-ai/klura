@@ -14,7 +14,7 @@ import { Pool } from '../dist/pool/pool.js';
 // new members.
 const REQUIRED_METHODS = [
   'createSession',
-  'closeSession',
+  'endDrive',
   'getSession',
   'driverFor',
   'shutdown',

@@ -304,8 +304,8 @@ export interface PinWsFrameResult {
  * `try_generator_in_page.verify_against`, `explain_ws_frame_structure`).
  *
  * Pins are capped at `WS_PINNED_FRAMES_CAP` per session (LRU on overflow). The
- * auto-pin on `close_session`'s RE nag typically covers the main case; use this
- * tool when an agent wants to protect a frame before close_session fires, or to
+ * auto-pin on `end_drive`'s RE nag typically covers the main case; use this
+ * tool when an agent wants to protect a frame before end_drive fires, or to
  * re-pin a frame the auto-pin couldn't know about (e.g. a companion ack frame).
  */
 export async function pinWsFrame(

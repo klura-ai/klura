@@ -80,14 +80,14 @@ export interface GraphConfig {
    *  destructive-text clicks) gate on a per-(action, selector) consent
    *  checkpoint. Read by perform_action during drive. Map graph turns this on. */
   gateMutatingActions?: boolean;
-  /** When true, close-session does not auto-synthesize a recorded-path
+  /** When true, end-drive does not auto-synthesize a recorded-path
    *  fallback strategy from perform_action history. Map graph turns this on. */
   skipAutoSynth?: boolean;
-  /** When true, close-session infers observed capabilities from declared
+  /** When true, end-drive infers observed capabilities from declared
    *  args + captured XHR bodies even when `declaredCapabilities` is empty.
    *  Map graph turns this on. */
   inferObservedCapabilitiesAtClose?: boolean;
-  /** When true, the close-session declaration-required short-circuit fires
+  /** When true, the end-drive declaration-required short-circuit fires
    *  immediately (declared capabilities are not required for a clean close).
    *  Map graph turns this on. */
   skipDeclarationGuard?: boolean;

@@ -30,7 +30,7 @@ interface KluraModule {
   getScreenshot: (id: string) => Promise<unknown>;
   getAttribute: (id: string, selector: string, attr?: string) => Promise<unknown>;
   findInPage: (id: string, needle: string, limit?: number) => Promise<unknown>;
-  closeSession: (
+  endDrive: (
     id: string,
     opts: { platform?: string; auditToken?: string; auditAnswers?: Record<string, unknown> },
   ) => Promise<unknown>;
@@ -292,7 +292,7 @@ async function handleRequest(
       json(klura.getEvents(since ? Number(since) : undefined));
     } else if (req.method === 'POST' && url.pathname === '/session/close') {
       json(
-        await klura.closeSession(params.sessionId ?? '', {
+        await klura.endDrive(params.sessionId ?? '', {
           platform: params.platform,
           auditToken: params.auditToken,
           auditAnswers: params.auditAnswers,

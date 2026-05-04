@@ -55,7 +55,7 @@ test('page-script: session already on target origin → zero navigates before fe
     driverFor() {
       return driver;
     },
-    async closeSession() {},
+    async endDrive() {},
   };
 
   const strategy = {

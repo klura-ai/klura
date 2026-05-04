@@ -1,23 +1,40 @@
-// Close-session audit — second `Audit` instance, mirrors the save-strategy
+// End-drive audit — second `Audit` instance, mirrors the save-strategy
 // audit but operates at the session-tear-down decision point. Absorbs:
 //
 //   - capability_declaration_required (Detector, ackReason: 'none') — refuses
-//     close on attempts 1 and 2 when the session typed/submitted content but
+//     end_drive on attempts 1 and 2 when the session typed/submitted content but
 //     never declared a capability. Agent fixes by calling declare_capability;
 //     attempt 3 force-tears-down regardless (the orchestrator skips the audit
 //     on attempt 3 to provide an escape hatch).
 //
-//   - re_persistence (Classifier, token-gated) — refuses close when N RE
+//   - save_attempted_none_landed (Detector, ackReason: 'none') — refuses
+//     end_drive when at least one save_strategy attempt was made and zero
+//     succeeded. Stops the legacy-form-post failure mode where the agent
+//     gives up mid-recoverable-loop and end_drive papers over the silent
+//     failure with whatever stale strategy was on disk.
+//
+//   - re_persistence (Classifier, token-gated) — refuses end_drive when N RE
 //     tool calls have been made with zero persistence calls. Agent either
 //     persists progress (retry naturally clears the gate) or echoes the
 //     audit_token via answers.re_persistence: { acknowledge_no_progress: true }.
 //     Token binds to {sessionId, reCallCount, persistCallCount, intent} so
-//     the gate re-arms on subsequent close attempts after fresh RE work.
+//     the gate re-arms on subsequent end_drive attempts after fresh RE work.
+//
+//   - triage_acknowledgment (Classifier, token-gated) — fires when end_drive
+//     would otherwise skip triage entirely (every declared capability already
+//     has a non-stale saved strategy, OR no triage handoff would fire). Triage
+//     is mandatory — agent doesn't get to decide "this was a one-off task,
+//     teardown without triage." Agent must either submit a triage_plan, or
+//     echo {triage_acknowledgment: {acknowledged: true, reason: "<own words
+//     explaining why no triage round was warranted, e.g. 'all capabilities
+//     have a fetch-tier saved strategy and no graduation candidates surfaced'>"}}.
+//     Token binds to {sessionId, declaredCapabilityCount, saveSuccessCount,
+//     endDriveAttempts}.
 //
 // Same machinery as save-strategy-audit, different lifecycle. New
-// close-session concerns become one Detector or Classifier entry on this
+// end-drive concerns become one Detector or Classifier entry on this
 // instance — runtime threads the token, formats the rejection, persists
-// nothing (close-session has no on-disk artifact equivalent to a strategy).
+// nothing (end-drive has no on-disk artifact equivalent to a strategy).
 
 import { Audit, type Classifier, type Detector } from './index';
 import { graphFor } from '../session-phase/graphs';
@@ -31,11 +48,11 @@ export const ACTION_CALL_THRESHOLD = 5;
  *  runtime/src/strategies/synthesize-on-close/literals.ts. */
 export const WRITE_SHAPED_ACTIONS = new Set(['type', 'fill_editor', 'fill', 'submit']);
 
-export interface CloseSessionPayload {
+export interface EndDrivePayload {
   sessionId: string;
   platform: string;
   liftMode: 'skip' | 'explicit_learn' | undefined;
-  closeAttempts: number;
+  endDriveAttempts: number;
   declaredCapabilityCount: number;
   writeActions: ReadonlyArray<{ action: string; value_preview?: string }>;
   reCallCount: number;
@@ -56,24 +73,30 @@ export interface CloseSessionPayload {
    *  `actionCallCount >= actions` (positive) AND `persistCallCount === 0`.
    *  When undefined, the classifier never fires. */
   rePersistenceThreshold: { reCalls: number; actions: number } | undefined;
+  /** Caller-computed: would the post-audit reverse-engineer handoff produce
+   *  a non-null triage handoff? When false AND declaredCapabilityCount > 0
+   *  AND liftMode !== 'skip', the triage_acknowledgment classifier fires —
+   *  the runtime forces the agent to acknowledge that triage was considered
+   *  even though the runtime would have skipped it. */
+  triageWouldFire: boolean;
 }
 
 /** Empty by design — every payload field the audit needs is captured at
  *  payload-build time. The ctx slot exists for symmetry with
  *  save-strategy-audit (which uses it for live-session probes). */
-export type CloseSessionCtx = Record<string, never>;
+export type EndDriveCtx = Record<string, never>;
 
 // ---------- Detector: capability_declaration_required ----------
 
-const declarationRequiredDetector: Detector<CloseSessionPayload, CloseSessionCtx> = {
+const declarationRequiredDetector: Detector<EndDrivePayload, EndDriveCtx> = {
   kind: 'capability_declaration_required',
   ackReason: 'none',
   detect: (p) => {
-    // closeAttempts is read PRE-bump (orchestrator bumps on audit success,
+    // endDriveAttempts is read PRE-bump (orchestrator bumps on audit success,
     // not before). Pre-bump 0 = first call, 1 = second call, 2 = third
     // call (the force-tear-down attempt — guard releases). Same threshold
     // as the legacy `attempts > 2` post-bump check.
-    if (p.closeAttempts >= 2) return [];
+    if (p.endDriveAttempts >= 2) return [];
     if (p.declaredCapabilityCount > 0) return [];
     if (p.liftMode === 'skip') return [];
     if (p.skipDeclarationGuard) return [];
@@ -119,7 +142,7 @@ const declarationRequiredDetector: Detector<CloseSessionPayload, CloseSessionCtx
           platform: p.platform,
           captured_write_actions: p.writeActions,
           action_call_count: p.actionCallCount,
-          close_attempts: p.closeAttempts,
+          end_drive_attempts: p.endDriveAttempts,
         },
       },
     ];
@@ -138,14 +161,14 @@ const declarationRequiredDetector: Detector<CloseSessionPayload, CloseSessionCtx
 //
 // Same shape as `capability_declaration_required`: ackReason `'none'`
 // (no acceptable ack — agent must save successfully or hit the third
-// close attempt to force-tear-down). Releases at closeAttempts >= 2 to
+// close attempt to force-tear-down). Releases at endDriveAttempts >= 2 to
 // preserve the existing third-attempt escape hatch.
 
-const saveAttemptedNoneLandedDetector: Detector<CloseSessionPayload, CloseSessionCtx> = {
+const saveAttemptedNoneLandedDetector: Detector<EndDrivePayload, EndDriveCtx> = {
   kind: 'save_attempted_none_landed',
   ackReason: 'none',
   detect: (p) => {
-    if (p.closeAttempts >= 2) return [];
+    if (p.endDriveAttempts >= 2) return [];
     if (p.saveAttemptCount === 0) return [];
     if (p.saveSuccessCount > 0) return [];
     return [
@@ -170,7 +193,7 @@ const saveAttemptedNoneLandedDetector: Detector<CloseSessionPayload, CloseSessio
           platform: p.platform,
           save_attempt_count: p.saveAttemptCount,
           save_success_count: p.saveSuccessCount,
-          close_attempts: p.closeAttempts,
+          end_drive_attempts: p.endDriveAttempts,
         },
       },
     ];
@@ -179,7 +202,7 @@ const saveAttemptedNoneLandedDetector: Detector<CloseSessionPayload, CloseSessio
 
 // ---------- Classifier: re_persistence ----------
 
-const rePersistenceClassifier: Classifier<CloseSessionPayload, CloseSessionCtx, unknown> = {
+const rePersistenceClassifier: Classifier<EndDrivePayload, EndDriveCtx, unknown> = {
   kind: 're_persistence',
   expectedAnswerShape:
     're_persistence: {acknowledge_no_progress: true} (only when there is genuinely nothing to persist; otherwise call save_verified_expression / add_discovery_note / add_resume_pointer first and the gate clears naturally without an answer)',
@@ -218,7 +241,7 @@ const rePersistenceClassifier: Classifier<CloseSessionPayload, CloseSessionCtx, 
       return [
         `re_persistence.acknowledge_no_progress must be \`true\` — only when there is genuinely ` +
           `nothing to persist. Otherwise persist via save_verified_expression / add_discovery_note ` +
-          `/ add_resume_pointer and retry close_session.`,
+          `/ add_resume_pointer and retry end_drive.`,
       ];
     }
     return [];
@@ -256,7 +279,7 @@ const rePersistenceClassifier: Classifier<CloseSessionPayload, CloseSessionCtx, 
   }),
 };
 
-function shouldRunRePersistence(p: CloseSessionPayload): boolean {
+function shouldRunRePersistence(p: EndDrivePayload): boolean {
   if (p.persistCallCount > 0) return false;
   const t = p.rePersistenceThreshold;
   if (!t) return false;
@@ -265,12 +288,97 @@ function shouldRunRePersistence(p: CloseSessionPayload): boolean {
   return false;
 }
 
+// ---------- Classifier: triage_acknowledgment ----------
+
+const TRIAGE_ACK_MIN_REASON_LENGTH = 20;
+
+const triageAcknowledgmentClassifier: Classifier<EndDrivePayload, EndDriveCtx, unknown> = {
+  kind: 'triage_acknowledgment',
+  expectedAnswerShape:
+    'triage_acknowledgment: {acknowledged: true, reason: "<your own words explaining why this session does not warrant a triage round, e.g. \'all declared capabilities have a fetch-tier saved strategy and the captures showed no graduation candidates\'>"}',
+  buildItems: (p) => {
+    if (!shouldRunTriageAcknowledgment(p)) return null;
+    return {
+      session_id: p.sessionId,
+      declared_capability_count: p.declaredCapabilityCount,
+      saved_capability_count: p.saveSuccessCount,
+      prompt:
+        `end_drive ALWAYS goes through triage. Every declared capability on this session is ` +
+        `already saved (no unresolved work, no stale strategies), so the runtime would skip the ` +
+        `triage handoff — but triage is the runtime-mandated review point. The agent does not ` +
+        `get to decide "this was a one-off task, no triage needed." Either submit a triage_plan ` +
+        `(graduation candidate? observed_capabilities to record? defense-surface notes worth ` +
+        `persisting?), or echo the audit_token + acknowledge with a non-trivial reason.`,
+      acknowledge_shape:
+        '{triage_acknowledgment: {acknowledged: true, reason: "<your reason, ≥20 chars>"}}',
+    };
+  },
+  validate: (_p, _ctx, answer) => {
+    if (typeof answer !== 'object' || answer === null) {
+      return [
+        `triage_acknowledgment answer must be an object — got ${typeof answer}. ` +
+          `Echo {acknowledged: true, reason: "<own words>"} after considering whether triage was warranted.`,
+      ];
+    }
+    const a = answer as { acknowledged?: unknown; reason?: unknown };
+    if (a.acknowledged !== true) {
+      return [
+        `triage_acknowledgment.acknowledged must be \`true\` — explicit assent that you considered ` +
+          `triage and chose to skip. Anything else means you have not made the choice consciously.`,
+      ];
+    }
+    if (typeof a.reason !== 'string' || a.reason.trim().length < TRIAGE_ACK_MIN_REASON_LENGTH) {
+      return [
+        `triage_acknowledgment.reason must be a non-trivial string (≥${TRIAGE_ACK_MIN_REASON_LENGTH} chars) ` +
+          `explaining in your own words why this session does not warrant a triage round. ` +
+          `Canned answers ("ok", "done", "no triage") do not satisfy.`,
+      ];
+    }
+    return [];
+  },
+  hashFields: (p) => ({
+    sessionId: p.sessionId,
+    declaredCapabilityCount: p.declaredCapabilityCount,
+    saveSuccessCount: p.saveSuccessCount,
+    endDriveAttempts: p.endDriveAttempts,
+  }),
+  remedy: () => ({
+    kind: 'classification_options',
+    options: [
+      {
+        choice: 'submit_triage_plan({...})',
+        rationale:
+          'go through triage properly — pick a surface, name the defense surface, propose an expected_tier, write a summary_for_user',
+      },
+      {
+        choice: '{triage_acknowledgment: {acknowledged: true, reason: "<own words>"}}',
+        rationale:
+          'explicit no-triage acknowledgment with a reason a future reader can audit (e.g. "all caps fetch-tier, no graduation candidate observed in captures")',
+      },
+    ],
+  }),
+};
+
+function shouldRunTriageAcknowledgment(p: EndDrivePayload): boolean {
+  // System-level opt-out wins (autonomous runs, benchmarks).
+  if (p.liftMode === 'skip') return false;
+  // Third-attempt force-tear-down releases every gate, mirroring
+  // declaration_required / save_attempted_none_landed.
+  if (p.endDriveAttempts >= 2) return false;
+  // No declared capability → triage has nothing to review structurally.
+  if (p.declaredCapabilityCount === 0) return false;
+  // Triage handoff will fire — that path already routes the agent into triage,
+  // no need for an additional gate.
+  if (p.triageWouldFire) return false;
+  return true;
+}
+
 // ---------- The audit instance ----------
 
-export const closeSessionAudit = new Audit<CloseSessionPayload, CloseSessionCtx>({
-  kind: 'close_session',
+export const endDriveAudit = new Audit<EndDrivePayload, EndDriveCtx>({
+  kind: 'end_drive',
   detectors: [declarationRequiredDetector, saveAttemptedNoneLandedDetector],
-  classifiers: [rePersistenceClassifier],
+  classifiers: [rePersistenceClassifier, triageAcknowledgmentClassifier],
 });
 
 // ---------- Helpers for orchestrator-side payload assembly ----------
@@ -280,7 +388,7 @@ interface SessionLike {
   platform?: string;
   graph?: import('../session-phase/types').GraphName;
   liftMode?: 'skip' | 'explicit_learn';
-  closeAttempts?: number;
+  endDriveAttempts?: number;
   declaredCapabilities?: ReadonlyArray<unknown>;
   performActionHistory?: ReadonlyArray<{ action?: string; value?: unknown }>;
   saveAttemptCount?: number;
@@ -311,15 +419,20 @@ export function collectWriteActions(
 }
 
 /**
- * Build the close-session audit payload from a Session + caller-supplied
+ * Build the end-drive audit payload from a Session + caller-supplied
  * counts (reCallCount, persistCallCount, actionCallCount). Pure, testable;
  * no side effects.
+ *
+ * `triageWouldFire` is computed by the orchestrator just before this call
+ * (see `wouldReverseEngineerHandoffFire` in end-drive/re-handoff.ts) — the
+ * triage_acknowledgment classifier reads it to decide whether to require an
+ * explicit ack token from the agent.
  */
-export function buildCloseSessionPayload(
+export function buildEndDrivePayload(
   session: SessionLike,
   counts: { reCallCount: number; persistCallCount: number; actionCallCount: number },
-  opts: { platform?: string },
-): CloseSessionPayload {
+  opts: { platform?: string; triageWouldFire: boolean },
+): EndDrivePayload {
   // Resolve graph config locally so the payload stays self-contained — the
   // payload is the contract between the orchestrator and the audit detectors,
   // and detectors should never reach back into runtime state.
@@ -329,7 +442,7 @@ export function buildCloseSessionPayload(
     sessionId: session.id,
     platform: opts.platform ?? session.platform ?? '<platform>',
     liftMode: session.liftMode,
-    closeAttempts: session.closeAttempts ?? 0,
+    endDriveAttempts: session.endDriveAttempts ?? 0,
     declaredCapabilityCount: (session.declaredCapabilities ?? []).length,
     writeActions: collectWriteActions(session),
     reCallCount: counts.reCallCount,
@@ -345,5 +458,6 @@ export function buildCloseSessionPayload(
       reCalls: RE_CALL_THRESHOLD,
       actions: 0,
     },
+    triageWouldFire: opts.triageWouldFire,
   };
 }

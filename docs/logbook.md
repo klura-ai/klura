@@ -8,7 +8,7 @@ For overall framing and the lifecycle that produces it, see `../ARCHITECTURE.md`
 
 Saved strategies (`~/.klura/skills/<platform>/{fetch,scripts,paths}/<capability>.json`) capture **what works** for a capability. The logbook (under `~/.klura/workdir/<platform>/`) captures **everything else** — every attempt, every outcome, every observed field shape, every session's contribution to the platform's accumulated knowledge. Without it:
 
-- The close_session RE handoff couldn't surface prior_attempts; the inline triage bundle would only carry current_tier.
+- The end_drive RE handoff couldn't surface prior_attempts; the inline triage bundle would only carry current_tier.
 - The revisit prompt couldn't ask "we tried this 3 times, want to try again?"
 - `get_platform_logbook` would return nothing, so the agent would have to re-derive cross-session signals from zero every session.
 - Newly-arrived agents would re-discover from zero every session even when the platform is well-trodden.
@@ -36,7 +36,7 @@ Strategies say "here's a working call." The logbook says "here's everything we'v
                                # require("X") / window.X / globalThis.X)
 ```
 
-`logbook.json` is the fast-to-read derived rollup; session archives are the source of truth. The logbook gets recomputed/updated on every `close_session`. Derived signals are recomputed lazily from session archives and cached.
+`logbook.json` is the fast-to-read derived rollup; session archives are the source of truth. The logbook gets recomputed/updated on every `end_drive`. Derived signals are recomputed lazily from session archives and cached.
 
 ## logbook.json schema
 
@@ -174,17 +174,17 @@ forms_seen: Array<{
 1. `start_session({platform, graph: "map"})` — agent receives a session id; if a logbook already exists, the response carries a `platform_map` summary (top observed capabilities, `url_graph_size`, `forms_seen` count).
 2. Drive exploration with `perform_action({action: "navigate"})`, clicks, and reads. Mutating clicks (POST/PUT/DELETE-bound, destructive-text matches like `buy`, `order`, `pay`, `delete`, `submit`, `confirm`) raise an `action_consent_required` checkpoint that the agent must ack before the click dispatches.
 3. For each capability the agent spots in network or DOM, call `record_observed_capability({platform, name, evidence, why_not_lifted, hypothesis?})`.
-4. `close_session` flushes — `url_graph` and `forms_seen` accretions land in the logbook, `observed_capabilities` is updated, and **auto-synth is skipped** (no recorded-path falls out of the action history; map clicks are probes, not replay material).
+4. `end_drive` flushes — `url_graph` and `forms_seen` accretions land in the logbook, `observed_capabilities` is updated, and **auto-synth is skipped** (no recorded-path falls out of the action history; map clicks are probes, not replay material).
 
 The map graph's `GraphConfig` turns these knobs on:
 
 - `gateMutatingActions: true` — emit the per-(action, selector) consent checkpoint.
-- `skipAutoSynth: true` — skip recorded-path auto-synth at `close_session`.
+- `skipAutoSynth: true` — skip recorded-path auto-synth at `end_drive`.
 - `inferObservedCapabilitiesAtClose: true` — derive `observed_capabilities` from the runtime-collected URL graph + forms when the agent didn't call `record_observed_capability` directly.
 - `skipDeclarationGuard: true` — closing without a declared capability is allowed (mapping has no goal capability).
 - `rePersistenceThreshold: {reCalls: 1, actions: 5}` — fires the re-persistence audit when a session did ≥5 `perform_action`s with zero persistence calls.
 
-The `re_persistence_gate` blocks `close_session` when the threshold fires AND the session persisted nothing — no `record_observed_capability`, no `save_verified_expression`, no `add_discovery_note`, no `add_resume_pointer`. Escape: persist at least one record, or retry with the server-minted `acknowledge_no_progress` token from the rejection.
+The `re_persistence_gate` blocks `end_drive` when the threshold fires AND the session persisted nothing — no `record_observed_capability`, no `save_verified_expression`, no `add_discovery_note`, no `add_resume_pointer`. Escape: persist at least one record, or retry with the server-minted `acknowledge_no_progress` token from the rejection.
 
 For the full schema, the `platform_map` teaser shape on `start_session`, and worked examples, see [klura://reference#platform-surface-map](../REFERENCE.md#platform-surface-map). For the FSM topology and per-graph `GraphConfig` reference, see [session-phases.md](session-phases.md).
 
@@ -194,7 +194,7 @@ For the full schema, the `platform_map` teaser shape on `start_session`, and wor
 
 ## Writers
 
-The only writer is `close_session`, via the capture-event adapter in `runtime/src/index.ts` that reshapes live session state into a `CaptureEvent[]` stream. The working-dir module (`runtime/src/working-dir/`) consumes that stream — it has zero dependency on runtime Session / pool / driver / MCP types. The asymmetry is deliberate: the adapter knows about both layers, the working-dir module doesn't.
+The only writer is `end_drive`, via the capture-event adapter in `runtime/src/index.ts` that reshapes live session state into a `CaptureEvent[]` stream. The working-dir module (`runtime/src/working-dir/`) consumes that stream — it has zero dependency on runtime Session / pool / driver / MCP types. The asymmetry is deliberate: the adapter knows about both layers, the working-dir module doesn't.
 
 Per close, the adapter emits:
 
@@ -229,7 +229,7 @@ Three agent-facing tools read the logbook:
 | --- | --- |
 | `get_platform_logbook({platform})` | The full `PlatformLogbook` — counters, lift_attempts, data_sufficiency for every capability. Useful when the agent wants to scan the whole platform's history. |
 | `get_strategy_events({platform, capability?, limit?})` | Most-recent-first slice of `strategy_events[]` across the platform (or narrowed to one capability). Useful for "what changed about this skill lately?" — discoveries, demotions, heals. |
-| `close_session` RE handoff | For each unresolved capability, inlines `triage[<cap>]: { current_tier, prior_attempts, discovery_artifact? }` — cross-session facts only, no verdicts. The LLM reads the raw captures + `get_platform_logbook` + the artifact and decides whether to lift. Detail: `klura://reference#triage-protocol`. |
+| `end_drive` RE handoff | For each unresolved capability, inlines `triage[<cap>]: { current_tier, prior_attempts, discovery_artifact? }` — cross-session facts only, no verdicts. The LLM reads the raw captures + `get_platform_logbook` + the artifact and decides whether to lift. Detail: `klura://reference#triage-protocol`. |
 | `start_session(...)` | When auto-executing a warm strategy that is below the LIFT threshold AND the logbook shows ≤ N prior failed attempts, returns `revisit_prompt` so the agent can ask the user whether to re-attempt the lift. |
 
 Internal readers:
@@ -242,7 +242,7 @@ Internal readers:
 | --- | --- | --- | --- |
 | Saved strategy (`<subdir>/<capability>.json`) | LLM (via `save_strategy`) or runtime (via graduation / close-synth) | Permanent until re-saved or reset | What works |
 | `policy.json` | User (via CLI) | Permanent | What's allowed |
-| `working/logbook.json` | Runtime (via close_session adapter) | Recomputed on every close | What's been tried + observed |
+| `working/logbook.json` | Runtime (via end_drive adapter) | Recomputed on every close | What's been tried + observed |
 | `working/health.json` | Runtime (per execute + heal) | Persistent; wiped by `clearSkills` | Per-strategy status (healthy / degraded / broken) |
 | `working/artifacts/<capability>.{json,bin}` | Agent (via discovery tools) | Persistent across sessions | Cross-run resume pointers + verified expressions |
 | `working/sessions/<sid>/` | Runtime | Permanent | Raw history; source of truth for derived signals |

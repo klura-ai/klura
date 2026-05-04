@@ -81,7 +81,7 @@ DRIVE (Drive Real Interactions, View Endpoints) ended when you called end_drive.
 
 If a tool response carries `_checkpoint`, ack it via `ack_checkpoint` (see Checkpoints below). On `start_session` / `list_platform_skills` you may see `re_continuation_available: true` when a prior session left partial progress — ask the user whether to continue the lift or accept recorded-path.
 
-**Close-session audit.** `end_drive` runs a consolidated audit. Two checks: `capability_declaration_required` (refuses close when session typed/submitted but no capability was declared — call `declare_capability` before closing) and `re_persistence` (refuses close when ≥2 RE tool calls landed with zero persistence calls — persist via `save_verified_expression` / `add_discovery_note` / `add_resume_pointer` and retry, or echo `audit_token` + `audit_answers: {re_persistence: {acknowledge_no_progress: true}}`). See `klura://reference#close-session-audit`.
+**Close-session audit.** `end_drive` runs a consolidated audit. Two checks: `capability_declaration_required` (refuses close when session typed/submitted but no capability was declared — call `declare_capability` before closing) and `re_persistence` (refuses close when ≥2 RE tool calls landed with zero persistence calls — persist via `save_verified_expression` / `add_discovery_note` / `add_resume_pointer` and retry, or echo `audit_token` + `audit_answers: {re_persistence: {acknowledge_no_progress: true}}`). See `klura://reference#end-drive-audit`.
 
 ## Discovery escape hatches (read only when you need them)
 

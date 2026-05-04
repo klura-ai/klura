@@ -101,7 +101,7 @@ Full FSM mechanics — admissibility, round budgets, transition events, the fail
         │             │                      │
         ▼             ▼                      ▼
    re-enter      close_     ┌────────────────────────────────┐
-   LIFT    ────► session    │ close_session                  │
+   LIFT    ────► session    │ end_drive                  │
                             │  1. synth recorded-path if no  │
                             │     save and action history    │
                             │     is rich                    │
@@ -149,7 +149,7 @@ Full FSM mechanics — admissibility, round budgets, transition events, the fail
             progress
 ```
 
-The same flow runs whether discovery or execution dominates — `start_session` either auto-executes (when a saved strategy exists for this `{platform, capability}`) or hands the agent a live browser to drive. Captures accumulate on the `Session` object throughout. `close_session` is where the runtime decides what to persist: if the agent saved nothing but the action history is rich, it auto-synthesizes a strategy; if the agent saved something but the captured traffic suggests a higher tier was reachable, it nags. Full mechanics in [docs/run-lifecycle.md](docs/run-lifecycle.md).
+The same flow runs whether discovery or execution dominates — `start_session` either auto-executes (when a saved strategy exists for this `{platform, capability}`) or hands the agent a live browser to drive. Captures accumulate on the `Session` object throughout. `end_drive` is where the runtime decides what to persist: if the agent saved nothing but the action history is rich, it auto-synthesizes a strategy; if the agent saved something but the captured traffic suggests a higher tier was reachable, it nags. Full mechanics in [docs/run-lifecycle.md](docs/run-lifecycle.md).
 
 ---
 
@@ -192,10 +192,10 @@ These wrap the core loop but aren't part of every run.
 | [docs/principles.md](docs/principles.md) | Design principles (plumbing vs intelligence, validate-everything-the-LLM-emits, "if the LLM keeps making the same mistake, the runtime is wrong"). Inspiration & prior art. |
 | [docs/run-lifecycle.md](docs/run-lifecycle.md) | The per-call lifecycle in detail, `lift_mode`, `~/.klura/config.json` settings reference, CLI-only controls. |
 | [docs/configuration.md](docs/configuration.md) | Every `~/.klura/config.json` field, the MCP `describe_config` / `configure` / `restart_runtime` tools, programmatic `createPool` overrides, and the legitimate `KLURA_*` env vars. |
-| [docs/logbook.md](docs/logbook.md) | The per-platform logbook: cross-session memory backing the inline triage bundle on close_session's RE handoff, `get_platform_logbook`, the revisit prompt, and `lift_mode`. On-disk layout, schema, writers, readers. |
+| [docs/logbook.md](docs/logbook.md) | The per-platform logbook: cross-session memory backing the inline triage bundle on end_drive's RE handoff, `get_platform_logbook`, the revisit prompt, and `lift_mode`. On-disk layout, schema, writers, readers. |
 | [docs/strategies.md](docs/strategies.md) | Strategy shapes, prerequisite methods, how strategies are chosen, graduation. |
 | [docs/tokens.md](docs/tokens.md) | Token types, proactive vs reactive refresh, TTL learning, OAuth, cookies, listener token refresh. |
-| [docs/discovery.md](docs/discovery.md) | Discovery flow, runtime-led scaffolding (declare_capability, auto-execute, auto-save, close_session nag), pre-action consent, save-time provenance contract. |
+| [docs/discovery.md](docs/discovery.md) | Discovery flow, runtime-led scaffolding (declare_capability, auto-execute, auto-save, end_drive nag), pre-action consent, save-time provenance contract. |
 | [docs/reverse-engineering.md](docs/reverse-engineering.md) | The RE toolkit, frame pinning + ring buffer, convergence coach, structural match mode, source-level debugger. |
 | [docs/listeners.md](docs/listeners.md) | Capability types, the four transports, listener lifecycle, event routing (pull, hook-events, MCP notifications). |
 | [docs/glossary.md](docs/glossary.md) | The three load-bearing terms — strategy, capability, skill — with the disambiguation table. Read first when prose ambiguity bites. |

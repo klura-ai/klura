@@ -76,7 +76,7 @@ function mockPool(driver) {
       sessions.set(session.id, session);
       return session;
     },
-    async closeSession(id) {
+    async endDrive(id) {
       this.sessionsClosed++;
       sessions.delete(id);
     },

@@ -191,7 +191,7 @@ test('pool: same-platform-different-identity calls don\'t share warm slots', asy
     assert.equal(driver.reset.length, 0, 'expected no resetSession calls');
     // Releasing a should leave it idle in its slot. Creating another for
     // identity=work then reuses it.
-    await pool.closeSession(a.id);
+    await pool.endDrive(a.id);
     const c = await pool.createSession({ platform: 'demo', identity: 'work' });
     assert.equal(driver.reset.length, 1, 'expected the work slot to reset on reuse');
     assert.equal(driver.created.length, 2, 'no new cold spawn for the reused identity');

@@ -28,7 +28,7 @@ import { currentPhase } from '../session-phase/registry';
 // inlines this verbatim so agents see the playbook on the response they're
 // already reading — `klura://reference#reverse-engineer-playbook` slug
 // pointers don't get fetched in practice. Read once at module load to avoid
-// re-parsing REFERENCE.md on every close_session call.
+// re-parsing REFERENCE.md on every end_drive call.
 let cachedPlaybookProse: string | null = null;
 function getReversePlaybookProse(): string {
   if (cachedPlaybookProse !== null) return cachedPlaybookProse;
@@ -42,7 +42,7 @@ function getReversePlaybookProse(): string {
 }
 
 /**
- * close_session handoff shape when declared capabilities are unresolved. The
+ * end_drive handoff shape when declared capabilities are unresolved. The
  * response is framed as a **role transition**, not a refusal — the agent is
  * done driving the UI; now they're a reverse engineer whose job is to figure
  * out how the page reproduced each capability so warm execute works for future
@@ -55,7 +55,7 @@ function getReversePlaybookProse(): string {
  * — close-time picks the conversation back up after triage approved.
  *
  * Close requires a successful `save_strategy` for every declared capability.
- * Repeat close_session calls without that return this same handoff — there
+ * Repeat end_drive calls without that return this same handoff — there
  * is no "third call wins" behavior. Each save itself runs through the
  * `user_confirmation` classifier in the save-strategy audit, so the user
  * has the final say at save time on whether the proposed shape is acceptable.
@@ -114,7 +114,7 @@ type CloseHandoff = {
     re_lift: string[];
     save: string[];
   };
-  close_attempts: number;
+  end_drive_attempts: number;
   message: string;
   /** Structured brief for authoring `submit_triage_plan` — derived from
    *  session captures. Surfaces what the triage audit will check (URL
@@ -209,7 +209,39 @@ export function classifyUrlParams(
 }
 
 // Exported for unit tests — can be called against a Session-shaped object
-// without a live pool. Production call-site is in closeSession.
+// without a live pool. Production call-site is in endDrive.
+/**
+ * Predicate sibling of `computeReverseEngineerHandoff`. Returns true iff
+ * `computeReverseEngineerHandoff(session, platform)` would return a non-null
+ * handoff — without doing the expensive decoration work (candidate XHR
+ * scoring, listing detection, captures inventory). The orchestrator calls
+ * this BEFORE running the end-drive audit so the audit's
+ * `triage_acknowledgment` classifier can decide whether to gate.
+ *
+ * Mirrors the early-exit conditions in `computeReverseEngineerHandoff`:
+ * lift_mode opt-out, no declared capability, every declared capability
+ * already has a non-stale saved strategy (or is user-capped at recorded-path).
+ */
+export function wouldReverseEngineerHandoffFire(
+  session: ReturnType<typeof pool.getSession>,
+  platform: string,
+): boolean {
+  if (session.liftMode === 'skip') return false;
+  const declared = session.declaredCapabilities ?? [];
+  if (declared.length === 0) return false;
+  const staleSet = session.staleStrategyCapabilities;
+  for (const d of declared) {
+    const saved = skills.loadStrategies(platform, d.capability);
+    const policy = loadCapabilityPolicyFull(platform, d.capability);
+    const policyCap = policy?.max_strategy_tier ?? null;
+    const hasAny = saved.length > 0;
+    const userCapped = policyCap === 'recorded-path';
+    const stale = staleSet?.has(d.capability) ?? false;
+    if (!((hasAny && !stale) || userCapped)) return true; // any unresolved → handoff fires
+  }
+  return false;
+}
+
 export function computeReverseEngineerHandoff(
   session: ReturnType<typeof pool.getSession>,
   platform: string,
@@ -308,12 +340,12 @@ export function computeReverseEngineerHandoff(
   const actionCount = (session.performActionHistory ?? []).length;
   const wsCount = (session.wsFrames ?? []).length;
   const httpCount = session.intercepted.length;
-  const closeAttempts = session.closeAttempts ?? 1;
+  const endDriveAttempts = session.endDriveAttempts ?? 1;
 
   const capNames = unresolved.map((u) => u.capability).join(', ');
   const repeatedNoOpClose = detectRepeatedNoOpClose(session, unresolved);
   // Empty-artifact guard: when the agent is about to hit the third
-  // close_session (which auto-synths recorded-path unconditionally) without
+  // end_drive (which auto-synths recorded-path unconditionally) without
   // having persisted ANY findings — no verified_expressions, no discovery
   // notes, no resume pointers — the recorded-path fallback is the ONLY thing
   // that will land. For genuinely DOM-only multi-step capabilities that's the
@@ -331,8 +363,8 @@ export function computeReverseEngineerHandoff(
   const resumePointersTotal = sumBuckets(acc?.agentResumePointers);
   const hasAnyPersistedFindings = verifiedCountTotal + notesCountTotal + resumePointersTotal > 0;
   const emptyArtifactWarning =
-    closeAttempts >= 2 && !hasAnyPersistedFindings
-      ? `\n\n⚠ EMPTY-ARTIFACT: you've called close_session twice and persisted ZERO findings (no save_verified_expression, add_discovery_note, or add_resume_pointer). Calling close_session again will return this same handoff — there is no "third call wins" path. LIFT ends when save_strategy lands a runnable strategy for every declared capability; every save passes the user_confirmation classifier so the user has the final say on whether the proposed shape is acceptable. Until a save lands, keep working: save_strategy against the candidate XHR carrying the data (build the fetch / page-script shape from the captured request — baseUrl + endpoint + method + headers + body), OR for SSR HTML reads save \`fetch\` with \`response: {format: "html", extract: {...}}\`, OR run the RE toolkit (try_generator / js_eval / set_breakpoint + save_verified_expression to persist).`
+    endDriveAttempts >= 2 && !hasAnyPersistedFindings
+      ? `\n\n⚠ EMPTY-ARTIFACT: you've called end_drive twice and persisted ZERO findings (no save_verified_expression, add_discovery_note, or add_resume_pointer). Calling end_drive again will return this same handoff — there is no "third call wins" path. LIFT ends when save_strategy lands a runnable strategy for every declared capability; every save passes the user_confirmation classifier so the user has the final say on whether the proposed shape is acceptable. Until a save lands, keep working: save_strategy against the candidate XHR carrying the data (build the fetch / page-script shape from the captured request — baseUrl + endpoint + method + headers + body), OR for SSR HTML reads save \`fetch\` with \`response: {format: "html", extract: {...}}\`, OR run the RE toolkit (try_generator / js_eval / set_breakpoint + save_verified_expression to persist).`
       : '';
 
   // Ungrounded-read guard: for a declared read-shaped capability (declared
@@ -343,7 +375,7 @@ export function computeReverseEngineerHandoff(
   // training-data memory rather than flagging it couldn't access the content.
   // Per runtime/docs/principles.md §"Prefer runtime enforcement over prompt
   // reminders" — fabrication is a very strong training prior that SKILL.md text
-  // can't override; the close_session handoff is the decision-point surface.
+  // can't override; the end_drive handoff is the decision-point surface.
   //
   // "Weak grounding" heuristic: declared-arg literal only matches in
   // visited_url (the URL bar), nowhere else; total non-OPTIONS response body
@@ -465,7 +497,7 @@ export function computeReverseEngineerHandoff(
       triageByCapability[u.capability] = computeTriageBundle(session, platform, u.capability);
     } catch (err) {
       // Per-capability triage is best-effort — a malformed logbook or missing
-      // archive shouldn't break close_session. But the failure must be VISIBLE:
+      // archive shouldn't break end_drive. But the failure must be VISIBLE:
       // a silent empty `triage: {}` looks identical to a successful no-op
       // bundle and hides logbook bugs indefinitely. Log to stderr + attach
       // under `triage_errors[<capability>]` so the agent (and field-report
@@ -485,15 +517,15 @@ export function computeReverseEngineerHandoff(
   const strategyTarget =
     unresolved.length === 1 ? `capability ${capNames}` : `capabilities ${capNames}`;
   const message = repeatedNoOpClose
-    ? `REPEAT-CLOSE DETECTED. You called close_session again without taking any action between attempts. ` +
-      `Calling close_session with the same session state will return the same refusal every time — it WILL NOT resolve anything. ` +
+    ? `REPEAT-CLOSE DETECTED. You called end_drive again without taking any action between attempts. ` +
+      `Calling end_drive with the same session state will return the same refusal every time — it WILL NOT resolve anything. ` +
       `\n\nYou HAVE NOT SAVED a strategy for the declared capabilit${capabilityNoun}: ${capNames}. ` +
       `Delivering the answer to the user is only HALF of this task; klura's contract is that every declared capability ends with EITHER a saved strategy OR an explicit policy decline with evidence. Without one, warm runs have to rediscover from cold and the benchmark reports 'no strategy saved'. ` +
       `\n\nYour next tool call MUST be one of:` +
       `\n  - save_strategy({session_id, platform, capability, strategy: {strategy: "fetch" | "page-script" | "recorded-path", ...}}) — author the strategy from the captured request you picked from candidate_xhrs[] (baseUrl + endpoint + method + headers + body). Bake nothing that rotates per call.` +
       `\n  - get_network_log / get_action_history / inspect_ws_frame — investigate before authoring` +
-      `\nclose_session WILL NOT terminate the session until save_strategy lands a runnable strategy for every declared capability. Every save passes the user_confirmation classifier — the user approves or rejects the proposed shape at save time. Until a save lands, every close call returns this same handoff.`
-    : `**DRIVE COMPLETE → LIFT REQUIRED.** close_session will NOT terminate this session until save_strategy lands a runnable strategy for every declared capability. Repeat close_session calls return this same handoff. Ending your turn here without a save IS A FAILURE — the session is still open, every future tool call will see the same LIFT prompt, and the bench records "no strategy saved." Keep working until save_strategy succeeds. Every save passes through the user_confirmation classifier in the save-strategy audit; the user approves or rejects the proposed shape at save time, with the strategy summary inlined in the prompt. Saving \`recorded-path\` is allowed in any phase — but the user_confirmation prompt surfaces tier + step count, so the user gets the final say on whether \`recorded-path\` is acceptable for this capability. ` +
+      `\nend_drive WILL NOT terminate the session until save_strategy lands a runnable strategy for every declared capability. Every save passes the user_confirmation classifier — the user approves or rejects the proposed shape at save time. Until a save lands, every close call returns this same handoff.`
+    : `**DRIVE COMPLETE → LIFT REQUIRED.** end_drive will NOT terminate this session until save_strategy lands a runnable strategy for every declared capability. Repeat end_drive calls return this same handoff. Ending your turn here without a save IS A FAILURE — the session is still open, every future tool call will see the same LIFT prompt, and the bench records "no strategy saved." Keep working until save_strategy succeeds. Every save passes through the user_confirmation classifier in the save-strategy audit; the user approves or rejects the proposed shape at save time, with the strategy summary inlined in the prompt. Saving \`recorded-path\` is allowed in any phase — but the user_confirmation prompt surfaces tier + step count, so the user gets the final say on whether \`recorded-path\` is acceptable for this capability. ` +
       `\n\nThe user has their answer. They've moved on. You are now in LIFT — infrastructure mode.` +
       `\n\nLIFT is NOT about the current user's request. It's already satisfied. LIFT is about the NEXT caller — and the one after that, and the benchmark run, and every other agent that uses klura tomorrow. Your job right now is to save a reusable strategy for ${strategyTarget} so nobody has to redo the work you just did.` +
       `\n\nThis changes the cost-benefit math. You are no longer a task-completer finishing a request; you are a reverse engineer writing library code. The question is NOT "is this worth it for this user" (they're done). The question is: "is a permanently-callable warm-fast version of this capability worth my time right now?" Almost always yes. Declining a liftable capability means every future invocation pays ~30s re-discovery + 10-20 LLM rounds + rate-limit exposure + storage-state churn. Saving page-script once amortizes after 2 future calls and keeps paying off.` +
@@ -598,13 +630,13 @@ export function computeReverseEngineerHandoff(
       ],
       save: ['save_strategy'],
     },
-    close_attempts: closeAttempts,
+    end_drive_attempts: endDriveAttempts,
     message: finalMessage,
   };
 }
 
 /**
- * No-op close-retry detector. If the agent calls close_session again without
+ * No-op close-retry detector. If the agent calls end_drive again without
  * taking ANY action between attempts (no new tool calls, no save_strategy, no
  * get_network_log), the second refusal surfaces a stronger "repeat-close
  * detected" message instead of just re-emitting the same role-shift handoff.
@@ -612,7 +644,7 @@ export function computeReverseEngineerHandoff(
  * same candidate list they ignored once already.
  *
  * Signal: session has `lift` set (first close already hit the handoff) AND
- * `roundsSinceHandoff === 0` AND `closeAttempts >= 2`. Since every tool call
+ * `roundsSinceHandoff === 0` AND `endDriveAttempts >= 2`. Since every tool call
  * increments `roundsSinceHandoff` in `pool.getSession`, a zero counter at
  * attempt ≥ 2 means the agent did nothing between closes.
  */
@@ -621,6 +653,6 @@ function detectRepeatedNoOpClose(
   _unresolved: CloseHandoff['unresolved_capabilities'],
 ): boolean {
   if (!session.lift) return false;
-  if ((session.closeAttempts ?? 1) < 2) return false;
+  if ((session.endDriveAttempts ?? 1) < 2) return false;
   return session.lift.roundsSinceHandoff <= 1;
 }

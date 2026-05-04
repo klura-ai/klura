@@ -1,7 +1,7 @@
 // Parser for Playwright a11y-snapshot-style selector strings —
 //   `<role> "<name>"` (e.g. `button "Submit"`, `textbox "Name"`).
 // Agents trained on Playwright snapshot output reach for this syntax when
-// driving the browser via `perform_action`, and the close-session
+// driving the browser via `perform_action`, and the end-drive
 // auto-synthesizer captures the agent's selector verbatim into the saved
 // step's `locators.css`. Two consumers need to crack the snapshot string
 // back into structured `{role, name}`:

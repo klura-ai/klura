@@ -63,7 +63,7 @@ export function getUnusedSignerDiscoveryTools(session: Session): string[] {
 /**
  * Compute the LIFT obligation for a session — a sticky reminder surfaced
  * on tool responses when mutating actions have happened but no strategy is
- * saved (and close_session hasn't completed). Returns null if no obligation
+ * saved (and end_drive hasn't completed). Returns null if no obligation
  * applies. See `runtime/src/session-obligations.ts` for the full rationale.
  */
 export function getSessionObligation(

@@ -193,7 +193,7 @@ const observedBumpedPerSession = new Map<string, Set<string>>();
 
 /**
  * Clear the per-session dedupe set for observed_capabilities bumps. Called at
- * close_session so the session id can be reused cleanly.
+ * end_drive so the session id can be reused cleanly.
  */
 export function clearObservedSessionTracking(sessionId: string): void {
   observedBumpedPerSession.delete(sessionId);

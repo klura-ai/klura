@@ -132,7 +132,7 @@ function makeMockPool({ selectorsThatExist = new Set(), evaluateResult = undefin
     async createSession() {
       return { id: sessionId };
     },
-    async closeSession() {},
+    async endDrive() {},
     getSession() {
       return { id: sessionId };
     },

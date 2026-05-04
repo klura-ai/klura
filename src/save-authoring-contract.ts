@@ -37,7 +37,7 @@ export interface SaveAuthoringContract {
    *  time — surfaced here so the agent sees them before authoring. */
   detected_patterns: {
     /** Captured XHRs ranked as data-load candidates. The agent picks one
-     *  as the strategy's primary request. Same shape `close_session`
+     *  as the strategy's primary request. Same shape `end_drive`
      *  surfaces in the LIFT handoff. */
     data_loads: DataLoadCandidate[];
     /** Captures whose response enumerates values used as URL-param

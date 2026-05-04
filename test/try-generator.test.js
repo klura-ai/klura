@@ -426,9 +426,9 @@ test('tryGenerator: closing the session clears the counter', async () => {
   });
   assert.ok(klura._pool.getTryGeneratorStats(sid));
 
-  // closeSession on a session id that has no actual browser session is a
+  // endDrive on a session id that has no actual browser session is a
   // no-op for the pool side but still clears the counter map entry.
-  await klura._pool.closeSession(sid);
+  await klura._pool.endDrive(sid);
   assert.strictEqual(klura._pool.getTryGeneratorStats(sid), null);
 });
 

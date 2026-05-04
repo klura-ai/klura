@@ -1,6 +1,6 @@
 // `collectDataLoadCandidates` — the read-only review path. No auto-save:
 // the runtime narrows captured requests to ranked candidates and lets
-// `close_session` surface them for the LLM to pick. These tests cover
+// `end_drive` surface them for the LLM to pick. These tests cover
 // the narrowing + candidate shape directly.
 
 import { test } from 'node:test';

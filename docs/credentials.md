@@ -86,14 +86,14 @@ On first login for a platform (no cookies yet):
 1. `start_session(url, platform)` — opens the browser.
 2. `start_remote_session(session_id, "Log in to your <platform> account")` — surfaces the viewer URL for the user.
 3. `wait_for_remote(session_id)` — blocks until the user clicks Done (or types "done" in chat).
-4. `stop_remote_session(session_id)` + `close_session(session_id, platform)` — saves the fresh cookies to `~/.klura/storage-state/<platform>.json`.
+4. `stop_remote_session(session_id)` + `end_drive(session_id, platform)` — saves the fresh cookies to `~/.klura/storage-state/<platform>.json`.
 5. **Capture the login steps as the `login` capability** (see above) so future reauths can run headlessly.
 
 On first identity capture, also call `set_identity(platform, {email: "..."})` with user confirmation so future `{{email}}` / `{{username}}` placeholders auto-fill. Non-secret only.
 
 On `needs_reauth: true` during execute (cookies stale, strategy still fine — do NOT re-discover):
 
-1. **Preferred — remote session**: `start_session(url, platform)` → `start_remote_session` → user logs in → `close_session(..., platform)` → retry the original `execute`. Password never enters context.
+1. **Preferred — remote session**: `start_session(url, platform)` → `start_remote_session` → user logs in → `end_drive(..., platform)` → retry the original `execute`. Password never enters context.
 2. **If a secret resolver is configured**: `execute(platform, 'login')`. Identity fills the email, secret resolver fills the password. No credentials in LLM context.
 3. **Chat (last resort)**: only if the user explicitly offers credentials AND the platform has no CAPTCHA.
 
@@ -113,7 +113,7 @@ The detection runs AFTER the cascade — if a lower tier succeeds, no reauth sig
 
 **If `login` hits a CAPTCHA mid-execution**, the recorded-path executor pauses and returns a response carrying `_checkpoint: {kind: "recorded_step_failed", prompt, viewer_url, checkpoint_token}` with `session_id`. Open the returned `viewer_url` for the user, ack via `ack_checkpoint({checkpoint_token, viewer_result: {...}})`, then `resume_execution(session_id)` to finish. Cookies still get saved on completion.
 
-**Manual login fallback** (when no auth-providing capability is on disk): `start_session(url, platform)` → log in via remote session → **save the login steps as a capability with `provides: ["auth"]` declared at the top level** → `close_session(session_id, platform)` → retry `execute`. The `auto_injected` advisory on dependent saves wires up `{kind: "tag", tag: "auth"}` automatically once an auth-providing capability exists.
+**Manual login fallback** (when no auth-providing capability is on disk): `start_session(url, platform)` → log in via remote session → **save the login steps as a capability with `provides: ["auth"]` declared at the top level** → `end_drive(session_id, platform)` → retry `execute`. The `auto_injected` advisory on dependent saves wires up `{kind: "tag", tag: "auth"}` automatically once an auth-providing capability exists.
 
 **Forcing reauth when heuristics miss**: if a strategy fails with a non-auth error but you suspect stale auth, run the reauth steps manually and retry. The detection is intentionally conservative.
 

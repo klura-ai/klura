@@ -945,7 +945,7 @@ async function tryRevisitPartialReplay(
         // partial replay's value is limited for pure-Node ws dials. Keep
         // the branch for completeness; in practice the caller will usually
         // fall through to full recorded-path.
-        await pool.closeSession(replay.session.id).catch(() => {});
+        await pool.endDrive(replay.session.id).catch(() => {});
         errors.push(
           `revisit-fallback: ws primary retry is not partial-replay-gated; falling through`,
         );
@@ -986,7 +986,7 @@ async function tryRevisitPartialReplay(
       // page-script retry runs in-browser — close the partial-replay
       // session first so the in-browser fetcher gets a clean page with
       // the restored cookies from storageState.
-      await pool.closeSession(replay.session.id).catch(() => {});
+      await pool.endDrive(replay.session.id).catch(() => {});
       retryResult = await executeFetchInBrowser(
         failingStrategy as PageScriptStrategy,
         args,
@@ -1001,7 +1001,7 @@ async function tryRevisitPartialReplay(
     }
     // For the fetch-Node branch the session is still open; close it now.
     if (type === 'fetch') {
-      await pool.closeSession(replay.session.id).catch(() => {});
+      await pool.endDrive(replay.session.id).catch(() => {});
     }
     if (retryResult.status >= 200 && retryResult.status < 300) {
       errors.push(`revisit-fallback: primary retry succeeded after partial replay`);
@@ -1010,7 +1010,7 @@ async function tryRevisitPartialReplay(
     errors.push(`revisit-fallback: primary retry still returned ${retryResult.status}`);
     return null;
   } catch (err) {
-    await pool.closeSession(replay.session.id).catch(() => {});
+    await pool.endDrive(replay.session.id).catch(() => {});
     errors.push(
       `revisit-fallback: primary retry threw (${err instanceof Error ? err.message : String(err)})`,
     );
@@ -1160,7 +1160,7 @@ export function classifyAutoExecDiagnosis(
     case 'auth_failed':
       hint =
         `The session is no longer authenticated. The agent cannot recover this without user-side ` +
-        `auth — surface to the human via close_session and start a remote viewer round if needed.`;
+        `auth — surface to the human via end_drive and start a remote viewer round if needed.`;
       break;
     case 'endpoint_stale':
       hint =

@@ -1,6 +1,6 @@
-// Map-graph close_session tests. Two guarantees:
-//   (a) graph: 'map' close_session skips auto-synth (records skip diagnostic).
-//   (b) graph: 'discover' close_session runs auto-synth (existing behavior).
+// Map-graph end_drive tests. Two guarantees:
+//   (a) graph: 'map' end_drive skips auto-synth (records skip diagnostic).
+//   (b) graph: 'discover' end_drive runs auto-synth (existing behavior).
 //
 // No real browser is spun up — these exercise the orchestrator directly.
 // Browser-driven integration coverage lives in llm-tests/scenarios.
@@ -18,7 +18,7 @@ process.on('exit', () => {
 });
 
 // Late-bind the runtime barrel after KLURA_HOME is set.
-const { closeSession } = await import('../dist/close-session/orchestrator.js');
+const { endDrive } = await import('../dist/end-drive/orchestrator.js');
 const { pool } = await import('../dist/runtime-state.js');
 
 function fakeSessionShell({ graph, sessionId }) {
@@ -30,7 +30,7 @@ function fakeSessionShell({ graph, sessionId }) {
     savedCapabilities: [],
     performActionHistory: [],
     artifactAccumulator: undefined,
-    closeAttempts: 0,
+    endDriveAttempts: 0,
     domNavigations: [],
     domFormsObserved: [],
   };
@@ -46,21 +46,21 @@ function patchPool(session) {
   };
   const origGet = pool.getSession;
   const origDriver = pool.driverFor;
-  const origClose = pool.closeSession;
+  const origClose = pool.endDrive;
   pool.getSession = (id) => (id === session.id ? session : origGet.call(pool, id));
   pool.driverFor = (id) => (id === session.id ? fakeDriver : origDriver.call(pool, id));
-  pool.closeSession = async (id) => {
+  pool.endDrive = async (id) => {
     if (id === session.id) return;
     return origClose.call(pool, id);
   };
   return () => {
     pool.getSession = origGet;
     pool.driverFor = origDriver;
-    pool.closeSession = origClose;
+    pool.endDrive = origClose;
   };
 }
 
-test("graph: 'map' close_session: auto-synth skipped, diagnostic emitted", async () => {
+test("graph: 'map' end_drive: auto-synth skipped, diagnostic emitted", async () => {
   const session = fakeSessionShell({ graph: 'map', sessionId: 'sess-map-1' });
   // One non-mutating perform_action so re-persistence gate doesn't fire.
   session.performActionHistory = [
@@ -68,7 +68,7 @@ test("graph: 'map' close_session: auto-synth skipped, diagnostic emitted", async
   ];
   const restore = patchPool(session);
   try {
-    const result = await closeSession(session.id, { platform: 'pm-test' });
+    const result = await endDrive(session.id, { platform: 'pm-test' });
     assert.equal(result.ok, true, `expected ok, got ${JSON.stringify(result)}`);
     const synth = result._diagnostics?.synth ?? [];
     const skipEntries = synth.filter((s) => s.outcome === 'auto_synth_disabled');
@@ -79,12 +79,12 @@ test("graph: 'map' close_session: auto-synth skipped, diagnostic emitted", async
   }
 });
 
-test("graph: 'discover' close_session: auto-synth runs (no skip diagnostic)", async () => {
+test("graph: 'discover' end_drive: auto-synth runs (no skip diagnostic)", async () => {
   const session = fakeSessionShell({ graph: 'discover', sessionId: 'sess-task-1' });
   session.performActionHistory = [];
   const restore = patchPool(session);
   try {
-    const result = await closeSession(session.id, { platform: 'pm-test' });
+    const result = await endDrive(session.id, { platform: 'pm-test' });
     assert.equal(result.ok, true);
     const synth = result._diagnostics?.synth ?? [];
     const skipEntries = synth.filter((s) => s.outcome === 'auto_synth_disabled');

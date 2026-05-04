@@ -2,7 +2,7 @@
 // synthesizeFallbacksOnClose was writing a provenance string into
 // notes.discovery, which the validator then rejected because `discovery`
 // isn't in the notes allowlist. Net effect: zero strategies landed from
-// an otherwise-successful close-session flow (observed in the
+// an otherwise-successful end-drive flow (observed in the
 // 2026-04-21T11-24 wikipedia CAPTCHA run).
 //
 // These tests assert the write is gone AND that auto-synth actually

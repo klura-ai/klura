@@ -104,7 +104,7 @@ function shouldSkipNoisyLiteralMatches(
       match_count: matches.length,
       distinct_host_paths: distinctHostPaths,
       advice:
-        'Typed literal matches too many captures across too many endpoints — likely a generic string (brand, domain, locale). Auto-save skipped; agent should pick the right endpoint via close-session review (capture_candidates list).',
+        'Typed literal matches too many captures across too many endpoints — likely a generic string (brand, domain, locale). Auto-save skipped; agent should pick the right endpoint via end-drive review (capture_candidates list).',
     },
   });
   return true;
@@ -156,7 +156,7 @@ function pushNoHttpMatchDiagnostic(
         offset: visitedHit?.m.offset,
         paramName: visitedHit?.paramName,
         advice:
-          'Literal appeared only in a top-level document URL — the SSR HTML signal: the page loads by navigating to an arg-templated URL and the data likely lives in the initial document response. The IDEAL save is `fetch` with `{baseUrl, endpoint: "/{{argName}}/...", response: {format: "html", extract: {...}}}` — one HTTP call, ~100ms warm, no browser. synth_recorded will still land a navigation-only recorded-path as a fallback, but prefer saving the fetch+html-extract explicitly via save_strategy before close_session. See klura://reference#fetch-schema.',
+          'Literal appeared only in a top-level document URL — the SSR HTML signal: the page loads by navigating to an arg-templated URL and the data likely lives in the initial document response. The IDEAL save is `fetch` with `{baseUrl, endpoint: "/{{argName}}/...", response: {format: "html", extract: {...}}}` — one HTTP call, ~100ms warm, no browser. synth_recorded will still land a navigation-only recorded-path as a fallback, but prefer saving the fetch+html-extract explicitly via save_strategy before end_drive. See klura://reference#fetch-schema.',
       },
     });
     return;
@@ -184,7 +184,7 @@ function pushNoHttpMatchDiagnostic(
  * decode, base64-unpack, or guess; the primitive reports what it found and the
  * agent picks up from there.
  */
-// Sync internally; kept with `async` at the call-site wrapper so close-session
+// Sync internally; kept with `async` at the call-site wrapper so end-drive
 // can await it uniformly alongside actually-async passes.
 // eslint-disable-next-line sonarjs/cognitive-complexity
 export function synthesizeFetchFromCaptures(
@@ -226,7 +226,7 @@ export function synthesizeFetchFromCaptures(
       // extracted data from. The LLM knows (it read the response body and
       // reported its content to the user); the runtime doesn't.
       //
-      // `close_session` surfaces a ranked candidate list via the review path
+      // `end_drive` surfaces a ranked candidate list via the review path
       // (see `computeCloseNag` in index.ts). The agent reviews candidate URLs +
       // body previews, picks the one carrying the data it reported, and calls
       // save_strategy explicitly. Second close tears down normally.
@@ -275,7 +275,7 @@ export function synthesizeFetchFromCaptures(
     // requests — hosts, headers, tracking params, analytics beacons — and the
     // "most-recent match wins" rule picks noise. If the literal matches > 20
     // HTTP entries across ≥ 3 distinct host+path combos, skip the auto-save;
-    // the runtime has no reliable anchor. The close-session refusal will
+    // the runtime has no reliable anchor. The end-drive refusal will
     // surface the data-load classifier's candidates instead, and the agent
     // picks from body_preview.
     if (shouldSkipNoisyLiteralMatches(matches, save, diag)) continue;

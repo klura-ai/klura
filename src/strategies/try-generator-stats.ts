@@ -11,7 +11,7 @@
 // diff in the context of iterations N-1 / N-2 ("converging", "stuck",
 // "oscillating") instead of as a raw byte offset with no gradient.
 //
-// The counter is per-session and cleared on close_session.
+// The counter is per-session and cleared on end_drive.
 
 export interface TryGeneratorStats {
   /** Every try_generator call against this session, regardless of args. */

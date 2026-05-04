@@ -67,7 +67,7 @@ export interface BrowserPool {
    * Close a session. The pool decides internally whether to tear down the
    * backend or return it to a warm slot for reuse.
    */
-  closeSession(sessionId: string): Promise<void>;
+  endDrive(sessionId: string): Promise<void>;
 
   /** Look up a session by id. Throws if unknown. */
   getSession(sessionId: string): Session;
@@ -160,7 +160,7 @@ export interface BrowserPool {
    * through to `createSession`.
    *
    * Returned sessions follow the borrow/release rules documented on
-   * `Session.borrowed`: `closeSession` is a no-op for listener-shared sessions
+   * `Session.borrowed`: `endDrive` is a no-op for listener-shared sessions
    * and a warm-slot return (without resetSession) for pool- warm sessions when
    * the release-time probe still passes.
    *
@@ -187,7 +187,7 @@ export interface BrowserPool {
    * — the session's lifecycle is still owned by the caller; the pool just gets
    * a weak reference so the checkout protocol can find it.
    *
-   * Unregister via the returned dispose function OR by calling `closeSession`
+   * Unregister via the returned dispose function OR by calling `endDrive`
    * on the session (which the listener does at teardown).
    *
    * Optional — test-stub pools may omit.
@@ -252,7 +252,7 @@ export interface Session {
    * the session's lifetime, populated by a default listener the driver attaches
    * at session creation. Separate from `streamWebSocketFrames` which is a live
    * callback surface for listener capabilities — this buffer exists so
-   * `close_session`'s diagnostic dump can preserve the frames for post-run
+   * `end_drive`'s diagnostic dump can preserve the frames for post-run
    * inspection on sites whose real work happens over WS (chat apps, real-time
    * dashboards, collaborative editors, MQTT-over-WS channels).
    *
@@ -266,7 +266,7 @@ export interface Session {
    * verbatim frame, kept out of the FIFO rotation so RE tools can refer
    * back to a specific frame across long sessions even after thousands of
    * new frames arrive. Populated by:
-   *   - `close_session`'s RE nag (auto-pins the target frame)
+   *   - `end_drive`'s RE nag (auto-pins the target frame)
    *   - `pin_ws_frame(session_id, {ws_i | ws_hash})` (explicit pin)
    * Capped at `WS_PINNED_FRAMES_CAP` entries per session (LRU eviction on
    * overflow). Resolver functions in response/network-log-shape.ts try this
@@ -352,12 +352,12 @@ export interface Session {
   /**
    * Every `perform_action` call the session has received so far. Source of
    * truth for auto-synthesizing a `recorded-path` fallback strategy at
-   * `close_session` time — the runtime replays this sequence to build a
+   * `end_drive` time — the runtime replays this sequence to build a
    * step-by-step replay of what the agent did during discovery, so the agent
    * never has to manually save a recorded-path themselves.
    *
    * Populated by the perform_action handler in index.ts AFTER the action
-   * executes successfully. Cleared on close_session (after synthesis runs).
+   * executes successfully. Cleared on end_drive (after synthesis runs).
    */
   performActionHistory?: PerformActionRecord[];
   /**
@@ -384,7 +384,7 @@ export interface Session {
   }>;
   /**
    * Per-session record of `<form>` elements observed in DOM snapshots.
-   * Flushed to working-dir as `dom_form_observed` events at close_session,
+   * Flushed to working-dir as `dom_form_observed` events at end_drive,
    * which folds them into the platform-level forms_seen inventory.
    * One entry per (url, action, method) observation; deduped at flush.
    */
@@ -402,7 +402,7 @@ export interface Session {
    * has `gateMutatingActions: true`. Subsequent matching `perform_action`
    * calls skip the consent prompt — kills the loop where each click on the
    * same target re-prompted with a fresh nonce. Cleared with the rest of
-   * session state on close_session.
+   * session state on end_drive.
    */
   gatedActionConsentCache?: Set<string>;
   /**
@@ -417,7 +417,7 @@ export interface Session {
   /**
    * Capability names saved successfully during this session, in save order.
    * Populated by `saveStrategy` when `sessionId` is passed. Source of truth for
-   * close_session auto-synthesis — partitions the performActionHistory by the
+   * end_drive auto-synthesis — partitions the performActionHistory by the
    * time window between saves so multi- capability sessions don't bleed actions
    * across capabilities.
    */
@@ -426,7 +426,7 @@ export interface Session {
    * Total `save_strategy` calls the agent made on this session, including
    * attempts that threw (audit rejection, validation failure). Incremented
    * unconditionally at the top of every saveStrategy entry — separate from
-   * `savedCapabilities`, which only records successes. close-session
+   * `savedCapabilities`, which only records successes. end-drive
    * compares these two: attempts > 0 AND savedCapabilities empty means the
    * agent tried to save and never landed one. Refuse to close without an
    * explicit ack so the agent doesn't accidentally leak a session whose
@@ -455,7 +455,7 @@ export interface Session {
    * Running total of extraction-tool-return character counts that the agent
    * actually saw during this session — a11y trees from start_session /
    * perform_action / get_a11y_tree, page text reads, etc. Feeds the
-   * close_session ungrounded-read advisory: for a declared read-shaped
+   * end_drive ungrounded-read advisory: for a declared read-shaped
    * capability (args declared, no write-shape actions), if this counter stayed
    * low AND no arg literal matched any XHR body / WS frame, the agent cannot
    * have grounded their answer in extracted content — so the handoff flags it.
@@ -483,7 +483,7 @@ export interface Session {
    */
   status?: import('../../session-phase/types').SessionStatus;
   /**
-   * LIFT mode selector. Controls what close_session does when a
+   * LIFT mode selector. Controls what end_drive does when a
    * declared capability is unresolved at session end.
    *
    *   - `'explicit_learn'` (default): interactive "let the user pick" mode.
@@ -493,7 +493,7 @@ export interface Session {
    *     recorded-path (~30s per warm call). Want me to try?" The agent
    *     asks, waits for user, then proceeds.
    *
-   *   - `'skip'`: no handoff at all — close_session just tears down, any
+   *   - `'skip'`: no handoff at all — end_drive just tears down, any
    *     auto-synthesized recorded-path still lands. Used when the caller
    *     has permanently opted out for this session.
    *
@@ -515,20 +515,20 @@ export interface Session {
    */
   staleStrategyCapabilities?: Set<string>;
   /**
-   * Number of close_session calls the agent has made on this session. The first
+   * Number of end_drive calls the agent has made on this session. The first
    * close may be rejected with a nag when the runtime detects the agent skipped
    * the reverse-engineer path on a WS-carried send (diagnostic
    * `literal_in_ws_frame_only` + no fetch/page-script saved + no RE-toolkit
    * use). Second and later closes always succeed.
    */
-  closeAttempts?: number;
+  endDriveAttempts?: number;
   /**
    * Per-session accumulator for discovery-artifact construction. Every tool
    * handler that does investigative work (inspect_ws_frame, try_generator,
    * get_js_source, get_send_encoder, find_in_page, get_network_log,
    * get_attribute) appends a neutral record of WHICH call was made (tool name +
    * args digest + outcome flag — never the response content) after completing
-   * its primary work. On save_strategy / close_session the
+   * its primary work. On save_strategy / end_drive the
    * strategies/discovery-artifact.ts module reads this and merges it into
    * <capability>.json for the next session to consume. Sub-arrays ring-cap at
    * 200 entries each to bound memory on long sessions.
@@ -536,11 +536,11 @@ export interface Session {
   artifactAccumulator?: ArtifactAccumulator;
   /**
    * Count of get_action_history tool calls this session. Surfaces whether the
-   * agent ever looked at action timing; used by close_session diagnostics.
+   * agent ever looked at action timing; used by end_drive diagnostics.
    */
   getActionHistoryCallCount?: number;
   /**
-   * LIFT phase state. Set by close_session when it returns the LIFT
+   * LIFT phase state. Set by end_drive when it returns the LIFT
    * (`phase: "lift"`) handoff response; tracks the agent's round count since
    * the role shift so the phase middleware can enforce the `lift.max_rounds`
    * budget.
@@ -624,7 +624,7 @@ export interface Session {
   /**
    * True when this session was handed out by `pool.tryCheckoutReadySession` — a
    * shared warm/listener-owned session the caller is borrowing, not owning.
-   * `pool.closeSession` on a borrowed session does NOT tear the session down;
+   * `pool.endDrive` on a borrowed session does NOT tear the session down;
    * it either returns it to its warm slot (pool-owned) or is a no-op
    * (listener-owned via `registerSharedSession`). Cold-spawned sessions leave
    * this undefined and follow the usual teardown path.
@@ -645,14 +645,14 @@ export interface ArtifactAccumulator {
   findInPageCalls: Array<{ needle_slug: string; matches_count: number; at: string }>;
   getAttributeCalls: Array<{ selector_digest: string; attr: string; at: string }>;
   getNetworkLogCalls: Array<{ filter_digest: string; full: boolean; at: string }>;
-  // RE toolkit call counters. Drive close_session's nag suppression: if the
+  // RE toolkit call counters. Drive end_drive's nag suppression: if the
   // agent invoked any of these during the session, we infer an RE attempt was
   // made and don't pester them at close-time.
   /**
    * Per-call `js_eval` record. The persisted-to-disk shape is just
    * `{expression_digest, at}` (privacy: results may carry tokens). The
    * in-memory `expression` and `result_string` fields are populated for
-   * the duration of the session and consumed by close-session auto-synth's
+   * the duration of the session and consumed by end-drive auto-synth's
    * js-eval auto-promote pass (matches result strings to captured header
    * values, synthesizes implicit verified_expressions). Both fields are
    * scrubbed before any artifact / logbook write.
@@ -670,7 +670,7 @@ export interface ArtifactAccumulator {
   evaluateOnFrameCalls: Array<{ expression_digest: string; ok: boolean; at: string }>;
   /**
    * Typed, prose-length hints the agent has dropped this session. Persisted to
-   * the discovery artifact at close_session for the next session to read. Keyed
+   * the discovery artifact at end_drive for the next session to read. Keyed
    * by capability; per-capability ring cap 20 entries.
    */
   notes: Record<
@@ -702,7 +702,7 @@ export interface ArtifactAccumulator {
    * Forward-looking pointers the agent recorded via add_resume_pointer, keyed
    * by the capability the agent said they apply to. Having the capability on
    * the pointer (rather than a flat session-wide array) matters: without it,
-   * close_session can't tell which capability's artifact should carry the
+   * end_drive can't tell which capability's artifact should carry the
    * pointer, and sessions where no save succeeded would lose agent-supplied
    * pointers entirely.
    */
@@ -723,7 +723,7 @@ export interface ArtifactAccumulator {
 /**
  * Single entry in `Session.performActionHistory`. The action, selector, and
  * optional value captured as-passed by the agent — these translate 1:1 into
- * recorded-path steps during close_session auto-synthesis.
+ * recorded-path steps during end_drive auto-synthesis.
  */
 export interface PerformActionRecord {
   at: number;
@@ -742,7 +742,7 @@ export interface PerformActionRecord {
   /**
    * Structural skeleton of the page at the moment this action fired. Stamped
    * only on mutating actions (click / type / fill_editor / select); absent on
-   * navigate / key_press / wait. At close_session time, synthesize-on-close
+   * navigate / key_press / wait. At end_drive time, synthesize-on-close
    * copies this onto the generated recorded-path step as `_fingerprint`, and
    * the warm-execute step loop compares it against a live re-capture to
    * detect that the page drifted between discovery and warm run. Runtime-

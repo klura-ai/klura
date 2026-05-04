@@ -1,6 +1,6 @@
-// Auto-synthesis of fallback strategies on close_session.
+// Auto-synthesis of fallback strategies on end_drive.
 //
-// Run at the tail of `closeSession`, before cookies are written and the session
+// Run at the tail of `endDrive`, before cookies are written and the session
 // torn down. Two passes:
 //
 // 1. Fetch / page-script synthesis — joins typed literals to captured traffic
@@ -12,7 +12,7 @@
 // saved a durable UI-flow fallback.
 //
 // Both passes are idempotent + best-effort: an existing save on disk wins, a
-// synthesis error is swallowed (we never want close_session to fail because a
+// synthesis error is swallowed (we never want end_drive to fail because a
 // fallback failed to write).
 
 import type { BrowserDriver } from '../../drivers/interface';
@@ -162,7 +162,7 @@ export async function synthesizeFallbacksOnClose(
  * headers, template the literal, mint a js-eval prereq.
  *
  * `result_string` lives only in-memory on the session accumulator and is
- * never persisted to disk — this collection happens during close-session
+ * never persisted to disk — this collection happens during end-drive
  * synth, before the artifact / logbook flush. After synth runs, the
  * accumulator entry's `result_string` field rides out with the session
  * teardown without ever reaching disk.

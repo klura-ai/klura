@@ -43,7 +43,7 @@ test('browser prereq steps interpolate url/selector/value before driving the pag
     driverFor() {
       return driver;
     },
-    async closeSession() {},
+    async endDrive() {},
   };
 
   const result = await runPrerequisites({
@@ -121,7 +121,7 @@ test('cache-hit js-eval prereq returns cached value without driving the page', a
     driverFor() {
       return driver;
     },
-    async closeSession() {},
+    async endDrive() {},
   };
 
   const result = await runPrerequisites({

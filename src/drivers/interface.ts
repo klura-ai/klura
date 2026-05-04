@@ -752,7 +752,7 @@ export abstract class BrowserDriver {
   }
 
   /**
-   * Idempotent teardown. Called by close_session before storage save — resume
+   * Idempotent teardown. Called by end_drive before storage save — resume
    * any active pause, remove all breakpoints, disable the Debugger domain. Must
    * not throw on a session that never touched the debugger.
    */

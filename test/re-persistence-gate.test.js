@@ -1,15 +1,15 @@
 // Close-session audit: re_persistence Classifier coverage.
 //
 // Sessions that made RE tool calls without persisting any findings must be
-// blocked from close_session until they either persist or echo the audit
+// blocked from end_drive until they either persist or echo the audit
 // token + answers.re_persistence.acknowledge_no_progress = true. Tests
-// exercise closeSessionAudit.process() directly — pure pump, no driver.
+// exercise endDriveAudit.process() directly — pure pump, no driver.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { closeSessionAudit, RE_CALL_THRESHOLD, ACTION_CALL_THRESHOLD } = await import(
-  '../dist/audit/close-session.js'
+const { endDriveAudit, RE_CALL_THRESHOLD, ACTION_CALL_THRESHOLD } = await import(
+  '../dist/audit/end-drive.js'
 );
 const { __resetStore } = await import('../dist/gate/store.js');
 
@@ -24,7 +24,7 @@ function makePayload(overrides = {}) {
     sessionId: 'sess-test',
     platform: 'p',
     liftMode: undefined,
-    closeAttempts: 0,
+    endDriveAttempts: 0,
     declaredCapabilityCount: 1, // sidestep declaration detector
     writeActions: [],
     reCallCount: RE_CALL_THRESHOLD + 1,
@@ -37,13 +37,18 @@ function makePayload(overrides = {}) {
     saveSuccessCount: 0,
     skipDeclarationGuard: false,
     rePersistenceThreshold: DISCOVER_THRESHOLD,
+    // Sidestep the triage_acknowledgment classifier — these tests target
+    // re_persistence specifically. Setting triageWouldFire: true tells the
+    // audit "the triage handoff will fire after this audit passes," which
+    // is the condition under which triage_acknowledgment doesn't gate.
+    triageWouldFire: true,
     ...overrides,
   };
 }
 
 test('RE-without-persist → first close rejects with token + items', () => {
   __resetStore();
-  const result = closeSessionAudit.process(makePayload(), {}, {});
+  const result = endDriveAudit.process(makePayload(), {}, {});
   assert.equal(result.status, 'rejected');
   const r = result.rejection;
   assert.equal(r.reason, 'pending');
@@ -57,7 +62,7 @@ test('RE-without-persist → first close rejects with token + items', () => {
 
 test('RE-then-persist → audit commits without classifier firing', () => {
   __resetStore();
-  const result = closeSessionAudit.process(
+  const result = endDriveAudit.process(
     makePayload({ persistCallCount: 1 }),
     {},
     {},
@@ -67,7 +72,7 @@ test('RE-then-persist → audit commits without classifier firing', () => {
 
 test('RE-below-threshold → audit commits without classifier firing', () => {
   __resetStore();
-  const result = closeSessionAudit.process(
+  const result = endDriveAudit.process(
     makePayload({ reCallCount: RE_CALL_THRESHOLD - 1 }),
     {},
     {},
@@ -78,8 +83,8 @@ test('RE-below-threshold → audit commits without classifier firing', () => {
 test('valid token + acknowledge_no_progress: true → committed', () => {
   __resetStore();
   const payload = makePayload();
-  const first = closeSessionAudit.process(payload, {}, {});
-  const second = closeSessionAudit.process(payload, {}, {
+  const first = endDriveAudit.process(payload, {}, {});
+  const second = endDriveAudit.process(payload, {}, {
     token: first.rejection.token,
     answers: { re_persistence: { acknowledge_no_progress: true } },
   });
@@ -88,8 +93,8 @@ test('valid token + acknowledge_no_progress: true → committed', () => {
 
 test('wrong token → re-mints fresh token', () => {
   __resetStore();
-  closeSessionAudit.process(makePayload(), {}, {});
-  const result = closeSessionAudit.process(makePayload(), {}, {
+  endDriveAudit.process(makePayload(), {}, {});
+  const result = endDriveAudit.process(makePayload(), {}, {
     token: 'NOT_A_REAL_TOKEN',
     answers: { re_persistence: { acknowledge_no_progress: true } },
   });
@@ -101,8 +106,8 @@ test('wrong token → re-mints fresh token', () => {
 test('valid token but answer missing acknowledge_no_progress → answers_inconsistent', () => {
   __resetStore();
   const payload = makePayload();
-  const first = closeSessionAudit.process(payload, {}, {});
-  const second = closeSessionAudit.process(payload, {}, {
+  const first = endDriveAudit.process(payload, {}, {});
+  const second = endDriveAudit.process(payload, {}, {
     token: first.rejection.token,
     answers: { re_persistence: {} },
   });
@@ -112,12 +117,12 @@ test('valid token but answer missing acknowledge_no_progress → answers_inconsi
   assert.ok(issues.some((s) => /acknowledge_no_progress/.test(s)));
 });
 
-test('hashFields scoping: closeAttempts bump does NOT invalidate re_persistence token', () => {
+test('hashFields scoping: endDriveAttempts bump does NOT invalidate re_persistence token', () => {
   __resetStore();
   const payload = makePayload();
-  const first = closeSessionAudit.process(payload, {}, {});
-  const second = closeSessionAudit.process(
-    { ...payload, closeAttempts: 1 },
+  const first = endDriveAudit.process(payload, {}, {});
+  const second = endDriveAudit.process(
+    { ...payload, endDriveAttempts: 1 },
     {},
     {
       token: first.rejection.token,
@@ -134,8 +139,8 @@ test('hashFields scoping: closeAttempts bump does NOT invalidate re_persistence 
 test('hashFields scoping: a fresh RE call DOES invalidate the token', () => {
   __resetStore();
   const payload = makePayload();
-  const first = closeSessionAudit.process(payload, {}, {});
-  const second = closeSessionAudit.process(
+  const first = endDriveAudit.process(payload, {}, {});
+  const second = endDriveAudit.process(
     { ...payload, reCallCount: payload.reCallCount + 1 },
     {},
     {
@@ -151,7 +156,7 @@ test('hashFields scoping: a fresh RE call DOES invalidate the token', () => {
 
 test('map graph: actionCallCount above threshold + zero persist → fires', () => {
   __resetStore();
-  const result = closeSessionAudit.process(
+  const result = endDriveAudit.process(
     makePayload({
       rePersistenceThreshold: MAP_THRESHOLD,
       reCallCount: 0,
@@ -168,7 +173,7 @@ test('map graph: actionCallCount above threshold + zero persist → fires', () =
 
 test('map graph: below action threshold and below RE threshold → no fire', () => {
   __resetStore();
-  const result = closeSessionAudit.process(
+  const result = endDriveAudit.process(
     makePayload({
       rePersistenceThreshold: MAP_THRESHOLD,
       reCallCount: 0,
@@ -184,7 +189,7 @@ test('map graph: below action threshold and below RE threshold → no fire', () 
 
 test('declaration_required: write actions + no declared capability + attempt 0 → fires', () => {
   __resetStore();
-  const result = closeSessionAudit.process(
+  const result = endDriveAudit.process(
     makePayload({
       declaredCapabilityCount: 0,
       writeActions: [{ action: 'type', value_preview: 'hello' }],
@@ -212,7 +217,7 @@ test('declaration_required: ackReason "none" — no ack-through path', () => {
     writeActions: [{ action: 'type', value_preview: 'hi' }],
     reCallCount: 0,
   });
-  const result = closeSessionAudit.process(payload, {}, {
+  const result = endDriveAudit.process(payload, {}, {
     acks: { capability_declaration_required: 'I have my reasons' },
   });
   // Even with an ack, the detector blocks because ackReason: 'none'.
@@ -226,14 +231,14 @@ test('declaration_required: ackReason "none" — no ack-through path', () => {
   assert.ok(true, ackIssue ? `ack issue: ${ackIssue}` : 'rejected as expected');
 });
 
-test('declaration_required: closeAttempts >= 2 → guard releases (force-tear-down attempt)', () => {
+test('declaration_required: endDriveAttempts >= 2 → guard releases (force-tear-down attempt)', () => {
   __resetStore();
-  const result = closeSessionAudit.process(
+  const result = endDriveAudit.process(
     makePayload({
       declaredCapabilityCount: 0,
       writeActions: [{ action: 'type' }],
       reCallCount: 0,
-      closeAttempts: 2,
+      endDriveAttempts: 2,
     }),
     {},
     {},
@@ -243,7 +248,7 @@ test('declaration_required: closeAttempts >= 2 → guard releases (force-tear-do
 
 test('declaration_required: liftMode "skip" → guard releases', () => {
   __resetStore();
-  const result = closeSessionAudit.process(
+  const result = endDriveAudit.process(
     makePayload({
       declaredCapabilityCount: 0,
       writeActions: [{ action: 'type' }],
@@ -258,7 +263,7 @@ test('declaration_required: liftMode "skip" → guard releases', () => {
 
 test('declaration_required: skipDeclarationGuard set (e.g. map graph) → guard releases', () => {
   __resetStore();
-  const result = closeSessionAudit.process(
+  const result = endDriveAudit.process(
     makePayload({
       declaredCapabilityCount: 0,
       writeActions: [{ action: 'type' }],
@@ -273,7 +278,7 @@ test('declaration_required: skipDeclarationGuard set (e.g. map graph) → guard 
 
 test('declaration_required: navigation/click without write actions → guard skips', () => {
   __resetStore();
-  const result = closeSessionAudit.process(
+  const result = endDriveAudit.process(
     makePayload({
       declaredCapabilityCount: 0,
       writeActions: [],

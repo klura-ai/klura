@@ -610,7 +610,7 @@ interface SessionLite {
  * resolution wires up the dynamic refresh at execute time.
  *
  * Same structural signal that `collectListingCandidates` surfaces in the
- * close_session handoff — but `close_session` isn't always reached
+ * end_drive handoff — but `end_drive` isn't always reached
  * before save_strategy (agents that save directly skip the handoff). This
  * detector fires at save time, which every save passes through, so the
  * hint can't be missed.

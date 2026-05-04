@@ -31,7 +31,7 @@ export interface AddResumePointerArgs {
 /**
  * Agent-initiated forward-looking pointer. Appends a typed reference (js_source
  * URL+line, request_index, frame_index, page_url, other) to the session's
- * artifact accumulator, scoped to the named capability so close_session knows
+ * artifact accumulator, scoped to the named capability so end_drive knows
  * which artifact to persist it on even when no `save_strategy` succeeded during
  * this session.
  */

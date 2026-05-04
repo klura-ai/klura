@@ -418,7 +418,7 @@ export class ListenerManager extends EventEmitter {
     // this session (page + WS already live) instead of cold- spawning. Purely
     // additive: the listener still owns the session's lifetime. The
     // registration drops automatically when the session is torn down
-    // (closeSession clears shared-registry entries).
+    // (endDrive clears shared-registry entries).
     if (this.pool.registerSharedSession) {
       this.pool.registerSharedSession(session, listener.platform);
     }
@@ -649,7 +649,7 @@ export class ListenerManager extends EventEmitter {
           }
           if (listener.browserSessionId && this.pool) {
             try {
-              await this.pool.closeSession(listener.browserSessionId);
+              await this.pool.endDrive(listener.browserSessionId);
             } catch {
               /* ignore */
             }
@@ -741,7 +741,7 @@ export class ListenerManager extends EventEmitter {
     }
     if (listener.browserSessionId && this.pool) {
       try {
-        await this.pool.closeSession(listener.browserSessionId);
+        await this.pool.endDrive(listener.browserSessionId);
       } catch {
         /* best-effort */
       }

@@ -6,7 +6,7 @@
 // round. When the agent ignores it, the runtime emits a `runtime_hint` on the
 // try_generator response nudging them to use the starter first.
 //
-// Module-level state because the cache is short-lived (cleared on closeSession)
+// Module-level state because the cache is short-lived (cleared on endDrive)
 // and there is exactly one process-local instance per Node runtime. Keeping it
 // on the Pool would force every Pool implementation (local + docker) to ship
 // the same plumbing for a detection-only signal that has no remote-side

@@ -199,7 +199,7 @@ test('unregisterInterruptionHandler: no-op on unknown', () => {
 
 // resolveInterruption (runtime-level wrapper) mints tokens on handover and
 // stashes pending state per-session. Tests at this layer need a real
-// session id — use klura.startSession / closeSession would be overkill, so
+// session id — use klura.startSession / endDrive would be overkill, so
 // we go through the exported API functions that accept session_id and
 // rely on the pool.getSession lookup failing gracefully. Instead: we
 // exercise the lower-level `mintInterruptionToken` + `assertNoPendingInterruption`

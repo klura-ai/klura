@@ -8,7 +8,7 @@
 //     the real page (all-empty rejection — auth wall case)
 //   - A strategy where ONE selector doesn't resolve (targeted rejection)
 //   - Successful probe returning without throwing when selectors match
-//   - Session lifecycle: exactly one createSession/closeSession pair
+//   - Session lifecycle: exactly one createSession/endDrive pair
 //   - The probe uses the origin-first navigate pattern (not about:blank)
 
 import test from 'node:test';
@@ -60,7 +60,7 @@ function mockPool(driver) {
       sessions.set(session.id, session);
       return session;
     },
-    async closeSession(id) {
+    async endDrive(id) {
       this.sessionsClosed++;
       sessions.delete(id);
     },

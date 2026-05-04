@@ -72,7 +72,7 @@ function makeStubPool(onClickThrow) {
     driverFor() {
       return driver;
     },
-    async closeSession() {},
+    async endDrive() {},
     getSession() {
       return session;
     },

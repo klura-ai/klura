@@ -97,7 +97,7 @@ test('warm hit: second createSession for same platform reuses the Session', asyn
   const firstObjRef = s1;
   const originalId = s1.id;
 
-  await pool.closeSession(originalId);
+  await pool.endDrive(originalId);
   assert.strictEqual(driver.calls.destroySession, 0, 'warm close should not destroy');
 
   const s2 = await pool.createSession({ platform: 'alpha' });
@@ -117,7 +117,7 @@ test('warm miss: different platform cold-spawns a fresh Session', async () => {
   });
 
   const alpha = await pool.createSession({ platform: 'alpha' });
-  await pool.closeSession(alpha.id);
+  await pool.endDrive(alpha.id);
 
   const beta = await pool.createSession({ platform: 'beta' });
   assert.strictEqual(driver.calls.createSession, 2, 'new platform should cold-spawn');
@@ -139,7 +139,7 @@ test('idle TTL expiry: stale warm entries are evicted by the sweeper', async () 
   });
 
   const s1 = await pool.createSession({ platform: 'alpha' });
-  await pool.closeSession(s1.id);
+  await pool.endDrive(s1.id);
   assert.ok(pool._warm.get(warmKey('alpha')), 'warm slot should exist post-close');
 
   // Manually age the entry past the TTL. The sweeper body runs inside
@@ -173,12 +173,12 @@ test('LRU eviction: exceeding maxContexts drops the oldest idle slot', async () 
   });
 
   const a = await pool.createSession({ platform: 'alpha' });
-  await pool.closeSession(a.id);
+  await pool.endDrive(a.id);
   // Sleep 10ms so the lastUsedAt timestamps differ enough that LRU
   // ordering is deterministic.
   await new Promise((r) => setTimeout(r, 10));
   const b = await pool.createSession({ platform: 'beta' });
-  await pool.closeSession(b.id);
+  await pool.endDrive(b.id);
 
   assert.strictEqual(pool._warm.size, 2);
 
@@ -191,7 +191,7 @@ test('LRU eviction: exceeding maxContexts drops the oldest idle slot', async () 
   assert.ok(pool._warm.has(warmKey('gamma')), 'gamma should be the new slot');
   assert.strictEqual(driver.calls.destroySession, 1, 'evicted entry should be destroyed');
 
-  await pool.closeSession(c.id);
+  await pool.endDrive(c.id);
   await pool.shutdown();
 });
 
@@ -203,7 +203,7 @@ test('crash recovery on checkout: resetSession throws, falls back to cold spawn'
   });
 
   const s1 = await pool.createSession({ platform: 'alpha' });
-  await pool.closeSession(s1.id);
+  await pool.endDrive(s1.id);
   assert.ok(pool._warm.has(warmKey('alpha')));
 
   // Simulate a crashed context: resetSession throws on the next
@@ -225,7 +225,7 @@ test('crash recovery on checkout: resetSession throws, falls back to cold spawn'
   await pool.shutdown();
 });
 
-test('warm disabled: closeSession destroys immediately and createSession always cold-spawns', async () => {
+test('warm disabled: endDrive destroys immediately and createSession always cold-spawns', async () => {
   const { driver, DriverClass } = makeMockDriver();
   const pool = new Pool(DriverClass, {
     idleTimeout: 300,
@@ -233,7 +233,7 @@ test('warm disabled: closeSession destroys immediately and createSession always 
   });
 
   const s1 = await pool.createSession({ platform: 'alpha' });
-  await pool.closeSession(s1.id);
+  await pool.endDrive(s1.id);
   assert.strictEqual(driver.calls.destroySession, 1);
   assert.strictEqual(pool._warm.size, 0);
 
@@ -259,13 +259,13 @@ test('js-eval cache survives warm close, dropped on LRU eviction', async () => {
   // is a "release to idle", not a teardown.
   const a = await pool.createSession({ platform: 'alpha' });
   pool.jsEvalCache.set('alpha', 'tok', 'alpha-v1', null);
-  await pool.closeSession(a.id);
+  await pool.endDrive(a.id);
   assert.strictEqual(pool.jsEvalCache.get('alpha', 'tok')?.value, 'alpha-v1');
 
   await new Promise((r) => setTimeout(r, 10));
   const b = await pool.createSession({ platform: 'beta' });
   pool.jsEvalCache.set('beta', 'tok', 'beta-v1', null);
-  await pool.closeSession(b.id);
+  await pool.endDrive(b.id);
 
   // Third platform forces LRU eviction of alpha. Cache for alpha must
   // be dropped along with the warm context.
@@ -277,7 +277,7 @@ test('js-eval cache survives warm close, dropped on LRU eviction', async () => {
     'beta-v1',
     'beta cache still live',
   );
-  await pool.closeSession(c.id);
+  await pool.endDrive(c.id);
   await pool.shutdown();
 });
 
@@ -290,7 +290,7 @@ test('js-eval cache dropped on pool shutdown', async () => {
 
   const a = await pool.createSession({ platform: 'alpha' });
   pool.jsEvalCache.set('alpha', 'tok', 'alpha-v1', null);
-  await pool.closeSession(a.id);
+  await pool.endDrive(a.id);
   assert.strictEqual(pool.jsEvalCache.get('alpha', 'tok')?.value, 'alpha-v1');
 
   await pool.shutdown();

@@ -1,4 +1,4 @@
-// Minimal triage bundle for close_session's LIFT handoff. Returns only
+// Minimal triage bundle for end_drive's LIFT handoff. Returns only
 // cross-session facts the LLM cannot re-derive from this session's captures:
 // the capability's current saved tier, a summary of prior lift attempts, and
 // the capability's own discovery artifact (the agent's scratchpad from earlier

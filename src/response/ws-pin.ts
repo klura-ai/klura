@@ -15,7 +15,7 @@
 // accept `ws_i`; hash wins when both are present.
 //
 // 2. **Pinned slots** — a small per-session map (cap 8) of `ws_hash → verbatim
-// WebSocketFrame`. Frames land in the map via: - `close_session`'s RE nag
+// WebSocketFrame`. Frames land in the map via: - `end_drive`'s RE nag
 // (auto-pin of `signal.ws_i`) - the explicit `pin_ws_frame` tool and stay
 // available for lookup even after the ring has rotated past them. Resolver
 // functions try the pinned map first, then the ring.

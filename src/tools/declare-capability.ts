@@ -9,7 +9,7 @@ export interface DeclareCapabilityArgs {
 
 /**
  * Declare a capability the agent is about to discover on this session. Used by
- * the runtime at close_session to partition perform_action history per
+ * the runtime at end_drive to partition perform_action history per
  * capability and auto-derive page-script/fetch strategies by joining typed
  * literals to captured traffic. Also the declaration surface for
  * multi-capability sessions (call once per capability). For single-capability

@@ -11,7 +11,7 @@ const COMMANDS = {
   'action': 'Perform action (click/type/select)',
   'network-log': 'Show intercepted network requests',
   'screenshot': 'Take page screenshot',
-  'close-session': 'Close browser session',
+  'end-drive': 'Close browser session',
   'save-strategy': 'Save a strategy from stdin',
   'execute': 'Execute a saved strategy',
   'start-remote': 'Start remote viewer (returns URL for user to interact)',
@@ -194,9 +194,9 @@ async function main() {
         break;
       }
 
-      case 'close-session': {
+      case 'end-drive': {
         const sessionId = args[1];
-        if (!sessionId) { console.error('Usage: klura close-session <sessionId> [--platform name]'); process.exit(1); }
+        if (!sessionId) { console.error('Usage: klura end-drive <sessionId> [--platform name]'); process.exit(1); }
         const platform = parseFlag('--platform');
         out(await sendToDaemon('POST', '/session/close', { sessionId, platform }));
         break;

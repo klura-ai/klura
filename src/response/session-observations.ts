@@ -16,7 +16,7 @@
 // Module-level state follows the existing pattern used by: -
 // saveRejectionsPerSession (skills.ts:~2754) - starter-cache
 // (response/starter-cache.ts) - _tryGeneratorStats (Pool) All cleared on
-// close_session via symmetric `clearForSession` helpers.
+// end_drive via symmetric `clearForSession` helpers.
 
 import type { LookupCandidate } from './lookup-classifier';
 
@@ -324,7 +324,7 @@ export function getCandidateCount(sessionId: string): number {
 /** Record the raw captured bytes for a request so match paths can do
  * exact substring matching against caller-declared literals. The index is
  * shared lineage with `_observations` — same session key, same
- *  PER_SESSION_CAP, cleared together on close_session. */
+ *  PER_SESSION_CAP, cleared together on end_drive. */
 export function recordRawCapture(
   sessionId: string,
   record: {
@@ -424,7 +424,7 @@ export function findRawCaptureMatches(
 }
 
 /** Clear all accumulated candidates for a session. Called from
- *  `closeSession` in index.ts (pattern matches clearStartersForSession). */
+ *  `endDrive` in index.ts (pattern matches clearStartersForSession). */
 export function clearForSession(sessionId: string): void {
   _observations.delete(sessionId);
   _rawCaptures.delete(sessionId);

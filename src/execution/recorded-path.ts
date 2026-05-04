@@ -153,7 +153,7 @@ export async function replayRecordedPathToAnchor(
       try {
         await runResolvedRecordedStep(driver, session, resolved);
       } catch (err) {
-        await pool.closeSession(session.id).catch(() => {});
+        await pool.endDrive(session.id).catch(() => {});
         return {
           ok: false,
           reason: `step_failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -173,7 +173,7 @@ export async function replayRecordedPathToAnchor(
     }
     return { ok: true, session };
   } catch (err) {
-    await pool.closeSession(session.id).catch(() => {});
+    await pool.endDrive(session.id).catch(() => {});
     return {
       ok: false,
       reason: `partial_replay_error: ${err instanceof Error ? err.message : String(err)}`,
@@ -704,7 +704,7 @@ async function executeSteps(
     };
   } finally {
     if (!keepSession) {
-      await pool.closeSession(session.id);
+      await pool.endDrive(session.id);
     }
   }
 }

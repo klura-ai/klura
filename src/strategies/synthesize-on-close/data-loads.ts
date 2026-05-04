@@ -1,4 +1,4 @@
-// Data-load candidate enumeration for the close_session review path. Separate
+// Data-load candidate enumeration for the end_drive review path. Separate
 // concern from the synth pipeline: when a capability was declared without
 // typed-literal args, the agent needs to explicitly pick the right endpoint
 // from a ranked list of data-load XHRs.
@@ -11,7 +11,7 @@ import { stringifyOrEmpty } from './helpers';
 import type { ParamObservation } from '../../response/session-observations';
 
 /**
- * Candidate shape surfaced in the `close_session` review response. The agent
+ * Candidate shape surfaced in the `end_drive` review response. The agent
  * reads `body_preview` to identify which request carried the data it reported
  * to the user, picks, and calls save_strategy against the chosen URL.
  */
@@ -44,7 +44,7 @@ const BODY_PREVIEW_MAX = 400;
 
 /**
  * Narrow the session's intercepted requests to a ranked candidate list of
- * data-load XHRs. Used by `close_session`'s review path: when a capability was
+ * data-load XHRs. Used by `end_drive`'s review path: when a capability was
  * declared without typed-literal args, the agent needs to explicitly pick the
  * right endpoint. This function enumerates and ranks; it does NOT save.
  *
@@ -125,7 +125,7 @@ export function collectDataLoadCandidates(
  * observed `(urlParam, value, label)` triples, AND an earlier capture
  * served a response whose body contains all those `value` strings — that
  * earlier capture IS the listing endpoint for this enum. Surfaced
- * alongside `candidate_xhrs` in the close_session handoff so the agent
+ * alongside `candidate_xhrs` in the end_drive handoff so the agent
  * sees the listing while planning lifts and naturally factors it as a
  * sibling capability with `notes.params.<X>.source: "capability:list_<entity>"`
  * (which the runtime resolves at execute time per execution.ts'

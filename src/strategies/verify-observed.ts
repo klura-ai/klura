@@ -375,7 +375,7 @@ export function findUnobservedStrategyUrls(
         `Common causes: the session never authenticated successfully (auth wall, expired storage_state); ` +
         `the page crashed before any XHR fired; the agent skipped DRIVE entirely. ` +
         `Honest fixes: (a) re-drive the session until the real send fires and is captured in the network log; ` +
-        `(b) close_session and classify as tool_error / auth_required so a future run can refresh storage_state; ` +
+        `(b) end_drive and classify as tool_error / auth_required so a future run can refresh storage_state; ` +
         `(c) if the capability genuinely needs no in-page traffic (e.g. saving a page-extract from static HTML), ` +
         `document why in notes.discovery before retrying. ` +
         `Do not save URLs from memory.`,

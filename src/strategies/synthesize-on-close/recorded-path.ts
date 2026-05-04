@@ -231,7 +231,7 @@ export function synthesizeRecordedPaths(
       attachSaveWarningsToStrategy(strategy, [
         {
           kind: 'read_nav_fallback',
-          message: `Auto-synth saved this as recorded-path because no XHR carried the data and the capability wasn't explicitly saved before close_session. For server-rendered HTML reads (data in the initial document response at navigate-time), fetch + response.format:"html" + extract is ~100ms warm vs ~5s browser replay.`,
+          message: `Auto-synth saved this as recorded-path because no XHR carried the data and the capability wasn't explicitly saved before end_drive. For server-rendered HTML reads (data in the initial document response at navigate-time), fetch + response.format:"html" + extract is ~100ms warm vs ~5s browser replay.`,
           hint: `Next session: inspect the initial document response via get_network_log, then save_strategy with strategy:"fetch", endpoint:"/{{${navLiteralMatch.name}}}", response:{format:"html", extract:{...}}. See klura://reference#fetch-schema.`,
         },
       ]);

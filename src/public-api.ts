@@ -112,7 +112,7 @@ function extractRenderVerbatim(result: unknown): { block: TextBlock | null; rest
  * image blocks so vision-capable models can actually see them.
  *
  * When the result carries `_session_obligation` (mcp-attached when a
- * mutating session has not yet saved or close_session'd), that message
+ * mutating session has not yet saved or end_drive'd), that message
  * is hoisted into a leading `[klura obligation]: <message>` text block
  * and stripped from the JSON-stringified rest. Surfacing it as a
  * top-level directive ahead of the tool's payload prevents it from

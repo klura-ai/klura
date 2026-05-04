@@ -217,7 +217,7 @@ export async function probeStrategySelectors({ data, platform, pool }: ProbeArgs
       nodeIncompatReason = 'wsOpen.steps requires a browser';
     }
   } finally {
-    await pool.closeSession(session.id);
+    await pool.endDrive(session.id);
   }
 
   // Batched prereq failures — if any individual prereq probe threw, we
