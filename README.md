@@ -62,7 +62,17 @@ The next time your agent needs the same task, it does not rediscover the page. I
 
 ## Quick Start
 
-Add klura to your MCP client — Claude Code, Claude Desktop, Cursor, Windsurf, OpenClaw, or any MCP-compatible host — then restart the client:
+Add klura to your MCP client — Claude Code, Claude Desktop, Cursor, Windsurf, OpenClaw, or any MCP-compatible host.
+
+### Claude Code
+
+The fastest path is the CLI:
+
+```bash
+claude mcp add klura -- npx -y @klura/mcp
+```
+
+That registers klura at user scope. To install per-project, drop it into `.mcp.json` at the repo root:
 
 ```json
 {
@@ -74,6 +84,38 @@ Add klura to your MCP client — Claude Code, Claude Desktop, Cursor, Windsurf, 
   }
 }
 ```
+
+You can also edit `~/.claude.json` directly, but `claude mcp add` is the supported path. After install, run `claude mcp list` to confirm klura is registered.
+
+### Claude Desktop, Cursor, Windsurf, OpenClaw
+
+These hosts share the same MCP config shape. Drop the snippet into the host's MCP config file (e.g. `claude_desktop_config.json` for Claude Desktop) and restart the client:
+
+```json
+{
+  "mcpServers": {
+    "klura": {
+      "command": "npx",
+      "args": ["-y", "@klura/mcp"]
+    }
+  }
+}
+```
+
+### From a local checkout (development)
+
+If you're working on klura itself, link the local build into your global path so MCP hosts and the `klura` CLI both see your changes:
+
+```bash
+cd runtime
+npm install
+npm run build
+npm link
+```
+
+After every code change, re-run `npm run build` and restart the daemon: `klura restart-runtime --force` (or `pkill -f 'klura.*daemon'`).
+
+### Try it
 
 Now ask your agent to do a website task:
 
@@ -536,6 +578,12 @@ You can edit the file directly or ask your agent to use klura's configuration to
 - `describe_config`
 - `configure`
 - `restart_runtime`
+
+A few knobs that are worth knowing about up front:
+
+- `pool.driver` (default unset → bundled Playwright driver) — switches the browser driver. Set to `"@klura/driver-playwright-stealth"` to enable stealth fingerprint patches (puppeteer-extra-plugin-stealth) for sites with stricter bot detection. BYO drivers can be installed by package name or absolute path.
+- `remote.auto_open` (`"always" | "on_local" | "never"`, default `"on_local"`) — when the remote viewer URL is reachable from the runtime host, klura spawns the OS URL handler so your default browser opens the viewer automatically. Skips the LLM-relay channel where long signed URLs tend to get a single byte garbled. Set to `"never"` for headless / SSH setups.
+- `remote.short_url` (boolean, default `true`) — surface a short single-use redirect URL (≈16 chars, 60s TTL) to the agent instead of the full JWT URL. Survives chat-renderer rewrites where the long URL doesn't.
 
 See [docs/run-lifecycle.md#settings-reference-kluraconfigjson](docs/run-lifecycle.md#settings-reference-kluraconfigjson) and [REFERENCE.md#configure](REFERENCE.md#configure).
 
