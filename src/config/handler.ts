@@ -44,6 +44,25 @@ export interface RemoteConfig {
   publicUrl?: string;
   timeout?: number;
   prompt?: string;
+  /**
+   * Auto-open the viewer URL in the user's default browser at session
+   * start. Bypasses the LLM-relay channel — the URL goes from the runtime
+   * to the OS's URL-handler directly, so single-char corruption can't
+   * happen in transit. `'on_local'` (default) opens only when the URL is
+   * reachable from the runtime host (`exposure === 'local'`); a public
+   * tunnel viewer is meant for a different device and shouldn't trigger
+   * a popup on the runtime's machine. `'always'` opens regardless;
+   * `'never'` disables.
+   */
+  auto_open: 'always' | 'on_local' | 'never';
+  /**
+   * Mint a short single-use redirect URL alongside the long JWT URL and
+   * surface the short one to the agent. The short URL (16-char base32
+   * ≈ 80 bits entropy, 60s TTL, single-use) survives LLM relay where
+   * the 250-400-char JWT does not. The full JWT URL is still served
+   * directly for callers who already hold it.
+   */
+  short_url: boolean;
 }
 
 export interface HealConfig {
@@ -120,7 +139,7 @@ export const CONFIG_DEFAULTS: DaemonConfig = {
     },
     rediscoverThreshold: 0.7,
   },
-  remote: { mode: 'auto', timeout: 600 },
+  remote: { mode: 'auto', timeout: 600, auto_open: 'on_local', short_url: true },
 };
 
 /** Describes one leaf config field. Drives validation, describe_config,
@@ -335,6 +354,26 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     optional: true,
     default: undefined,
     description: 'Default prompt shown above the viewer.',
+    needsRestart: false,
+  },
+  {
+    path: 'remote.auto_open',
+    type: 'enum',
+    enum: ['always', 'on_local', 'never'] as const,
+    default: CONFIG_DEFAULTS.remote.auto_open,
+    description:
+      "Auto-open the viewer URL in the user's default browser. " +
+      '"on_local" (default) opens only when the URL is reachable from the runtime host (skips public-tunnel URLs meant for a different device). ' +
+      '"always" opens regardless; "never" disables. Bypasses the LLM-relay channel where long JWT URLs are prone to single-char corruption.',
+    needsRestart: false,
+  },
+  {
+    path: 'remote.short_url',
+    type: 'boolean',
+    default: CONFIG_DEFAULTS.remote.short_url,
+    description:
+      'Surface a short single-use redirect URL to the agent instead of the full JWT URL. ' +
+      'Short URLs (16-char base32, 60s TTL, single-use) survive LLM relay where the 250-400-char JWT does not.',
     needsRestart: false,
   },
 ];

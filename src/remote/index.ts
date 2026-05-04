@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { spawn } from 'child_process';
 import { openTunnel, type Tunnel } from '../tunnel';
 import type { BrowserDriver } from '../drivers/interface';
 import type { Session } from '../drivers/types/session';
@@ -30,9 +31,66 @@ export type ViewerExposure = 'local' | 'public';
 interface RemoteSession {
   sessionId: string;
   viewerUrl: string;
+  /**
+   * Short single-use redirect URL (when `remote.short_url` is enabled).
+   * Returned to the agent in place of `viewerUrl` so the LLM relay only
+   * carries 16-ish chars instead of a 250-400-char JWT URL. Falls back
+   * to the long URL when short_url is disabled.
+   */
+  shortUrl: string | null;
   exposure: ViewerExposure;
+  /**
+   * Whether the runtime tried to open the URL in the user's default
+   * browser at session start. The agent's preface mentions this so the
+   * user knows to look for a popup tab rather than wait on a paste.
+   */
+  autoOpened: boolean;
   tunnel: Tunnel | null;
   timeoutTimer: NodeJS.Timeout;
+}
+
+/**
+ * Best-effort: open the URL in the user's default browser via the OS
+ * URL handler. Bypasses the LLM relay channel — no chance of single-char
+ * corruption between mint and browser-load. Detached + stdio:'ignore' so
+ * the runtime doesn't keep the child alive or block on its output.
+ *
+ * Returns true on successful spawn (not on browser load — we can't
+ * observe that from here). Logs and returns false on spawn error.
+ */
+function openInBrowser(url: string): boolean {
+  try {
+    const platform = process.platform;
+    let cmd: string;
+    let args: string[];
+    if (platform === 'darwin') {
+      cmd = 'open';
+      args = [url];
+    } else if (platform === 'win32') {
+      // `start` is a cmd builtin, not an exe; the empty "" is the window
+      // title required when start receives a quoted argument.
+      cmd = 'cmd';
+      args = ['/c', 'start', '""', url];
+    } else {
+      cmd = 'xdg-open';
+      args = [url];
+    }
+    const child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
+    child.on('error', (err) => {
+      console.warn(`[remote] auto-open failed: ${String(err)}`);
+    });
+    child.unref();
+    return true;
+  } catch (err) {
+    console.warn(`[remote] auto-open failed: ${String(err)}`);
+    return false;
+  }
+}
+
+function shouldAutoOpen(mode: RemoteConfig['auto_open'], exposure: ViewerExposure): boolean {
+  if (mode === 'never') return false;
+  if (mode === 'always') return true;
+  return exposure === 'local';
 }
 
 const activeSessions = new Map<string, RemoteSession>();
@@ -46,9 +104,18 @@ export async function startRemoteSession(
   driver: BrowserDriver,
   session: Session,
   config?: Partial<RemoteConfig>,
+  options: { refresh?: boolean } = {},
 ): Promise<RemoteSession> {
   const existing = activeSessions.get(sessionId);
-  if (existing) return existing;
+  if (existing) {
+    // Default behavior: idempotent — return the cached session. Callers that
+    // explicitly want a fresh viewer URL (e.g. recovering from chat-renderer
+    // URL corruption) pass `refresh: true` and get a teardown + remint.
+    // `stop_remote_session` then `start_remote_session` is the public
+    // equivalent.
+    if (!options.refresh) return existing;
+    await stopRemoteSession(sessionId);
+  }
 
   const cfg = { ...loadRemoteConfig(), ...config };
 
@@ -63,19 +130,23 @@ export async function startRemoteSession(
 
   const viewer = await startViewer(sessionId, driver, session, {
     prompt: cfg.prompt,
+    enableShortUrl: cfg.short_url,
   });
 
   let viewerUrl = viewer.localUrl;
+  let baseHost = `http://localhost:${viewer.port}`;
   let tunnel: Tunnel | null = null;
   let exposure: ViewerExposure = 'local';
 
   if (cfg.mode === 'direct' && cfg.publicUrl) {
-    viewerUrl = `${cfg.publicUrl.replace(/\/$/, '')}:${viewer.port}/?token=${viewer.token}&v=${viewer.integrity}`;
+    baseHost = `${cfg.publicUrl.replace(/\/$/, '')}:${viewer.port}`;
+    viewerUrl = `${baseHost}/?token=${viewer.token}&v=${viewer.integrity}`;
     exposure = 'public';
   } else if (cfg.mode === 'auto' || cfg.mode === 'cloudflared') {
     try {
       tunnel = await openTunnel(viewer.port);
-      viewerUrl = `${tunnel.url.replace(/\/$/, '')}/?token=${viewer.token}&v=${viewer.integrity}`;
+      baseHost = tunnel.url.replace(/\/$/, '');
+      viewerUrl = `${baseHost}/?token=${viewer.token}&v=${viewer.integrity}`;
       exposure = 'public';
       console.error(`[remote] Tunnel open: ${tunnel.url}`);
     } catch (err) {
@@ -84,6 +155,12 @@ export async function startRemoteSession(
     }
   }
   // cfg.mode === 'local' falls through with the localhost viewerUrl + exposure.
+
+  const shortUrl = viewer.shortToken ? `${baseHost}/r/${viewer.shortToken}` : null;
+
+  const autoOpened = shouldAutoOpen(cfg.auto_open, exposure)
+    ? openInBrowser(shortUrl ?? viewerUrl)
+    : false;
 
   const timeoutTimer = setTimeout(
     () => {
@@ -97,13 +174,17 @@ export async function startRemoteSession(
   const remote: RemoteSession = {
     sessionId,
     viewerUrl,
+    shortUrl,
     exposure,
+    autoOpened,
     tunnel,
     timeoutTimer,
   };
 
   activeSessions.set(sessionId, remote);
-  console.error(`[remote] Session started: ${viewerUrl}`);
+  const shortNote = shortUrl ? ` (short: ${shortUrl})` : '';
+  const openedNote = autoOpened ? ' [auto-opened]' : '';
+  console.error(`[remote] Session started: ${viewerUrl}${shortNote}${openedNote}`);
   return remote;
 }
 
@@ -142,7 +223,13 @@ registerRemoteBackend({
   name: 'local',
   async start(sessionId, driver, session, opts) {
     const remote = await startRemoteSession(sessionId, driver, session, opts);
-    return { sessionId, viewerUrl: remote.viewerUrl, exposure: remote.exposure };
+    return {
+      sessionId,
+      viewerUrl: remote.viewerUrl,
+      exposure: remote.exposure,
+      ...(remote.shortUrl ? { shortUrl: remote.shortUrl } : {}),
+      ...(remote.autoOpened ? { autoOpened: true } : {}),
+    };
   },
   async waitForDone(handle, timeoutMs) {
     return waitForRemoteDone(handle.sessionId, timeoutMs);

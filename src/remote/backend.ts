@@ -32,6 +32,17 @@ interface RemoteHandle {
    *  public URLs need a "do not paste in a public channel" caution.
    *  Backends without a viewer URL omit this field. */
   readonly exposure?: 'local' | 'public';
+  /** Short single-use redirect URL the agent should relay to the user
+   *  in place of `viewerUrl`. ~16 chars instead of 250-400, so LLM
+   *  copy-corruption can't happen. The backend redirects this to the
+   *  full JWT URL the first time it's loaded. Absent when the backend
+   *  doesn't mint a short URL (config opt-out, or non-viewer backend). */
+  readonly shortUrl?: string;
+  /** True when the backend already attempted to open the URL in the
+   *  user's default browser at session start. The verbatim-relay preface
+   *  uses this to tell the user a tab should already have popped, vs
+   *  asking them to copy-paste. */
+  readonly autoOpened?: boolean;
   /** Backend-specific bag; typed as unknown to keep this interface
    *  narrow. Each backend reads its own keys. */
   readonly backendState?: unknown;
@@ -43,7 +54,7 @@ interface RemoteHandoffBackend {
     sessionId: string,
     driver: BrowserDriver,
     session: Session,
-    opts: RemoteConfig,
+    opts: Partial<RemoteConfig>,
   ): Promise<RemoteHandle>;
   waitForDone(handle: RemoteHandle, timeoutMs: number): Promise<{ done: boolean; reason?: string }>;
   stop(handle: RemoteHandle): Promise<void>;

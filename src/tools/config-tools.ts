@@ -32,7 +32,10 @@ export function restartRuntime(args: { force?: boolean } = {}): {
     return {
       ok: false,
       active_sessions: active,
-      message: `Refusing to restart: ${active} active session(s). Close them first, or pass force=true to restart anyway (open sessions will be killed).`,
+      message:
+        `Refusing to restart: ${active} active session(s). ` +
+        'To proceed, either (a) end the relevant drive sessions first via end_drive — note this discards any in-progress drive work, so confirm with the user before doing so, or (b) pass force=true to restart anyway (open sessions will be killed). ' +
+        'Note: refreshing a corrupted remote viewer URL does NOT require a restart — call stop_remote_session then start_remote_session, which keeps the drive alive.',
     };
   }
   // Respond, then exit after the HTTP layer flushes. Next klura call respawns

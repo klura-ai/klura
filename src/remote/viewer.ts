@@ -124,7 +124,10 @@ const URL_CORRUPTED_HTML = `<!DOCTYPE html>
 <h1>This URL got corrupted in transit</h1>
 <p>The viewer URL carries a JWT signed by the klura runtime. Some byte of the URL changed between when the server minted it and when your browser loaded it — typically because a chat renderer, clipboard handler, or browser extension rewrote one or more characters of the token.</p>
 <div class="hint">
-  <strong>To recover:</strong> ask the agent to call <code>start_remote_session</code> again. Open the new URL by clicking the link directly (don't copy-paste through anything that might rewrite it). If the problem repeats, switch <code>~/.klura/config.json</code> <code>remote.mode</code> from <code>"cloudflared"</code> / <code>"auto"</code> to <code>"local"</code>: the localhost URL is shorter and skips the tunnel.
+  <strong>To recover:</strong> tell the agent verbatim — <em>"refresh the remote viewer"</em>. The agent will call <code>stop_remote_session</code> then <code>start_remote_session</code>. <strong>This does NOT end your drive</strong> — your browser session, captured traffic, and discovery progress all survive. You'll get a fresh URL.
+</div>
+<div class="hint">
+  <strong>If it keeps happening:</strong> the runtime can also auto-open the URL on your machine instead of pasting it through chat. Set <code>remote.auto_open</code> to <code>"always"</code> in <code>~/.klura/config.json</code>, or have the agent call <code>configure({path: "remote.auto_open", value: "always"})</code>. Or shorten what gets relayed: <code>remote.short_url: true</code> (default) sends a 16-char redirect URL through chat instead of the full JWT.
 </div>
 <p>This URL is dead — the corrupted token won't authenticate. Closing this tab is safe.</p>
 </body>
@@ -620,12 +623,48 @@ interface InputEvent {
   id?: string;
 }
 
+/**
+ * Crockford-style base32 alphabet (no I/L/O/U), case-insensitive at decode
+ * time but we always emit uppercase. Used for the short-link token; chosen
+ * over base64url so a casual visual read of the token in chat doesn't trip
+ * over the `_`/`-` distinction that bites the long JWT URL.
+ */
+const SHORT_TOKEN_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+const SHORT_TOKEN_LENGTH = 16; // 16 * 5 = 80 bits of entropy — brute-force-resistant.
+const SHORT_TOKEN_TTL_MS = 60_000; // 60s window from mint to first redirect.
+
+function mintShortToken(): string {
+  const bytes = crypto.randomBytes(SHORT_TOKEN_LENGTH);
+  let out = '';
+  for (let i = 0; i < SHORT_TOKEN_LENGTH; i++) {
+    // bytes is always SHORT_TOKEN_LENGTH long by construction, and the
+    // alphabet covers all 32 values 0..31, so this index is always defined.
+    const byte = bytes[i] ?? 0;
+    const ch = SHORT_TOKEN_ALPHABET[byte & 0x1f] ?? '0';
+    out += ch;
+  }
+  return out;
+}
+
+interface ShortLinkRecord {
+  token: string;
+  integrity: string;
+  expiresAt: number;
+  consumed: boolean;
+}
+
 export async function startViewer(
   sessionId: string,
   driver: BrowserDriver,
   session: Session,
-  opts: { fps?: number; quality?: number; prompt?: string } = {},
-): Promise<{ token: string; integrity: string; localUrl: string; port: number }> {
+  opts: { fps?: number; quality?: number; prompt?: string; enableShortUrl?: boolean } = {},
+): Promise<{
+  token: string;
+  integrity: string;
+  localUrl: string;
+  port: number;
+  shortToken: string | null;
+}> {
   // HS256 JWT (see ./jwt.ts) signed with ~/.klura/remote-secret.key. The
   // viewer mints once at startup and verifies on every WS upgrade.
   const token = signViewerToken({
@@ -648,31 +687,68 @@ export async function startViewer(
   const serverOsLiteral = JSON.stringify(os.platform());
   const renderedHtml = VIEWER_HTML.replace('{{SERVER_OS}}', serverOsLiteral);
 
+  // Short-link redirect. Maps a short opaque base32 token → the full
+  // `?token=<JWT>&v=<integrity>` query string. Single-use + 60s TTL; the
+  // long JWT URL is still served directly for callers who already hold
+  // it (e.g. anyone who stored the auto-opened browser address bar).
+  const shortToken = opts.enableShortUrl ? mintShortToken() : null;
+  const integrity = tokenIntegrity(token);
+  const shortLink: ShortLinkRecord | null = shortToken
+    ? { token, integrity, expiresAt: Date.now() + SHORT_TOKEN_TTL_MS, consumed: false }
+    : null;
+
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
     if (url.pathname === '/health') {
       res.writeHead(200);
       res.end('ok');
-    } else {
-      // Integrity check on the page-load query string. When ?v doesn't
-      // match the recomputed hash of ?token, the URL was corrupted between
-      // server-mint and browser-load. Serve a short error page instead of
-      // the viewer; the WS handler also rejects with code 4002 if the page
-      // somehow loads anyway.
-      const suppliedToken = url.searchParams.get('token');
-      const suppliedV = url.searchParams.get('v');
-      if (
-        suppliedToken !== null &&
-        suppliedV !== null &&
-        suppliedV !== tokenIntegrity(suppliedToken)
-      ) {
-        res.writeHead(400, { 'Content-Type': 'text/html' });
-        res.end(URL_CORRUPTED_HTML);
+      return;
+    }
+    // Short-link redirect: GET /r/<short> → 302 to /?token=...&v=...
+    // Single-use; the record is marked consumed on first hit so a leaked
+    // short URL can't be replayed.
+    if (url.pathname.startsWith('/r/')) {
+      const supplied = url.pathname.slice(3);
+      if (!shortLink || !shortToken || supplied !== shortToken) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('not found');
         return;
       }
-      res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end(renderedHtml);
+      if (shortLink.consumed) {
+        res.writeHead(410, { 'Content-Type': 'text/plain' });
+        res.end('short link already consumed — ask the agent to refresh the remote viewer');
+        return;
+      }
+      if (Date.now() > shortLink.expiresAt) {
+        res.writeHead(410, { 'Content-Type': 'text/plain' });
+        res.end('short link expired — ask the agent to refresh the remote viewer');
+        return;
+      }
+      shortLink.consumed = true;
+      res.writeHead(302, {
+        Location: `/?token=${shortLink.token}&v=${shortLink.integrity}`,
+      });
+      res.end();
+      return;
     }
+    // Integrity check on the page-load query string. When ?v doesn't
+    // match the recomputed hash of ?token, the URL was corrupted between
+    // server-mint and browser-load. Serve a short error page instead of
+    // the viewer; the WS handler also rejects with code 4002 if the page
+    // somehow loads anyway.
+    const suppliedToken = url.searchParams.get('token');
+    const suppliedV = url.searchParams.get('v');
+    if (
+      suppliedToken !== null &&
+      suppliedV !== null &&
+      suppliedV !== tokenIntegrity(suppliedToken)
+    ) {
+      res.writeHead(400, { 'Content-Type': 'text/html' });
+      res.end(URL_CORRUPTED_HTML);
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(renderedHtml);
   });
 
   const wss = new WebSocketServer({ server });
@@ -1110,9 +1186,10 @@ export async function startViewer(
 
   return {
     token,
-    integrity: tokenIntegrity(token),
-    localUrl: `http://localhost:${viewer.port}?token=${token}&v=${tokenIntegrity(token)}`,
+    integrity,
+    localUrl: `http://localhost:${viewer.port}?token=${token}&v=${integrity}`,
     port: viewer.port,
+    shortToken,
   };
 }
 
