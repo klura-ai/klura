@@ -289,3 +289,46 @@ test('declaration_required: navigation/click without write actions → guard ski
   );
   assert.equal(result.status, 'committed');
 });
+
+test('declaration_required: exploration session (clicks, no writes, no saves) → guard skips', () => {
+  // Field-report shape: actionCallCount: 1 (one click) but no write-shape
+  // actions and no save attempts. Pre-exemption this fired and forced a
+  // fake capability declaration → surface_triage_missing deadlock.
+  // Post-exemption it commits cleanly so end_drive can close.
+  __resetStore();
+  const result = endDriveAudit.process(
+    makePayload({
+      declaredCapabilityCount: 0,
+      writeActions: [],
+      actionCallCount: 1,
+      saveAttemptCount: 0,
+      reCallCount: 0,
+    }),
+    {},
+    {},
+  );
+  assert.equal(result.status, 'committed');
+});
+
+test('declaration_required: exploration with save attempt → guard fires (commitment signal)', () => {
+  // Once the agent tried to save, they committed to RE — the detector
+  // should still demand a declared capability so audit-rejection iteration
+  // has somewhere to land.
+  __resetStore();
+  const result = endDriveAudit.process(
+    makePayload({
+      declaredCapabilityCount: 0,
+      writeActions: [],
+      actionCallCount: 1,
+      saveAttemptCount: 1,
+      reCallCount: 0,
+    }),
+    {},
+    {},
+  );
+  assert.equal(result.status, 'rejected');
+  const w = result.rejection.warnings.find(
+    (x) => x.kind === 'capability_declaration_required',
+  );
+  assert.ok(w);
+});

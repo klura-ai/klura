@@ -915,6 +915,25 @@ function applyAutoExecuteHint(
     `save a new one rather than ad-hoc-redoing the flow.`;
 }
 
+/**
+ * Reject `graph: "map"` + `capability` at the edge. Map's topology is
+ * `drive → terminal{closed}` — there is no triage or lift phase, so a
+ * declared capability has nowhere to land a saved strategy. Without this
+ * rejection, end_drive ends up writing session.lift bookkeeping out-of-band
+ * for a graph that doesn't have lift, and the next currentPhase() call hits
+ * the half-init invariant.
+ */
+function rejectMapWithCapability(opts: StartSessionOptions): void {
+  if (!opts.capability || opts.graph !== 'map') return;
+  throw new Error(
+    `invalid_start_session: capability "${opts.capability}" cannot be declared on a \`graph: "map"\` session. ` +
+      `Map mode is for surface-mapping a platform you'll return to (no specific user goal); its FSM topology has no ` +
+      `lift phase, so a declared capability has nowhere to land a saved strategy. For ANY goal-directed flow — ` +
+      `including ones where the agent has to navigate around the site to find the right page — pass ` +
+      `\`graph: "discover"\` (the default; you can omit it). Pure platform mapping (no capability) stays on map.`,
+  );
+}
+
 export async function startSession(
   url: string,
   opts: StartSessionOptions = {},
@@ -951,6 +970,8 @@ export async function startSession(
       }
     }
   }
+
+  rejectMapWithCapability(opts);
 
   // Platform is required when capability is set. Saved strategies live under
   // <platform>/, storage state lives at storage-state/<platform>.json, and

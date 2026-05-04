@@ -185,9 +185,11 @@ const kbdInput=document.getElementById('kbd-input');
 const kbdBtn=document.getElementById('kbd-btn');
 const proceedBtn=document.getElementById('proceed-btn');
 const doneBtn=document.getElementById('done-btn');
-const token=new URLSearchParams(location.search).get('token');
+const _params=new URLSearchParams(location.search);
+const token=_params.get('token');
+const _v=_params.get('v');
 const proto=location.protocol==='https:'?'wss:':'ws:';
-const ws=new WebSocket(proto+'//'+location.host+'/ws?token='+token);
+const ws=new WebSocket(proto+'//'+location.host+'/ws?token='+token+(_v?'&v='+_v:''));
 ws.binaryType='arraybuffer';
 
 // Client-side device detection. We only expose the virtual-keyboard UI on
@@ -650,8 +652,27 @@ interface ShortLinkRecord {
   token: string;
   integrity: string;
   expiresAt: number;
-  consumed: boolean;
 }
+
+/**
+ * Mutable short-link state shared by the request handler and the
+ * `refreshShortToken` callback. The handler reads `state.token` and
+ * `state.record` at request time (not at handler-construction time), so a
+ * call to `refreshShortToken` rotates the relay channel without restarting
+ * the HTTP server, the WebSocket, or invalidating the underlying JWT.
+ */
+interface ShortLinkState {
+  token: string;
+  record: ShortLinkRecord;
+}
+
+/**
+ * `null` when `enableShortUrl` was false at start. The startViewer return
+ * carries `shortToken: null` and `refreshShortToken` returns null in that
+ * branch — short-link minting is opt-in at viewer start and the choice
+ * doesn't flip mid-session.
+ */
+type MutableShortLink = { state: ShortLinkState } | null;
 
 export async function startViewer(
   sessionId: string,
@@ -664,6 +685,14 @@ export async function startViewer(
   localUrl: string;
   port: number;
   shortToken: string | null;
+  /** Re-mint the 16-char relay token + reset the 60s TTL. Returns the
+   *  new short token, or null when this viewer was started with
+   *  `enableShortUrl: false`. The full JWT URL stays unchanged — only
+   *  the relay channel rotates. */
+  refreshShortToken: () => string | null;
+  /** True when the active short link is past its 60s TTL. Caller checks
+   *  this before deciding whether to call `refreshShortToken`. */
+  shortTokenStale: () => boolean;
 }> {
   // HS256 JWT (see ./jwt.ts) signed with ~/.klura/remote-secret.key. The
   // viewer mints once at startup and verifies on every WS upgrade.
@@ -687,14 +716,25 @@ export async function startViewer(
   const serverOsLiteral = JSON.stringify(os.platform());
   const renderedHtml = VIEWER_HTML.replace('{{SERVER_OS}}', serverOsLiteral);
 
-  // Short-link redirect. Maps a short opaque base32 token → the full
-  // `?token=<JWT>&v=<integrity>` query string. Single-use + 60s TTL; the
-  // long JWT URL is still served directly for callers who already hold
-  // it (e.g. anyone who stored the auto-opened browser address bar).
-  const shortToken = opts.enableShortUrl ? mintShortToken() : null;
   const integrity = tokenIntegrity(token);
-  const shortLink: ShortLinkRecord | null = shortToken
-    ? { token, integrity, expiresAt: Date.now() + SHORT_TOKEN_TTL_MS, consumed: false }
+  // Short-link redirect. Maps a short opaque base32 token → the full
+  // `?token=<JWT>&v=<integrity>` query string. Multi-use within the 60s
+  // TTL window — repeated clicks within the window all redirect to the
+  // same long URL, so a failed page-load (browser quirk, network blip,
+  // password-manager popup mid-flight) is recoverable by re-clicking.
+  // The long JWT URL is still served directly for callers who already
+  // hold it (e.g. anyone who stored the auto-opened browser address bar).
+  // State is held in a mutable wrapper so `refreshShortToken` (returned
+  // below) can rotate the relay token in-place; the request handler
+  // reads through the wrapper at request time, so a refresh takes effect
+  // immediately without restarting the server.
+  const shortLinkContainer: MutableShortLink = opts.enableShortUrl
+    ? {
+        state: {
+          token: mintShortToken(),
+          record: { token, integrity, expiresAt: Date.now() + SHORT_TOKEN_TTL_MS },
+        },
+      }
     : null;
 
   const server = http.createServer((req, res) => {
@@ -705,28 +745,26 @@ export async function startViewer(
       return;
     }
     // Short-link redirect: GET /r/<short> → 302 to /?token=...&v=...
-    // Single-use; the record is marked consumed on first hit so a leaked
-    // short URL can't be replayed.
+    // Multi-use within the TTL window — every click during the 60s
+    // window redirects to the same long URL, so a failed page-load is
+    // recoverable by re-clicking. State is read through the mutable
+    // container at request time so a `refreshShortToken` call between
+    // requests is observed by the next redirect attempt.
     if (url.pathname.startsWith('/r/')) {
       const supplied = url.pathname.slice(3);
-      if (!shortLink || !shortToken || supplied !== shortToken) {
+      const live = shortLinkContainer?.state;
+      if (!live || supplied !== live.token) {
         res.writeHead(404, { 'Content-Type': 'text/plain' });
         res.end('not found');
         return;
       }
-      if (shortLink.consumed) {
-        res.writeHead(410, { 'Content-Type': 'text/plain' });
-        res.end('short link already consumed — ask the agent to refresh the remote viewer');
-        return;
-      }
-      if (Date.now() > shortLink.expiresAt) {
+      if (Date.now() > live.record.expiresAt) {
         res.writeHead(410, { 'Content-Type': 'text/plain' });
         res.end('short link expired — ask the agent to refresh the remote viewer');
         return;
       }
-      shortLink.consumed = true;
       res.writeHead(302, {
-        Location: `/?token=${shortLink.token}&v=${shortLink.integrity}`,
+        Location: `/?token=${live.record.token}&v=${live.record.integrity}`,
       });
       res.end();
       return;
@@ -784,13 +822,19 @@ export async function startViewer(
     // (single-character change between server-mint and browser-handshake)
     // from "wrong token" (an attacker or stale session). Both reject, but
     // the corruption case has a recoverable user-facing remedy: ask the
-    // agent for a fresh URL.
-    if (supplied !== null && suppliedV !== tokenIntegrity(supplied)) {
+    // agent for a fresh URL. Lenient on missing `v`: when the client
+    // didn't supply one, fall through to the token-equality check below.
+    // This matches the page-load handler's leniency and is the right
+    // behavior — the integrity hash is deterministic from the token, so
+    // it adds no security beyond token equality; its only value is
+    // distinguishing corruption from a wrong token, and that distinction
+    // requires v to be present.
+    if (supplied !== null && suppliedV !== null && suppliedV !== tokenIntegrity(supplied)) {
       const expectedV = tokenIntegrity(supplied);
       console.error(
         `[viewer] WS rejected for session ${sessionId}: url_corrupted_in_transit\n` +
           `  reqUrl=${req.url ?? '<no-url>'}\n` +
-          `  supplied v=${suppliedV ?? '<v-absent>'} but recompute(token)=${expectedV}\n` +
+          `  supplied v=${suppliedV} but recompute(token)=${expectedV}\n` +
           `  → token bytes were modified somewhere between server-mint and browser-handshake (chat renderer, clipboard, proxy)`,
       );
       ws.close(4002, 'URL corrupted in transit');
@@ -1189,7 +1233,20 @@ export async function startViewer(
     integrity,
     localUrl: `http://localhost:${viewer.port}?token=${token}&v=${integrity}`,
     port: viewer.port,
-    shortToken,
+    shortToken: shortLinkContainer?.state.token ?? null,
+    refreshShortToken: () => {
+      if (!shortLinkContainer) return null;
+      const next = mintShortToken();
+      shortLinkContainer.state = {
+        token: next,
+        record: { token, integrity, expiresAt: Date.now() + SHORT_TOKEN_TTL_MS },
+      };
+      return next;
+    },
+    shortTokenStale: () => {
+      if (!shortLinkContainer) return false;
+      return Date.now() > shortLinkContainer.state.record.expiresAt;
+    },
   };
 }
 

@@ -32,7 +32,7 @@ import { clearForSession as clearSessionObservations } from '../response/session
 import { computeReverseEngineerHandoff, wouldReverseEngineerHandoffFire } from './re-handoff';
 import { endDriveAudit, buildEndDrivePayload } from '../audit/end-drive';
 import { rejectionToErrorMessage } from '../audit';
-import { graphConfig } from '../session-phase/registry';
+import { graphConfig, currentGraph } from '../session-phase/registry';
 
 function outcomeForTier(tier: string): SessionMetaPayload['outcome'] {
   if (tier === 'page-script') return 'page_script_saved';
@@ -528,7 +528,15 @@ export async function endDrive(
   // user_confirmation classifier in the save-strategy audit, so the user has
   // the final say at save time on whether the proposed strategy lands.
   const isAbandonFromLift = session.lift !== undefined;
-  if (opts.platform && !isAbandonFromLift) {
+  // Only graphs that include a lift phase can run the LIFT handoff. Map's
+  // topology is `drive → terminal{closed}` — writing session.lift bookkeeping
+  // for a map session would leave session.phase undefined while session.lift
+  // is populated, tripping the half-init invariant on the next currentPhase()
+  // call. start_session already rejects `capability + map`, so this guard
+  // is a defensive backstop — no in-process programmatic caller should reach
+  // this branch on a graph without a lift phase.
+  const graphHasLift = currentGraph(session).nodes.has('lift');
+  if (opts.platform && !isAbandonFromLift && graphHasLift) {
     const handoff = computeReverseEngineerHandoff(session, opts.platform);
     if (handoff) {
       try {

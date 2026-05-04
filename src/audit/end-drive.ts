@@ -101,15 +101,20 @@ const declarationRequiredDetector: Detector<EndDrivePayload, EndDriveCtx> = {
     if (p.liftMode === 'skip') return [];
     if (p.skipDeclarationGuard) return [];
     // Fire whenever the agent meaningfully drove the page (any
-    // perform_action call) without declaring a capability. Previous
-    // behavior gated on write-shaped actions (type / fill / submit) only —
-    // that missed the read-only case where the agent typed nothing,
-    // navigated to a query-bearing URL or clicked a result, and then
-    // closed cleanly. The benchmark recorded "no save" for those reads
-    // because end_drive resolved with no unresolved capabilities. Read
+    // perform_action call) without declaring a capability. Read
     // capabilities deserve a save opportunity too: a fetch strategy for
     // the search XHR is the whole point of klura.
     if (p.actionCallCount === 0) return [];
+    // Exploration-session exemption: the session has no declared
+    // capability, no save attempt, and no write-shaped actions. The agent
+    // navigated to look around and is closing — there is no RE artifact
+    // to demand. Forcing a fake capability declaration here produces the
+    // surface_triage_missing → unobserved_url deadlock with no path out.
+    // Auto-synth still runs at the orchestrator layer and persists
+    // anything it can derive; the audit just stops refusing close.
+    // Mirrors the parallel exemption in computeSessionObligation
+    // (session-obligations.ts).
+    if (p.saveAttemptCount === 0 && p.writeActions.length === 0) return [];
 
     const writeActionsObserved = p.writeActions.length > 0;
     const previews = p.writeActions

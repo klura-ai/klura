@@ -39,10 +39,17 @@ export const UNIVERSAL_TOOLS: ReadonlySet<string> = new Set([
   'demote_fetch_to_page_script',
 ]);
 
-/** Read-only investigation tools. Allowed in drive, triage, and lift. */
+/** Read-only investigation tools. Allowed in drive, triage, and lift.
+ *  `get_a11y_tree` lives here because the trimmed tree returned by
+ *  `perform_action` truncates around the 15 KB mark; agents legitimately
+ *  need the full tree mid-drive when the element they want lives outside
+ *  that window (long lists, deeply nested content, popup trees). Forcing
+ *  them into triage just to read the page DOM blocks the goal-directed
+ *  path for a read-only operation. */
 export const READ_ONLY_DIAGNOSTIC: ReadonlySet<string> = new Set([
   'get_network_log',
   'get_action_history',
+  'get_a11y_tree',
   'find_in_page',
   'get_attribute',
   'get_screenshot',

@@ -1273,6 +1273,7 @@ export class PlaywrightDriver extends BrowserDriver {
     inputType: string;
     inWriteForm: boolean;
     submitLike: boolean;
+    isDisclosureToggle: boolean;
   } | null> {
     try {
       const page = this._page(session);
@@ -1305,7 +1306,29 @@ export class PlaywrightDriver extends BrowserDriver {
           tag === 'button' ||
           (tag === 'input' && (inputType === 'submit' || inputType === 'image')) ||
           formaction !== null;
-        return { tag, href, onclick, formaction, inputType, inWriteForm, submitLike };
+        // Disclosure toggles: accordion section headers, dropdown triggers,
+        // expandable panels. ARIA-1.2 disclosure pattern is `aria-expanded`
+        // (any value) or `aria-controls` pointing at the panel; HTML native
+        // is `<summary>` inside `<details>`. All three flip local UI state
+        // only; the map-mode gate exempts them.
+        const ariaExpanded = getAttr('aria-expanded');
+        const ariaControls = getAttr('aria-controls');
+        const insideDetails: boolean =
+          tag === 'summary' && typeof e.closest === 'function' && e.closest('details') !== null;
+        const isDisclosureToggle =
+          ariaExpanded !== null ||
+          (ariaControls !== null && ariaControls.length > 0) ||
+          insideDetails;
+        return {
+          tag,
+          href,
+          onclick,
+          formaction,
+          inputType,
+          inWriteForm,
+          submitLike,
+          isDisclosureToggle,
+        };
       })) as {
         tag: string;
         href: string | null;
@@ -1314,6 +1337,7 @@ export class PlaywrightDriver extends BrowserDriver {
         inputType: string;
         inWriteForm: boolean;
         submitLike: boolean;
+        isDisclosureToggle: boolean;
       };
       try {
         await handle.dispose();

@@ -160,6 +160,11 @@ async function isStructurallySafeMapAction(
   if (action === 'click') {
     if (target.submitLike) return false;
     if (target.formaction !== null) return false;
+    // Disclosure toggles (aria-expanded / aria-controls / <summary>) flip
+    // local UI state, never commit server state — exempt so map-mode agents
+    // can expand sections without per-toggle acks. submitLike / formaction
+    // guards above run first.
+    if (target.isDisclosureToggle) return true;
     if (target.tag !== 'a') return false;
     if (target.onclick !== null) return false;
     const href = target.href;

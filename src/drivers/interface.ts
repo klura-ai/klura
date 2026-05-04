@@ -504,6 +504,13 @@ export abstract class BrowserDriver {
      *  in form), `<input type=submit|image>`, or any element with a
      *  `formaction` attribute. */
     submitLike: boolean;
+    /** True when the element is structurally a disclosure toggle: it carries
+     *  an `aria-expanded` attribute (any value), `aria-controls` pointing at
+     *  another element, or is a native `<summary>` inside a `<details>`.
+     *  Disclosure toggles flip local UI state — accordion sections, dropdown
+     *  menus, expandable panels — and never commit server state, so the
+     *  map-mode consent gate exempts them. */
+    isDisclosureToggle: boolean;
   } | null> {
     return Promise.resolve(null);
   }

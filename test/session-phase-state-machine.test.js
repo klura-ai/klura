@@ -148,6 +148,44 @@ test('admissibility: end_drive remains admissible when lift budget is exhausted'
   assert.ok(r.ok, 'end_drive admissible even when lift budget exhausted');
 });
 
+test('admissibility: get_a11y_tree admitted in drive', () => {
+  // Drive-phase agents legitimately need the full a11y tree when the
+  // trimmed default from perform_action truncates around the element they
+  // want. Forcing them into triage just to read the page DOM blocks the
+  // goal-directed path for a read-only operation.
+  const session = fresh();
+  const r = currentSpec(session).checkAdmissibility('get_a11y_tree', session);
+  assert.ok(r.ok, 'get_a11y_tree admitted in drive (read-only diagnostic)');
+});
+
+test('admissibility: get_a11y_tree admitted in triage and lift too', () => {
+  // It's a read-only diagnostic — must be reachable from every active phase.
+  const triageSession = fresh();
+  dispatch(triageSession, { kind: 'end_drive_unresolved' });
+  assert.ok(currentSpec(triageSession).checkAdmissibility('get_a11y_tree', triageSession).ok);
+  const liftSession = fresh();
+  dispatch(liftSession, { kind: 'end_drive_unresolved' });
+  dispatch(liftSession, { kind: 'plan_handoff' });
+  assert.ok(currentSpec(liftSession).checkAdmissibility('get_a11y_tree', liftSession).ok);
+});
+
+test('graph topology: map has no lift phase', async () => {
+  // Backstop for the orchestrator's lift-bookkeeping graph guard. The guard
+  // checks `currentGraph(session).nodes.has('lift')` before populating
+  // session.lift; if a future graph rev added 'lift' to map's node set
+  // without the matching state-machine transitions, the guard would
+  // incorrectly write bookkeeping for an unreachable phase.
+  const { graphFor } = await import('../dist/session-phase/graphs/index.js');
+  const map = graphFor('map');
+  assert.equal(map.nodes.has('lift'), false, 'map graph must not contain a lift phase');
+  assert.equal(map.nodes.has('triage'), false, 'map graph must not contain a triage phase');
+  // Sanity: discover and execute do contain lift.
+  const discover = graphFor('discover');
+  const execute = graphFor('execute');
+  assert.equal(discover.nodes.has('lift'), true);
+  assert.equal(execute.nodes.has('lift'), true);
+});
+
 test('forceTransition: returns event=null for forced transitions', () => {
   const session = fresh();
   const r = forceTransition(session, { kind: 'terminal', status: 'closed' });

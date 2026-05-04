@@ -47,6 +47,18 @@ interface RemoteSession {
   autoOpened: boolean;
   tunnel: Tunnel | null;
   timeoutTimer: NodeJS.Timeout;
+  /**
+   * Base host string used to build `shortUrl` (`<baseHost>/r/<token>`).
+   * Captured at session-mint time so a refresh can rebuild the short
+   * URL without re-deriving the host from tunnel / config state.
+   */
+  baseHost: string;
+  /** Re-mint the 16-char relay token + reset the 60s TTL. Returns the
+   *  new token, or null when this session was started without a short
+   *  URL (`remote.short_url: false`). The full JWT URL stays unchanged. */
+  refreshShortToken: () => string | null;
+  /** True when the active short link is past its 60s TTL. */
+  shortTokenStale: () => boolean;
 }
 
 /**
@@ -108,12 +120,22 @@ export async function startRemoteSession(
 ): Promise<RemoteSession> {
   const existing = activeSessions.get(sessionId);
   if (existing) {
-    // Default behavior: idempotent — return the cached session. Callers that
-    // explicitly want a fresh viewer URL (e.g. recovering from chat-renderer
-    // URL corruption) pass `refresh: true` and get a teardown + remint.
-    // `stop_remote_session` then `start_remote_session` is the public
-    // equivalent.
-    if (!options.refresh) return existing;
+    // Default behavior: idempotent — return the cached session. The full
+    // JWT URL stays valid for the JWT's hour-long TTL even after the
+    // 60s short-link relay token expires; on cache hit, rotate just the
+    // short token in-place when it's stale so a second call after a
+    // missed click yields a fresh /r/<token>. Callers that want a full
+    // session refresh (rare — recovering from chat-renderer URL
+    // corruption, tunnel teardown) pass `refresh: true` and get a full
+    // teardown + remint. `stop_remote_session` then `start_remote_session`
+    // is the public equivalent.
+    if (!options.refresh) {
+      if (existing.shortTokenStale()) {
+        const next = existing.refreshShortToken();
+        if (next) existing.shortUrl = `${existing.baseHost}/r/${next}`;
+      }
+      return existing;
+    }
     await stopRemoteSession(sessionId);
   }
 
@@ -179,6 +201,9 @@ export async function startRemoteSession(
     autoOpened,
     tunnel,
     timeoutTimer,
+    baseHost,
+    refreshShortToken: viewer.refreshShortToken,
+    shortTokenStale: viewer.shortTokenStale,
   };
 
   activeSessions.set(sessionId, remote);
