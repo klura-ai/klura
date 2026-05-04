@@ -952,6 +952,24 @@ export async function startSession(
     }
   }
 
+  // Platform is required when capability is set. Saved strategies live under
+  // <platform>/, storage state lives at storage-state/<platform>.json, and
+  // every downstream lifecycle (auto-execute, synth, submit_triage_plan)
+  // keys by platform. Accepting capability without platform leaves the
+  // session unable to file the resulting strategy and unable to load prior
+  // cookies — the agent drives the entire flow and end_drive accepts with
+  // nothing to persist. Reject up-front; that's the only layer where this
+  // rule fits cleanly.
+  if (opts.capability && !opts.platform) {
+    throw new Error(
+      `invalid_start_session: capability "${opts.capability}" was declared without a platform. ` +
+        `Platform keys the on-disk skill dir (\`~/.klura/skills/<platform>/...\`) and the storage-state file ` +
+        `(\`~/.klura/storage-state/<platform>.json\`); without it, end_drive cannot save and cookies cannot ` +
+        `be reloaded next session. Re-call start_session with \`platform: "<slug>"\`. Common pattern: ` +
+        `platform = the second-level domain (\`messenger\` for messenger.com, \`reddit\` for reddit.com).`,
+    );
+  }
+
   // The daemon has exactly one device profile (see runtime/src/devices.ts).
   // Multi-device setups run multiple daemons with different KLURA_HOME.
   const deviceProfile = getDeviceProfile();
@@ -1160,10 +1178,9 @@ export async function startSession(
         `When close_session returns phase:"lift", investigate or save before re-calling — repeat close_session calls without intervening progress return the same refusal. Full playbook: klura://reference#reverse-engineer-playbook.`,
     };
   }
-  // Capability-arg shape check. Well-known slugs (send_message, etc.) have
-  // canonical arg keys; agents fumble these despite SKILL.md examples
-  // (`{message: "Hello"}` instead of `{recipient, text}`). Surface a hint
-  // before the start hint so the agent fixes args before driving.
+  // Well-known capability arg-shape hint (e.g. send_message → {recipient, text}).
+  // Platform-missing is hard-rejected at the entry point above; this only
+  // surfaces typos / dropped keys the slug implies.
   if (opts.capability) {
     const argHint = checkCapabilityArgs(opts.capability, opts.args);
     if (argHint) {
