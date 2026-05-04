@@ -56,9 +56,9 @@ test('full markdown render includes the original-bug field: js-eval.name', () =>
   assert.match(jsEvalSection, /"name":/);
 });
 
-test('tier-scoped render to "recorded-path" omits prereq kinds', () => {
+test('tier-scoped render to "recorded-path" includes prereq kinds (capability prereqs supported)', () => {
   const md = renderSaveStrategySchemaMarkdown({ tier: 'recorded-path' });
-  assert.doesNotMatch(md, /Prereq kinds/);
+  assert.match(md, /Prereq kinds/);
   assert.match(md, /Recorded-path step/);
 });
 

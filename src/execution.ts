@@ -679,6 +679,7 @@ export async function execute(
             platform,
             capability,
             pool,
+            tokenCache,
             opts.identity,
             opts.ownerSessionId,
           );

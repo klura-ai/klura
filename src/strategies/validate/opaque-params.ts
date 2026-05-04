@@ -72,8 +72,18 @@ export function validateNoOpaqueUserParams(
     // narrow backstop for saves without session context (programmatic saves,
     // tests) — the LLM still owns the decision; these patterns only catch
     // values almost certainly not user-typed (UUIDs, base64 blobs, MongoDB
-    // ObjectIds).
-    const shape = helperExampleLooksOpaque(example, OPAQUE_EXAMPLE_PATTERNS);
+    // ObjectIds). When the agent declared `kind: "url"`, the URI-scheme
+    // pattern (https://...) is by-construction expected and not a useful
+    // signal — the agent is asserting "this is a public URL the caller can
+    // pass." The other shape patterns (UUID, ObjectId, base64 blob, etc.)
+    // still fire because they're not URL-shaped.
+    const shape =
+      kind === 'url'
+        ? helperExampleLooksOpaque(
+            example,
+            OPAQUE_EXAMPLE_PATTERNS.filter(([, label]) => label !== 'URI-scheme opaque ID'),
+          )
+        : helperExampleLooksOpaque(example, OPAQUE_EXAMPLE_PATTERNS);
 
     // "Unused param is exempt" is a friendly rule for documentation-only
     // entries. When the accumulator ground-truths this param as server-

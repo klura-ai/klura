@@ -61,40 +61,23 @@ export interface ScannedField {
 export function collectScannedFields(data: Strategy): ScannedField[] {
   const out: ScannedField[] = [];
   const obj = data as Record<string, unknown>;
+  // Recorded-path locator strings (steps[].selector, steps[].locators.css,
+  // steps[].locators.alternatives[].css, steps[].waitSelector) are page anchors,
+  // not wire literals. The literal_provenance classifier was designed for HTTP
+  // wire fields where the variability axis is "what does each caller send."
+  // Locator variability lives in the templated a11y `name` (which the agent
+  // picks when scoping the locator), not the CSS string. Scanning locators
+  // here surfaces false-positive classification work that the agent can only
+  // resolve by re-templating the locator's `name` — same outcome reachable via
+  // the structural locator schema, no audit needed.
   const scanStepCollection = (steps: unknown, basePath: string): void => {
     if (!Array.isArray(steps)) return;
     steps.forEach((s, idx) => {
       if (!s || typeof s !== 'object') return;
       const st = s as Record<string, unknown>;
       if (typeof st.url === 'string') out.push({ path: `${basePath}[${idx}].url`, value: st.url });
-      if (typeof st.selector === 'string') {
-        out.push({ path: `${basePath}[${idx}].selector`, value: st.selector });
-      }
       if (typeof st.value === 'string') {
         out.push({ path: `${basePath}[${idx}].value`, value: st.value });
-      }
-      if (typeof st.waitSelector === 'string') {
-        out.push({ path: `${basePath}[${idx}].waitSelector`, value: st.waitSelector });
-      }
-      const locators = st.locators;
-      if (locators && typeof locators === 'object') {
-        const locs = locators as Record<string, unknown>;
-        if (typeof locs.css === 'string') {
-          out.push({ path: `${basePath}[${idx}].locators.css`, value: locs.css });
-        }
-        const alternatives = locs.alternatives;
-        if (Array.isArray(alternatives)) {
-          alternatives.forEach((alt, altIdx) => {
-            if (!alt || typeof alt !== 'object') return;
-            const css = (alt as Record<string, unknown>).css;
-            if (typeof css === 'string') {
-              out.push({
-                path: `${basePath}[${idx}].locators.alternatives[${altIdx}].css`,
-                value: css,
-              });
-            }
-          });
-        }
       }
     });
   };

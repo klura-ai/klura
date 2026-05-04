@@ -337,6 +337,7 @@ export function firstObservableUrl(data: Record<string, unknown>): string | null
     return endpoint?.url ?? null;
   }
   if (tier === 'recorded-path' && Array.isArray(data.steps)) {
+    const examples = collectParamExamples(data);
     for (const raw of data.steps) {
       if (!raw || typeof raw !== 'object') continue;
       const s = raw as Record<string, unknown>;
@@ -344,7 +345,20 @@ export function firstObservableUrl(data: Record<string, unknown>): string | null
       let url = '';
       if (typeof s.url === 'string' && s.url) url = s.url;
       else if (typeof s.value === 'string') url = s.value;
-      if (url) return url;
+      if (!url) continue;
+      // Resolve {{placeholder}} via notes.params.<name>.example. When a
+      // placeholder has no example, surface_triage_missing has no concrete
+      // origin to bind against — return null so the surface check is a no-op
+      // for the templated case rather than rejecting the literal "{{name}}"
+      // string. Concrete URLs still bind normally.
+      if (url.includes('{{')) {
+        try {
+          url = resolveTemplate(url, examples, 'recorded-path.steps[].url');
+        } catch {
+          return null;
+        }
+      }
+      return url;
     }
   }
   return null;

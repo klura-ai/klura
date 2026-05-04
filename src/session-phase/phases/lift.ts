@@ -23,16 +23,23 @@ import {
   unionSets,
 } from '../tool-catalog';
 
+// `end_drive` is admitted in lift as the abandon path. Without it the agent
+// has no exit when an audit loop fails to converge — the rejection messages
+// even point at end_drive as the abandon mechanism. Auto-synth still runs
+// at end_drive's own orchestrator, so a salvageable recorded-path can land
+// from drive history even when the agent couldn't compose a save manually.
 const ALLOWED = unionSets(
   READ_ONLY_DIAGNOSTIC,
   TRIAGE_AND_LIFT_WRITE,
   LIFT_RE_ACTIVE,
   DISCOVERY_ARTIFACT,
+  new Set(['end_drive']),
 );
 
 const ALLOWED_WHEN_EXHAUSTED: ReadonlySet<string> = new Set([
   'save_strategy',
   'submit_triage_plan',
+  'end_drive',
 ]);
 
 /** Default lift budget when the user hasn't set `lift.max_rounds`. `0` =

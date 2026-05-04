@@ -256,15 +256,47 @@ function findClickObservedValuesIn(
   return out;
 }
 
+// Min-length floor for the `single_entity` example match. Substring acceptance
+// (an example like "Granat Sweden AB" satisfying a literal like
+// `a:has-text('Granat Sweden AB')`) closes the canonical mismatch where the
+// agent declared the example as the entity name and the literal wraps it in a
+// locator/expression. Tiny examples (1-2 chars) would let the agent canned-
+// answer their way through every literal, so a 3-char floor stays — same
+// rationale as CLICK_OBSERVATION_MIN_VALUE_LENGTH on the click-observed check.
+const SINGLE_ENTITY_EXAMPLE_MIN_LENGTH = 3;
 function literalInAnyExample(data: Strategy, literal: string): boolean {
   const params = (data as { notes?: { params?: Record<string, unknown> } }).notes?.params;
   if (!params || typeof params !== 'object') return false;
   for (const entry of Object.values(params)) {
     if (!entry || typeof entry !== 'object') continue;
     const example = (entry as Record<string, unknown>).example;
-    if (typeof example === 'string' && example === literal) return true;
+    if (typeof example !== 'string' || example.length < SINGLE_ENTITY_EXAMPLE_MIN_LENGTH) continue;
+    if (literal.includes(example)) return true;
   }
   return false;
+}
+
+// Click-observed exemption for navigate destination URLs. The static-on-click-
+// observed rejection treats "value appears in any captured ui_click value" as
+// "value is a selectable enum option." That logic is right for URL params,
+// body fields, and headers — places where the click-observed value is one of
+// several pickable options the user steers between. It's wrong for a navigate
+// step's destination URL: the URL IS the entry point of the flow, not a
+// choice. Common false positive: site auth flows redirect through
+// `?next=<entry-url>`, the entry URL gets picked up as a click-observed value
+// of the `next` param, and the navigate step's literal URL then trips the
+// rejection. Exemption: when the literal is a `navigate` step's `url` AND the
+// observed value equals the literal verbatim, accept `static`.
+const NAVIGATE_URL_PATH_RE = /^steps\[(\d+)\]\.url$/;
+function isNavigateStepUrl(data: Strategy, path: string): boolean {
+  const m = NAVIGATE_URL_PATH_RE.exec(path);
+  if (!m || !m[1]) return false;
+  const idx = Number(m[1]);
+  const steps = (data as { steps?: unknown }).steps;
+  if (!Array.isArray(steps)) return false;
+  const step: unknown = steps[idx];
+  if (!step || typeof step !== 'object') return false;
+  return (step as Record<string, unknown>).action === 'navigate';
 }
 
 export function validateLiteralAnswer(
@@ -300,6 +332,14 @@ export function validateLiteralAnswer(
     // via "static" when click→XHR observations exist for the value.
     const matches = findClickObservedValuesIn(item.value, observedParamValues);
     if (matches.length > 0) {
+      // Navigate-URL exemption: when the literal is a navigate step's url AND
+      // every match is a full-value equality (not a substring of a longer
+      // literal), the click-observed pairing is just the auth-redirect
+      // mechanic (`?next=<entry-url>`), not a selectable enum option. Accept
+      // `static`. See the comment on isNavigateStepUrl above.
+      if (isNavigateStepUrl(data, item.path) && matches.every((m) => m.value === item.value)) {
+        return [];
+      }
       return matches.map(
         (m) =>
           `literal_provenance["${item.path}"] = "static" but the value contains ${JSON.stringify(
@@ -316,9 +356,11 @@ export function validateLiteralAnswer(
   if (answer === 'single_entity') {
     if (literalInAnyExample(data, item.value)) return [];
     return [
-      `literal_provenance["${item.path}"] = "single_entity" but the literal ${JSON.stringify(
-        item.value,
-      )} does not appear as-is in any notes.params.*.example. If this strategy is intentionally single-entity, declare the literal as the example in notes.params.<slug>.example; otherwise reclassify.`,
+      `literal_provenance["${item.path}"] = "single_entity" but no notes.params.*.example ` +
+        `(min ${SINGLE_ENTITY_EXAMPLE_MIN_LENGTH} chars) appears as a substring of the literal ${JSON.stringify(
+          item.value,
+        )}. If this strategy is intentionally single-entity, declare the entity name as the example ` +
+        `in notes.params.<slug>.example; otherwise reclassify.`,
     ];
   }
   if ('caller_input' in answer) {

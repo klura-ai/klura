@@ -125,6 +125,29 @@ test('admissibility: phase-scoped tool rejected outside its phase', () => {
   assert.match(r.reason, /not available in phase 'drive'/);
 });
 
+test('admissibility: end_drive admitted in lift as the abandon path', () => {
+  // Drive → triage → lift via the canonical sequence. end_drive must be
+  // admissible from lift so the agent can bail out of an audit loop without
+  // leaking the session.
+  const session = fresh();
+  dispatch(session, { kind: 'end_drive_unresolved' }); // → triage
+  dispatch(session, { kind: 'plan_handoff' }); // → lift
+  assert.equal(currentPhase(session), 'lift');
+  const r = currentSpec(session).checkAdmissibility('end_drive', session);
+  assert.ok(r.ok, 'end_drive admitted in lift');
+});
+
+test('admissibility: end_drive remains admissible when lift budget is exhausted', () => {
+  // The exhausted set must include end_drive too, otherwise a
+  // budget-exhausted lift session has no exit at all.
+  const session = fresh();
+  dispatch(session, { kind: 'end_drive_unresolved' });
+  dispatch(session, { kind: 'plan_handoff' });
+  session.lift.softBlockEngaged = true;
+  const r = currentSpec(session).checkAdmissibility('end_drive', session);
+  assert.ok(r.ok, 'end_drive admissible even when lift budget exhausted');
+});
+
 test('forceTransition: returns event=null for forced transitions', () => {
   const session = fresh();
   const r = forceTransition(session, { kind: 'terminal', status: 'closed' });

@@ -179,6 +179,16 @@ export interface RecordedPathStrategy {
   strategy: 'recorded-path';
   steps: RecordedPathStep[];
   /**
+   * Optional prerequisites. Same prereq catalog as fetch / page-script. The
+   * canonical use case is splitting an auth-gated multi-step flow into a
+   * side-effect-only `<site>_login` (recorded-path that ends with the user
+   * authenticated) plus a downstream `<site>_<action>` (recorded-path with
+   * `prerequisites: [{kind: "capability", capability: "<site>_login"}]`).
+   * Cookies set by the prereq flow into the steps via the platform-keyed
+   * storage-state file.
+   */
+  prerequisites?: Prerequisite[];
+  /**
    * Optional post-navigation extract. After the last step completes, the
    * runtime reads the page's serialized HTML via `driver.getPageHtml` and pipes
    * it through the cheerio selector helper to produce a structured body.

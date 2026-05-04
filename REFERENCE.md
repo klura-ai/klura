@@ -284,13 +284,15 @@ Two extractions, one sub-execute — the runtime calls `lookup_member_by_name` o
 
 **Save-time rules.** Self-loops and missing targets are rejected (override with `optional: true` to save out-of-order). `execute()` recursively calls the target with interpolated `args`, up to `MAX_PREREQ_DEPTH = 5`; non-2xx sub-execute fails the caller (or binds null if `optional`).
 
-**Binding-oriented vs side-effect-oriented.** Capability prereqs come in two shapes. The binding-oriented shape (above) extracts values via `vars` that the caller substitutes through `{{<name>}}` placeholders. The **side-effect-oriented** shape runs a capability purely for its browser-context effects — most commonly a `login` capability whose recorded-path logs the user in and leaves an auth cookie on the shared `BrowserContext`. There is no return value worth binding; the caller's `fetch` / `page-script` simply runs afterwards with the cookie jar already warm. For side-effect-only prereqs, **omit `vars` entirely** (or pass `{}`):
+**Binding-oriented vs side-effect-oriented.** Capability prereqs come in two shapes. The binding-oriented shape (above) extracts values via `vars` that the caller substitutes through `{{<name>}}` placeholders. The **side-effect-oriented** shape runs a capability purely for its browser-context effects — most commonly a `login` capability whose recorded-path logs the user in and leaves an auth cookie on the shared `BrowserContext`. There is no return value worth binding; the caller (any tier — `fetch`, `page-script`, or another `recorded-path`) simply runs afterwards with the cookie jar already warm. For side-effect-only prereqs, **omit `vars` entirely** (or pass `{}`):
 
 ```json
 { "name": "ensure_logged_in", "kind": "capability", "capability": "login" }
 ```
 
-The execute runtime shares the same warm `BrowserContext` across a capability prereq and its caller (the sub-execute checks out the warm slot, runs, returns the slot to the pool; the caller then checks out the same slot — `resetSession` navigates to `about:blank` but does not clear context-level cookies). Any cookies the sub-execute set are visible when the caller's HTTP / page-script fires. The caller strategy referencing a side-effect-only prereq does **not** declare any `{{<name>}}` placeholder tied to it.
+The execute runtime shares the same warm `BrowserContext` across a capability prereq and its caller (the sub-execute checks out the warm slot, runs, returns the slot to the pool; the caller then checks out the same slot — `resetSession` navigates to `about:blank` but does not clear context-level cookies). Any cookies the sub-execute set are visible when the caller's request fires. The caller strategy referencing a side-effect-only prereq does **not** declare any `{{<name>}}` placeholder tied to it.
+
+**Recorded-path callers.** A recorded-path strategy can declare capability prereqs the same way fetch/page-script do — the canonical use case is splitting an auth-gated multi-step flow into a `<site>_login` (recorded-path that ends with the user authenticated) plus a `<site>_<action>` (recorded-path with `prerequisites: [{kind: "capability", capability: "<site>_login"}]` that picks up post-auth). Each capability gets its own surface for triage, the literal_provenance audit doesn't cross-contaminate between login and action, and the cookie state flows through the platform's storage-state file. Prereqs run BEFORE the recorded-path opens its own session, so the steps execute against an already-warmed cookie jar.
 
 **Requires warm-pool mode.** Cookie propagation relies on the caller reusing the same `BrowserContext` the prereq ran in. Warm-pool mode (`pool.warm.enabled: true` in `~/.klura/config.json`) enables this reuse. In cold-pool mode each sub-execute creates + destroys its own context and the caller receives a fresh one — side-effect-only prereqs silently fail to share state. If you're authoring a shared-login pattern, confirm warm pool is enabled; otherwise use a binding-oriented prereq (extract the session token, bind it, caller sends as header) which works in either mode.
 
@@ -928,7 +930,9 @@ Classify every `page-script` save via `notes.anchor_type` so triage + revisit-pr
 
 ## recorded-path schema
 
-A recorded-path strategy is a DOM-replay fallback for sites klura can't lift to an API tier. It carries an ordered list of `steps` (navigate, click, type, fill_editor, select, wait, key_press) plus optional `response` extract. At warm execute, the runtime replays the steps in a browser session and, if `response.format: "html"` is declared, pipes the final page's DOM through cheerio to return structured fields.
+A recorded-path strategy is a DOM-replay fallback for sites klura can't lift to an API tier. It carries an ordered list of `steps` (navigate, click, type, fill_editor, select, wait, key_press) plus optional `response` extract and optional `prerequisites`. At warm execute, the runtime first runs prerequisites (fetching tokens, invoking sibling capabilities for side-effect-only login flows, etc.), then replays the steps in a browser session and, if `response.format: "html"` is declared, pipes the final page's DOM through cheerio to return structured fields.
+
+For multi-step flows that span an authentication boundary (BankID, OAuth, SSO), split into a side-effect-only `<site>_login` capability and a downstream `<site>_<action>` capability that declares the login as a `kind: "capability"` prereq. See `klura://reference#capability-prereq` for the composition pattern.
 
 For the live field-level schema, see `klura://reference#save-strategy-schema`.
 

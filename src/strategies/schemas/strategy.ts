@@ -128,6 +128,7 @@ export const pageScriptSchema = z
 export const recordedPathSchema = z.looseObject({
   strategy: z.literal('recorded-path'),
   steps: z.array(z.record(z.string(), z.unknown())).describe('recorded browser action steps'),
+  prerequisites: prereqList,
   notes: optionalSlot(objectValue).describe('agent-owned metadata; see notes catalog below'),
   generated: optionalSlot(objectValue).describe('{ name: { code } | { instruction } }'),
   response: optionalSlot(objectValue).describe('recorded-path response handling'),

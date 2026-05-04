@@ -25,8 +25,7 @@ export type StrategyTier = 'fetch' | 'page-script' | 'recorded-path';
 
 interface RenderOpts {
   /** Restrict prereq listing to those typically used with the given tier.
-   *  Recorded-path doesn't carry prereqs; fetch / page-script share the
-   *  full set. */
+   *  All three tiers share the full prereq set. */
   tier?: StrategyTier;
 }
 
@@ -71,21 +70,18 @@ export function renderSaveStrategySchemaMarkdown(opts: RenderOpts = {}): string 
     }
   }
 
-  // Prereq kinds — render only when the tier carries prereqs (recorded-path
-  // doesn't). For fetch / page-script the full kind list is relevant.
-  if (opts.tier !== 'recorded-path') {
-    lines.push('### Prereq kinds (`prerequisites: [{kind, ...}, ...]`)');
+  // Prereq kinds — all three tiers carry prereqs.
+  lines.push('### Prereq kinds (`prerequisites: [{kind, ...}, ...]`)');
+  lines.push('');
+  for (const kind of PREREQ_KINDS) {
+    const schema = prereqSchemas[kind];
+    const slug = prereqReferenceSlug(kind);
+    lines.push(`**\`${kind}\`** — see klura://reference#${slug}`);
     lines.push('');
-    for (const kind of PREREQ_KINDS) {
-      const schema = prereqSchemas[kind];
-      const slug = prereqReferenceSlug(kind);
-      lines.push(`**\`${kind}\`** — see klura://reference#${slug}`);
-      lines.push('');
-      lines.push('```');
-      lines.push(renderZodSkeleton(schema));
-      lines.push('```');
-      lines.push('');
-    }
+    lines.push('```');
+    lines.push(renderZodSkeleton(schema));
+    lines.push('```');
+    lines.push('');
   }
 
   lines.push('### `notes` (agent-owned)');

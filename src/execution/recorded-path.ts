@@ -9,6 +9,7 @@
 // callers are step execution.
 
 import type { Session } from '../drivers/types/session';
+import type { TokenCache } from '../strategies/tokens';
 import * as skills from '../strategies/skills';
 import { shapeNetworkLog } from '../response/network-log-shape';
 import { extractFromHtml } from '../response/html-extract';
@@ -19,6 +20,7 @@ import { invokeCheckpointAndGate } from '../checkpoints';
 import { resolveVariables } from './vars';
 import { probeOptionalLocator, runResolvedRecordedStep } from './step-runner';
 import { tryStructuralHeal, isHealableAction } from './heal';
+import { runPrerequisites } from './fetch-browser';
 import { loadConfig } from '../config/handler';
 import {
   registerAutoExecuteAlias,
@@ -72,9 +74,28 @@ export async function executeRecordedPath(
   platform: string,
   capability: string,
   pool: AnyPool,
+  tokenCache: TokenCache | null = null,
   identity?: string,
   ownerSessionId?: string,
 ): Promise<ExecuteResult> {
+  // Run prerequisites BEFORE opening the recorded-path's own session.
+  // Capability prereqs (the canonical "log in first" composition) recursively
+  // execute their own strategy via resolveCapabilityPrereq, which writes
+  // platform storage-state on completion. The recorded-path session opened
+  // below loads that storage-state, so cookies set by a prereq capability
+  // (e.g. bankid_login) flow through to the steps via the platform-keyed
+  // jar. Browser-only prereqs (page-extract / fetch-extract / js-eval / browser)
+  // run in their own short-lived session inside runPrerequisites.
+  const { tokens } = await runPrerequisites({
+    strategy,
+    args,
+    platform,
+    pool,
+    tokenCache,
+    ...(identity !== undefined ? { identity } : {}),
+  });
+  const stepArgs: Record<string, unknown> = { ...args, ...tokens };
+
   const { opts: devOpts, device: resolvedDevice } = currentDeviceSessionOpts();
   const storageStatePath = skills.loadStorageStatePath(platform, identity);
   // Recorded-path opts out of ready-page reuse: step replay assumes a fresh DOM
@@ -91,7 +112,7 @@ export async function executeRecordedPath(
 
   return await executeSteps(
     strategy.steps,
-    args,
+    stepArgs,
     platform,
     capability,
     pool,

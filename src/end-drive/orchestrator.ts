@@ -508,18 +508,27 @@ export async function endDrive(
 
   // Close-session handoff into LIFT (phase: "lift"): any declared capability
   // must either have a saved strategy OR an explicit policy decline before
-  // close succeeds. Attempts 1 and 2 return the LIFT handoff response — the
-  // agent becomes a reverse engineer, works through candidate XHRs + RE
-  // signals, saves a strategy OR declines with evidence. Third close
-  // force-tears-down regardless.
+  // close succeeds. The first end_drive call from drive (`session.lift` not
+  // yet set) returns the LIFT handoff response — the agent becomes a reverse
+  // engineer, works through candidate XHRs + RE signals, saves a strategy OR
+  // declines with evidence.
   //
-  // The rule is: if any declared capability is unresolved, close requires a
-  // successful save_strategy (handoff returns null when every capability has
-  // a save). Until then every close attempt returns the LIFT handoff and the
-  // agent must keep working. The save itself is gated by the user_confirmation
-  // classifier in the save-strategy audit, so the user has the final say at
-  // save time on whether the proposed strategy lands.
-  if (opts.platform) {
+  // Subsequent end_drive calls FROM lift (`session.lift` already set, meaning
+  // the prior handoff already fired) take the abandon path: skip the handoff,
+  // fall through to auto-synth + close. This is the agent's escape hatch for
+  // audit loops that fail to converge — the lift phase admits end_drive
+  // exactly so the agent can bail without leaking the session. Auto-synth
+  // still runs over the captured action history, so a salvageable
+  // recorded-path can land from drive history even when the agent couldn't
+  // compose a manual save.
+  //
+  // The rule for the first call is unchanged: if any declared capability is
+  // unresolved, close requires a successful save_strategy (handoff returns
+  // null when every capability has a save). The save itself is gated by the
+  // user_confirmation classifier in the save-strategy audit, so the user has
+  // the final say at save time on whether the proposed strategy lands.
+  const isAbandonFromLift = session.lift !== undefined;
+  if (opts.platform && !isAbandonFromLift) {
     const handoff = computeReverseEngineerHandoff(session, opts.platform);
     if (handoff) {
       try {
