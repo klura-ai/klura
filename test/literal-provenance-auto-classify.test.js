@@ -79,8 +79,9 @@ test('agent can omit literal_provenance for auto-classified items', () => {
 });
 
 test('placeholder matching prereq.binds → auto-classified as prereq_output', () => {
-  // collectScannedFields scans endpoint + (string-only) body + prereq URLs.
-  // We put the {{token}} placeholder in the endpoint so the audit sees it.
+  // collectScannedFields scans endpoint + body (object keys + JSON descent) +
+  // headers + prereq URLs. We put the {{token}} placeholder in the endpoint
+  // so the audit sees it.
   const strategy = {
     strategy: 'page-script',
     baseUrl: 'http://127.0.0.1:3311',
@@ -101,16 +102,10 @@ test('placeholder matching prereq.binds → auto-classified as prereq_output', (
     ...baseCtx,
     observedUrls: ['http://127.0.0.1:3311/', 'http://127.0.0.1:3311/api/send'],
   };
-  // Strategy is mutating-shaped (POST) — Stage 1 demands a verification ack
-  // before classifiers run. Supply one so Stage 2 fires and exposes the
-  // auto_classified items being asserted.
-  const acks = {
-    mutating_verification_required:
-      'transaction-shape: response.extract grounds the verification (test default)',
-    parameterization_disclosure_required:
-      'prereq sign covers the only varying value (token); endpoint anchor /api/send has no caller axis beyond the prereq output',
-  };
-  const first = saveStrategyAudit.process(strategy, ctx, { acks });
+  // First call mints token; classifiers (mutating_verification_required,
+  // parameterization_disclosure_required, literal_provenance, ...) all
+  // surface as items at Stage 2.
+  const first = saveStrategyAudit.process(strategy, ctx, {});
   assert.equal(first.status, 'rejected');
   const items = first.rejection.items.literal_provenance;
   const endpoint = items.find((i) => i.path === 'endpoint');
@@ -124,11 +119,7 @@ test('static fields stay unclassified — agent must answer', () => {
     baseUrl: 'http://127.0.0.1:3315',
     endpoint: '/search', // no placeholder
   };
-  const acks = {
-    parameterization_disclosure_required:
-      'endpoint /search: degenerate test fixture; literal_provenance is the gate under test',
-  };
-  const first = saveStrategyAudit.process(strategy, baseCtx, { acks });
+  const first = saveStrategyAudit.process(strategy, baseCtx, {});
   assert.equal(first.status, 'rejected');
   const items = first.rejection.items.literal_provenance;
   const endpoint = items.find((i) => i.path === 'endpoint');
@@ -172,4 +163,105 @@ test('agent override wins over auto-classification', () => {
     issues.some((i) => i.includes('static') && i.includes('placeholder')),
     `expected static-vs-placeholder issue, got: ${JSON.stringify(issues)}`,
   );
+});
+
+const descentCtx = {
+  ...baseCtx,
+  observedUrls: ['http://127.0.0.1:3315/', 'http://127.0.0.1:3315/api/x', 'http://127.0.0.1:3315/api/graphql'],
+};
+
+test('JSON descent: object body keys surface as literal_provenance items', () => {
+  // body is an object — each key emits as a separate scanned-field path.
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'http://127.0.0.1:3315',
+    endpoint: '/api/x',
+    method: 'GET',
+    body: { static_key: 'plain', templated_key: '{{query}}' },
+    notes: { params: { query: { kind: 'text', example: 'thai' } } },
+  };
+  const result = saveStrategyAudit.process(strategy, descentCtx, {});
+  assert.equal(result.status, 'rejected');
+  const items = result.rejection.items.literal_provenance;
+  const staticKey = items.find((i) => i.path === 'body.static_key');
+  const templatedKey = items.find((i) => i.path === 'body.templated_key');
+  assert.ok(staticKey, 'expected body.static_key in items');
+  assert.equal(staticKey.value, 'plain');
+  assert.ok(templatedKey, 'expected body.templated_key in items');
+  assert.deepEqual(templatedKey.auto_classified, { caller_input: 'query' });
+});
+
+test('JSON descent: stringified-JSON body field exposes inner literals', () => {
+  // The Facebook-discovery shape: body.variables is a JSON-stringified blob
+  // hiding embedded literals (count, scale). Without descent, the agent can
+  // classify body.variables as "static" and the inner numerics never surface.
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'http://127.0.0.1:3315',
+    endpoint: '/api/graphql',
+    method: 'GET',
+    body: {
+      doc_id: '7760990390645001',
+      variables: '{"count":3,"scale":1}',
+    },
+  };
+  const result = saveStrategyAudit.process(strategy, descentCtx, {});
+  assert.equal(result.status, 'rejected');
+  const items = result.rejection.items.literal_provenance;
+  const wrapper = items.find((i) => i.path === 'body.variables');
+  const innerCount = items.find((i) => i.path === 'body.variables.count');
+  const innerScale = items.find((i) => i.path === 'body.variables.scale');
+  assert.ok(wrapper, 'expected wrapper body.variables in items');
+  assert.ok(innerCount, 'expected inner body.variables.count in items');
+  assert.equal(innerCount.value, '3');
+  assert.ok(innerScale, 'expected inner body.variables.scale in items');
+  assert.equal(innerScale.value, '1');
+});
+
+test('JSON descent: headers keys surface as literal_provenance items', () => {
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'http://127.0.0.1:3315',
+    endpoint: '/api/x',
+    method: 'GET',
+    headers: { 'x-version': '2', 'x-token': '{{token}}' },
+    prerequisites: [
+      {
+        name: 'mint_token',
+        kind: 'js-eval',
+        url: 'http://127.0.0.1:3315/',
+        expression: 'computeToken()',
+        binds: 'token',
+        return_shape: { kind: 'string', min_length: 8 },
+      },
+    ],
+  };
+  const result = saveStrategyAudit.process(strategy, descentCtx, {});
+  assert.equal(result.status, 'rejected');
+  const items = result.rejection.items.literal_provenance;
+  const versionHeader = items.find((i) => i.path === 'headers.x-version');
+  const tokenHeader = items.find((i) => i.path === 'headers.x-token');
+  assert.ok(versionHeader, 'expected headers.x-version in items');
+  assert.equal(versionHeader.value, '2');
+  assert.ok(tokenHeader, 'expected headers.x-token in items');
+  assert.deepEqual(tokenHeader.auto_classified, { prereq_output: 'token' });
+});
+
+test('JSON descent: malformed JSON string keeps wrapper, no inner literals', () => {
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'http://127.0.0.1:3315',
+    endpoint: '/api/x',
+    method: 'GET',
+    body: {
+      payload: '{not actually json',
+    },
+  };
+  const result = saveStrategyAudit.process(strategy, descentCtx, {});
+  assert.equal(result.status, 'rejected');
+  const items = result.rejection.items.literal_provenance;
+  const wrapper = items.find((i) => i.path === 'body.payload');
+  assert.ok(wrapper, 'expected wrapper body.payload in items');
+  const inner = items.filter((i) => i.path.startsWith('body.payload.'));
+  assert.equal(inner.length, 0, `expected no inner descent, got: ${JSON.stringify(inner)}`);
 });

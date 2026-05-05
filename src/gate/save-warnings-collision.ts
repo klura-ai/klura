@@ -361,27 +361,16 @@ export function detectAuthGatedWithoutAuthPrereq(
   const cookieSetters = collectCookieSetters(captured, strategyOrigin);
   if (cookieSetters.length === 0) return [];
 
-  // If the strategy IS the cookie-setter, the warning doesn't apply — the
-  // agent is saving an auth-providing capability itself. Two signals: the
-  // endpoint path matches a captured cookie-setter, OR the strategy declares
-  // `provides: ["auth"]` at the top level (typed-edge marker).
+  // The only opt-out is the typed-edge marker `provides: ["auth"]` — the
+  // agent declaring "this strategy IS the auth provider." Path-matching the
+  // strategy's endpoint against captured cookie-setters is too coarse: any
+  // gateway that multiplexes operations under one path (GraphQL, JSON-RPC,
+  // generic /api/v1/) silently bypasses the warning when an unrelated
+  // operation on the same path happened to set cookies. The typed-edge
+  // requirement closes that bypass — agents saving the actual auth flow
+  // declare `provides: ["auth"]`; everyone else gets the warning and
+  // chains a `{kind: "tag", tag: "auth"}` prereq.
   const strategyEndpoint = (data as { endpoint?: string }).endpoint ?? '';
-  const strategyEndpointPath = (() => {
-    if (typeof strategyEndpoint !== 'string' || strategyEndpoint.length === 0) return '';
-    try {
-      return new URL(strategyEndpoint, baseUrl).pathname;
-    } catch {
-      return '';
-    }
-  })();
-  const strategyMatchesCookieSetter = cookieSetters.some((s) => {
-    try {
-      return new URL(s.url).pathname === strategyEndpointPath;
-    } catch {
-      return false;
-    }
-  });
-  if (strategyMatchesCookieSetter) return [];
   const provides = (data as { provides?: unknown }).provides;
   if (Array.isArray(provides) && provides.includes('auth')) return [];
 

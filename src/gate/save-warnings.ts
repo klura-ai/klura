@@ -37,6 +37,7 @@ import {
   detectParameterizationDisclosureRequired,
   collectParameterizationAnchors,
 } from './save-warnings-parameterization';
+import { detectUnreferencedPrereqBinding } from './save-warnings-unreferenced-binding';
 
 export {
   detectEnumValueInCapabilitySlug,
@@ -46,6 +47,7 @@ export {
   detectMutatingStrategyVerificationApproach,
   detectParameterizationDisclosureRequired,
   collectParameterizationAnchors,
+  detectUnreferencedPrereqBinding,
   VERIFICATION_SHAPE_TAGS,
   FIRE_AND_FORGET_JUSTIFYING_NOUNS,
   NON_DOM_VERIFICATION_MARKERS,

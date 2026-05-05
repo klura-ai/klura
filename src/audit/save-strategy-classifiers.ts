@@ -247,12 +247,17 @@ export const observedSiblingsClassifier: Classifier<Strategy, SaveStrategyCtx, u
 
 // user_confirmation — surfaces the proposed save to the user for explicit
 // approval before commit. Tier-agnostic: covers fetch / page-script /
-// recorded-path uniformly. The Classifier's buildItems composes a prompt
-// the agent reads back to the user verbatim; the agent's reply lands in
-// audit_answers.user_confirmation as {user_decision, user_quote}. Test
-// harnesses bypass the round trip by registering a SaveConfirmationDecider
-// that auto-decides based on a scenario predicate (see
-// `runtime/src/audit/save-confirmation-decider.ts`).
+// recorded-path uniformly. The Classifier's buildItems emits a structural
+// fact-set the agent must convey; the agent composes the user-facing
+// prompt in their own voice and submits it as `agent_prompt` alongside
+// the user's reply. The runtime structurally checks that agent_prompt
+// covers the load-bearing facts (capability slug, tier, target host,
+// anchor classification when page-script, presence of warnings) — same
+// pattern as `tierJustificationUnciteable` in `audit/triage-plan.ts`.
+//
+// Test harnesses bypass the round trip by registering a
+// SaveConfirmationDecider; the runtime synthesizes the answer (including
+// agent_prompt) so validate's fact-checks pass without the agent loop.
 //
 // **Pre-resolve at buildItems time when a decider is registered + approves.**
 // Otherwise the agent sees `user_confirmation` in the items list,
@@ -268,26 +273,137 @@ export const observedSiblingsClassifier: Classifier<Strategy, SaveStrategyCtx, u
 // distinct save shape needs its own user approval — changing any field
 // (tier, anchor_type, prereqs, headers, body, even notes) invalidates the
 // approval and forces a fresh ask.
+
+interface RequiredFacts {
+  capability: string;
+  tier: string;
+  target: string;
+  anchor_type?: string | null;
+  warning_kinds: string[];
+}
+
+const WARNING_ACK_SYNONYMS = ['warning', 'flagged', 'issue', 'concern'];
+
+function extractRequiredFacts(data: Strategy, ctx: SaveStrategyCtx): RequiredFacts {
+  const s = data as Record<string, unknown>;
+  const tier = typeof s.strategy === 'string' ? s.strategy : 'unknown';
+  let target = '';
+  if (tier === 'fetch' || tier === 'page-script') {
+    const baseUrl = typeof s.baseUrl === 'string' ? s.baseUrl : '';
+    const endpoint = typeof s.endpoint === 'string' ? s.endpoint : '';
+    target = baseUrl + endpoint || baseUrl || endpoint;
+  } else if (tier === 'recorded-path') {
+    const steps = Array.isArray(s.steps) ? (s.steps as unknown[]) : [];
+    const navStep = steps.find(
+      (st) =>
+        st &&
+        typeof st === 'object' &&
+        (st as { action?: unknown }).action === 'navigate' &&
+        typeof (st as { url?: unknown }).url === 'string',
+    );
+    target = navStep ? (navStep as { url: string }).url : '';
+  }
+  const notes =
+    s.notes && typeof s.notes === 'object' ? (s.notes as Record<string, unknown>) : undefined;
+  const anchor_type = notes && typeof notes.anchor_type === 'string' ? notes.anchor_type : null;
+  const meta =
+    s.runtime_meta && typeof s.runtime_meta === 'object'
+      ? (s.runtime_meta as Record<string, unknown>)
+      : undefined;
+  const rawWarnings = Array.isArray(meta?.save_warnings) ? (meta.save_warnings as unknown[]) : [];
+  const warning_kinds: string[] = [];
+  for (const w of rawWarnings) {
+    if (w && typeof w === 'object') {
+      const k = (w as { kind?: unknown }).kind;
+      if (typeof k === 'string' && !warning_kinds.includes(k)) warning_kinds.push(k);
+    }
+  }
+  return {
+    capability: ctx.capability,
+    tier,
+    target,
+    anchor_type,
+    warning_kinds,
+  };
+}
+
+/** Extract the host portion of a URL string. Returns the input verbatim if
+ *  it doesn't parse — leniency for templated/partial targets. */
+function targetHost(target: string): string {
+  if (target.length === 0) return target;
+  try {
+    return new URL(target).host;
+  } catch {
+    return target;
+  }
+}
+
+/** Structural fact-check on the agent-composed prompt. Mirrors the
+ *  `tierJustificationUnciteable` pattern: the prompt phrasing is free,
+ *  but it MUST surface every load-bearing fact the user needs to make an
+ *  informed approve/reject. */
+function checkPromptFacts(prompt: string, facts: RequiredFacts): string[] {
+  const out: string[] = [];
+  if (!prompt.includes(facts.capability)) {
+    out.push(
+      `user_confirmation.agent_prompt must mention the capability slug "${facts.capability}" verbatim — the user needs to know what's being saved.`,
+    );
+  }
+  if (!prompt.includes(facts.tier)) {
+    out.push(
+      `user_confirmation.agent_prompt must mention the tier "${facts.tier}" verbatim — durability classification is load-bearing for the user's approval.`,
+    );
+  }
+  if (facts.target.length > 0) {
+    const host = targetHost(facts.target);
+    const hasFullTarget = prompt.includes(facts.target);
+    const hasHost = host.length > 0 && prompt.includes(host);
+    // Endpoint path fallback — sometimes the agent shortens to just the path.
+    const endpointPathMatch = /^https?:\/\/[^/]+(\/.*)$/.exec(facts.target);
+    const hasPath =
+      !!endpointPathMatch && endpointPathMatch[1] !== undefined && endpointPathMatch[1].length > 1
+        ? prompt.includes(endpointPathMatch[1])
+        : false;
+    if (!hasFullTarget && !hasHost && !hasPath) {
+      out.push(
+        `user_confirmation.agent_prompt must mention the save target — host "${host}" or full target "${facts.target}" — the user needs to know where the call lands.`,
+      );
+    }
+  }
+  if (facts.tier === 'page-script' && facts.anchor_type) {
+    // Either the literal anchor_type value, or the generic word "anchor"
+    // (e.g. "module-anchored", "unclassified anchor"). Allows the agent to
+    // describe `unknown` as "unclassified" or "fragile" without naming the
+    // raw enum value.
+    const hasAnchorWord = /anchor|fragile|durable|unclassified|module|protocol/i.test(prompt);
+    const hasAnchorType = prompt.includes(facts.anchor_type);
+    if (!hasAnchorWord && !hasAnchorType) {
+      out.push(
+        `user_confirmation.agent_prompt must convey the anchor classification (notes.anchor_type "${facts.anchor_type}") — durability of a page-script strategy is load-bearing for the user's approval.`,
+      );
+    }
+  }
+  if (facts.warning_kinds.length > 0) {
+    const lower = prompt.toLowerCase();
+    const acknowledgesWarning = WARNING_ACK_SYNONYMS.some((s) => lower.includes(s));
+    if (!acknowledgesWarning) {
+      out.push(
+        `user_confirmation.agent_prompt must acknowledge the open warning(s) [${facts.warning_kinds
+          .map((k) => `"${k}"`)
+          .join(
+            ', ',
+          )}] — burying flagged concerns defeats the user-confirmation gate. Mention "warning" / "flagged" / "issue" / "concern" or name a kind verbatim.`,
+      );
+    }
+  }
+  return out;
+}
+
 export const userConfirmationClassifier: Classifier<Strategy, SaveStrategyCtx, unknown> = {
   kind: 'user_confirmation',
   expectedAnswerShape:
-    'user_confirmation: {user_decision: "approve" | "reject", user_quote: "<the user\'s fresh reply to THIS save\'s prompt_for_user — do NOT reuse their reply to triage_plan, surface_changed, or any earlier turn>"}',
+    'user_confirmation: {agent_prompt: "<the 1-3 sentence prompt you showed the user, in your own voice, mentioning the capability slug, tier, target host, anchor classification (when page-script), and any open warnings>", user_decision: "approve" | "reject", user_quote: "<the user\'s fresh reply — do NOT reuse their reply to triage_plan, surface_changed, or any earlier turn>"}',
   buildItems: (data, ctx) => {
-    // Pre-resolve via the registered decider when one exists. If the
-    // decider approves, return null → classifier becomes inactive →
-    // user_confirmation never appears in items. The agent sees only the
-    // structural classifiers (literal_provenance / capability_name /
-    // observed_siblings), all of which they can answer without user input.
-    //
-    // Decider returns the canonical `{decision, quote}` shape (see
-    // SaveConfirmationDecider in `save-confirmation-decider.ts`). The
-    // audit-answer slot uses `{user_decision, user_quote}` keys —
-    // skills.ts:418-435 does the transformation when feeding the answer
-    // through the audit's validate path. This pre-resolve mirrors the
-    // same transformation before checking shape, then drops the
-    // classifier from items only when the transformed answer is shape-valid
-    // AND approves. Reject answers fall through to the prompt path so the
-    // existing surfacing code runs unchanged.
     const decider = getRegisteredSaveConfirmationDecider();
     if (decider) {
       try {
@@ -300,47 +416,45 @@ export const userConfirmationClassifier: Classifier<Strategy, SaveStrategyCtx, u
         // re-invokes the decider with proper try/catch downstream.
       }
     }
+    const facts = extractRequiredFacts(data, ctx);
     return {
-      prompt_for_user: composeUserPrompt(data, ctx),
+      required_facts: facts,
       agent_note:
-        "Per-save confirmation. Relay `prompt_for_user` verbatim to the user as your text turn, wait for their fresh yes/no reply about THIS save, and submit that reply as `user_quote`. Do NOT reuse the user's reply to a prior `ack_checkpoint` (triage_plan, surface_changed) or any earlier turn — the runtime cannot structurally distinguish a fresh reply from a recycled one, so this contract is on the agent. Self-resolving the gate by recycling a reply defeats the gate's purpose.",
+        'Compose a 1-3 sentence prompt to the user explaining what is about to be saved. Use your own voice — match the user\'s tone. The prompt MUST mention every fact in `required_facts`: the capability slug verbatim, the tier verbatim, the target host (or path), the anchor classification when tier is page-script, and at least the word "warning" / "flagged" / "issue" / "concern" when `warning_kinds` is non-empty. End with an explicit yes/no ask. Submit your prompt as `audit_answers.user_confirmation.agent_prompt`; submit the user\'s reply as `user_quote` and their decision as `user_decision`. Do NOT reuse the user\'s reply to a prior ack_checkpoint (triage_plan, surface_changed) or any earlier turn — the runtime cannot detect recycled replies, so freshness is on you. Self-resolving the gate by recycling a reply defeats the gate\'s purpose.',
+      debug_prompt: composeUserPrompt(data, ctx),
     };
   },
   validate: (data, ctx, answer) => {
-    // If a SaveConfirmationDecider is registered, the runtime synthesizes
-    // the answer before this validate runs (see Audit.process integration).
-    // By the time we get here, the answer is either agent-supplied or
-    // decider-supplied, and the validate is just shape-checking.
     if (answer === undefined || answer === null) {
-      // Decider may have synthesized but the runtime didn't apply (defensive).
       const d = getRegisteredSaveConfirmationDecider();
       if (d) {
         const synthesized = d.decide(data, ctx);
-        return validateAnswerShape(synthesized);
+        return validateAnswerShape(synthesized, data, ctx);
       }
       return [
-        `audit_answers.user_confirmation is required. Read prompt_for_user from items.user_confirmation, ` +
-          `relay it VERBATIM to the user as your text turn, wait for their fresh yes/no reply about THIS save, ` +
-          `then retry with audit_answers.user_confirmation: ` +
-          `{user_decision: "approve" | "reject", user_quote: "<their fresh reply>"}. ` +
+        `audit_answers.user_confirmation is required. Read \`required_facts\` from items.user_confirmation, ` +
+          `compose a 1-3 sentence prompt in your own voice that mentions every fact, relay it to the user, ` +
+          `wait for their fresh yes/no reply about THIS save, then retry with audit_answers.user_confirmation: ` +
+          `{agent_prompt: "<the prompt you showed them>", user_decision: "approve" | "reject", user_quote: "<their fresh reply>"}. ` +
           `Do NOT reuse the user's reply to a prior ack_checkpoint (triage_plan, surface_changed) or any earlier turn — ` +
           `the runtime cannot detect recycled replies, so the contract is on you.`,
       ];
     }
-    return validateAnswerShape(answer);
+    return validateAnswerShape(answer, data, ctx);
   },
   remedy: () => ({
     kind: 'no_programmatic_remedy',
     reason:
-      "user confirmation is the user's decision about THIS save. The runtime has no structural alternative to surface — relay the prompt_for_user prose verbatim to the user, wait for their fresh yes/no reply about this specific save, and submit it as user_quote. Reusing the user's reply to a prior ack_checkpoint or any earlier turn defeats the gate; freshness is on the agent.",
+      "user confirmation is the user's decision about THIS save. The runtime has no structural alternative to surface — read `required_facts`, compose the prompt in your own voice covering every fact, relay it to the user, and submit their fresh reply as `user_quote`. Reusing the user's reply to a prior ack_checkpoint or any earlier turn defeats the gate; freshness is on the agent.",
   }),
 };
 
-function validateAnswerShape(answer: unknown): string[] {
+function validateAnswerShape(answer: unknown, data: Strategy, ctx: SaveStrategyCtx): string[] {
   if (!answer || typeof answer !== 'object') {
-    return ['user_confirmation answer must be an object {user_decision, user_quote}'];
+    return ['user_confirmation answer must be an object {agent_prompt, user_decision, user_quote}'];
   }
   const a = answer as Record<string, unknown>;
+  const agentPrompt = a.agent_prompt;
   const decision = a.user_decision;
   const quote = a.user_quote;
   const issues: string[] = [];
@@ -353,6 +467,19 @@ function validateAnswerShape(answer: unknown): string[] {
     issues.push(
       "user_confirmation.user_quote must be a non-empty string with the user's verbatim reply",
     );
+  }
+  // agent_prompt is required for both agent-supplied and synthesized answers.
+  // The runtime's decider integration in skills.ts injects a deterministic
+  // composeUserPrompt-rendered string as agent_prompt — that prose covers
+  // every required fact by construction, so the fact-check passes for the
+  // decider path without special-casing.
+  if (typeof agentPrompt !== 'string' || agentPrompt.trim().length === 0) {
+    issues.push(
+      'user_confirmation.agent_prompt must be a non-empty string — the prose you showed the user when asking for their approval. Read `required_facts` from items.user_confirmation and compose a 1-3 sentence prompt in your own voice covering every fact.',
+    );
+  } else {
+    const facts = extractRequiredFacts(data, ctx);
+    issues.push(...checkPromptFacts(agentPrompt, facts));
   }
   if (decision === 'reject' && typeof quote === 'string' && quote.trim().length > 0) {
     issues.push(

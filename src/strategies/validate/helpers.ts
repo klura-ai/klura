@@ -58,6 +58,50 @@ export interface ScannedField {
   value: string;
 }
 
+const JSON_DESCENT_MAX_DEPTH = 3;
+
+/** Emit a scanned field, descending into JSON-stringified objects and plain
+ *  object structures. A JSON-string body field like
+ *  `body.variables = "{\"count\":3}"` surfaces as both `body.variables` (the
+ *  wrapper) and `body.variables.count` (the inner literal) — keeps the
+ *  caller-varying axes visible to literal_provenance instead of letting the
+ *  agent classify the whole serialized blob as "static". */
+function emitFieldWithDescent(
+  out: ScannedField[],
+  path: string,
+  value: unknown,
+  depth: number,
+): void {
+  if (depth > JSON_DESCENT_MAX_DEPTH) return;
+  if (typeof value === 'string') {
+    out.push({ path, value });
+    const trimmed = value.trim();
+    if (trimmed.length >= 2 && trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const parsed: unknown = JSON.parse(value);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+            emitFieldWithDescent(out, `${path}.${k}`, v, depth + 1);
+          }
+        }
+      } catch {
+        // Not parseable as JSON — wrapper field stays; no descent.
+      }
+    }
+    return;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    out.push({ path, value: String(value) });
+    return;
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      emitFieldWithDescent(out, `${path}.${k}`, v, depth + 1);
+    }
+  }
+  // Arrays / null / undefined: skip — outside the scanned-field model.
+}
+
 export function collectScannedFields(data: Strategy): ScannedField[] {
   const out: ScannedField[] = [];
   const obj = data as Record<string, unknown>;
@@ -86,7 +130,12 @@ export function collectScannedFields(data: Strategy): ScannedField[] {
     const v = obj[k];
     if (typeof v === 'string') out.push({ path: k, value: v });
   }
-  if (typeof obj.body === 'string') out.push({ path: 'body', value: obj.body });
+  emitFieldWithDescent(out, 'body', obj.body, 0);
+  if (obj.headers && typeof obj.headers === 'object' && !Array.isArray(obj.headers)) {
+    for (const [hk, hv] of Object.entries(obj.headers as Record<string, unknown>)) {
+      emitFieldWithDescent(out, `headers.${hk}`, hv, 0);
+    }
+  }
 
   const generated = obj.generated;
   if (generated && typeof generated === 'object') {

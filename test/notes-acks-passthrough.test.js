@@ -81,21 +81,16 @@ const auditCtx = {
 };
 
 test('notes.save_warnings_acked is forwarded to the audit (regression)', () => {
-  // First call: notes.save_warnings_acked carries the Detector acks so
-  // Stage 1 clears and Stage 2 can mint a token. Multiple Detectors fire
-  // (unparametrized_session_id, mutating_verification_required); both
-  // need acks to reach Stage 2.
+  // First call: notes.save_warnings_acked carries Detector-level acks so
+  // Stage 1 clears (unparametrized_session_id is still a Detector). The
+  // mutating_verification_required Classifier surfaces as a Stage-2 item;
+  // its answer travels through audit_answers, not notes.save_warnings_acked.
   const ackedFirst = buildStrategy();
   ackedFirst.notes.save_warnings_acked = [
     {
       kind: 'unparametrized_session_id',
       reason:
         'sid is freshly minted per page load and is not portable across users; the in-page signer requires it',
-    },
-    {
-      kind: 'mutating_verification_required',
-      reason:
-        'transaction-shape: response.extract grounds the verification (test default)',
     },
   ];
   let firstToken;
@@ -107,9 +102,8 @@ test('notes.save_warnings_acked is forwarded to the audit (regression)', () => {
     firstToken = err.message.match(/audit_token:\s*(\S+)/)[1];
   }
 
-  // Second call: same strategy + token + answers + acks in notes. Should
-  // commit. Pre-fix this stayed in answers_inconsistent forever because
-  // input.acks reached the audit empty.
+  // Second call: same strategy + token + answers + Detector ack in notes.
+  // Classifier answers (mutating_verification_required) live in audit_answers.
   const acked = buildStrategy();
   acked.notes.save_warnings_acked = ackedFirst.notes.save_warnings_acked;
   try {
@@ -117,9 +111,12 @@ test('notes.save_warnings_acked is forwarded to the audit (regression)', () => {
       ...auditCtx,
       token: firstToken,
       answers: {
+        mutating_verification_required:
+          'transaction-shape: response.extract grounds the verification (test default)',
         literal_provenance: {
           endpoint: 'static',
           'prerequisites[0].url': 'static',
+          'headers.content-type': 'static',
         },
         observed_siblings: {},
       },

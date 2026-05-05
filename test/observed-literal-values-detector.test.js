@@ -51,8 +51,8 @@ function mkCtx(session) {
   };
 }
 
-function findWarning(rej, kind) {
-  return (rej?.warnings || []).find((w) => w.kind === kind);
+function findClassifierItem(rej, kind) {
+  return rej?.items?.[kind];
 }
 
 test('fires when a header value matches an observed string', () => {
@@ -68,9 +68,10 @@ test('fires when a header value matches an observed string', () => {
   };
   const r = saveStrategyAudit.process(strategy, mkCtx(session), {});
   assert.equal(r.status, 'rejected');
-  const w = findWarning(r.rejection, 'observed_literal_values');
-  assert.ok(w, 'expected observed_literal_values warning');
-  assert.match(w.message, /headers\["x-nonce"\]/);
+  const item = findClassifierItem(r.rejection, 'observed_literal_values');
+  assert.ok(item, 'expected observed_literal_values classifier item');
+  const occurrence = (item.occurrences ?? []).find((o) => /headers\["x-nonce"\]/.test(o.location));
+  assert.ok(occurrence, 'expected headers["x-nonce"] occurrence');
 });
 
 test('fires for body JSON leaf values (recursive walk)', () => {
@@ -85,9 +86,10 @@ test('fires for body JSON leaf values (recursive walk)', () => {
     notes: { params: { text: { description: 'msg', kind: 'text', example: 'hi' } } },
   };
   const r = saveStrategyAudit.process(strategy, mkCtx(session), {});
-  const w = findWarning(r.rejection, 'observed_literal_values');
-  assert.ok(w);
-  assert.match(w.message, /body\.meta\.token/);
+  const item = findClassifierItem(r.rejection, 'observed_literal_values');
+  assert.ok(item);
+  const occurrence = (item.occurrences ?? []).find((o) => /body\.meta\.token/.test(o.location));
+  assert.ok(occurrence, 'expected body.meta.token occurrence');
 });
 
 test('fires for recorded-path step values', () => {
@@ -102,13 +104,13 @@ test('fires for recorded-path step values', () => {
     notes: { params: { text: { description: 'msg', kind: 'text', example: 'hi' } } },
   };
   const r = saveStrategyAudit.process(strategy, mkCtx(session), {});
-  const w = findWarning(r.rejection, 'observed_literal_values');
-  assert.ok(w);
-  assert.match(w.message, /steps\[1\]\.value/);
+  const item = findClassifierItem(r.rejection, 'observed_literal_values');
+  assert.ok(item);
+  const occurrence = (item.occurrences ?? []).find((o) => /steps\[1\]\.value/.test(o.location));
+  assert.ok(occurrence, 'expected steps[1].value occurrence');
 });
 
 test('STABLE_LITERAL_VALUES allowlist is not flagged', () => {
-  // application/json appears in observation set AND header — must NOT fire.
   const session = mkSession(['application/json']);
   const strategy = {
     strategy: 'fetch',
@@ -120,8 +122,7 @@ test('STABLE_LITERAL_VALUES allowlist is not flagged', () => {
     notes: { params: { text: { description: 'msg', kind: 'text', example: 'hi' } } },
   };
   const r = saveStrategyAudit.process(strategy, mkCtx(session), {});
-  const w = findWarning(r.rejection, 'observed_literal_values');
-  assert.equal(w, undefined);
+  assert.equal(findClassifierItem(r.rejection, 'observed_literal_values'), undefined);
 });
 
 test('templated-only values are not scanned', () => {
@@ -136,7 +137,7 @@ test('templated-only values are not scanned', () => {
     notes: { params: { text: { description: 'msg', kind: 'text', example: 'hi' } } },
   };
   const r = saveStrategyAudit.process(strategy, mkCtx(session), {});
-  assert.equal(findWarning(r.rejection, 'observed_literal_values'), undefined);
+  assert.equal(findClassifierItem(r.rejection, 'observed_literal_values'), undefined);
 });
 
 test('strings under 8 chars are not scanned', () => {
@@ -151,10 +152,10 @@ test('strings under 8 chars are not scanned', () => {
     notes: { params: { text: { description: 'msg', kind: 'text', example: 'hi' } } },
   };
   const r = saveStrategyAudit.process(strategy, mkCtx(session), {});
-  assert.equal(findWarning(r.rejection, 'observed_literal_values'), undefined);
+  assert.equal(findClassifierItem(r.rejection, 'observed_literal_values'), undefined);
 });
 
-test('detector returns no warning when session has no observations', () => {
+test('classifier silent when session has no observations', () => {
   const session = mkSession([]);
   const strategy = {
     strategy: 'fetch',
@@ -166,10 +167,10 @@ test('detector returns no warning when session has no observations', () => {
     notes: { params: { text: { description: 'msg', kind: 'text', example: 'hi' } } },
   };
   const r = saveStrategyAudit.process(strategy, mkCtx(session), {});
-  assert.equal(findWarning(r.rejection, 'observed_literal_values'), undefined);
+  assert.equal(findClassifierItem(r.rejection, 'observed_literal_values'), undefined);
 });
 
-test('ack with reason referencing flagged value commits', () => {
+test('answer with reason referencing flagged value commits', () => {
   const session = mkSession([BAKED]);
   const strategy = {
     strategy: 'fetch',
@@ -181,23 +182,17 @@ test('ack with reason referencing flagged value commits', () => {
     notes: { params: { text: { description: 'msg', kind: 'text', example: 'hi' } } },
   };
   const ctx = mkCtx(session);
-  // Two Stage-1 detectors fire here — observed_literal_values (the focus
-  // of this test) AND mutating_verification_required (POST tier). Both
-  // must be acked for Stage 2 to run.
-  const acks = {
-    observed_literal_values: `the value ${BAKED} is a frozen fixture in this dev environment, not a rotating token`,
-    mutating_verification_required: VERIFY_ACK,
-  };
-  const first = saveStrategyAudit.process(strategy, ctx, { acks });
+  const first = saveStrategyAudit.process(strategy, ctx, {});
   assert.equal(first.status, 'rejected');
 
   const second = saveStrategyAudit.process(strategy, ctx, {
     token: first.rejection.token,
     answers: {
-      literal_provenance: { endpoint: 'static' },
+      observed_literal_values: `the value ${BAKED} is a frozen fixture in this dev environment, not a rotating token`,
+      mutating_verification_required: VERIFY_ACK,
+      literal_provenance: { endpoint: 'static', 'headers.x-nonce': 'static' },
       observed_siblings: {},
     },
-    acks,
   });
   assert.equal(
     second.status,
@@ -206,7 +201,7 @@ test('ack with reason referencing flagged value commits', () => {
   );
 });
 
-test('anti-canned ack: reason missing all flagged values → ack_issue', () => {
+test('anti-canned: answer missing all flagged values → classifier rejected', () => {
   const session = mkSession([BAKED]);
   const strategy = {
     strategy: 'fetch',
@@ -223,16 +218,15 @@ test('anti-canned ack: reason missing all flagged values → ack_issue', () => {
   const second = saveStrategyAudit.process(strategy, ctx, {
     token: first.rejection.token,
     answers: {
-      literal_provenance: { endpoint: 'static' },
-      observed_siblings: {},
-    },
-    acks: {
       observed_literal_values: 'this is intentional, trust me, it is fine',
+      mutating_verification_required: VERIFY_ACK,
+      literal_provenance: { endpoint: 'static', 'headers.x-nonce': 'static' },
+      observed_siblings: {},
     },
   });
   assert.equal(second.status, 'rejected');
-  const ack = (second.rejection.ack_issues || []).find((s) =>
+  const issue = (second.rejection.classifier_issues || []).find((s) =>
     /must reference at least one flagged literal value/.test(s),
   );
-  assert.ok(ack, `expected anti-canned ack issue; got ${JSON.stringify(second.rejection)}`);
+  assert.ok(issue, `expected anti-canned classifier issue; got ${JSON.stringify(second.rejection)}`);
 });

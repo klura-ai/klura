@@ -46,11 +46,13 @@ function mkCtx(session) {
   };
 }
 
-test('detector fires when js-eval prereq bakes observed property keys', () => {
+test('classifier fires when js-eval prereq bakes observed property keys', () => {
   const session = mkSession(['__app', 'me', 'o']);
   const strategy = {
     strategy: 'page-script',
     baseUrl: 'https://x.test/',
+    endpoint: '/api/x',
+    headers: { 'X-Nonce': '{{nonce}}' },
     prerequisites: [
       {
         name: 'p',
@@ -64,17 +66,17 @@ test('detector fires when js-eval prereq bakes observed property keys', () => {
   };
   const r = saveStrategyAudit.process(strategy, mkCtx(session), {});
   assert.equal(r.status, 'rejected');
-  const observedKeysWarning = r.rejection.warnings.find(
-    (w) => w.kind === 'observed_property_keys',
-  );
-  assert.ok(observedKeysWarning, 'expected observed_property_keys warning');
+  const item = r.rejection?.items?.observed_property_keys;
+  assert.ok(item, 'expected observed_property_keys classifier item');
 });
 
-test('ack with valid reason (mentions a flagged key) commits', () => {
+test('answer with valid reason (mentions a flagged key) commits', () => {
   const session = mkSession(['__app', 'me', 'o']);
   const strategy = {
     strategy: 'page-script',
     baseUrl: 'https://x.test/',
+    endpoint: '/api/x',
+    headers: { 'X-Nonce': '{{nonce}}' },
     prerequisites: [
       {
         name: 'p',
@@ -88,25 +90,18 @@ test('ack with valid reason (mentions a flagged key) commits', () => {
     notes: { params: { text: { description: 'msg', kind: 'text', example: 'hi' } } },
   };
   const ctx = mkCtx(session);
-  const acks = {
-    observed_property_keys:
-      'The keys "me" and "o" are intentional — frozen offsets in this dev fixture.',
-  };
-  // First call: pass acks so Stage 1 clears and Stage 2 mints a token.
-  const first = saveStrategyAudit.process(strategy, ctx, { acks });
+  const first = saveStrategyAudit.process(strategy, ctx, {});
   assert.equal(first.status, 'rejected');
   assert.equal(first.rejection.reason, 'pending');
 
-  // Provide audit answers + ack referencing the keys.
   const second = saveStrategyAudit.process(strategy, ctx, {
     token: first.rejection.token,
     answers: {
-      literal_provenance: {
-        'prerequisites[0].url': 'static',
-      },
+      observed_property_keys:
+        'The keys "me" and "o" are intentional — frozen offsets in this dev fixture.',
+      literal_provenance: { 'prerequisites[0].url': 'static', endpoint: 'static' },
       observed_siblings: {},
     },
-    acks,
   });
   assert.equal(
     second.status,
@@ -115,11 +110,13 @@ test('ack with valid reason (mentions a flagged key) commits', () => {
   );
 });
 
-test('ack with reason missing all flagged keys → ack_issue (anti-canned)', () => {
+test('answer with reason missing all flagged keys → classifier issue (anti-canned)', () => {
   const session = mkSession(['__app', 'me', 'o']);
   const strategy = {
     strategy: 'page-script',
     baseUrl: 'https://x.test/',
+    endpoint: '/api/x',
+    headers: { 'X-Nonce': '{{nonce}}' },
     prerequisites: [
       {
         name: 'p',
@@ -138,25 +135,25 @@ test('ack with reason missing all flagged keys → ack_issue (anti-canned)', () 
   const second = saveStrategyAudit.process(strategy, ctx, {
     token: first.rejection.token,
     answers: {
+      observed_property_keys: 'this is intentional and I have my reasons for it being so',
       literal_provenance: { 'prerequisites[0].url': 'static' },
       observed_siblings: {},
     },
-    acks: {
-      observed_property_keys: 'this is intentional and I have my reasons for it being so',
-    },
   });
   assert.equal(second.status, 'rejected');
-  const ackIssue = (second.rejection.ack_issues || []).find((s) =>
+  const issue = (second.rejection.classifier_issues || []).find((s) =>
     /must reference at least one flagged key/.test(s),
   );
-  assert.ok(ackIssue, 'expected anti-canned-ack issue');
+  assert.ok(issue, `expected anti-canned classifier issue; got ${JSON.stringify(second.rejection.classifier_issues)}`);
 });
 
-test('detector returns no issues when session has no observations recorded', () => {
+test('classifier silent when session has no observations recorded', () => {
   const session = mkSession([]);
   const strategy = {
     strategy: 'page-script',
     baseUrl: 'https://x.test/',
+    endpoint: '/api/x',
+    headers: { 'X-Nonce': '{{nonce}}' },
     prerequisites: [
       {
         name: 'p',
@@ -169,25 +166,20 @@ test('detector returns no issues when session has no observations recorded', () 
     ],
   };
   const r = saveStrategyAudit.process(strategy, mkCtx(session), {});
-  // No observations → observed_property_keys warning shouldn't fire.
-  // (Other detectors may still fire; we only check this kind is absent.)
-  const observedKeysWarning = (r.rejection?.warnings ?? []).find(
-    (w) => w.kind === 'observed_property_keys',
-  );
-  assert.equal(observedKeysWarning, undefined);
+  // No observations → observed_property_keys classifier should be inactive.
+  assert.equal(r.rejection?.items?.observed_property_keys, undefined);
 });
 
-test('detector: token invalidates when expression edited (observed_property_keys-relevant fields scoped via classifier hash)', () => {
-  // The detector itself doesn't bind to tokens; that's the audit-level
-  // behavior. The expression edit invalidates the literal_provenance
-  // classifier's token — which is the correct scoping. This test pins
-  // that the agent gets a fresh rejection (with the new flagged keys)
-  // when the expression changes.
+test('classifier item reflects edited expression keys', () => {
+  // Edit expression → the new flagged keys surface in the classifier item,
+  // and the hash binding cascades a fresh token via payload_changed.
   const session = mkSession(['__app', 'me', 'o', 'xa', 'y']);
   const ctx = mkCtx(session);
   const s1 = {
     strategy: 'page-script',
     baseUrl: 'https://x.test/',
+    endpoint: '/api/x',
+    headers: { 'X-Nonce': '{{nonce}}' },
     prerequisites: [
       {
         name: 'p',
@@ -199,8 +191,7 @@ test('detector: token invalidates when expression edited (observed_property_keys
       },
     ],
   };
-  const first = saveStrategyAudit.process(s1, ctx, {});
-  // Edit expression → still flagged, but the keys differ.
+  saveStrategyAudit.process(s1, ctx, {});
   const s2 = {
     ...s1,
     prerequisites: [
@@ -209,8 +200,10 @@ test('detector: token invalidates when expression edited (observed_property_keys
   };
   const second = saveStrategyAudit.process(s2, ctx, {});
   assert.equal(second.status, 'rejected');
-  const w = (second.rejection.warnings || []).find((x) => x.kind === 'observed_property_keys');
-  assert.ok(w);
-  // Flagged keys reflect the NEW expression, not the cached one.
-  assert.match(w.message, /xa.*y|y.*xa/);
+  const item = second.rejection?.items?.observed_property_keys;
+  assert.ok(item, 'expected observed_property_keys item on retry');
+  // Flagged keys reflect the NEW expression.
+  const flaggedKeys = item.flagged_keys ?? [];
+  assert.ok(flaggedKeys.includes('xa') || flaggedKeys.includes('y'),
+    `expected flagged_keys to include xa/y; got ${JSON.stringify(flaggedKeys)}`);
 });

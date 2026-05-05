@@ -17,8 +17,6 @@ import {
   validateNoSelectorSelfReference,
 } from '../strategies/validate';
 import type { Session } from '../drivers/types/session';
-import { findObservedKeys, findObservedLiterals } from '../observation-trace';
-import { collectExecutableJsStrings } from '../gate/save-warnings';
 import { findUnobservedStrategyUrls, firstObservableUrl } from '../strategies/verify-observed';
 import { loadLogbook } from '../working-dir/logbook';
 import { lookupSurface, urlKey } from '../session-phase/surface-binding';
@@ -35,11 +33,7 @@ import {
   detectEndpointCollidesWithSavedCapability,
   detectEnumParamListingUnfactored,
   detectEnumValueInCapabilitySlug,
-  detectMutatingStrategyVerificationApproach,
-  detectParameterizationDisclosureRequired,
-  VERIFICATION_SHAPE_TAGS,
-  FIRE_AND_FORGET_JUSTIFYING_NOUNS,
-  NON_DOM_VERIFICATION_MARKERS,
+  detectUnreferencedPrereqBinding,
   type SaveWarning,
 } from '../gate/save-warnings';
 import { validateLookupPrereqsAreCapabilities, type ObservedSiblingItem } from '../gate/save-audit';
@@ -49,6 +43,12 @@ import {
   observedSiblingsClassifier,
   userConfirmationClassifier,
 } from './save-strategy-classifiers';
+import {
+  parameterizationDisclosureClassifier,
+  mutatingVerificationClassifier,
+  observedPropertyKeysClassifier,
+  observedLiteralValuesClassifier,
+} from './save-strategy-warning-classifiers';
 import type { ParamObservation } from '../response/session-observations';
 
 export interface SaveStrategyCtx {
@@ -364,6 +364,19 @@ const authGatedWithoutAuthPrereqDetector: Detector<Strategy, SaveStrategyCtx> = 
   ackReason: 'required',
 };
 
+// Catches js-eval prereqs whose declared `binds` name is never referenced
+// elsewhere on the strategy. The shape silently corrupts warm execute:
+// the prereq does real work (often firing the actual fetch + parse
+// internally) but the runtime ignores the return value and fires the
+// dead-shaped HTTP envelope on top, so the caller receives whatever the
+// envelope returns instead of the prereq's parsed payload. ackable when
+// the binding is a deliberate side-effect-only refresh.
+const unreferencedPrereqBindingDetector: Detector<Strategy, SaveStrategyCtx> = {
+  kind: 'unreferenced_prereq_binding',
+  detect: (data) => asIssues(detectUnreferencedPrereqBinding(data)),
+  ackReason: 'required',
+};
+
 const recordedPathInlinesLookupDetector: Detector<Strategy, SaveStrategyCtx> = {
   kind: 'recorded_path_inlines_lookup',
   detect: (data, ctx) =>
@@ -440,145 +453,12 @@ const endpointCollidesWithSavedCapabilityDetector: Detector<Strategy, SaveStrate
   ackReason: 'none',
 };
 
-// Mutating-shaped strategies (HTTP POST/PUT/PATCH/DELETE on fetch /
-// page-script, recorded-path with type/submit, page-script with WS
-// publish/send) MUST verify the side effect actually landed before
-// returning ok:true. status:200 alone proves the network call
-// succeeded — not that the right entity was mutated. Almost every
-// mutating action exposes some confirmation surface; truly-no-verify
-// flows are rare. The agent must declare their verification approach
-// in the ack reason; the runtime checks the reason is structurally
-// grounded (anti-canned-ack + anchor-match).
-//
-// See `feedback_always_verify_mutating_actions.md` for the design rule.
-const mutatingVerificationRequiredDetector: Detector<Strategy, SaveStrategyCtx> = {
-  kind: 'mutating_verification_required',
-  detect: (data) => asIssues(detectMutatingStrategyVerificationApproach(data)),
-  ackReason: 'required',
-  // Two-stage check.
-  //
-  // 1. Anti-canned: reason must contain at least one of (a) a path-shaped
-  //    token naming a real element of the saved strategy (response.extract.<x>,
-  //    prerequisites[N], frameFromPage, etc.), OR (b) a recognized shape tag
-  //    (transaction-shape / chat-shape / dom-poll / intrinsic-to-caller /
-  //    fire-and-forget). `fire-and-forget` ALSO requires a justifying noun
-  //    so it can't be abused as a free pass.
-  //
-  // 2. Anchor-match: verification durability must match the strategy's
-  //    notes.anchor_type. Module/protocol-anchored strategies whose ONLY
-  //    verification claim is `dom-poll` make the DOM the new fragility
-  //    bottleneck. Reject those — the agent must re-anchor verification
-  //    or down-classify the strategy's anchor.
-  validateAck: (reason, emittedIssues) => {
-    const issue = emittedIssues[0];
-    const ctx = (issue as { context?: { anchor_type?: unknown; valid_paths?: unknown } }).context;
-    const anchorType =
-      typeof ctx?.anchor_type === 'string'
-        ? (ctx.anchor_type as 'module' | 'protocol' | 'dom' | 'unknown')
-        : 'unknown';
-    const validPaths = Array.isArray(ctx?.valid_paths) ? (ctx.valid_paths as string[]) : [];
-
-    const out: string[] = [];
-
-    // Detect shape tag(s) used. Case-sensitive literal substring.
-    const shapeTagsUsed = VERIFICATION_SHAPE_TAGS.filter((t) => reason.includes(t));
-
-    // Detect path-shaped tokens that name a real element of the strategy.
-    // Sort longest-first so `response.extract.message_id` matches before
-    // the bare `response.extract` fallback would.
-    const matchedPaths = [...validPaths]
-      .sort((a, b) => b.length - a.length)
-      .filter((p) => reason.includes(p));
-
-    if (shapeTagsUsed.length === 0 && matchedPaths.length === 0) {
-      out.push(
-        `reason must name the verification approach by structural anchor. Either reference a real path of the saved strategy (e.g. response.extract.<field>, prerequisites[N], frameFromPage.expression) OR include a shape tag (transaction-shape / chat-shape / dom-poll / intrinsic-to-caller / rpc-read / fire-and-forget). Prose-only reasons are rejected.`,
-      );
-      return out;
-    }
-
-    // fire-and-forget needs a justifying noun.
-    if (shapeTagsUsed.includes('fire-and-forget')) {
-      const lower = reason.toLowerCase();
-      const justified = FIRE_AND_FORGET_JUSTIFYING_NOUNS.some((n) => lower.includes(n));
-      if (!justified) {
-        out.push(
-          `fire-and-forget tag requires a justifying noun naming the kind of unverified action: one of ${FIRE_AND_FORGET_JUSTIFYING_NOUNS.join(', ')}. Most mutating actions have a confirmation surface — fire-and-forget is rare and must be specific.`,
-        );
-      }
-    }
-
-    // Anchor-match check. If the strategy is module- or protocol-anchored
-    // AND the only signal in the ack reason is dom-poll (no module/protocol
-    // marker, no transaction-shape / chat-shape / intrinsic-to-caller), the
-    // DOM is now the fragility bottleneck.
-    if (anchorType === 'module' || anchorType === 'protocol') {
-      const hasOnlyDomPoll =
-        shapeTagsUsed.includes('dom-poll') &&
-        !shapeTagsUsed.some(
-          (t) => t === 'transaction-shape' || t === 'chat-shape' || t === 'intrinsic-to-caller',
-        );
-      const hasNonDomMarker = NON_DOM_VERIFICATION_MARKERS.some((m) => reason.includes(m));
-      if (hasOnlyDomPoll && !hasNonDomMarker) {
-        out.push(
-          `anchor mismatch: strategy is ${anchorType}-anchored but verification is DOM-anchored (dom-poll). DOM polling becomes the fragility bottleneck — when the UI rewrites, verification breaks even though the underlying ${anchorType} call still works. Either re-anchor verification to ${anchorType}-tier surfaces (response.extract / window.require page-global readback / frameFromPage parsing the wire response), or down-classify notes.anchor_type to "dom".`,
-        );
-      }
-    }
-
-    return out;
-  },
-};
-
-// Parameterization-disclosure detector — every saved strategy must declare
-// the caller-varying axes (`notes.params`) or explicitly justify why none
-// apply. End-drive's auto-derive populates `notes.params` only from
-// caller-typed literals; sessions driven with `args:{}` land paramless
-// strategies that warm callers can't customize. The detector fires on
-// every tier when notes.params is empty/undefined; the ack reason must
-// reference at least one structural anchor of the saved strategy
-// (anti-canned). See `save-warnings-parameterization.ts`.
-const parameterizationDisclosureRequiredDetector: Detector<Strategy, SaveStrategyCtx> = {
-  kind: 'parameterization_disclosure_required',
-  detect: (data) => asIssues(detectParameterizationDisclosureRequired(data)),
-  ackReason: 'required',
-  // Anti-canned: ack reason must include at least one path-shaped token
-  // from the candidate-anchors list emitted by the detector. Forces the
-  // agent to read the rejection's specifics rather than canned-acking.
-  validateAck: (reason, emittedIssues) => {
-    const issue = emittedIssues[0];
-    const ctx = (issue as { context?: { candidate_anchors?: unknown } }).context;
-    const anchors = Array.isArray(ctx?.candidate_anchors)
-      ? ctx.candidate_anchors.filter((x): x is string => typeof x === 'string' && x.length > 0)
-      : [];
-
-    if (anchors.length === 0) {
-      // Degenerate strategy: no body, no headers, no endpoint, no prereqs,
-      // no steps — nothing to anchor on. Fail-closed: a strategy with no
-      // structural surface can't be a real capability.
-      return [
-        `strategy has no structural anchors (endpoint, body, headers, prereqs, steps all empty). ` +
-          `Either populate the strategy with the captured request data or save a recorded-path with steps.`,
-      ];
-    }
-
-    // Sort longest-first so multi-segment paths like `body.recipient_id`
-    // match before the bare `body` fallback.
-    const matched = [...anchors]
-      .sort((a, b) => b.length - a.length)
-      .filter((a) => reason.includes(a));
-    if (matched.length === 0) {
-      const sample = anchors.slice(0, 8).join(', ');
-      return [
-        `reason must reference at least one structural anchor of the saved strategy. Candidates include: ` +
-          `${sample}${anchors.length > 8 ? ', …' : ''}. Bare prose like "no params apply" or "this capability ` +
-          `takes no input" is rejected — name the body field / endpoint segment / prereq / header that proves ` +
-          `the rejection was read.`,
-      ];
-    }
-    return [];
-  },
-};
+// `mutating_verification_required` and `parameterization_disclosure_required`
+// are token-bound Classifiers in `save-strategy-warning-classifiers.ts`. They
+// promote what would otherwise be Detector{ackReason:'required',validateAck}
+// pairs to Level-3 (gates.md taxonomy) — anti-canned substring matching alone
+// is bypassable when the agent's canned reason happens to overlap a candidate
+// anchor; token binding closes that bypass.
 
 // ---------- Unconditional detector (was validateLookupPrereqsAreCapabilities) ----------
 
@@ -632,123 +512,10 @@ const lookupPrereqMustBeCapabilityDetector: Detector<Strategy, SaveStrategyCtx> 
   ackReason: 'none',
 };
 
-// ---------- Observed-property-keys detector (was minified-offset gate) ----------
-
-// Property-access chains in expression bodies (frameFromPage.expression,
-// js-eval prereqs) where the keys came from runtime observation in this
-// session — i.e., names the agent saw via Object.keys output, find_in_page
-// match, etc. Observed names are fragile (rotate on every minified /
-// obfuscated / refactor-heavy deploy). Same provenance check the legacy
-// minified-offset gate ran; folded into the consolidated audit as one
-// Detector with a per-detector ack-validator that preserves the
-// anti-canned-ack property (ack must reference a flagged key).
-const observedPropertyKeysDetector: Detector<Strategy, SaveStrategyCtx> = {
-  kind: 'observed_property_keys',
-  detect: (data, ctx) => {
-    if (!ctx.session) return [];
-    const issues: Issue[] = [];
-    for (const { location, text } of collectExecutableJsStrings(data)) {
-      const flagged = findObservedKeys(text, ctx.session);
-      if (flagged.length === 0) continue;
-      const observed_keys = Array.from(new Set(flagged.map((f) => f.key)));
-      issues.push({
-        kind: 'observed_property_keys',
-        message:
-          `${location} bakes observed property keys [${observed_keys.map((k) => JSON.stringify(k)).join(', ')}] ` +
-          `inside ${JSON.stringify(text).slice(0, 120)}…`,
-        hint:
-          `Replace with a shape-walk: Object.values(window.X).find(v => typeof v?.<knownField> === "string"). ` +
-          `See klura://reference#save-strategy-audit.`,
-        context: { location, observed_keys, expression: text },
-      });
-    }
-    return issues;
-  },
-  ackReason: 'required',
-  // Anti-canned-ack: the reason must reference at least one flagged key
-  // with a word boundary (no substring matches inside common English
-  // words). Forces the agent to read the rejection's specifics.
-  validateAck: (reason, emittedIssues) => {
-    const allKeys = new Set<string>();
-    for (const issue of emittedIssues) {
-      const ctx = (issue as { context?: { observed_keys?: unknown } }).context;
-      const keys = ctx?.observed_keys;
-      if (Array.isArray(keys)) {
-        for (const k of keys) if (typeof k === 'string') allKeys.add(k);
-      }
-    }
-    if (allKeys.size === 0) return [];
-    const referenced = [...allKeys].some((k) => {
-      const escaped = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const re = new RegExp(`(?<![A-Za-z0-9_])${escaped}(?![A-Za-z0-9_])`, 'i');
-      return re.test(reason);
-    });
-    if (!referenced) {
-      const quotedKeys = [...allKeys].map((k) => `"${k}"`).join(', ');
-      return [
-        `must reference at least one flagged key (${quotedKeys}) ` +
-          `to prove the rejection was read — a generic "intentional" doesn't pass`,
-      ];
-    }
-    return [];
-  },
-};
-
-// ---------- Observed-literal-values detector ----------
-
-// Same provenance mechanism as observed_property_keys, applied to header /
-// body / recorded-path step VALUES rather than expression keys. Catches
-// the canonical baked-rotating-token case: agent observes a per-page nonce
-// at runtime (via find_in_page or js_eval), pastes it verbatim into
-// `headers["x-nonce"]` instead of templating it through a prereq, save
-// proceeds, next deploy rotates the nonce, the saved strategy 401s.
-//
-// STABLE_LITERAL_VALUES allowlist filters common HTTP / wire vocabulary
-// (`application/json`, `GET`, `keep-alive`, etc.) that may legitimately
-// match observed strings without indicating fragility.
-const observedLiteralValuesDetector: Detector<Strategy, SaveStrategyCtx> = {
-  kind: 'observed_literal_values',
-  detect: (data, ctx) => {
-    if (!ctx.session) return [];
-    const flagged = findObservedLiterals(data, ctx.session);
-    return flagged.map((l) => ({
-      kind: 'observed_literal_values',
-      message:
-        `${l.location} bakes the literal value ${JSON.stringify(l.value).slice(0, 80)} ` +
-        `which the agent observed during this session — that's by-construction a per-session ` +
-        `or per-deploy artifact (rotating token, nonce, signed header), not a stable contract.`,
-      hint:
-        `Template via a prereq: declare a js-eval prereq that re-derives the value from ` +
-        `the live page on every call, bind it (e.g. \`binds: "nonce"\`), and reference \`{{nonce}}\` ` +
-        `in the header / body. See klura://reference#save-strategy-audit.`,
-      context: { location: l.location, value: l.value },
-    }));
-  },
-  ackReason: 'required',
-  // Anti-canned-ack: ack must reference a flagged value. Same shape as
-  // observed_property_keys. Forces the agent to read the rejection's
-  // specifics rather than canned-acking by kind.
-  validateAck: (reason, emittedIssues) => {
-    const allValues = new Set<string>();
-    for (const issue of emittedIssues) {
-      const ctx = (issue as { context?: { value?: unknown } }).context;
-      const v = ctx?.value;
-      if (typeof v === 'string') allValues.add(v);
-    }
-    if (allValues.size === 0) return [];
-    const referenced = [...allValues].some((v) => reason.includes(v));
-    if (!referenced) {
-      // Show only the first 12 chars of each value in the error so the
-      // ack-issue is readable for long tokens.
-      const previews = [...allValues].map((v) => JSON.stringify(v.slice(0, 12) + '…'));
-      return [
-        `must reference at least one flagged literal value (e.g. ${previews.join(', ')}) ` +
-          `to prove the rejection was read — a generic "intentional" doesn't pass`,
-      ];
-    }
-    return [];
-  },
-};
+// `observed_property_keys` and `observed_literal_values` are token-bound
+// Classifiers in `save-strategy-warning-classifiers.ts` for the same reason
+// as the parameterization / mutating-verification migration above —
+// anti-canned-ack substring matching alone is bypassable.
 
 // ---------- Popup-addressing-without-trigger detector ----------
 
@@ -891,20 +658,21 @@ export const saveStrategyAudit = new Audit<Strategy, SaveStrategyCtx>({
     prereqBindKeyMismatchDetector,
     lookupEmbeddedInPrereqDetector,
     authGatedWithoutAuthPrereqDetector,
+    unreferencedPrereqBindingDetector,
     recordedPathInlinesLookupDetector,
     ungroundedEnumPlaceholderDetector,
     enumParamListingUnfactoredDetector,
     enumValueInCapabilitySlugDetector,
     endpointCollidesWithSavedCapabilityDetector,
-    mutatingVerificationRequiredDetector,
-    parameterizationDisclosureRequiredDetector,
     unobservedUrlDetector,
     lookupPrereqMustBeCapabilityDetector,
-    observedPropertyKeysDetector,
-    observedLiteralValuesDetector,
     popupAddressingWithoutTriggerDetector,
   ],
   classifiers: [
+    parameterizationDisclosureClassifier,
+    mutatingVerificationClassifier,
+    observedPropertyKeysClassifier,
+    observedLiteralValuesClassifier,
     literalProvenanceClassifier,
     capabilityNameJustificationClassifier,
     observedSiblingsClassifier,

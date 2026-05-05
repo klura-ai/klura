@@ -540,9 +540,18 @@ export function saveStrategy(
     const decider = getRegisteredSaveConfirmationDecider();
     if (decider) {
       const synthesized = decider.decide(data, auditCtx);
+      // Inject a deterministic composeUserPrompt rendering as agent_prompt
+      // so the user_confirmation Classifier's fact-check passes for the
+      // decider path. The composer's output covers every required_fact by
+      // construction (capability slug, tier, target, anchor, warnings).
+      /* eslint-disable @typescript-eslint/no-require-imports */
+      const auditConfirmationPrompt =
+        require('../audit/save-confirmation-prompt') as typeof import('../audit/save-confirmation-prompt');
+      /* eslint-enable @typescript-eslint/no-require-imports */
       mergedAnswers = {
         ...agentAnswers,
         user_confirmation: {
+          agent_prompt: auditConfirmationPrompt.composeUserPrompt(data, auditCtx),
           user_decision: synthesized.decision,
           user_quote: synthesized.quote,
         },

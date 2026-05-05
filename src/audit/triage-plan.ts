@@ -8,8 +8,7 @@
 // content the runtime can ground-check" detectors; (b) and (c) are
 // structural prerequisites that used to live as hand-rolled throws in
 // `submit-triage-plan.ts` and were lifted in here so triage matches the
-// 1:1-with-save-audit shape principle (see `runtime/CLAUDE.md` §"Audit
-// instances" + `runtime/docs/principles.md` §"Pre-commit gates").
+// 1:1-with-save-audit shape principle.
 //
 // Severity:
 //  - `request_pattern_url_extractable`, `request_pattern_url_observed`,

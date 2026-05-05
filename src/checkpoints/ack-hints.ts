@@ -8,9 +8,7 @@
 //     the missing case at compile time).
 //   - Composing the hint is pure (kind + ack args → string).
 //
-// Budget: each branch keeps the hint under ~300 chars per CLAUDE.md "Info
-// architecture: layered teaching" — the field is per-session teaching, not
-// a documentation surface. Detail belongs in REFERENCE.md.
+// Budget: each branch keeps the hint under ~300 chars.
 
 import type { CheckpointAckInput } from './gate-glue';
 import type { CheckpointKind } from './types';

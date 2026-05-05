@@ -455,21 +455,28 @@ The token is bound to a per-classifier `hashFields` slice of the strategy — si
 
 2. **`capability_name_justification`** — when the capability slug contains a lookup-implying segment (`by_<x>`, `for_<x>`, `lookup_<x>`) AND no prereq uses `kind: "capability"` or `fetch-extract`, the agent must supply a non-empty justification. Absent segment or lookup prereq present → field is ignored.
 3. **`observed_siblings`** — runtime diffs the session's captured endpoints against the strategy and already-saved siblings. Every remaining entry must be answered `"recorded"` (called `record_observed_capability` for it) or `"not_worth_recording:<one-sentence reason>"`.
-4. **`user_confirmation`** — every save requires explicit user approval before commit. Tier-agnostic: covers `fetch` / `page-script` / `recorded-path` uniformly. The first call returns `items.user_confirmation.prompt_for_user` — a runtime-composed prose summary of the proposed save (tier, anchor, prereq summary, any save*warnings) ending with *"Save this strategy? (yes / no, with a one-line reason if no)"\_. Relay verbatim, ask the user, retry with `audit_answers.user_confirmation: {user_decision: "approve" | "reject", user_quote: "<their fresh reply, ≥1 char>"}`.
-   - `user_decision: "approve"` + non-empty `user_quote` → save proceeds (other classifiers permitting).
+4. **`user_confirmation`** — every save requires explicit user approval before commit. Tier-agnostic: covers `fetch` / `page-script` / `recorded-path` uniformly. The first call returns `items.user_confirmation.required_facts` — a struct holding the load-bearing facts about the proposed save (`{capability, tier, target, anchor_type, warning_kinds}`) plus an `agent_note` re-stating the contract. Compose a 1-3 sentence prompt **in your own voice** that mentions every required fact, end with an explicit yes/no ask, relay it to the user, and retry with `audit_answers.user_confirmation: {agent_prompt: "<the prose you showed them>", user_decision: "approve" | "reject", user_quote: "<their fresh reply, ≥1 char>"}`. The runtime structurally checks `agent_prompt` covered every fact (capability slug verbatim, tier verbatim, target host or path, anchor word when page-script, a warning synonym — `"warning"` / `"flagged"` / `"issue"` / `"concern"` — when `warning_kinds` is non-empty). Same pattern as `tierJustificationUnciteable` on the triage-plan audit: phrase freely, runtime verifies the load-bearing facts arrived.
+   - `user_decision: "approve"` + fact-covering `agent_prompt` + non-empty `user_quote` → save proceeds (other classifiers permitting).
    - `user_decision: "reject"` → save rejects with prose pointing back to LIFT — try a different tier or anchor based on the user's reason.
    - The classifier binds to the **whole strategy hash** (no `hashFields` scoping) — every distinct save shape needs its own approval. Mutating any field forces a fresh ask.
 
-   **`user_quote` must be the user's fresh reply to THIS save's `prompt_for_user`.** Do NOT reuse the user's reply to a prior `ack_checkpoint` (triage_plan, surface_changed) or any earlier turn. The runtime cannot detect recycled replies — there is no structural fingerprint that distinguishes a fresh user reply from a recycled one — so the contract is on the agent. Self-resolving the gate by recycling a reply defeats the gate's purpose: the gate exists because the user's call on the proposed strategy shape is the load-bearing decision, and that decision needs a separate elicitation per save. The `items.user_confirmation.agent_note` field on the rejection envelope re-states this contract inline.
+   **`user_quote` must be the user's fresh reply to THIS save's `agent_prompt`.** Do NOT reuse the user's reply to a prior `ack_checkpoint` (triage_plan, surface_changed) or any earlier turn. The runtime cannot detect recycled replies — there is no structural fingerprint that distinguishes a fresh user reply from a recycled one — so the contract is on the agent. Self-resolving the gate by recycling a reply defeats the gate's purpose: the gate exists because the user's call on the proposed strategy shape is the load-bearing decision, and that decision needs a separate elicitation per save. The `items.user_confirmation.agent_note` field on the rejection envelope re-states this contract inline. (`items.user_confirmation.debug_prompt` carries a deterministic runtime-composed rendering of the same facts as a fallback / example — useful when you want a starting phrasing — but the load-bearing answer is your own `agent_prompt`.)
 
-   **Test harnesses / autonomous runs** can register a `SaveConfirmationDecider` via `registerSaveConfirmationDecider({name, decide(strategy, ctx)})` to auto-decide based on a scenario predicate. When a decider is registered, the runtime synthesizes the answer before the audit runs and the agent never sees the rejection. Production runs leave the slot empty so the agent always prompts the human; if you're operating an autonomous benchmark or scheduled run with no live human, register the decider at the embedder layer rather than self-attesting through the agent path.
+   **Test harnesses / autonomous runs** can register a `SaveConfirmationDecider` via `registerSaveConfirmationDecider({name, decide(strategy, ctx)})` to auto-decide based on a scenario predicate. When a decider is registered, the runtime synthesizes the answer (including a deterministic `agent_prompt`) before the audit runs and the agent never sees the rejection. Production runs leave the slot empty so the agent always prompts the human; if you're operating an autonomous benchmark or scheduled run with no live human, register the decider at the embedder layer rather than self-attesting through the agent path.
 
-**Detector warnings (each requires an inline ack OR a strategy fix):**
+**Token-bound warning Classifiers (each requires an `audit_answers.<kind>` reason):**
 
-- `observed_property_keys` — prereq expression bakes property-access keys the agent observed at runtime in this session (via `js_eval` results / `find_in_page` matches). Templates for shape-walks below.
-- `observed_literal_values` — strategy header / body / step value matches a string the agent observed at runtime. By construction a per-session artifact (rotating token, signed nonce); template via a prereq instead.
+- `mutating_verification_required` — strategy is mutating-shaped (HTTP POST/PUT/PATCH/DELETE on fetch/page-script, recorded-path with type/submit, page-script `.publish()` / `.send()`, fetch with `protocol: "websocket"`). Answer with a one-sentence reason naming the verification approach by structural anchor — either reference a real path of the saved strategy (`response.extract.<field>`, `prerequisites[N]`, `frameFromPage.expression`) or include a recognized shape tag (`transaction-shape` / `chat-shape` / `dom-poll` / `intrinsic-to-caller` / `rpc-read` / `fire-and-forget`). `fire-and-forget` requires a justifying noun (telemetry, beacon, idempotent, etc.). Anchor-match: `module`/`protocol`-anchored strategies acked with `dom-poll` only are rejected — DOM polling becomes the fragility bottleneck.
+- `parameterization_disclosure_required` — `notes.params` is empty/undefined. Most capabilities have at least one caller-varying axis (count, cursor, query text, id, locale, ordering); a paramless save means warm callers can't customize the call. Answer with a one-sentence reason naming a structural anchor of the saved strategy (a body field, header key, endpoint segment, prereq name) that proves the capability is genuinely parameterless. Bare prose like "no params apply" is rejected.
+- `observed_property_keys` — prereq expression bakes property-access keys the agent observed at runtime in this session (via `js_eval` results / `find_in_page` matches). Answer with a one-sentence reason that references at least one flagged key by name with a word-boundary match — proves the rejection was read. Templates for shape-walks below.
+- `observed_literal_values` — strategy header / body / step value matches a string the agent observed at runtime. By construction a per-session artifact (rotating token, signed nonce). Answer with a one-sentence reason referencing at least one flagged literal value verbatim, OR template via a prereq.
+
+**Detector warnings (each requires `notes.save_warnings_acked: [{kind, reason}]` OR a strategy fix):**
+
 - `unobserved_url` — strategy `endpoint` or prereq `url` was not captured in the session network log. **No ack-through path** — fix the URL or the save fails (per "Observe, not probe": URL hallucination from training data is runtime-rejected, not justifiable).
 - `unparametrized_session_id`, `unresolved_name_to_id_gap`, `entity_pinned_infra_prereq`, `prereq_bind_key_mismatch`, `inline_multi_fetch`, `lookup_embedded_in_prereq`, `name_id_mismatch`, `session_scoped_id_extraction`, `lookup_prereq_must_be_capability` — structural red flags from `runtime/src/gate/save-warnings.ts`. Each fixed-or-acked.
+- `unreferenced_prereq_binding` — a `js-eval` prereq declares `binds: "<name>"` but `{{<name>}}` is never referenced in `endpoint` / `baseUrl` / `body` / `headers` / `params` / `frameFromPage.expression` / a sibling prereq's `args_template` / `url` / `expression` / `fetch_body` / `headers_map`. Two shapes both silently corrupt warm execute: (a) the binding name is misspelled at the call site, or (b) the prereq is doing the real work via side effects (firing the actual fetch + parse internally) and the declared HTTP envelope is dead, so the caller receives whatever the dead envelope returns instead of the prereq's value. Fix by referencing `{{<name>}}` in the request envelope, OR drop the envelope (clear `endpoint` / `method` / `body` / `headers`) and move the prereq's logic into a top-level `frameFromPage.expression` so the return value IS the caller's result. Ack-with-reason is the third path when the binding genuinely drives a side-effect-only refresh whose value warm callers don't read.
+- `auth_gated_without_auth_prereq` — strategy targets an origin where the session captured one or more responses that set cookies, but the strategy declares no `{kind: "capability"}` or `{kind: "tag", tag: "auth"}` prereq. Cold-execute (fresh `storage_state`) and expired-cookie callers will hit the auth wall. The only opt-out without chaining auth is declaring `provides: ["auth"]` on the strategy itself (the agent is saving the auth-providing capability). Path-matching the strategy's endpoint against captured cookie-setters is **not** a bypass — gateways that multiplex operations under one path (GraphQL, JSON-RPC, generic `/api/v1/`) would silently suppress the warning when an unrelated operation on the same path happened to set cookies. Either factor the cookie-setting flow into a sibling capability with `provides: ["auth"]` and chain `{kind: "tag", tag: "auth"}`, declare the saved strategy itself as the auth provider, or ack via `notes.save_warnings_acked` if the cookie isn't auth (A/B test bucket, preference cookie this strategy doesn't depend on).
 - `popup_addressing_without_trigger` — a recorded-path step pins to `page: "popup-N"` but no popup with that handle was observed during the discovery session. The flow is almost certainly missing the click that opens the popup. Either add the trigger step, re-discover, or ack via `notes.save_warnings_acked: [{kind: "popup_addressing_without_trigger", reason: "..."}]` if the popup is opened by a side channel (browser extension, prior tab). See `klura://reference#popups`.
 
 **Why observation = fragility (`observed_property_keys` / `observed_literal_values`).** A name or value the agent saw at runtime is an _artifact of the site's current build_ — minified output, obfuscated identifier, deploy-versioned global, rotating signed token. Stable web API names (`document.cookie`, `event.target`, `location.pathname`) come from web standards and don't rotate. Stable HTTP wire vocabulary (`application/json`, `GET`, `no-cache`) is contract by definition. Anything in between is observation: minifier shuffles it, deploy renames it, server rotates it.
@@ -571,19 +578,17 @@ Every mutating-shaped strategy must verify its side effect before returning `ok:
 - `recorded-path` with any step whose `action` ∈ `{type, fill_editor, fill, submit, key_press}`
 - `page-script` whose `frameFromPage.expression` contains `.publish(` or `.send(`
 
-Acknowledge inline:
+Acknowledge via `audit_answers` on the second-call retry (the first call mints the token and emits `items.mutating_verification_required` carrying `valid_paths` and the strategy's `anchor_type`):
 
 ```json
 {
-  "notes": {
-    "save_warnings_acked": [
-      { "kind": "mutating_verification_required", "reason": "<shape tag>: <structural anchor>" }
-    ]
+  "audit_answers": {
+    "mutating_verification_required": "<shape tag>: <structural anchor>"
   }
 }
 ```
 
-The reason must contain either a path-shaped token naming a real element of the saved strategy (`response.extract.<field>`, `prerequisites[N]`, `frameFromPage.expression`, a bound prereq name) OR one of the recognized shape tags. Prose-only reasons are rejected.
+The reason must contain either a path-shaped token naming a real element of the saved strategy (`response.extract.<field>`, `prerequisites[N]`, `frameFromPage.expression`, a bound prereq name) OR one of the recognized shape tags. Prose-only reasons are rejected. The runtime token-binds this Classifier to the strategy's mutating-shape slice (method, endpoint, body, headers, response, frameFromPage, steps), so the agent must consume a real rejection's token to commit — canned reasons that happen to substring-match an anchor without reading the rejection don't pass.
 
 **Shape tags** and what they claim:
 
@@ -607,9 +612,10 @@ The reason must contain either a path-shaped token naming a real element of the 
 
 Module/protocol-anchored saves whose ack contains ONLY `dom-poll` (no module/protocol marker like `response.extract`, `window.require`, `frameFromPage.expression`, `wire`, `mqtt`) are rejected with an `anchor mismatch` ack-issue.
 
-**Worked example — chat send with `transaction-shape` verification:**
+**Worked example — chat send with `transaction-shape` verification.** The strategy itself carries no inline ack; the agent submits the verification reason via `audit_answers` on the second-call retry:
 
 ```json
+// Strategy:
 {
   "strategy": "page-script",
   "method": "POST",
@@ -618,14 +624,14 @@ Module/protocol-anchored saves whose ack contains ONLY `dom-poll` (no module/pro
     "expression": "(async()=>{ const r = await window.__app.send({to: args.thread, text: args.text}); return {message_id: r.message_id}; })()"
   },
   "response": { "extract": { "message_id": "message_id" } },
-  "notes": {
-    "anchor_type": "module",
-    "save_warnings_acked": [
-      {
-        "kind": "mutating_verification_required",
-        "reason": "transaction-shape: response.extract.message_id is the server-issued id; missing = failure"
-      }
-    ]
+  "notes": { "anchor_type": "module" }
+}
+
+// Retry call:
+{
+  "audit_token": "<from prior rejection>",
+  "audit_answers": {
+    "mutating_verification_required": "transaction-shape: response.extract.message_id is the server-issued id; missing = failure"
   }
 }
 ```
@@ -633,30 +639,25 @@ Module/protocol-anchored saves whose ack contains ONLY `dom-poll` (no module/pro
 **Worked example — recorded-path with `dom-poll`:**
 
 ```json
+// Strategy:
 {
   "strategy": "recorded-path",
   "steps": [
-    {
-      "id": "s1",
-      "action": "type",
-      "value": "{{text}}",
-      "locators": { "a11y": { "role": "textbox", "name": "Message" } }
-    },
-    {
-      "id": "s2",
-      "action": "submit",
-      "locators": { "a11y": { "role": "button", "name": "Send" } }
-    },
-    { "id": "s3", "action": "click", "locators": { "a11y": { "role": "status", "name": "Sent" } } }
+    { "id": "s1", "action": "type", "value": "{{text}}",
+      "locators": { "a11y": { "role": "textbox", "name": "Message" } } },
+    { "id": "s2", "action": "submit",
+      "locators": { "a11y": { "role": "button", "name": "Send" } } },
+    { "id": "s3", "action": "click",
+      "locators": { "a11y": { "role": "status", "name": "Sent" } } }
   ],
-  "notes": {
-    "anchor_type": "dom",
-    "save_warnings_acked": [
-      {
-        "kind": "mutating_verification_required",
-        "reason": "dom-poll: steps[2] confirms the \"Sent\" status element appears"
-      }
-    ]
+  "notes": { "anchor_type": "dom" }
+}
+
+// Retry call:
+{
+  "audit_token": "<from prior rejection>",
+  "audit_answers": {
+    "mutating_verification_required": "dom-poll: steps[2] confirms the \"Sent\" status element appears"
   }
 }
 ```
@@ -672,22 +673,18 @@ Every saved strategy must either declare its caller-varying axes via `notes.para
 **Two fixes:**
 
 1. **Declare the axes.** Re-discover with `start_session({args:{<param>: <example>}})`, type the example into the flow you want parameterized, save again — auto-derive correlates the literal to the captured request body and stamps `notes.params.<param>` for you. Or hand-edit the saved strategy: add `notes.params.<name> = {kind, description, example}`, replace the literal in body/endpoint with `{{<name>}}`.
-2. **Ack as parameterless.** Inline:
+2. **Answer as parameterless.** On the second-call retry:
 
    ```json
    {
-     "notes": {
-       "save_warnings_acked": [
-         {
-           "kind": "parameterization_disclosure_required",
-           "reason": "<structural anchor + why parameterless>"
-         }
-       ]
+     "audit_token": "<from prior rejection>",
+     "audit_answers": {
+       "parameterization_disclosure_required": "<structural anchor + why parameterless>"
      }
    }
    ```
 
-   The reason must reference at least one structural anchor of the saved strategy: a body field key, header key, endpoint path segment, prereq name, recorded-path step id, the literal endpoint, or `method`. Bare prose ("this capability has no params") is rejected — the runtime checks the reason against the candidate-anchors list it emitted on the rejection.
+   The reason must reference at least one structural anchor of the saved strategy: a body field key, header key, endpoint path segment, prereq name, recorded-path step id, the literal endpoint, or `method`. Bare prose ("this capability has no params") is rejected — the runtime checks the reason against the candidate-anchors list it emitted on the rejection. Token-bound: the agent must consume a real rejection's token to commit, and the token's hash binds to `{endpoint, body, headers, prerequisites, steps}` so a body change cascade-invalidates the token (fresh anchor list, fresh ask).
 
 **Worked acks:**
 
@@ -857,7 +854,7 @@ Schema:
 
 **Save-time probe** navigates to `url`, evaluates `expression` once (passing a stub `args` object built from `args_template`'s keys when per-call mode is in use, and dispatching to the iframe's contentFrame when `frame` is set), verifies the return matches `return_shape`.
 
-**Common pitfalls**: writing a function body (`return X`) instead of an expression (`X`) — the runtime wraps in an async IIFE and rejects raw `return`. Hardcoding an intermediate token value instead of calling the live global each time. Setting `refresh.enabled: true` without warm mode (the refresh loop requires a warm context; without warm it's a no-op). Setting `args_template` AND `refresh.enabled: true` together — rejected at save time as incoherent (per-call args can't be cached on a clock). Pointing `frame` at a non-iframe element, or at an iframe that has not attached by the time the prereq fires (the runtime waits up to the eval timeout for it to attach, then errors with the resolved selector).
+**Common pitfalls**: writing a function body (`return X`) instead of an expression (`X`) — the runtime wraps in an async IIFE and rejects raw `return`. Hardcoding an intermediate token value instead of calling the live global each time. Setting `refresh.enabled: true` without warm mode (the refresh loop requires a warm context; without warm it's a no-op). Setting `args_template` AND `refresh.enabled: true` together — rejected at save time as incoherent (per-call args can't be cached on a clock). Pointing `frame` at a non-iframe element, or at an iframe that has not attached by the time the prereq fires (the runtime waits up to the eval timeout for it to attach, then errors with the resolved selector). **`args_template` values pass through as strings** — `args_template: {count: "{{count}}"}` arrives at the expression as `args.count === "3"` even when the caller arg is numeric, because the template engine substitutes textually. Cast inside the expression (`const count = Number(args.count)`) whenever you need numeric semantics; `array.length >= args.count` will silently misbehave at boundaries with a stringly-typed count. **`return_shape.min_length` floor for serialized JSON arrays** — `JSON.stringify([])` is `"[]"` (length 2), so `min_length: 2` lets empty results through silently. When the expression returns a JSON-serialized array, set `min_length` ≥ 3 to fail loud on the empty-array case; better still, return the structured value and use `kind: "object"` with `required_keys` so the runtime validates the shape rather than just the byte count.
 
 ## interrupts
 
@@ -1786,7 +1783,7 @@ See `klura://reference#re-pattern-choice` to decide iterate vs encoder-read BEFO
 
    - **Warnings**: each is fixable OR ackable. The `hint` line tells you the fix; `notes.save_warnings_acked: [{kind, reason}]` overrides when the warning genuinely doesn't apply (e.g. a `prereq_bind_key_mismatch` is intentional because the bind name is reused across sibling endpoints with different wire keys).
    - **`items.literal_provenance`**: keys are field PATHS (e.g. `"endpoint"`, `"headers.X-Foo"`, `"body.userId"`), not the literal values at those paths. Auto-classified entries (templated fields with one distinct `{{placeholder}}`) you can omit; the audit fills them in.
-   - **`items.user_confirmation`**: contains a `prompt_for_user` summary string and an `agent_note` re-stating the freshness contract. Relay `prompt_for_user` verbatim, wait for the user's fresh yes/no about THIS save, and supply that reply in `audit_answers.user_confirmation: {user_decision, user_quote}` on retry. **Do NOT reuse the user's reply to a prior `ack_checkpoint` (triage_plan, surface_changed) or any earlier turn** — the runtime cannot detect recycled replies; freshness is on the agent. Self-resolving the gate by recycling a reply defeats its purpose. (When an embedder has registered a save-confirmation decider, the runtime auto-resolves this classifier on retry without needing an agent-supplied answer — you don't need to detect this; just retry, and the audit either passes or re-rejects with a fresh prompt.)
+   - **`items.user_confirmation`**: contains a `required_facts` struct (`{capability, tier, target, anchor_type, warning_kinds}`) and an `agent_note` re-stating the freshness contract. Compose a 1-3 sentence prompt in your own voice that mentions every fact, relay it to the user, and supply both the prompt and reply in `audit_answers.user_confirmation: {agent_prompt, user_decision, user_quote}` on retry. The runtime structurally checks `agent_prompt` covered every required fact. **Do NOT reuse the user's reply to a prior `ack_checkpoint` (triage_plan, surface_changed) or any earlier turn** — the runtime cannot detect recycled replies; freshness is on the agent. Self-resolving the gate by recycling a reply defeats its purpose. (When an embedder has registered a save-confirmation decider, the runtime auto-resolves this classifier on retry without needing an agent-supplied answer — you don't need to detect this; just retry, and the audit either passes or re-rejects with a fresh prompt.)
    - **The rejection is NOT a "your save is being processed" notice — it's a hard reject with a retry path.** If you end the turn after the first rejection, no save lands. The `→ Your save_strategy call is NOT committed` line in the response is literal: nothing was written.
 
 8. **Handoff.** If you run out of budget mid-process, drop `add_resume_pointer` entries for the file:line anchors you found. Drop `add_discovery_note` entries with prose reasoning — "builder is the function whose first arg is `{text, thread_id}`", "request signature header is derived from path+query+timestamp via fn at bundle-abc.js:9872". Next session's agent reads them from `list_platform_skills.discovery_artifact` inline.
@@ -2457,7 +2454,7 @@ DRIVE ends when `end_drive` returns the LIFT handoff. From there, the intended r
 
    **Rotating fields (epoch_id, otid, request_id, task_id, version_id, nonces, per-send timestamps, signatures, …) are templated via js-eval prereqs that re-derive the value from the live page** — one prereq per field, each with `binds`, referenced in `generated.frame.code` via `{{name}}`. The page has the machinery that produced each captured value; your prereq calls that machinery at execute time. Rotating fields are _never_ saved as hardcoded literals, and they're _never_ a reason to fold.
 
-3. **User-arbitration is at save time, not on a runtime cadence.** Every `save_strategy` runs through the `user_confirmation` classifier (see [`#save-strategy-audit`](#save-strategy-audit) above). The first call returns `items.user_confirmation.prompt_for_user` — a runtime-composed summary of the proposed save (tier, anchor, prereq summary, recorded-path step count) — alongside an `agent_note` re-stating the freshness contract. Relay `prompt_for_user` verbatim, wait for the user's fresh yes/no about THIS save, and retry with `audit_answers.user_confirmation: {user_decision, user_quote: "<their fresh reply>"}`. **Do NOT reuse the user's reply to a prior `ack_checkpoint` (triage_plan, surface_changed) or any earlier turn** — the runtime cannot detect recycled replies; freshness is on the agent. Reject keeps the session in the current phase — try a different tier or anchor based on the user's reason.
+3. **User-arbitration is at save time, not on a runtime cadence.** Every `save_strategy` runs through the `user_confirmation` classifier (see [`#save-strategy-audit`](#save-strategy-audit) above). The first call returns `items.user_confirmation.required_facts` — a struct with the load-bearing facts about the proposed save (capability, tier, target, anchor_type, warning_kinds) — alongside an `agent_note` re-stating the freshness contract. Compose a 1-3 sentence prompt in your own voice that mentions every fact, ask the user, and retry with `audit_answers.user_confirmation: {agent_prompt: "<the prose you showed them>", user_decision, user_quote: "<their fresh reply>"}`. The runtime structurally checks `agent_prompt` covered every fact. **Do NOT reuse the user's reply to a prior `ack_checkpoint` (triage_plan, surface_changed) or any earlier turn** — the runtime cannot detect recycled replies; freshness is on the agent. Reject keeps the session in the current phase — try a different tier or anchor based on the user's reason.
 
 4. **Quit conditions — exhaustive:**
    - **SUCCESS**: complete, runnable strategy saved. Expected exit.

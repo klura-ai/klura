@@ -51,6 +51,23 @@ registerSaveConfirmationDecider({
 //     the supplied answers.
 // Tests pass `partialCtx` with only the fields they care about — the
 // rest default to empty.
+// Warning kinds that have been promoted from Detector{ackReason:'required',
+// validateAck} to Classifier — their reasons land in audit_answers, not
+// acks. See save-strategy-warning-classifiers.ts.
+const WARNING_CLASSIFIER_KINDS = new Set([
+  'parameterization_disclosure_required',
+  'mutating_verification_required',
+  'observed_property_keys',
+  'observed_literal_values',
+]);
+
+const DEFAULT_WARNING_ANSWERS = {
+  mutating_verification_required:
+    'transaction-shape: response.extract grounds the verification (test default)',
+  parameterization_disclosure_required:
+    'method anchor — test strategy has no caller axis (parameterization gate not under test here)',
+};
+
 function runAudit(partialCtx, strategy, answers) {
   const ctx = {
     sessionId: 'sess_test',
@@ -61,22 +78,21 @@ function runAudit(partialCtx, strategy, answers) {
     capturedEndpointPaths: partialCtx.capturedEndpointPaths ?? new Set(),
   };
   // Stage 1 probe: discover which detectors fire and auto-ack required ones.
-  // Some detectors carry a per-detector validateAck (anti-canned + anchor-
-  // match for mutating_verification_required, anti-canned for
-  // observed_property_keys / observed_literal_values). The default canned
-  // reason is rejected by those validateAck hooks. Per-kind reasons below
-  // satisfy each detector's structural check.
-  const ACK_REASONS = {
-    mutating_verification_required:
-      'transaction-shape: response.extract grounds the verification (test default)',
-    parameterization_disclosure_required:
-      'method anchor — test strategy has no caller axis (parameterization gate not under test here)',
-  };
   const acks = {};
   const probe = saveStrategyAudit.process(strategy, ctx, {});
   if (probe.status === 'rejected' && probe.rejection.reason === 'unacked_warnings') {
     for (const w of probe.rejection.warnings ?? []) {
-      acks[w.kind] = ACK_REASONS[w.kind] ?? `test-runner pre-ack: incidental ${w.kind} warning`;
+      acks[w.kind] = `test-runner pre-ack: incidental ${w.kind} warning`;
+    }
+  }
+  // Pre-fill warning-classifier answers (parameterization_disclosure_required,
+  // mutating_verification_required, etc.) from defaults, unless the test
+  // already supplied one in `answers`. Tests focused on a specific warning
+  // pass their own answer to exercise rejection paths.
+  const mergedAnswers = { ...answers };
+  for (const [kind, defaultAnswer] of Object.entries(DEFAULT_WARNING_ANSWERS)) {
+    if (!Object.prototype.hasOwnProperty.call(mergedAnswers, kind)) {
+      mergedAnswers[kind] = defaultAnswer;
     }
   }
   // Stage 2 first call: mint token. If Stage 1 still blocks (hard
@@ -89,7 +105,7 @@ function runAudit(partialCtx, strategy, answers) {
     `first rejection must be pending (got ${first.rejection.reason}; warnings: ${JSON.stringify((first.rejection.warnings ?? []).map((w) => w.kind))})`,
   );
   const token = first.rejection.token;
-  return saveStrategyAudit.process(strategy, ctx, { token, answers, acks });
+  return saveStrategyAudit.process(strategy, ctx, { token, answers: mergedAnswers, acks });
 }
 
 test('harden: justification rejected when slug has _by_ AND js-eval prereq fetches /search', () => {
@@ -338,11 +354,9 @@ test('hash scoping: rewriting prereq.expression keeps the audit token valid', ()
   };
   
 
-  const verifyAcks = {
-    mutating_verification_required:
-      'transaction-shape: response.extract grounds the verification (test default)',
-  };
-  const first = saveStrategyAudit.process(baseStrategy, ctx, { acks: verifyAcks });
+  const verifyAnswer =
+    'transaction-shape: response.extract grounds the verification (test default)';
+  const first = saveStrategyAudit.process(baseStrategy, ctx, {});
   assert.equal(first.status, 'rejected');
   assert.equal(first.rejection.reason, 'pending');
   const token = first.rejection.token;
@@ -352,8 +366,8 @@ test('hash scoping: rewriting prereq.expression keeps the audit token valid', ()
   // literal fields didn't change.
   const second = saveStrategyAudit.process(rewrittenStrategy, ctx, {
     token,
-    acks: verifyAcks,
     answers: {
+      mutating_verification_required: verifyAnswer,
       literal_provenance: {
         endpoint: 'static',
         'prerequisites[0].url': 'static',
@@ -389,18 +403,16 @@ test('hash scoping: changing the endpoint DOES invalidate the audit token', () =
   };
   
 
-  const verifyAcks = {
-    mutating_verification_required:
-      'transaction-shape: response.extract grounds the verification (test default)',
-  };
-  const first = saveStrategyAudit.process(strategy, ctx, { acks: verifyAcks });
+  const verifyAnswer =
+    'transaction-shape: response.extract grounds the verification (test default)';
+  const first = saveStrategyAudit.process(strategy, ctx, {});
   const token = first.rejection.token;
 
   const mutated = { ...strategy, endpoint: '/api/v2/send' };
   const second = saveStrategyAudit.process(mutated, ctx, {
     token,
-    acks: verifyAcks,
     answers: {
+      mutating_verification_required: verifyAnswer,
       literal_provenance: { endpoint: 'static' },
       observed_siblings: {},
     },
@@ -448,11 +460,9 @@ test('hash scoping: adding notes.save_warnings_acked keeps the audit token valid
     capturedEndpointPaths: new Set(),
   };
   
-  const verifyAcks = {
-    mutating_verification_required:
-      'transaction-shape: response.extract grounds the verification (test default)',
-  };
-  const first = saveStrategyAudit.process(strategy, ctx, { acks: verifyAcks });
+  const verifyAnswer =
+    'transaction-shape: response.extract grounds the verification (test default)';
+  const first = saveStrategyAudit.process(strategy, ctx, {});
   const token = first.rejection.token;
 
   const ackedStrategy = {
@@ -464,8 +474,8 @@ test('hash scoping: adding notes.save_warnings_acked keeps the audit token valid
   };
   const second = saveStrategyAudit.process(ackedStrategy, ctx, {
     token,
-    acks: verifyAcks,
     answers: {
+      mutating_verification_required: verifyAnswer,
       literal_provenance: {
         endpoint: 'static',
         'prerequisites[0].url': 'static',
@@ -750,7 +760,7 @@ function reRegisterDefaultApprove() {
   });
 }
 
-test('user_confirmation: first call without decider issues token + prompt_for_user', () => {
+test('user_confirmation: first call without decider emits required_facts + agent_note', () => {
   unregisterSaveConfirmationDecider('pre-save-audit-test-default-approve');
   try {
     const result = saveStrategyAudit.process(minimalStrategy(), minimalCtx(), {});
@@ -759,15 +769,20 @@ test('user_confirmation: first call without decider issues token + prompt_for_us
     assert.ok(result.rejection.token, 'token issued on first call');
     const items = result.rejection.items?.user_confirmation;
     assert.ok(items, 'items.user_confirmation present');
-    const prompt = Array.isArray(items) ? items[0]?.prompt_for_user : items.prompt_for_user;
-    assert.ok(prompt && typeof prompt === 'string', 'prompt_for_user is a string');
-    assert.match(prompt, /Save this strategy/);
+    const facts = items.required_facts;
+    assert.ok(facts, 'required_facts present');
+    assert.equal(facts.capability, 'list_items');
+    assert.equal(facts.tier, 'page-script');
+    assert.match(facts.target, /site\.example\.com/);
+    assert.equal(facts.anchor_type, 'dom');
+    assert.ok(typeof items.agent_note === 'string' && items.agent_note.length > 0,
+      'agent_note is a non-empty string');
   } finally {
     reRegisterDefaultApprove();
   }
 });
 
-test('user_confirmation: second call with approve answer commits', () => {
+test('user_confirmation: second call with approve answer + fact-covering agent_prompt commits', () => {
   unregisterSaveConfirmationDecider('pre-save-audit-test-default-approve');
   try {
     const ctx = minimalCtx();
@@ -779,7 +794,12 @@ test('user_confirmation: second call with approve answer commits', () => {
       answers: {
         literal_provenance: { endpoint: 'static' },
         observed_siblings: {},
-        user_confirmation: { user_decision: 'approve', user_quote: 'looks good, save it' },
+        user_confirmation: {
+          agent_prompt:
+            'About to save the page-script capability list_items targeting site.example.com (dom-anchored — fragile if the UI rewrites). Save it?',
+          user_decision: 'approve',
+          user_quote: 'looks good, save it',
+        },
       },
     });
     assert.equal(
@@ -805,6 +825,8 @@ test('user_confirmation: reject decision rejects with go-back-to-LIFT prose', ()
         literal_provenance: { endpoint: 'static' },
         observed_siblings: {},
         user_confirmation: {
+          agent_prompt:
+            'About to save the page-script capability list_items targeting site.example.com (dom-anchored). Save it?',
           user_decision: 'reject',
           user_quote: 'no, I want a fetch tier instead',
         },
@@ -840,6 +862,109 @@ test('user_confirmation: missing answer with no decider rejects with shape error
     assert.ok(
       issues.some((i) => /audit_answers\.user_confirmation is required/.test(i)),
       'rejection mentions missing user_confirmation answer',
+    );
+  } finally {
+    reRegisterDefaultApprove();
+  }
+});
+
+test('user_confirmation: agent_prompt missing capability slug → fact-check rejects', () => {
+  unregisterSaveConfirmationDecider('pre-save-audit-test-default-approve');
+  try {
+    const ctx = minimalCtx();
+    const strategy = minimalStrategy();
+    const first = saveStrategyAudit.process(strategy, ctx, {});
+    const token = first.rejection.token;
+    const result = saveStrategyAudit.process(strategy, ctx, {
+      token,
+      answers: {
+        literal_provenance: { endpoint: 'static' },
+        observed_siblings: {},
+        user_confirmation: {
+          // Mentions tier + target + anchor but NOT the capability slug.
+          agent_prompt:
+            'About to save a page-script capability targeting site.example.com (dom-anchored). Save it?',
+          user_decision: 'approve',
+          user_quote: 'looks good',
+        },
+      },
+    });
+    assert.equal(result.status, 'rejected');
+    const issues = result.rejection.classifier_issues || [];
+    assert.ok(
+      issues.some((i) => /capability slug "list_items"/.test(i)),
+      `expected capability-slug fact-check rejection; got ${JSON.stringify(issues)}`,
+    );
+  } finally {
+    reRegisterDefaultApprove();
+  }
+});
+
+test('user_confirmation: agent_prompt missing target → fact-check rejects', () => {
+  unregisterSaveConfirmationDecider('pre-save-audit-test-default-approve');
+  try {
+    const ctx = minimalCtx();
+    const strategy = minimalStrategy();
+    const first = saveStrategyAudit.process(strategy, ctx, {});
+    const token = first.rejection.token;
+    const result = saveStrategyAudit.process(strategy, ctx, {
+      token,
+      answers: {
+        literal_provenance: { endpoint: 'static' },
+        observed_siblings: {},
+        user_confirmation: {
+          // Mentions capability + tier + anchor but NOT the host or path.
+          agent_prompt: 'Saving the list_items page-script capability (dom-anchored). Save it?',
+          user_decision: 'approve',
+          user_quote: 'looks good',
+        },
+      },
+    });
+    assert.equal(result.status, 'rejected');
+    const issues = result.rejection.classifier_issues || [];
+    assert.ok(
+      issues.some((i) => /save target/.test(i)),
+      `expected target fact-check rejection; got ${JSON.stringify(issues)}`,
+    );
+  } finally {
+    reRegisterDefaultApprove();
+  }
+});
+
+test('user_confirmation: agent_prompt buries warnings → fact-check rejects', () => {
+  unregisterSaveConfirmationDecider('pre-save-audit-test-default-approve');
+  try {
+    const ctx = minimalCtx();
+    // Strategy with a baked save_warning entry on runtime_meta.
+    const strategy = {
+      ...minimalStrategy(),
+      runtime_meta: {
+        save_warnings: [
+          { kind: 'mutating_verification_required', message: 'fixture warning' },
+        ],
+      },
+    };
+    const first = saveStrategyAudit.process(strategy, ctx, {});
+    const token = first.rejection.token;
+    const result = saveStrategyAudit.process(strategy, ctx, {
+      token,
+      answers: {
+        literal_provenance: { endpoint: 'static' },
+        observed_siblings: {},
+        user_confirmation: {
+          // Mentions all required facts but NOT a warning synonym.
+          agent_prompt:
+            'Saving page-script list_items at site.example.com (dom-anchored). Save it?',
+          user_decision: 'approve',
+          user_quote: 'looks good',
+        },
+      },
+    });
+    assert.equal(result.status, 'rejected');
+    const issues = result.rejection.classifier_issues || [];
+    assert.ok(
+      issues.some((i) => /open warning/.test(i)),
+      `expected warning-acknowledgement fact-check rejection; got ${JSON.stringify(issues)}`,
     );
   } finally {
     reRegisterDefaultApprove();
@@ -965,6 +1090,22 @@ function mutatingPostStrategy(extras = {}) {
   return strategy;
 }
 
+// Helper for warning-classifier round-trips. Mints token on first call,
+// then validates the supplied audit_answers on second call. Returns the
+// final result. `firstOnly: true` returns the first-call rejection (for
+// "warning fires" tests that inspect items at mint time).
+function runWarningClassifier(strategy, ctx, audit_answers = {}, opts = {}) {
+  const first = saveStrategyAudit.process(strategy, ctx, {});
+  if (opts.firstOnly) return first;
+  if (first.status !== 'rejected' || first.rejection.reason !== 'pending') {
+    return first;
+  }
+  return saveStrategyAudit.process(strategy, ctx, {
+    token: first.rejection.token,
+    answers: audit_answers,
+  });
+}
+
 test('verify-required: GET fetch is read-only — detector does not fire', () => {
   const strategy = {
     strategy: 'fetch',
@@ -994,42 +1135,31 @@ test('verify-required: GET fetch is read-only — detector does not fire', () =>
   );
 });
 
-test('verify-required: mutating POST with no ack → Stage-1 rejection with the warning', () => {
+test('verify-required: mutating POST with no answer → Stage-2 pending with classifier item', () => {
   const strategy = mutatingPostStrategy();
   const result = saveStrategyAudit.process(strategy, verifyCtx(), {});
   assert.equal(result.status, 'rejected');
-  assert.equal(result.rejection.reason, 'unacked_warnings');
-  const w = (result.rejection.warnings ?? []).find(
-    (x) => x.kind === 'mutating_verification_required',
+  assert.equal(result.rejection.reason, 'pending');
+  // mutating_verification_required is now a Classifier — surfaces in items, not warnings.
+  assert.ok(
+    result.rejection.items?.mutating_verification_required,
+    'mutating_verification_required classifier item present',
   );
-  assert.ok(w, 'mutating_verification_required warning fires on POST');
-  // Stage-1 rejection: no token, no items.
-  assert.equal(result.rejection.token, undefined);
-  assert.equal(result.rejection.items, undefined);
+  assert.ok(result.rejection.token, 'token minted at Stage 2');
 });
 
-test('verify-required: ack with response.extract.message_id (path exists) → save commits', () => {
+test('verify-required: answer with response.extract.message_id (path exists) → save commits', () => {
   const strategy = mutatingPostStrategy();
-  const ctx = verifyCtx();
-  const acks = {
+  const result = runWarningClassifier(strategy, verifyCtx(), {
     mutating_verification_required:
       'response.extract.message_id pulls server-issued id; absence = failure',
-  };
-  const first = saveStrategyAudit.process(strategy, ctx, { acks });
-  assert.equal(first.rejection.reason, 'pending');
-  const token = first.rejection.token;
-  const second = saveStrategyAudit.process(strategy, ctx, {
-    token,
-    acks,
-    answers: {
-      literal_provenance: { endpoint: 'static' },
-      observed_siblings: {},
-    },
+    literal_provenance: { endpoint: 'static' },
+    observed_siblings: {},
   });
-  assert.equal(second.status, 'committed', JSON.stringify(second));
+  assert.equal(result.status, 'committed', JSON.stringify(result));
 });
 
-test('verify-required: ack referencing fabricated path → ack rejected', () => {
+test('verify-required: answer referencing fabricated path → classifier rejected', () => {
   // Strategy intentionally has NO response.extract so no `response.*`
   // tokens land in valid_paths. The reason names a fabricated path AND
   // has no shape tag → fails the anti-canned check.
@@ -1045,110 +1175,85 @@ test('verify-required: ack referencing fabricated path → ack rejected', () => 
       anchor_type: 'unknown',
     },
   };
-  const ctx = verifyCtx();
-  const acks = {
+  const result = runWarningClassifier(strategy, verifyCtx(), {
     mutating_verification_required: 'totally.unrelated.path proves it',
-  };
-  const result = saveStrategyAudit.process(strategy, ctx, { acks });
+    literal_provenance: { endpoint: 'static' },
+    observed_siblings: {},
+  });
   assert.equal(result.status, 'rejected');
-  assert.equal(result.rejection.reason, 'unacked_warnings');
-  const ackIssues = result.rejection.ack_issues ?? [];
+  assert.equal(result.rejection.reason, 'answers_inconsistent');
+  const issues = result.rejection.classifier_issues ?? [];
   assert.ok(
-    ackIssues.some((i) => /reason must name the verification approach/.test(i)),
-    `expected anti-canned rejection; got ${JSON.stringify(ackIssues)}`,
+    issues.some((i) => /reason must name the verification approach/.test(i)),
+    `expected anti-canned rejection; got ${JSON.stringify(issues)}`,
   );
 });
 
-test('verify-required: ack with transaction-shape literal tag → save commits', () => {
+test('verify-required: answer with transaction-shape literal tag → save commits', () => {
   const strategy = mutatingPostStrategy();
-  const ctx = verifyCtx();
-  const acks = {
+  const result = runWarningClassifier(strategy, verifyCtx(), {
     mutating_verification_required: 'transaction-shape: server returns confirmation',
-  };
-  const first = saveStrategyAudit.process(strategy, ctx, { acks });
-  assert.equal(first.rejection.reason, 'pending');
-  const second = saveStrategyAudit.process(strategy, ctx, {
-    token: first.rejection.token,
-    acks,
-    answers: {
-      literal_provenance: { endpoint: 'static' },
-      observed_siblings: {},
-    },
+    literal_provenance: { endpoint: 'static' },
+    observed_siblings: {},
   });
-  assert.equal(second.status, 'committed', JSON.stringify(second));
+  assert.equal(result.status, 'committed', JSON.stringify(result));
 });
 
-test('verify-required: ack with fire-and-forget + telemetry noun → save commits', () => {
+test('verify-required: answer with fire-and-forget + telemetry noun → save commits', () => {
   const strategy = mutatingPostStrategy();
-  const ctx = verifyCtx();
-  const acks = {
+  const result = runWarningClassifier(strategy, verifyCtx(), {
     mutating_verification_required:
       'fire-and-forget — analytics telemetry beacon, idempotent on the server',
-  };
-  const first = saveStrategyAudit.process(strategy, ctx, { acks });
-  assert.equal(first.rejection.reason, 'pending');
-  const second = saveStrategyAudit.process(strategy, ctx, {
-    token: first.rejection.token,
-    acks,
-    answers: {
-      literal_provenance: { endpoint: 'static' },
-      observed_siblings: {},
-    },
+    literal_provenance: { endpoint: 'static' },
+    observed_siblings: {},
   });
-  assert.equal(second.status, 'committed', JSON.stringify(second));
+  assert.equal(result.status, 'committed', JSON.stringify(result));
 });
 
-test('verify-required: ack with rpc-read tag → save commits (POST envelope, read operation)', () => {
+test('verify-required: answer with rpc-read tag → save commits (POST envelope, read operation)', () => {
   const strategy = mutatingPostStrategy();
-  const ctx = verifyCtx();
-  const acks = {
+  const result = runWarningClassifier(strategy, verifyCtx(), {
     mutating_verification_required:
       'rpc-read: GraphQL query, response.data is the payload — no side effect to verify',
-  };
-  const first = saveStrategyAudit.process(strategy, ctx, { acks });
-  assert.equal(first.rejection.reason, 'pending');
-  const second = saveStrategyAudit.process(strategy, ctx, {
-    token: first.rejection.token,
-    acks,
-    answers: {
-      literal_provenance: { endpoint: 'static' },
-      observed_siblings: {},
-    },
+    literal_provenance: { endpoint: 'static' },
+    observed_siblings: {},
   });
-  assert.equal(second.status, 'committed', JSON.stringify(second));
+  assert.equal(result.status, 'committed', JSON.stringify(result));
 });
 
-test('verify-required: ack with fire-and-forget but no justifying noun → ack rejected', () => {
+test('verify-required: answer with fire-and-forget but no justifying noun → classifier rejected', () => {
   const strategy = mutatingPostStrategy();
-  const ctx = verifyCtx();
-  const acks = {
+  const result = runWarningClassifier(strategy, verifyCtx(), {
     mutating_verification_required: 'fire-and-forget — no verification needed',
-  };
-  const result = saveStrategyAudit.process(strategy, ctx, { acks });
+    literal_provenance: { endpoint: 'static' },
+    observed_siblings: {},
+  });
   assert.equal(result.status, 'rejected');
-  const ackIssues = result.rejection.ack_issues ?? [];
+  assert.equal(result.rejection.reason, 'answers_inconsistent');
+  const issues = result.rejection.classifier_issues ?? [];
   assert.ok(
-    ackIssues.some((i) => /fire-and-forget tag requires a justifying noun/.test(i)),
-    `expected fire-and-forget noun rejection; got ${JSON.stringify(ackIssues)}`,
+    issues.some((i) => /fire-and-forget tag requires a justifying noun/.test(i)),
+    `expected fire-and-forget noun rejection; got ${JSON.stringify(issues)}`,
   );
 });
 
-test('verify-required: ack with prose-only reason → ack rejected', () => {
+test('verify-required: answer with prose-only reason → classifier rejected', () => {
   const strategy = mutatingPostStrategy();
-  const ctx = verifyCtx();
-  const acks = {
+  const result = runWarningClassifier(strategy, verifyCtx(), {
     mutating_verification_required: 'looks fine to me, intentional',
-  };
-  const result = saveStrategyAudit.process(strategy, ctx, { acks });
+    literal_provenance: { endpoint: 'static' },
+    observed_siblings: {},
+  });
   assert.equal(result.status, 'rejected');
-  const ackIssues = result.rejection.ack_issues ?? [];
+  assert.equal(result.rejection.reason, 'answers_inconsistent');
+  const issues = result.rejection.classifier_issues ?? [];
   assert.ok(
-    ackIssues.some((i) => /reason must name the verification approach/.test(i)),
-    `expected prose-only rejection; got ${JSON.stringify(ackIssues)}`,
+    issues.some((i) => /reason must name the verification approach/.test(i)),
+    `expected prose-only rejection; got ${JSON.stringify(issues)}`,
   );
 });
 
-test('verify-required: recorded-path with type+submit and no ack → warning fires', () => {
+test('verify-required: recorded-path with type+submit fires classifier item', () => {
   const strategy = {
     strategy: 'recorded-path',
     steps: [
@@ -1159,13 +1264,13 @@ test('verify-required: recorded-path with type+submit and no ack → warning fir
     notes: { params: { text: { description: 'body', kind: 'text', example: 'hi' } }, anchor_type: 'dom' },
   };
   const result = saveStrategyAudit.process(strategy, verifyCtx(), {});
-  const w = (result.rejection.warnings ?? []).find(
-    (x) => x.kind === 'mutating_verification_required',
+  assert.ok(
+    result.rejection?.items?.mutating_verification_required,
+    'recorded-path with type/submit must trip the verification classifier',
   );
-  assert.ok(w, 'recorded-path with type/submit must trip the detector');
 });
 
-test('verify-required: recorded-path acked with steps[N] reference → save commits', () => {
+test('verify-required: recorded-path answered with steps[N] reference → save commits', () => {
   const strategy = {
     strategy: 'recorded-path',
     steps: [
@@ -1178,21 +1283,15 @@ test('verify-required: recorded-path acked with steps[N] reference → save comm
     ],
     notes: { params: { text: { description: 'body', kind: 'text', example: 'hi' } }, anchor_type: 'dom' },
   };
-  const ctx = verifyCtx({ observedUrls: [] });
-  const acks = {
+  const result = runWarningClassifier(strategy, verifyCtx({ observedUrls: [] }), {
     mutating_verification_required: 'dom-poll: steps[5] confirms the "Sent" status element appears',
-  };
-  const first = saveStrategyAudit.process(strategy, ctx, { acks });
-  assert.equal(first.rejection.reason, 'pending', JSON.stringify(first.rejection));
-  const second = saveStrategyAudit.process(strategy, ctx, {
-    token: first.rejection.token,
-    acks,
-    answers: { literal_provenance: {}, observed_siblings: {} },
+    literal_provenance: {},
+    observed_siblings: {},
   });
-  assert.equal(second.status, 'committed', JSON.stringify(second));
+  assert.equal(result.status, 'committed', JSON.stringify(result));
 });
 
-test('verify-required: page-script with .publish( + ack referencing frameFromPage.expression → save commits', () => {
+test('verify-required: page-script with .publish( + answer referencing frameFromPage.expression → save commits', () => {
   const strategy = {
     strategy: 'page-script',
     baseUrl: 'https://site.example.com',
@@ -1203,77 +1302,58 @@ test('verify-required: page-script with .publish( + ack referencing frameFromPag
     },
     notes: { params: { text: { description: 'body', kind: 'text', example: 'hi' } }, anchor_type: 'module' },
   };
-  const ctx = verifyCtx({ observedUrls: ['https://site.example.com/api/ws_send'] });
-  const acks = {
-    mutating_verification_required:
-      'chat-shape: frameFromPage.expression awaits publish ack via window.require module before returning',
-  };
-  const first = saveStrategyAudit.process(strategy, ctx, { acks });
-  assert.equal(first.rejection.reason, 'pending', JSON.stringify(first.rejection));
-  const second = saveStrategyAudit.process(strategy, ctx, {
-    token: first.rejection.token,
-    acks,
-    answers: { literal_provenance: { endpoint: 'static' }, observed_siblings: {} },
-  });
-  assert.equal(second.status, 'committed', JSON.stringify(second));
+  const result = runWarningClassifier(
+    strategy,
+    verifyCtx({ observedUrls: ['https://site.example.com/api/ws_send'] }),
+    {
+      mutating_verification_required:
+        'chat-shape: frameFromPage.expression awaits publish ack via window.require module before returning',
+      literal_provenance: { endpoint: 'static' },
+      observed_siblings: {},
+    },
+  );
+  assert.equal(result.status, 'committed', JSON.stringify(result));
 });
 
-test('verify-required: anchor-match — module-anchored + dom-poll only → ack rejected', () => {
+test('verify-required: anchor-match — module-anchored + dom-poll only → classifier rejected', () => {
   const strategy = mutatingPostStrategy({ anchor_type: 'module' });
-  const ctx = verifyCtx();
-  const acks = {
+  const result = runWarningClassifier(strategy, verifyCtx(), {
     mutating_verification_required: 'dom-poll: verify_sent js-eval polls .toast for 2s',
-  };
-  const result = saveStrategyAudit.process(strategy, ctx, { acks });
+    literal_provenance: { endpoint: 'static' },
+    observed_siblings: {},
+  });
   assert.equal(result.status, 'rejected');
-  const ackIssues = result.rejection.ack_issues ?? [];
+  assert.equal(result.rejection.reason, 'answers_inconsistent');
+  const issues = result.rejection.classifier_issues ?? [];
   assert.ok(
-    ackIssues.some((i) => /anchor mismatch/.test(i)),
-    `expected anchor-mismatch rejection; got ${JSON.stringify(ackIssues)}`,
+    issues.some((i) => /anchor mismatch/.test(i)),
+    `expected anchor-mismatch rejection; got ${JSON.stringify(issues)}`,
   );
 });
 
 test('verify-required: anchor-match — module-anchored + transaction-shape with response.extract.id → save commits', () => {
   const strategy = mutatingPostStrategy({ anchor_type: 'module' });
-  const ctx = verifyCtx();
-  const acks = {
+  const result = runWarningClassifier(strategy, verifyCtx(), {
     mutating_verification_required:
       'transaction-shape: response.extract.message_id grounds the verification',
-  };
-  const first = saveStrategyAudit.process(strategy, ctx, { acks });
-  assert.equal(first.rejection.reason, 'pending', JSON.stringify(first.rejection));
-  const second = saveStrategyAudit.process(strategy, ctx, {
-    token: first.rejection.token,
-    acks,
-    answers: {
-      literal_provenance: { endpoint: 'static' },
-      observed_siblings: {},
-    },
+    literal_provenance: { endpoint: 'static' },
+    observed_siblings: {},
   });
-  assert.equal(second.status, 'committed', JSON.stringify(second));
+  assert.equal(result.status, 'committed', JSON.stringify(result));
 });
 
 test('verify-required: anchor-match — module-anchored + chat-shape with window.require readback → save commits', () => {
   const strategy = mutatingPostStrategy({ anchor_type: 'module' });
-  const ctx = verifyCtx();
-  const acks = {
+  const result = runWarningClassifier(strategy, verifyCtx(), {
     mutating_verification_required:
       'chat-shape: window.require("ChatStore") page-global readback after publish',
-  };
-  const first = saveStrategyAudit.process(strategy, ctx, { acks });
-  assert.equal(first.rejection.reason, 'pending', JSON.stringify(first.rejection));
-  const second = saveStrategyAudit.process(strategy, ctx, {
-    token: first.rejection.token,
-    acks,
-    answers: {
-      literal_provenance: { endpoint: 'static' },
-      observed_siblings: {},
-    },
+    literal_provenance: { endpoint: 'static' },
+    observed_siblings: {},
   });
-  assert.equal(second.status, 'committed', JSON.stringify(second));
+  assert.equal(result.status, 'committed', JSON.stringify(result));
 });
 
-test('verify-required: fetch with protocol="websocket" → detector fires (binary WS publish)', () => {
+test('verify-required: fetch with protocol="websocket" → classifier item (binary WS publish)', () => {
   const strategy = {
     strategy: 'fetch',
     origin: 'https://site.example.com',
@@ -1285,14 +1365,12 @@ test('verify-required: fetch with protocol="websocket" → detector fires (binar
   };
   const ctx = verifyCtx({ observedUrls: ['wss://site.example.com/chat'] });
   const result = saveStrategyAudit.process(strategy, ctx, {});
-  const w = (result.rejection.warnings ?? []).find(
-    (x) => x.kind === 'mutating_verification_required',
-  );
-  assert.ok(w, 'fetch+protocol:websocket must trip the detector');
-  assert.match(w.message, /fetch with protocol="websocket"/);
+  const item = result.rejection?.items?.mutating_verification_required;
+  assert.ok(item, 'fetch+protocol:websocket must trip the classifier');
+  assert.match(item.issue, /fetch with protocol="websocket"/);
 });
 
-test('verify-required: anchor-match — protocol-anchored + dom-poll only → ack rejected', () => {
+test('verify-required: anchor-match — protocol-anchored + dom-poll only → classifier rejected', () => {
   const strategy = {
     strategy: 'fetch',
     baseUrl: 'https://site.example.com',
@@ -1302,36 +1380,28 @@ test('verify-required: anchor-match — protocol-anchored + dom-poll only → ac
     body: { text: '{{text}}' },
     notes: { params: { text: { description: 'body', kind: 'text', example: 'hi' } }, anchor_type: 'protocol' },
   };
-  const ctx = verifyCtx();
-  const acks = {
+  const result = runWarningClassifier(strategy, verifyCtx(), {
     mutating_verification_required: 'dom-poll: js-eval polls toast indicator',
-  };
-  const result = saveStrategyAudit.process(strategy, ctx, { acks });
+    literal_provenance: { endpoint: 'static' },
+    observed_siblings: {},
+  });
   assert.equal(result.status, 'rejected');
-  const ackIssues = result.rejection.ack_issues ?? [];
+  assert.equal(result.rejection.reason, 'answers_inconsistent');
+  const issues = result.rejection.classifier_issues ?? [];
   assert.ok(
-    ackIssues.some((i) => /anchor mismatch/.test(i)),
-    `expected anchor-mismatch on protocol-anchored fetch; got ${JSON.stringify(ackIssues)}`,
+    issues.some((i) => /anchor mismatch/.test(i)),
+    `expected anchor-mismatch on protocol-anchored fetch; got ${JSON.stringify(issues)}`,
   );
 });
 
 test('verify-required: anchor-match — dom-anchored + dom-poll → save commits (DOM is the floor)', () => {
   const strategy = mutatingPostStrategy({ anchor_type: 'dom' });
-  const ctx = verifyCtx();
-  const acks = {
+  const result = runWarningClassifier(strategy, verifyCtx(), {
     mutating_verification_required: 'dom-poll: verify_sent js-eval polls .toast-success after publish',
-  };
-  const first = saveStrategyAudit.process(strategy, ctx, { acks });
-  assert.equal(first.rejection.reason, 'pending', JSON.stringify(first.rejection));
-  const second = saveStrategyAudit.process(strategy, ctx, {
-    token: first.rejection.token,
-    acks,
-    answers: {
-      literal_provenance: { endpoint: 'static' },
-      observed_siblings: {},
-    },
+    literal_provenance: { endpoint: 'static' },
+    observed_siblings: {},
   });
-  assert.equal(second.status, 'committed', JSON.stringify(second));
+  assert.equal(result.status, 'committed', JSON.stringify(result));
 });
 
 // ----------------------------------------------------------------------
@@ -1353,55 +1423,51 @@ function paramlessGetStrategy(extras = {}) {
   };
 }
 
-test('parameterization: notes.params absent + no ack → warning fires', () => {
+test('parameterization: notes.params absent → classifier item fires', () => {
   const strategy = paramlessGetStrategy();
   const result = saveStrategyAudit.process(strategy, verifyCtx({ observedUrls: ['https://site.example.com/api/feed'] }), {});
   assert.equal(result.status, 'rejected');
-  assert.equal(result.rejection.reason, 'unacked_warnings');
-  const w = (result.rejection.warnings ?? []).find(
-    (x) => x.kind === 'parameterization_disclosure_required',
+  assert.equal(result.rejection.reason, 'pending');
+  assert.ok(
+    result.rejection.items?.parameterization_disclosure_required,
+    'parameterization classifier item must fire on paramless strategy',
   );
-  assert.ok(w, 'parameterization warning must fire on paramless strategy');
 });
 
-test('parameterization: notes.params empty object + no ack → warning fires', () => {
+test('parameterization: notes.params empty object → classifier item fires', () => {
   const strategy = paramlessGetStrategy({ notes: { params: {} } });
   const result = saveStrategyAudit.process(strategy, verifyCtx({ observedUrls: ['https://site.example.com/api/feed'] }), {});
-  const w = (result.rejection.warnings ?? []).find(
-    (x) => x.kind === 'parameterization_disclosure_required',
+  assert.ok(
+    result.rejection.items?.parameterization_disclosure_required,
+    'parameterization classifier item must fire on empty notes.params',
   );
-  assert.ok(w, 'parameterization warning must fire on empty notes.params');
 });
 
-test('parameterization: notes.params populated → detector silent', () => {
+test('parameterization: notes.params populated → classifier silent', () => {
   const strategy = paramlessGetStrategy({
     notes: { params: { count: { description: 'limit', kind: 'text', example: '10' } } },
   });
   const result = saveStrategyAudit.process(strategy, verifyCtx({ observedUrls: ['https://site.example.com/api/feed'] }), {});
-  const w = (result.rejection?.warnings ?? []).find(
-    (x) => x.kind === 'parameterization_disclosure_required',
+  assert.equal(
+    result.rejection?.items?.parameterization_disclosure_required,
+    undefined,
+    'classifier inactive when params declared',
   );
-  assert.equal(w, undefined, 'detector must not fire when params declared');
 });
 
-test('parameterization: ack referencing endpoint anchor → save commits', () => {
+test('parameterization: answer referencing endpoint anchor → save commits', () => {
   const strategy = paramlessGetStrategy();
   const ctx = verifyCtx({ observedUrls: ['https://site.example.com/api/feed'] });
-  const acks = {
+  const result = runWarningClassifier(strategy, ctx, {
     parameterization_disclosure_required:
       'endpoint /api/feed: GET viewer-scoped feed with no caller axis',
-  };
-  const first = saveStrategyAudit.process(strategy, ctx, { acks });
-  assert.equal(first.rejection.reason, 'pending', JSON.stringify(first.rejection));
-  const second = saveStrategyAudit.process(strategy, ctx, {
-    token: first.rejection.token,
-    acks,
-    answers: { literal_provenance: { endpoint: 'static' }, observed_siblings: {} },
+    literal_provenance: { endpoint: 'static' },
+    observed_siblings: {},
   });
-  assert.equal(second.status, 'committed', JSON.stringify(second));
+  assert.equal(result.status, 'committed', JSON.stringify(result));
 });
 
-test('parameterization: ack referencing prereq name → save commits', () => {
+test('parameterization: answer referencing prereq name → save commits', () => {
   const strategy = {
     strategy: 'page-script',
     baseUrl: 'https://site.example.com',
@@ -1421,59 +1487,48 @@ test('parameterization: ack referencing prereq name → save commits', () => {
     notes: { anchor_type: 'dom' },
   };
   const ctx = verifyCtx({ observedUrls: ['https://site.example.com/api/whoami', 'https://site.example.com/'] });
-  const acks = {
+  const result = runWarningClassifier(strategy, ctx, {
     parameterization_disclosure_required:
       'prereq csrf covers the only varying header value; endpoint /api/whoami is viewer-scoped, no body, no caller axis',
-  };
-  const first = saveStrategyAudit.process(strategy, ctx, { acks });
-  assert.equal(first.rejection.reason, 'pending', JSON.stringify(first.rejection));
-  const second = saveStrategyAudit.process(strategy, ctx, {
-    token: first.rejection.token,
-    acks,
-    answers: {
-      literal_provenance: {
-        endpoint: 'static',
-        'prerequisites[0].url': 'static',
-      },
-      observed_siblings: {},
+    literal_provenance: {
+      endpoint: 'static',
+      'prerequisites[0].url': 'static',
     },
+    observed_siblings: {},
   });
-  assert.equal(second.status, 'committed', JSON.stringify(second));
+  assert.equal(result.status, 'committed', JSON.stringify(result));
 });
 
-test('parameterization: bare-prose ack with no structural anchor → ack rejected', () => {
+test('parameterization: bare-prose answer with no structural anchor → classifier rejected', () => {
   const strategy = paramlessGetStrategy();
   const ctx = verifyCtx({ observedUrls: ['https://site.example.com/api/feed'] });
-  const acks = {
+  const result = runWarningClassifier(strategy, ctx, {
     parameterization_disclosure_required: 'this capability is intentionally parameterless',
-  };
-  const result = saveStrategyAudit.process(strategy, ctx, { acks });
+    literal_provenance: { endpoint: 'static' },
+    observed_siblings: {},
+  });
   assert.equal(result.status, 'rejected');
-  const ackIssues = result.rejection.ack_issues ?? [];
+  assert.equal(result.rejection.reason, 'answers_inconsistent');
+  const issues = result.rejection.classifier_issues ?? [];
   assert.ok(
-    ackIssues.some((i) => /must reference at least one structural anchor/.test(i)),
-    `expected anti-canned rejection; got ${JSON.stringify(ackIssues)}`,
+    issues.some((i) => /must reference at least one structural anchor/.test(i)),
+    `expected anti-canned rejection; got ${JSON.stringify(issues)}`,
   );
 });
 
-test('parameterization: hash-scope — adding notes.params clears warning without re-acking siblings', () => {
-  // Stage 1: paramless — warning fires, ack with structural anchor commits.
-  const paramless = paramlessGetStrategy();
+test('parameterization: hash-scope — declaring notes.params clears the classifier', () => {
   const ctx = verifyCtx({ observedUrls: ['https://site.example.com/api/feed'] });
-  const acks = {
-    parameterization_disclosure_required: 'endpoint /api/feed: viewer-scoped',
-  };
-  const first = saveStrategyAudit.process(paramless, ctx, { acks });
-  assert.equal(first.rejection.reason, 'pending');
+  const paramless = paramlessGetStrategy();
+  const first = saveStrategyAudit.process(paramless, ctx, {});
+  assert.ok(first.rejection?.items?.parameterization_disclosure_required, 'fires on paramless');
 
-  // Stage 2: agent declares params — detector silent now. Re-call without
-  // any ack; the warning shouldn't fire so the ack list isn't needed.
   const parameterized = paramlessGetStrategy({
     notes: { params: { count: { description: 'limit', kind: 'text', example: '10' } } },
   });
   const after = saveStrategyAudit.process(parameterized, ctx, {});
-  const w = (after.rejection?.warnings ?? []).find(
-    (x) => x.kind === 'parameterization_disclosure_required',
+  assert.equal(
+    after.rejection?.items?.parameterization_disclosure_required,
+    undefined,
+    'classifier silent after params declared',
   );
-  assert.equal(w, undefined, 'detector silent after params declared');
 });
