@@ -101,6 +101,12 @@ export interface GraphConfig {
   obligationStyle?: 'lift_required' | 'flush_reminder' | 'none';
   /** Optional `_hint` attached to start_session response. */
   startSessionHint?: string;
+  /** Tools admissible in DRIVE phase beyond the standard
+   *  `unionSets(DRIVE_ACTIVE, READ_ONLY_DIAGNOSTIC, DISCOVERY_ARTIFACT)`.
+   *  Map graph adds `save_strategy` here because map has no triage/lift to
+   *  unlock saves later — explicit save during drive is the only path to
+   *  disk. Discover/execute leave unset; their save path runs in lift. */
+  extraDriveTools?: ReadonlySet<string>;
 }
 
 /** A phase's full behavior in one object. The state machine is a tiny
@@ -132,11 +138,14 @@ export interface PhaseSpec {
 
   /** Composite admissibility: phase membership + exhausted-set narrowing.
    *  Tool-body audits (e.g. surface_triage_missing) are structurally
-   *  orthogonal and run inside the tool body, after admissibility passes. */
+   *  orthogonal and run inside the tool body, after admissibility passes.
+   *  `graphConfig` is optional so test harnesses that don't thread the
+   *  whole graph context through can still call this directly; production
+   *  callers pass it. */
   checkAdmissibility(
     toolName: string,
     session: Session,
-    graphConfig: GraphConfig,
+    graphConfig?: GraphConfig,
   ): AdmissibilityResult;
 
   /** Prefix prose surfaced when the budget is exhausted. The hard block

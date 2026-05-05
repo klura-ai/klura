@@ -169,6 +169,41 @@ test('admissibility: get_a11y_tree admitted in triage and lift too', () => {
   assert.ok(currentSpec(liftSession).checkAdmissibility('get_a11y_tree', liftSession).ok);
 });
 
+test('admissibility: map mode admits save_strategy in drive via extraDriveTools', async () => {
+  // Map graph has no triage/lift phases — drive is the only phase. Without
+  // save_strategy admissible in drive, the documented "call save_strategy
+  // for what you want to keep" hint is unreachable and map sessions
+  // produce zero strategy files. Map's GraphConfig declares
+  // extraDriveTools = {save_strategy} for exactly this reason.
+  const { graphFor } = await import('../dist/session-phase/graphs/index.js');
+  const map = graphFor('map');
+  const discover = graphFor('discover');
+  const session = fresh();
+  // Discover graph (default): save_strategy rejects in drive.
+  const discoverReject = currentSpec(session).checkAdmissibility(
+    'save_strategy',
+    session,
+    discover.config,
+  );
+  assert.equal(discoverReject.ok, false, 'discover drive rejects save_strategy');
+  assert.match(discoverReject.reason, /hand over to triage/);
+  // Map graph: save_strategy admits.
+  const mapAdmit = currentSpec(session).checkAdmissibility(
+    'save_strategy',
+    session,
+    map.config,
+  );
+  assert.ok(mapAdmit.ok, 'map drive admits save_strategy via extraDriveTools');
+  // Map rejection prose for an unrelated tool reflects map's flow.
+  const mapReject = currentSpec(session).checkAdmissibility(
+    'submit_triage_plan',
+    session,
+    map.config,
+  );
+  assert.equal(mapReject.ok, false);
+  assert.match(mapReject.reason, /map mode.*save_strategy.*end_drive/s);
+});
+
 test('graph topology: map has no lift phase', async () => {
   // Backstop for the orchestrator's lift-bookkeeping graph guard. The guard
   // checks `currentGraph(session).nodes.has('lift')` before populating

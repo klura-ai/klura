@@ -21,8 +21,13 @@ export const MAP_GRAPH: Graph = {
     skipDeclarationGuard: true,
     rePersistenceThreshold: { reCalls: 1, actions: 5 },
     obligationStyle: 'flush_reminder',
+    // Map has no triage/lift to unlock saves — drive is the only phase, so
+    // explicit `save_strategy` calls must be admissible in drive. Without
+    // this the documented "call save_strategy for what you want to keep"
+    // hint above is unreachable.
+    extraDriveTools: new Set(['save_strategy']),
     startSessionHint:
       'Map mode: walk the platform; mutating actions require per-(action, selector) consent. ' +
-      'Auto-synth is skipped at close — call `save_strategy` for what you want to keep.',
+      'Auto-synth is skipped at close — call `save_strategy` for what you want to keep, then `end_drive`.',
   },
 };

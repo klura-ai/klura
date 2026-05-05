@@ -35,15 +35,23 @@ export const DRIVE_SPEC: PhaseSpec = {
   checkAdmissibility(
     toolName: string,
     session: Session,
-    _graphConfig: GraphConfig,
+    graphConfig?: GraphConfig,
   ): AdmissibilityResult {
-    if (!this.allowedTools.has(toolName)) {
+    const extra = graphConfig?.extraDriveTools;
+    const admitted = this.allowedTools.has(toolName) || (extra?.has(toolName) ?? false);
+    if (!admitted) {
+      // Rejection prose differs by graph shape. Discover/execute exit drive
+      // by `end_drive` to hand to triage; map has no triage so the right
+      // exit is `save_strategy` (commit findings) followed by `end_drive`
+      // (close session). Branch on `skipAutoSynth` — the canonical signal
+      // that the graph has no auto-save path and the agent owns persistence.
+      const isMapShaped = graphConfig?.skipAutoSynth === true;
+      const exitHint = isMapShaped
+        ? `In map mode, drive is the only phase — call \`save_strategy\` for each capability you want to keep, then \`end_drive\` to close.`
+        : `In drive, you drive the UI toward the goal. When you have the captures you need, call \`end_drive\` to hand over to triage.`;
       return {
         ok: false,
-        reason:
-          `tool '${toolName}' is not available in phase 'drive'. ` +
-          `In drive, you drive the UI toward the goal. ` +
-          `When you have the captures you need, call \`end_drive\` to hand over to triage.`,
+        reason: `tool '${toolName}' is not available in phase 'drive'. ${exitHint}`,
       };
     }
     if (session.drive?.softBlockEngaged && !this.allowedToolsWhenExhausted.has(toolName)) {
