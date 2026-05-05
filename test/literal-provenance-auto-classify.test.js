@@ -107,6 +107,8 @@ test('placeholder matching prereq.binds → auto-classified as prereq_output', (
   const acks = {
     mutating_verification_required:
       'transaction-shape: response.extract grounds the verification (test default)',
+    parameterization_disclosure_required:
+      'prereq sign covers the only varying value (token); endpoint anchor /api/send has no caller axis beyond the prereq output',
   };
   const first = saveStrategyAudit.process(strategy, ctx, { acks });
   assert.equal(first.status, 'rejected');
@@ -122,7 +124,11 @@ test('static fields stay unclassified — agent must answer', () => {
     baseUrl: 'http://127.0.0.1:3315',
     endpoint: '/search', // no placeholder
   };
-  const first = saveStrategyAudit.process(strategy, baseCtx, {});
+  const acks = {
+    parameterization_disclosure_required:
+      'endpoint /search: degenerate test fixture; literal_provenance is the gate under test',
+  };
+  const first = saveStrategyAudit.process(strategy, baseCtx, { acks });
   assert.equal(first.status, 'rejected');
   const items = first.rejection.items.literal_provenance;
   const endpoint = items.find((i) => i.path === 'endpoint');

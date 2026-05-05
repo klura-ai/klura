@@ -69,6 +69,8 @@ function runAudit(partialCtx, strategy, answers) {
   const ACK_REASONS = {
     mutating_verification_required:
       'transaction-shape: response.extract grounds the verification (test default)',
+    parameterization_disclosure_required:
+      'method anchor — test strategy has no caller axis (parameterization gate not under test here)',
   };
   const acks = {};
   const probe = saveStrategyAudit.process(strategy, ctx, {});
@@ -489,7 +491,15 @@ test('static-on-click-observed: rejects "static" when literal matches a ui_click
     endpoint: '/api/repos?lang=rust',
     method: 'GET',
     headers: {},
-    notes: {},
+    notes: {
+      save_warnings_acked: [
+        {
+          kind: 'parameterization_disclosure_required',
+          reason:
+            'endpoint /api/repos contains the lang literal — parameterization gate is the literal_provenance gate under test here',
+        },
+      ],
+    },
   };
   const result = runAudit(
     {
@@ -712,7 +722,10 @@ function minimalStrategy() {
     baseUrl: 'https://site.example.com',
     endpoint: '/api/items',
     method: 'GET',
-    notes: { params: {}, anchor_type: 'dom' },
+    notes: {
+      params: { cursor: { description: 'pagination', kind: 'text', example: '' } },
+      anchor_type: 'dom',
+    },
   };
 }
 
@@ -958,7 +971,17 @@ test('verify-required: GET fetch is read-only — detector does not fire', () =>
     baseUrl: 'https://site.example.com',
     endpoint: '/api/items',
     method: 'GET',
-    notes: { params: {}, anchor_type: 'protocol' },
+    notes: {
+      params: {},
+      anchor_type: 'protocol',
+      save_warnings_acked: [
+        {
+          kind: 'parameterization_disclosure_required',
+          reason:
+            'endpoint /api/items: GET-only listing for the verify-required detector test, no caller axis',
+        },
+      ],
+    },
   };
   const result = saveStrategyAudit.process(strategy, verifyCtx({ observedUrls: ['https://site.example.com/api/items'] }), {});
   // First call may still mint token for classifiers (literal_provenance),
@@ -1289,4 +1312,148 @@ test('verify-required: anchor-match — dom-anchored + dom-poll → save commits
     },
   });
   assert.equal(second.status, 'committed', JSON.stringify(second));
+});
+
+// ----------------------------------------------------------------------
+// parameterization_disclosure_required Detector — every saved strategy
+// must declare notes.params or ack with a structurally-grounded reason.
+// ----------------------------------------------------------------------
+
+function paramlessGetStrategy(extras = {}) {
+  return {
+    strategy: 'fetch',
+    baseUrl: 'https://site.example.com',
+    endpoint: '/api/feed',
+    method: 'GET',
+    headers: {},
+    notes: {
+      anchor_type: 'unknown',
+      ...extras.notes,
+    },
+  };
+}
+
+test('parameterization: notes.params absent + no ack → warning fires', () => {
+  const strategy = paramlessGetStrategy();
+  const result = saveStrategyAudit.process(strategy, verifyCtx({ observedUrls: ['https://site.example.com/api/feed'] }), {});
+  assert.equal(result.status, 'rejected');
+  assert.equal(result.rejection.reason, 'unacked_warnings');
+  const w = (result.rejection.warnings ?? []).find(
+    (x) => x.kind === 'parameterization_disclosure_required',
+  );
+  assert.ok(w, 'parameterization warning must fire on paramless strategy');
+});
+
+test('parameterization: notes.params empty object + no ack → warning fires', () => {
+  const strategy = paramlessGetStrategy({ notes: { params: {} } });
+  const result = saveStrategyAudit.process(strategy, verifyCtx({ observedUrls: ['https://site.example.com/api/feed'] }), {});
+  const w = (result.rejection.warnings ?? []).find(
+    (x) => x.kind === 'parameterization_disclosure_required',
+  );
+  assert.ok(w, 'parameterization warning must fire on empty notes.params');
+});
+
+test('parameterization: notes.params populated → detector silent', () => {
+  const strategy = paramlessGetStrategy({
+    notes: { params: { count: { description: 'limit', kind: 'text', example: '10' } } },
+  });
+  const result = saveStrategyAudit.process(strategy, verifyCtx({ observedUrls: ['https://site.example.com/api/feed'] }), {});
+  const w = (result.rejection?.warnings ?? []).find(
+    (x) => x.kind === 'parameterization_disclosure_required',
+  );
+  assert.equal(w, undefined, 'detector must not fire when params declared');
+});
+
+test('parameterization: ack referencing endpoint anchor → save commits', () => {
+  const strategy = paramlessGetStrategy();
+  const ctx = verifyCtx({ observedUrls: ['https://site.example.com/api/feed'] });
+  const acks = {
+    parameterization_disclosure_required:
+      'endpoint /api/feed: GET viewer-scoped feed with no caller axis',
+  };
+  const first = saveStrategyAudit.process(strategy, ctx, { acks });
+  assert.equal(first.rejection.reason, 'pending', JSON.stringify(first.rejection));
+  const second = saveStrategyAudit.process(strategy, ctx, {
+    token: first.rejection.token,
+    acks,
+    answers: { literal_provenance: { endpoint: 'static' }, observed_siblings: {} },
+  });
+  assert.equal(second.status, 'committed', JSON.stringify(second));
+});
+
+test('parameterization: ack referencing prereq name → save commits', () => {
+  const strategy = {
+    strategy: 'page-script',
+    baseUrl: 'https://site.example.com',
+    endpoint: '/api/whoami',
+    method: 'GET',
+    headers: { 'x-csrf': '{{csrf}}' },
+    prerequisites: [
+      {
+        name: 'csrf',
+        kind: 'js-eval',
+        url: 'https://site.example.com/',
+        expression: 'document.cookie',
+        binds: 'csrf',
+        return_shape: { kind: 'string', min_length: 4 },
+      },
+    ],
+    notes: { anchor_type: 'dom' },
+  };
+  const ctx = verifyCtx({ observedUrls: ['https://site.example.com/api/whoami', 'https://site.example.com/'] });
+  const acks = {
+    parameterization_disclosure_required:
+      'prereq csrf covers the only varying header value; endpoint /api/whoami is viewer-scoped, no body, no caller axis',
+  };
+  const first = saveStrategyAudit.process(strategy, ctx, { acks });
+  assert.equal(first.rejection.reason, 'pending', JSON.stringify(first.rejection));
+  const second = saveStrategyAudit.process(strategy, ctx, {
+    token: first.rejection.token,
+    acks,
+    answers: {
+      literal_provenance: {
+        endpoint: 'static',
+        'prerequisites[0].url': 'static',
+      },
+      observed_siblings: {},
+    },
+  });
+  assert.equal(second.status, 'committed', JSON.stringify(second));
+});
+
+test('parameterization: bare-prose ack with no structural anchor → ack rejected', () => {
+  const strategy = paramlessGetStrategy();
+  const ctx = verifyCtx({ observedUrls: ['https://site.example.com/api/feed'] });
+  const acks = {
+    parameterization_disclosure_required: 'this capability is intentionally parameterless',
+  };
+  const result = saveStrategyAudit.process(strategy, ctx, { acks });
+  assert.equal(result.status, 'rejected');
+  const ackIssues = result.rejection.ack_issues ?? [];
+  assert.ok(
+    ackIssues.some((i) => /must reference at least one structural anchor/.test(i)),
+    `expected anti-canned rejection; got ${JSON.stringify(ackIssues)}`,
+  );
+});
+
+test('parameterization: hash-scope — adding notes.params clears warning without re-acking siblings', () => {
+  // Stage 1: paramless — warning fires, ack with structural anchor commits.
+  const paramless = paramlessGetStrategy();
+  const ctx = verifyCtx({ observedUrls: ['https://site.example.com/api/feed'] });
+  const acks = {
+    parameterization_disclosure_required: 'endpoint /api/feed: viewer-scoped',
+  };
+  const first = saveStrategyAudit.process(paramless, ctx, { acks });
+  assert.equal(first.rejection.reason, 'pending');
+
+  // Stage 2: agent declares params — detector silent now. Re-call without
+  // any ack; the warning shouldn't fire so the ack list isn't needed.
+  const parameterized = paramlessGetStrategy({
+    notes: { params: { count: { description: 'limit', kind: 'text', example: '10' } } },
+  });
+  const after = saveStrategyAudit.process(parameterized, ctx, {});
+  const w = (after.rejection?.warnings ?? []).find(
+    (x) => x.kind === 'parameterization_disclosure_required',
+  );
+  assert.equal(w, undefined, 'detector silent after params declared');
 });

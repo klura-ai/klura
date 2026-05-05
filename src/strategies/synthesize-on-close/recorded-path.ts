@@ -7,6 +7,7 @@ import { assignAutoStepIds } from '../auto-step-id';
 import type { Session, PerformActionRecord } from '../../drivers/types/session';
 import { findLastIndex, pickDiscoveredFromUrl } from './helpers';
 import { attachSaveWarningsToStrategy, detectTypedTextDrift } from './literals';
+import { detectParameterizationDisclosureRequired } from '../../gate/save-warnings-parameterization';
 import { parseSnapshotSelector } from '../../execution/snapshot-selector';
 import type { AutoSynthResult, SaveMarker, SynthDiagnosticEntry } from './types';
 
@@ -220,6 +221,16 @@ export function synthesizeRecordedPaths(
       (strategy.notes as Record<string, unknown>).params = params;
     }
     attachSaveWarningsToStrategy(strategy, detectTypedTextDrift(session, save.args));
+    // Parameterization disclosure: auto-synth doesn't go through the
+    // saveStrategy audit pipeline (no sessionId passed below), so the new
+    // parameterization_disclosure_required Detector wouldn't fire on
+    // paramless auto-saves. Run the structural check here and attach the
+    // warning to runtime_meta.save_warnings so next session reading
+    // list_platform_skills sees the under-parameterization signal.
+    attachSaveWarningsToStrategy(
+      strategy,
+      detectParameterizationDisclosureRequired(strategy as unknown as skills.Strategy),
+    );
     // Read-nav fallback: this branch fired because no XHR carried the data AND
     // the agent didn't save explicitly. recorded-path is the honest auto-synth
     // outcome, but for SSR HTML reads (the typical shape: profile page loaded

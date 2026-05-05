@@ -33,6 +33,10 @@ import {
   FIRE_AND_FORGET_JUSTIFYING_NOUNS,
   NON_DOM_VERIFICATION_MARKERS,
 } from './save-warnings-mutating-verification';
+import {
+  detectParameterizationDisclosureRequired,
+  collectParameterizationAnchors,
+} from './save-warnings-parameterization';
 
 export {
   detectEnumValueInCapabilitySlug,
@@ -40,6 +44,8 @@ export {
   detectAuthGatedWithoutAuthPrereq,
   detectPrereqBindKeyMismatch,
   detectMutatingStrategyVerificationApproach,
+  detectParameterizationDisclosureRequired,
+  collectParameterizationAnchors,
   VERIFICATION_SHAPE_TAGS,
   FIRE_AND_FORGET_JUSTIFYING_NOUNS,
   NON_DOM_VERIFICATION_MARKERS,

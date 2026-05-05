@@ -135,6 +135,7 @@ export const WARNING_KINDS = {
   ungroundedEnumPlaceholder: 'ungrounded_enum_placeholder',
   lookupEmbeddedInPrereq: 'lookup_embedded_in_prereq',
   multiFetchInlinePrereq: 'multi_fetch_inline_prereq',
+  parameterizationDisclosureRequired: 'parameterization_disclosure_required',
 } as const;
 
 export type WarningKind = (typeof WARNING_KINDS)[keyof typeof WARNING_KINDS];
@@ -179,6 +180,7 @@ export const REF_LINKS = {
   networkLogDiscoveryWorkflow: 'network-log-discovery-workflow',
   observedCapabilities: 'observed-capabilities',
   pageScriptAnchors: 'page-script-anchors',
+  parameterizationDisclosureRequired: 'parameterization-disclosure-required',
   pageScriptSchema: 'page-script-schema',
   platformSurfaceMap: 'platform-surface-map',
   popups: 'popups',

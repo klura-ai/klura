@@ -36,6 +36,7 @@ import {
   detectEnumParamListingUnfactored,
   detectEnumValueInCapabilitySlug,
   detectMutatingStrategyVerificationApproach,
+  detectParameterizationDisclosureRequired,
   VERIFICATION_SHAPE_TAGS,
   FIRE_AND_FORGET_JUSTIFYING_NOUNS,
   NON_DOM_VERIFICATION_MARKERS,
@@ -437,6 +438,56 @@ const mutatingVerificationRequiredDetector: Detector<Strategy, SaveStrategyCtx> 
   },
 };
 
+// Parameterization-disclosure detector — every saved strategy must declare
+// the caller-varying axes (`notes.params`) or explicitly justify why none
+// apply. End-drive's auto-derive populates `notes.params` only from
+// caller-typed literals; sessions driven with `args:{}` land paramless
+// strategies that warm callers can't customize. The detector fires on
+// every tier when notes.params is empty/undefined; the ack reason must
+// reference at least one structural anchor of the saved strategy
+// (anti-canned). See `save-warnings-parameterization.ts`.
+const parameterizationDisclosureRequiredDetector: Detector<Strategy, SaveStrategyCtx> = {
+  kind: 'parameterization_disclosure_required',
+  detect: (data) => asIssues(detectParameterizationDisclosureRequired(data)),
+  ackReason: 'required',
+  // Anti-canned: ack reason must include at least one path-shaped token
+  // from the candidate-anchors list emitted by the detector. Forces the
+  // agent to read the rejection's specifics rather than canned-acking.
+  validateAck: (reason, emittedIssues) => {
+    const issue = emittedIssues[0];
+    const ctx = (issue as { context?: { candidate_anchors?: unknown } }).context;
+    const anchors = Array.isArray(ctx?.candidate_anchors)
+      ? ctx.candidate_anchors.filter((x): x is string => typeof x === 'string' && x.length > 0)
+      : [];
+
+    if (anchors.length === 0) {
+      // Degenerate strategy: no body, no headers, no endpoint, no prereqs,
+      // no steps — nothing to anchor on. Fail-closed: a strategy with no
+      // structural surface can't be a real capability.
+      return [
+        `strategy has no structural anchors (endpoint, body, headers, prereqs, steps all empty). ` +
+          `Either populate the strategy with the captured request data or save a recorded-path with steps.`,
+      ];
+    }
+
+    // Sort longest-first so multi-segment paths like `body.recipient_id`
+    // match before the bare `body` fallback.
+    const matched = [...anchors]
+      .sort((a, b) => b.length - a.length)
+      .filter((a) => reason.includes(a));
+    if (matched.length === 0) {
+      const sample = anchors.slice(0, 8).join(', ');
+      return [
+        `reason must reference at least one structural anchor of the saved strategy. Candidates include: ` +
+          `${sample}${anchors.length > 8 ? ', …' : ''}. Bare prose like "no params apply" or "this capability ` +
+          `takes no input" is rejected — name the body field / endpoint segment / prereq / header that proves ` +
+          `the rejection was read.`,
+      ];
+    }
+    return [];
+  },
+};
+
 // ---------- Unconditional detector (was validateLookupPrereqsAreCapabilities) ----------
 
 // Every endpoint / prereq URL in the saved strategy must match a host+path
@@ -754,6 +805,7 @@ export const saveStrategyAudit = new Audit<Strategy, SaveStrategyCtx>({
     enumValueInCapabilitySlugDetector,
     endpointCollidesWithSavedCapabilityDetector,
     mutatingVerificationRequiredDetector,
+    parameterizationDisclosureRequiredDetector,
     unobservedUrlDetector,
     lookupPrereqMustBeCapabilityDetector,
     observedPropertyKeysDetector,

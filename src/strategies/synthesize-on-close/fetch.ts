@@ -20,6 +20,7 @@ import {
   findLiteralInSessionCaptures,
   type LiteralMatch,
 } from './literals';
+import { detectParameterizationDisclosureRequired } from '../../gate/save-warnings-parameterization';
 import { buildStepsFromHistory } from './recorded-path';
 import type { AutoSynthResult, SaveMarker, SynthDiagnosticEntry } from './types';
 import { templateRequestFromVEs, type EvaluatedVE } from './verified-expressions';
@@ -466,6 +467,14 @@ export function synthesizeFetchFromCaptures(
       ...(Object.keys(runtimeMetaBlock).length > 0 ? { runtime_meta: runtimeMetaBlock } : {}),
     };
     attachSaveWarningsToStrategy(strategy, detectTypedTextDrift(session, save.args));
+    // Parameterization disclosure: auto-synth bypasses saveStrategyAudit
+    // (no sessionId passed). Run the structural check here so paramless
+    // auto-saves carry the warning into runtime_meta.save_warnings; next
+    // session reading list_platform_skills sees the signal.
+    attachSaveWarningsToStrategy(
+      strategy,
+      detectParameterizationDisclosureRequired(strategy as never),
+    );
 
     try {
       const path = skills.saveStrategy(platform, save.capability, strategy as never);

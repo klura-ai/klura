@@ -660,6 +660,45 @@ Module/protocol-anchored saves whose ack contains ONLY `dom-poll` (no module/pro
 
 Also consider validating each declared `notes.params.<name>` value before the call fires (e.g., the recipient lookup actually found a thread before typing into the composer) — a missing recipient is exactly the misroute the verification step should catch.
 
+## parameterization-disclosure-required
+
+Every saved strategy must either declare its caller-varying axes via `notes.params` or explicitly justify why none apply. Most capabilities have at least one axis (count, cursor, query text, id, locale, ordering); a save without any means warm callers can't customize the call. The save-time `parameterization_disclosure_required` detector fires whenever `notes.params` is absent, missing, or empty — for every tier (`fetch`, `page-script`, `recorded-path`).
+
+**Why this exists.** End-drive's auto-derive (`runtime/src/strategies/synthesize-on-close/fetch.ts`) populates `notes.params` only from caller-typed literals — the values the agent passed to `start_session({args:{…}})` during discovery. Sessions driven with `args:{}` synthesize a strategy with `notes.params` empty, and (until this gate fired) landed silently. The gate makes the parameterless case a deliberate ack, not a quiet default.
+
+**Two fixes:**
+
+1. **Declare the axes.** Re-discover with `start_session({args:{<param>: <example>}})`, type the example into the flow you want parameterized, save again — auto-derive correlates the literal to the captured request body and stamps `notes.params.<param>` for you. Or hand-edit the saved strategy: add `notes.params.<name> = {kind, description, example}`, replace the literal in body/endpoint with `{{<name>}}`.
+2. **Ack as parameterless.** Inline:
+
+   ```json
+   {
+     "notes": {
+       "save_warnings_acked": [
+         {
+           "kind": "parameterization_disclosure_required",
+           "reason": "<structural anchor + why parameterless>"
+         }
+       ]
+     }
+   }
+   ```
+
+   The reason must reference at least one structural anchor of the saved strategy: a body field key, header key, endpoint path segment, prereq name, recorded-path step id, the literal endpoint, or `method`. Bare prose ("this capability has no params") is rejected — the runtime checks the reason against the candidate-anchors list it emitted on the rejection.
+
+**Worked acks:**
+
+- `"endpoint /api/me/logout: no path params, body absent, prereq csrf_token covers the only caller-invariant secret"`
+- `"viewer-scoped — endpoint /api/viewer/profile returns the calling user's data; no input axis"`
+- `"body fields query and doc_id are static GraphQL operation metadata; the captured request had no variables block"`
+
+**Tier sensitivity.**
+
+- `fetch` / `page-script`: typical case is body fields or URL query keys missing from `notes.params`. The fix is usually to declare them and template `{{name}}` into the body/endpoint.
+- `recorded-path`: caller-varying values appear as `step.value` strings on `type` / `fill_editor` steps. Declare them as params and replace the literal step value with `{{name}}`.
+
+Genuinely-parameterless capabilities exist (`logout`, `current_user_id`, `viewer_profile`); the ack path is for them. The detector fires unconditionally so the parameterless choice is always a deliberate one.
+
 ## end-drive-audit
 
 Every `end_drive` call funnels through a single consolidated audit (`runtime/src/audit/end-drive.ts`) — sibling shape to the `save-strategy-audit`. It composes structural detectors and token-gated classifiers into ONE rejection envelope.
