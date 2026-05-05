@@ -139,6 +139,10 @@ function rejectionToErrorMessage(result: GateResult): string {
     lines.push('  issues:');
     for (const iss of r.issues) lines.push(`    - ${iss}`);
   }
+  if (r.payload_diff && r.payload_diff.length > 0) {
+    lines.push('  payload_diff (these fields changed since the prior consent_token):');
+    for (const p of r.payload_diff) lines.push(`    - ${p}`);
+  }
   const items = r.checklist.items as {
     consenting_to?: { actions_summary: string; settle_ms: number };
     required_fields?: string[];

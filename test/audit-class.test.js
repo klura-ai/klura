@@ -235,6 +235,39 @@ test('hashFields scope: edits to in-scope fields DO invalidate token', () => {
   const r = audit.process(p2, {}, { token, answers: { classifier: 'ok' } });
   assert.equal(r.status, 'rejected');
   assert.equal(r.rejection.reason, 'payload_changed');
+  assert.deepEqual(
+    r.rejection.payload_diff,
+    ['(classifier) critical'],
+    'payload_diff names the changed field, prefixed with the classifier kind',
+  );
+});
+
+test('payload_changed diff: nested field shifts surface as a dotted path', () => {
+  const audit = new Audit({
+    kind: 'test',
+    detectors: [],
+    classifiers: [
+      {
+        kind: 'classifier',
+        buildItems: () => ['present'],
+        validate: () => [],
+        remedy: NO_REMEDY,
+        expectedAnswerShape: TEST_SHAPE,
+      },
+    ],
+  });
+  const p1 = { notes: { acks: [{ kind: 'k', reason: 'old' }] } };
+  const first = audit.process(p1, {}, {});
+  const token = first.rejection.token;
+
+  const p2 = { notes: { acks: [{ kind: 'k', reason: 'new' }] } };
+  const r = audit.process(p2, {}, { token, answers: { classifier: 'ok' } });
+  assert.equal(r.rejection.reason, 'payload_changed');
+  assert.deepEqual(r.rejection.payload_diff, ['(classifier) notes.acks[0].reason']);
+  // The renderer surfaces the diff right under the headline.
+  const msg = rejectionToErrorMessage('test', r.rejection);
+  assert.match(msg, /1 field changed since prior audit_token/);
+  assert.match(msg, /\(classifier\) notes\.acks\[0\]\.reason/);
 });
 
 // ---------- mixed flow ----------

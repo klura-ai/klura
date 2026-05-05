@@ -15,6 +15,10 @@ const SWEEP_INTERVAL_MS = 60 * 1000; // 1 minute
 interface StoredToken {
   kind: string;
   payloadHash: string;
+  // The structured value that was hashed, retained so a `payload_changed`
+  // rejection can diff old vs. new and tell the agent which fields shifted.
+  // Deep-cloned at issue time to decouple from the caller's references.
+  hashInput?: unknown;
   issuedAt: number;
   expiresAt: number;
 }
@@ -34,7 +38,12 @@ function ensureSweeper(): void {
   if (typeof sweepTimer.unref === 'function') sweepTimer.unref();
 }
 
-export function issueToken(args: { kind: string; payloadHash: string; ttlMs?: number }): string {
+export function issueToken(args: {
+  kind: string;
+  payloadHash: string;
+  hashInput?: unknown;
+  ttlMs?: number;
+}): string {
   ensureSweeper();
   const token = randomBytes(9).toString('base64url'); // 12-char url-safe
   const now = Date.now();
@@ -42,11 +51,21 @@ export function issueToken(args: { kind: string; payloadHash: string; ttlMs?: nu
   tokens.set(token, {
     kind: args.kind,
     payloadHash: args.payloadHash,
+    hashInput: args.hashInput === undefined ? undefined : cloneStructured(args.hashInput),
     issuedAt: now,
     expiresAt: now + ttl,
   });
   return token;
 }
+
+function cloneStructured(value: unknown): unknown {
+  // JSON round-trip is sufficient for gate hash inputs (always JSON-shaped:
+  // strings, numbers, booleans, plain objects, arrays). Decouples the
+  // stored snapshot from caller-side mutation between issue and lookup.
+  return JSON.parse(JSON.stringify(value));
+}
+
+export type { StoredToken };
 
 export function lookupToken(token: string): StoredToken | null {
   const entry = tokens.get(token);

@@ -12,6 +12,7 @@
 
 import { hashGatePayload } from './hash';
 import { issueToken, lookupToken, consumeToken } from './store';
+import { diffPaths } from './diff';
 import type { GateChecklist, GateRejection, GateResult } from './types';
 
 export interface TokenGateSpec<TPayload, TAnswers> {
@@ -41,13 +42,15 @@ export interface TokenGate<TPayload, TAnswers> {
 export function buildTokenGate<TPayload, TAnswers>(
   spec: TokenGateSpec<TPayload, TAnswers>,
 ): TokenGate<TPayload, TAnswers> {
-  const computeHash = (payload: TPayload): string =>
-    hashGatePayload(spec.hashFields ? spec.hashFields(payload) : payload);
+  const hashInputFor = (payload: TPayload): unknown =>
+    spec.hashFields ? spec.hashFields(payload) : payload;
+  const computeHash = (payload: TPayload): string => hashGatePayload(hashInputFor(payload));
 
   const issueForPayload = (payload: TPayload): GateRejection => {
     const checklist = spec.buildChecklist(payload);
-    const payloadHash = computeHash(payload);
-    const token = issueToken({ kind: spec.kind, payloadHash });
+    const hashInput = hashInputFor(payload);
+    const payloadHash = hashGatePayload(hashInput);
+    const token = issueToken({ kind: spec.kind, payloadHash, hashInput });
     return { reason: 'pending_audit', token, checklist };
   };
 
@@ -73,11 +76,18 @@ export function buildTokenGate<TPayload, TAnswers>(
       if (currentHash !== stored.payloadHash) {
         // Agent changed the payload between audit and commit. Invalidate
         // the old token and force re-classification against the new shape.
+        // Diff against the prior hashInput so the rejection names which
+        // fields shifted — saves the agent from playing detective.
         consumeToken(input.token);
         const fresh = issueForPayload(payload);
+        const payload_diff = diffPaths(stored.hashInput, hashInputFor(payload));
         return {
           status: 'rejected',
-          rejection: { ...fresh, reason: 'payload_changed_since_audit' },
+          rejection: {
+            ...fresh,
+            reason: 'payload_changed_since_audit',
+            ...(payload_diff.length > 0 ? { payload_diff } : {}),
+          },
         };
       }
 

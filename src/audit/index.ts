@@ -28,6 +28,7 @@
 
 import { hashGatePayload } from '../gate/hash';
 import { issueToken, lookupToken, consumeToken } from '../gate/store';
+import { diffPaths } from '../gate/diff';
 import { extractBundledIssues } from '../strategies/validate/bundled-issues';
 
 // ---------- Public types ----------
@@ -269,6 +270,11 @@ export interface AuditRejection {
    *  rendered `how_to_respond:` line. Keyed by Classifier.kind, value is
    *  the raw shape string from `Classifier.expectedAnswerShape`. */
   classifier_answer_shapes?: Record<string, string>;
+  /** Paths that changed between the prior token's hashed slices and the
+   *  current retry's slices. Present only on `reason: 'payload_changed'`
+   *  rejections. Each entry is prefixed with `(<classifier_kind>) ` so
+   *  the agent sees which dimension's hash slice the field belongs to. */
+  payload_diff?: string[];
 }
 
 export type AuditResult =
@@ -456,11 +462,12 @@ export class Audit<TPayload, TCtx> {
     }
 
     // Detectors clean, classifiers active. Token-mint or validate.
-    const payloadHash = this.hashFor(payload, ctx, activeClassifiers);
+    const slices = this.sliceFor(payload, ctx, activeClassifiers);
+    const payloadHash = hashGatePayload(slices);
 
     if (!input.token) {
       // First call: mint, reject.
-      const token = issueToken({ kind: this.kind, payloadHash });
+      const token = issueToken({ kind: this.kind, payloadHash, hashInput: slices });
       return {
         status: 'rejected',
         rejection: {
@@ -477,7 +484,7 @@ export class Audit<TPayload, TCtx> {
 
     const stored = lookupToken(input.token);
     if (!stored || stored.kind !== this.kind) {
-      const token = issueToken({ kind: this.kind, payloadHash });
+      const token = issueToken({ kind: this.kind, payloadHash, hashInput: slices });
       return {
         status: 'rejected',
         rejection: {
@@ -492,7 +499,8 @@ export class Audit<TPayload, TCtx> {
     }
     if (stored.payloadHash !== payloadHash) {
       if (!input.dryRun) consumeToken(input.token);
-      const token = issueToken({ kind: this.kind, payloadHash });
+      const token = issueToken({ kind: this.kind, payloadHash, hashInput: slices });
+      const payload_diff = diffSlices(stored.hashInput, slices);
       return {
         status: 'rejected',
         rejection: {
@@ -502,6 +510,7 @@ export class Audit<TPayload, TCtx> {
           warnings: allWarnings,
           classifier_remedies: this.collectRemedies(payload, ctx, activeClassifiers),
           classifier_answer_shapes: this.collectAnswerShapes(activeClassifiers),
+          ...(payload_diff.length > 0 ? { payload_diff } : {}),
         },
       };
     }
@@ -541,19 +550,20 @@ export class Audit<TPayload, TCtx> {
     return { status: 'committed', warnings: allWarnings };
   }
 
-  private hashFor(
+  private sliceFor(
     payload: TPayload,
     ctx: TCtx,
     active: Classifier<TPayload, TCtx, unknown>[],
-  ): string {
-    // Combined hash across active classifiers' scoped fields. A classifier
-    // without hashFields contributes the whole payload to its slice. The
-    // token binds to the union of all active classifiers' relevant fields.
-    const slices: unknown[] = [];
-    for (const c of active) {
-      slices.push({ kind: c.kind, fields: c.hashFields ? c.hashFields(payload, ctx) : payload });
-    }
-    return hashGatePayload(slices);
+  ): Array<{ kind: string; fields: unknown }> {
+    // Per-classifier hash slices. A classifier without hashFields
+    // contributes the whole payload to its slice. The token binds to the
+    // union of all active classifiers' relevant fields. Materialized (not
+    // just hashed) so a payload_changed rejection can diff old vs. new and
+    // tell the agent which fields shifted.
+    return active.map((c) => ({
+      kind: c.kind,
+      fields: c.hashFields ? c.hashFields(payload, ctx) : payload,
+    }));
   }
 
   private collectItems(
@@ -610,6 +620,45 @@ export class Audit<TPayload, TCtx> {
     }
     return out;
   }
+}
+
+function diffSlices(
+  oldInput: unknown,
+  newSlices: Array<{ kind: string; fields: unknown }>,
+): string[] {
+  // Match slices by classifier kind. A retry can change which classifiers
+  // are active (rare but possible — e.g. the new payload no longer triggers
+  // a `buildItems` non-empty path). When a kind appears on only one side,
+  // surface that as a single bullet rather than diffing into the void.
+  const newByKind = new Map<string, unknown>();
+  for (const s of newSlices) newByKind.set(s.kind, s.fields);
+
+  const oldByKind = new Map<string, unknown>();
+  if (Array.isArray(oldInput)) {
+    for (const s of oldInput) {
+      if (s !== null && typeof s === 'object' && 'kind' in s) {
+        const rec = s as { kind?: unknown; fields?: unknown };
+        if (typeof rec.kind === 'string') oldByKind.set(rec.kind, rec.fields);
+      }
+    }
+  }
+
+  const out: string[] = [];
+  const allKinds = new Set([...oldByKind.keys(), ...newByKind.keys()]);
+  for (const k of [...allKinds].sort((x, y) => x.localeCompare(y))) {
+    if (!oldByKind.has(k)) {
+      out.push(`(${k}) classifier became active on retry`);
+      continue;
+    }
+    if (!newByKind.has(k)) {
+      out.push(`(${k}) classifier no longer active on retry`);
+      continue;
+    }
+    for (const p of diffPaths(oldByKind.get(k), newByKind.get(k))) {
+      out.push(`(${k}) ${p}`);
+    }
+  }
+  return out;
 }
 
 function itemsAreNonEmpty(items: unknown): boolean {
@@ -679,6 +728,7 @@ export function rejectionToErrorMessage(
   // up front so the retry edits the exact field that's wrong.
   const classifierIssues = rejection.classifier_issues ?? [];
   const ackIssues = rejection.ack_issues ?? [];
+  const payloadDiff = rejection.payload_diff ?? [];
   const totalIssues = classifierIssues.length + ackIssues.length;
   if (totalIssues > 0) {
     lines.push(
@@ -686,6 +736,15 @@ export function rejectionToErrorMessage(
     );
     for (const i of classifierIssues) lines.push(`  • ${i}`);
     for (const i of ackIssues) lines.push(`  • ${i}`);
+  } else if (payloadDiff.length > 0) {
+    // payload_changed promotes the diff into the headline. Each bullet
+    // names a field that shifted between the audited payload and the retry
+    // — the agent reverts those (or re-confirms the new shape) instead of
+    // hunting for what differs.
+    lines.push(
+      `invalid_strategy: ${kind}_rejected (${rejection.reason}) — ${payloadDiff.length} field${payloadDiff.length === 1 ? '' : 's'} changed since prior audit_token, revert or re-confirm:`,
+    );
+    for (const p of payloadDiff) lines.push(`  • ${p}`);
   } else {
     lines.push(`invalid_strategy: ${kind}_rejected (${rejection.reason})`);
   }

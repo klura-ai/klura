@@ -178,9 +178,11 @@ export function assertNoPendingCheckpoint(sessionId: string, args: CheckpointAck
   const rejection = result.rejection;
   const reasonTag = rejection.reason;
   const issues = rejection.issues?.join('; ') ?? '';
+  const diff = rejection.payload_diff?.join('; ') ?? '';
+  const detail = [issues, diff ? `payload_diff: ${diff}` : ''].filter(Boolean).join(' — ');
   throw new Error(
     `invalid_strategy: pending_checkpoint, acknowledge before continuing ` +
-      `(${reasonTag}${issues ? ': ' + issues : ''}). Echo checkpoint_token + ` +
+      `(${reasonTag}${detail ? ': ' + detail : ''}). Echo checkpoint_token + ` +
       `user_response / viewer_result, or cancel with {cancelled: true, reason}.`,
   );
 }

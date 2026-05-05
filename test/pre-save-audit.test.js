@@ -405,6 +405,14 @@ test('hash scoping: changing the endpoint DOES invalidate the audit token', () =
   });
   assert.equal(second.status, 'rejected');
   assert.equal(second.rejection.reason, 'payload_changed');
+  assert.ok(
+    Array.isArray(second.rejection.payload_diff) && second.rejection.payload_diff.length > 0,
+    'payload_diff should name the changed field(s) so the agent does not have to play detective',
+  );
+  assert.ok(
+    second.rejection.payload_diff.some((p) => p.includes('endpoint')),
+    `payload_diff should reference the changed endpoint field, got: ${JSON.stringify(second.rejection.payload_diff)}`,
+  );
 });
 
 test('hash scoping: adding notes.save_warnings_acked keeps the audit token valid', () => {
@@ -890,6 +898,11 @@ test('user_confirmation: hash binds to whole strategy — mutation invalidates t
     });
     assert.equal(result.status, 'rejected');
     assert.equal(result.rejection.reason, 'payload_changed');
+    assert.ok(
+      Array.isArray(result.rejection.payload_diff) &&
+        result.rejection.payload_diff.some((p) => p.includes('anchor_type')),
+      `payload_diff should name the anchor_type change, got: ${JSON.stringify(result.rejection.payload_diff)}`,
+    );
   } finally {
     reRegisterDefaultApprove();
   }

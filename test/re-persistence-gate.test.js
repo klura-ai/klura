@@ -150,6 +150,11 @@ test('hashFields scoping: a fresh RE call DOES invalidate the token', () => {
   );
   assert.equal(second.status, 'rejected');
   assert.equal(second.rejection.reason, 'payload_changed');
+  assert.ok(
+    Array.isArray(second.rejection.payload_diff) &&
+      second.rejection.payload_diff.some((p) => p.includes('reCallCount')),
+    `payload_diff should name reCallCount, got: ${JSON.stringify(second.rejection.payload_diff)}`,
+  );
 });
 
 // --- Map-graph action-call threshold ---

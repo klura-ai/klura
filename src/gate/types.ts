@@ -31,6 +31,11 @@ export interface GateRejection {
   // bullet per structural mismatch between the agent's answer and the
   // payload.
   issues?: string[];
+  // Paths that changed between the prior token's hashed payload and the
+  // retry's payload. Present only on `reason: 'payload_changed_since_audit'`.
+  // Consumers should surface these in the agent-visible error message so
+  // the retry edits the exact field that drifted.
+  payload_diff?: string[];
 }
 
 export type GateResult =
