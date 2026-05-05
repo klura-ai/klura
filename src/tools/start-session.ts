@@ -782,19 +782,57 @@ async function maybeAutoExecuteOnStart(
 }
 
 /**
+ * `auto_execute_reason` values that mean the runtime DECLINED to attempt
+ * the saved strategy — the executor never ran, so there's no failure to
+ * route through the rediscover-gate. The session swaps back to the
+ * `discover` graph so drive primitives (`js_eval`, `perform_action`,
+ * `get_a11y_tree`) become admissible and the `_hint`'s "drive the flow
+ * yourself" path is real. Without the swap the session stays in the
+ * narrow execute-phase tool surface (only `end_drive`, `get_screenshot`,
+ * auth-recovery), contradicting the hint.
+ *
+ * Fail-closed: a future "didn't try" reason added later remains terminal
+ * unless explicitly added here. "Tried and failed" reasons
+ * (`auto_execute_threw: ...`) are NOT in this set — they correctly route
+ * through the FSM's failure path.
+ */
+const NON_TERMINAL_AUTO_EXECUTE_REASONS: ReadonlySet<string> = new Set([
+  'args_required_to_auto_execute',
+  'no_complete_saved_strategy',
+]);
+
+/**
  * For `graph: 'execute'` sessions, route the warm-execute outcome through
  * the FSM. Saved-strategy success → `execute_succeeded` (terminal{closed});
  * failure routes through the rediscover-failure gate: stale strategies →
  * triage with the failure as defense-surface input; arg/auth/structural
  * failures → terminal{failed}. discover/map graphs ignore this entirely.
+ *
+ * On a "didn't try" decline (see NON_TERMINAL_AUTO_EXECUTE_REASONS), the
+ * session graph swaps back to `discover` and no FSM event is dispatched —
+ * the session behaves as a fresh discover session for the agent's manual
+ * drive recovery.
  */
-function dispatchExecuteGraphOutcome(
+export function dispatchExecuteGraphOutcome(
   session: Session,
   opts: StartSessionOptions,
   result: StartSessionResult,
 ): void {
   if (session.graph !== 'execute') return;
   if (!opts.platform || !opts.capability) return;
+  if (
+    result.executed !== true &&
+    typeof result.auto_execute_reason === 'string' &&
+    NON_TERMINAL_AUTO_EXECUTE_REASONS.has(result.auto_execute_reason)
+  ) {
+    // Auto-execute declined — swap the session out of the execute graph
+    // so drive primitives are admissible. The graph swap is safe here
+    // because the FSM hasn't dispatched anything in the execute graph yet
+    // (no execute-phase onEnter has populated session.execute), so the
+    // half-initialized check in currentPhase doesn't trip.
+    session.graph = 'discover';
+    return;
+  }
 
   const platform = opts.platform;
   const capability = opts.capability;
