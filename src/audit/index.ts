@@ -745,6 +745,25 @@ export function rejectionToErrorMessage(
       `invalid_strategy: ${kind}_rejected (${rejection.reason}) — ${payloadDiff.length} field${payloadDiff.length === 1 ? '' : 's'} changed since prior audit_token, revert or re-confirm:`,
     );
     for (const p of payloadDiff) lines.push(`  • ${p}`);
+  } else if (rejection.reason === 'token_unknown_or_expired') {
+    // The opaque "token_unknown_or_expired" reason name leaves the agent
+    // guessing why their echoed token didn't validate. Three real causes:
+    //   - cross-session token reuse (tokens are session-local)
+    //   - payload mutated since the rejection that issued the prior token
+    //     (token binds to (kind, payloadHash); any structural change forces
+    //     re-audit and the prior token is a stranger)
+    //   - the token is older than the gate-store TTL (rare in practice)
+    // Surface the cause + the fresh token below so the retry uses the
+    // most-recent rejection's token, not a stale one.
+    lines.push(
+      `invalid_strategy: ${kind}_rejected (token_unknown_or_expired) — the audit_token you echoed doesn't match the prior rejection from this session.`,
+    );
+    lines.push(
+      `  Common causes: (a) cross-session reuse — tokens are session-local; (b) the strategy mutated since the rejection, so the prior token's payload-hash no longer matches; (c) the token's TTL elapsed (rare). Use the audit_token from the MOST RECENT rejection of THIS session.`,
+    );
+    lines.push(
+      `  A fresh audit_token has been issued for this call (see below); echo that one on the next retry.`,
+    );
   } else {
     lines.push(`invalid_strategy: ${kind}_rejected (${rejection.reason})`);
   }
