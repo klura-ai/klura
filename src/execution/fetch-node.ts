@@ -31,6 +31,7 @@ import {
 import type { ExecuteResult, FetchStrategy, Prerequisite, RequestStrategy, AnyPool } from './types';
 import type { TokenCache } from '../strategies/tokens';
 import { resolveGenerated } from '../strategies/generators';
+import { applyResponseFrom, hasResponseFrom } from './response-from';
 
 // Wraps the graduation-layer counter bump with the side-effect of rewriting the
 // saved strategy from `fetch` to `page-script` when the threshold crosses. This
@@ -507,6 +508,26 @@ export async function executeFetchNode(
     stringifyScope,
     identity,
   );
+
+  // `response.from` short-circuit — strategy returns the named prereq's value
+  // directly; no HTTP fires. Schema-side validation (validateResponseShape)
+  // already verified the named prereq exists and is value-producing, so any
+  // throw here is a runtime data issue (e.g. prereq returned an unparseable
+  // JSON string).
+  if (hasResponseFrom(strategy)) {
+    try {
+      const { body } = applyResponseFrom(strategy, tokens);
+      return { status: 200, body };
+    } catch (err) {
+      return {
+        status: 500,
+        body: {
+          error: 'response_from_failed',
+          message: err instanceof Error ? err.message : String(err),
+        },
+      };
+    }
+  }
 
   const genInputArgs: Record<string, unknown> = { ...tokens, ...args };
   const { resolved: gen, needsLlm } = resolveGenerated(strategy.generated, overrides, genInputArgs);

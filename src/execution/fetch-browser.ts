@@ -19,6 +19,7 @@ import { resolveGenerated } from '../strategies/generators';
 import { JS_EVAL_TIMEOUT_DEFAULT_MS } from '../strategies/skills';
 import { trimA11yTree, MAX_TOOL_OUTPUT_CHARS, truncateString } from '../response/response-size';
 import { fireInterrupts, type InterruptEntry } from '../strategies/interrupt-firing';
+import { applyResponseFrom, hasResponseFrom } from './response-from';
 import type { TokenCache } from '../strategies/tokens';
 import {
   applyHtmlExtract,
@@ -498,6 +499,26 @@ export async function executeFetchInBrowser(
       tokenCache,
       tokens,
     );
+
+    // `response.from` short-circuit — strategy returns the named prereq's value
+    // directly; no fetch fires. Same shape as fetch-node's short-circuit;
+    // schema-side validation ensures the named prereq exists + is value-
+    // producing. The js-eval prereq has already run inside `runBrowserPrereqs`
+    // (it's the browser-tier prereq path), so its bound value is in `tokens`.
+    if (hasResponseFrom(strategy)) {
+      try {
+        const { body } = applyResponseFrom(strategy, tokens);
+        return { status: 200, body };
+      } catch (err) {
+        return {
+          status: 500,
+          body: {
+            error: 'response_from_failed',
+            message: err instanceof Error ? err.message : String(err),
+          },
+        };
+      }
+    }
 
     // pre_execution interrupts fire after prereqs complete (so their bindings
     // are already in `tokens`) but before the main request is composed.

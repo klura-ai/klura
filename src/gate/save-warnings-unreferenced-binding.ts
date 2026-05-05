@@ -34,6 +34,13 @@ export function detectUnreferencedPrereqBinding(data: Strategy): SaveWarning[] {
     const binds = (p as { binds?: unknown }).binds;
     if (typeof binds !== 'string' || binds.length === 0) continue;
 
+    // `response.from: "<binds>"` is a direct prereq-name consumer — the
+    // strategy's return value IS the prereq's bound value, no templating.
+    // Skip the warning when from matches binds; without this the detector
+    // would fire on every legitimate prereq-as-response pattern.
+    const responseFrom = (obj.response as { from?: unknown } | null | undefined)?.from;
+    if (typeof responseFrom === 'string' && responseFrom === binds) continue;
+
     // Search corpus = the strategy minus this prereq, serialized. Template
     // engine accepts `{{name}}` with optional inner whitespace. Escape
     // regex meta in the name (the schema allows alphanumeric + underscore
@@ -59,12 +66,13 @@ export function detectUnreferencedPrereqBinding(data: Strategy): SaveWarning[] {
       hint:
         `Pick one: (a) reference {{${binds}}} in body / endpoint / headers / a sibling ` +
         `prereq's args_template / fetch_body if the binding should feed into the request; ` +
-        `(b) drop the dead HTTP envelope (clear endpoint/method/body/headers) and move the ` +
-        `prereq's logic into a top-level frameFromPage.expression so the return value IS the ` +
-        `caller's result; (c) ack via notes.save_warnings_acked: [{kind: "unreferenced_prereq_binding", ` +
-        `reason: "<one sentence — e.g. binding intentionally drives a refresh-only side effect, ` +
-        `the value isn't consumed by warm callers>"}] when the binding genuinely has no ` +
-        `consumer but the prereq must still run. See klura://reference#save-strategy-audit.`,
+        `(b) set response.from: "${binds}" if the prereq's return value IS the strategy result ` +
+        `— the strategy then skips its HTTP fire and returns the prereq's bound value directly ` +
+        `(canonical for DOM-extraction page-scripts); (c) ack via notes.save_warnings_acked: ` +
+        `[{kind: "unreferenced_prereq_binding", reason: "<one sentence — e.g. binding ` +
+        `intentionally drives a refresh-only side effect, the value isn't consumed by warm ` +
+        `callers>"}] when the binding genuinely has no consumer but the prereq must still run. ` +
+        `See klura://reference#save-strategy-audit.`,
       context: { prereq_index: i, binds_name: binds },
     });
   }

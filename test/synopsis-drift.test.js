@@ -162,6 +162,16 @@ test('record + union (the notes.params shape) yields per-branch detail on object
   assert.ok(!/Invalid input$/m.test(blob), `still squashing to "Invalid input":\n${blob}`);
 });
 
+test('responseSchema renders inline with from field + semantic guidance', async () => {
+  const { responseSchema } = await import('../dist/strategies/schemas/response.js');
+  const inline = renderZodSkeletonInline(responseSchema);
+  // The new `from` field carries semantic guidance about when to use it.
+  assert.match(inline, /from\?: string {2}\/\/ name of a prereq whose bound value IS the strategy result/);
+  assert.match(inline, /strategy does NOT fire HTTP \/ WS \/ UI replay/);
+  // Existing fields preserved.
+  assert.match(inline, /format\?: "json" \| "html"/);
+});
+
 test('zod issue codes — none format to bare "Invalid input"', () => {
   const cases = [
     { label: 'invalid_type', schema: z.string(), input: 42 },

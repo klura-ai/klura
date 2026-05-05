@@ -17,16 +17,24 @@
 
 import { isPlainObject } from './helpers';
 import { responseSchema } from '../schemas/response';
-import { zodErrorToIssues } from '../schemas/zod-helpers';
+import { renderZodSkeletonInline, zodErrorToIssues } from '../schemas/zod-helpers';
 
 export function validateResponseShape(data: Record<string, unknown>, tier: string): void {
   if (!('response' in data) || data.response === undefined || data.response === null) return;
 
-  // `response` is currently meaningful on fetch (HTTP response body → HTML
-  // extract) and recorded-path (post-navigation page DOM → HTML extract).
-  // page-script and the listener tier don't have a post-execute extract phase,
-  // so a `response` there would be silently ignored — reject loudly.
-  if (tier !== 'fetch' && tier !== 'recorded-path') {
+  const response = data.response;
+  if (!isPlainObject(response)) {
+    throw new Error(`invalid_strategy: ${tier}.response must be an object`);
+  }
+  const hasFrom = typeof response.from === 'string' && response.from.length > 0;
+
+  // `response` is meaningful on:
+  //   - fetch (HTTP response body → HTML/JSON, optional extract)
+  //   - recorded-path (post-replay live DOM → HTML extract)
+  //   - any tier when `response.from` is set (the value comes from a prereq —
+  //     the strategy doesn't fire HTTP/replay at all, so this is universal).
+  // page-script without `response.from` would silently ignore the field — reject.
+  if (tier !== 'fetch' && tier !== 'recorded-path' && !hasFrom) {
     throw new Error(
       `invalid_strategy: "response" field is only valid on fetch and recorded-path strategies (got tier "${tier}"). ` +
         `For HTML scraping with cookies, use tier "fetch" — Node-tier fetch automatically sends the platform's ` +
@@ -34,14 +42,9 @@ export function validateResponseShape(data: Record<string, unknown>, tier: strin
         `to pull fields out of the GET response. ` +
         `For recorded-path, use the same {format: "html", extract} shape to extract from the final page DOM after the step loop. ` +
         `For JSON endpoints, remove the response field and let execute() return the parsed body verbatim. ` +
-        `If your strategy genuinely needs to run JS in the page (window.* state, in-page crypto), keep tier "page-script" ` +
-        `and have the script return the structured object directly — there's no post-execute extract phase to add.`,
+        `If your data IS the return value of a prereq (e.g. a js-eval prereq that scrapes the live DOM and produces JSON), ` +
+        `set {response: {from: "<prereq-name>"}} on any tier — the strategy then skips its HTTP/replay fire and returns the prereq's value.`,
     );
-  }
-
-  const response = data.response;
-  if (!isPlainObject(response)) {
-    throw new Error(`invalid_strategy: ${tier}.response must be an object`);
   }
 
   const parsed = responseSchema.safeParse(response);
@@ -50,8 +53,53 @@ export function validateResponseShape(data: Record<string, unknown>, tier: strin
     const bullets = issues.map((issue) => `  - ${issue}`).join('\n');
     const issueLabel = issues.length === 1 ? '1 issue' : `${issues.length} issues`;
     throw new Error(
-      `invalid_strategy: ${tier}.response has ${issueLabel} — fix all before retrying:\n${bullets}`,
+      `invalid_strategy: ${tier}.response has ${issueLabel} — fix all before retrying:\n${bullets}\n\nExpected shape: ${tier}.response is ${renderZodSkeletonInline(responseSchema)}`,
     );
+  }
+
+  // When response.from is set, validate the named prereq exists and is a
+  // value-producing kind. Fail loudly so the agent doesn't ship a strategy
+  // that silently returns undefined at warm-execute.
+  if (hasFrom) {
+    // recorded-path's response.from semantics are unclear: prereqs run BEFORE
+    // step replay, so "return the prereq value" would skip the steps entirely
+    // — at which point the strategy might as well be page-script. Steer
+    // recorded-path users to response.extract (post-replay HTML extraction)
+    // instead.
+    if (tier === 'recorded-path') {
+      throw new Error(
+        `invalid_strategy: recorded-path.response.from is not supported. recorded-path's prereqs run BEFORE step replay, ` +
+          `so returning a prereq value would skip the steps entirely — use tier "page-script" with response.from instead. ` +
+          `For post-replay DOM extraction, use {response: {format: "html", extract: {var: {selector: ".css"}}}} — the executor reads ` +
+          `the live page DOM after the last step.`,
+      );
+    }
+    const fromName = response.from as string;
+    const prereqs = Array.isArray(data.prerequisites) ? data.prerequisites : [];
+    const named = prereqs.find(
+      (p): p is Record<string, unknown> => isPlainObject(p) && p.name === fromName,
+    );
+    if (!named) {
+      const declared = prereqs
+        .map((p) => (isPlainObject(p) && typeof p.name === 'string' ? `"${p.name}"` : null))
+        .filter((n): n is string => n !== null);
+      const declaredList = declared.length > 0 ? declared.join(', ') : '(none)';
+      throw new Error(
+        `invalid_strategy: ${tier}.response.from = "${fromName}" but no prereq with that name was declared. ` +
+          `Declared prereq names: ${declaredList}. ` +
+          `Either add a prereq with name:"${fromName}" (kind:"js-eval" / "page-extract" / "fetch-extract" / "capability" / "tag") ` +
+          `or remove response.from to let the strategy fire its own HTTP/replay.`,
+      );
+    }
+    const allowedKinds = new Set(['js-eval', 'page-extract', 'fetch-extract', 'capability', 'tag']);
+    const namedKind = typeof named.kind === 'string' ? named.kind : null;
+    if (namedKind === null || !allowedKinds.has(namedKind)) {
+      throw new Error(
+        `invalid_strategy: ${tier}.response.from = "${fromName}" references a prereq of kind "${namedKind ?? 'unknown'}". ` +
+          `Only value-producing prereqs (js-eval, page-extract, fetch-extract, capability, tag) can supply a strategy result. ` +
+          `For browser/cached prereqs, the bound value isn't a return shape the runtime can hand back as the strategy's response.`,
+      );
+    }
   }
 
   const format = response.format;
@@ -92,8 +140,9 @@ export function validateResponseShape(data: Record<string, unknown>, tier: strin
 
   // format === 'html' on fetch: require method = GET. recorded-path doesn't
   // carry a method field — the restriction is on the HTTP request shape, not on
-  // DOM extracts after a DOM replay.
-  if (tier === 'fetch') {
+  // DOM extracts after a DOM replay. Skip when response.from is set; HTTP
+  // doesn't fire at all in that case so method doesn't apply.
+  if (tier === 'fetch' && !hasFrom) {
     let methodStr = 'GET';
     if (typeof data.method === 'string') {
       methodStr = data.method;

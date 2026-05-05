@@ -46,6 +46,7 @@ export interface FetchStrategy extends HttpStrategyBase {
 export interface PageScriptStrategy extends HttpStrategyBase {
   strategy: 'page-script';
   origin?: string;
+  response?: ResponseSpec;
 }
 
 export interface Prerequisite {
