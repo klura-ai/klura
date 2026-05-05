@@ -271,7 +271,7 @@ export const observedSiblingsClassifier: Classifier<Strategy, SaveStrategyCtx, u
 export const userConfirmationClassifier: Classifier<Strategy, SaveStrategyCtx, unknown> = {
   kind: 'user_confirmation',
   expectedAnswerShape:
-    'user_confirmation: {user_decision: "approve" | "reject", user_quote: "<verbatim user reply>"}',
+    'user_confirmation: {user_decision: "approve" | "reject", user_quote: "<the user\'s fresh reply to THIS save\'s prompt_for_user — do NOT reuse their reply to triage_plan, surface_changed, or any earlier turn>"}',
   buildItems: (data, ctx) => {
     // Pre-resolve via the registered decider when one exists. If the
     // decider approves, return null → classifier becomes inactive →
@@ -300,7 +300,11 @@ export const userConfirmationClassifier: Classifier<Strategy, SaveStrategyCtx, u
         // re-invokes the decider with proper try/catch downstream.
       }
     }
-    return { prompt_for_user: composeUserPrompt(data, ctx) };
+    return {
+      prompt_for_user: composeUserPrompt(data, ctx),
+      agent_note:
+        "Per-save confirmation. Relay `prompt_for_user` verbatim to the user as your text turn, wait for their fresh yes/no reply about THIS save, and submit that reply as `user_quote`. Do NOT reuse the user's reply to a prior `ack_checkpoint` (triage_plan, surface_changed) or any earlier turn — the runtime cannot structurally distinguish a fresh reply from a recycled one, so this contract is on the agent. Self-resolving the gate by recycling a reply defeats the gate's purpose.",
+    };
   },
   validate: (data, ctx, answer) => {
     // If a SaveConfirmationDecider is registered, the runtime synthesizes
@@ -316,8 +320,11 @@ export const userConfirmationClassifier: Classifier<Strategy, SaveStrategyCtx, u
       }
       return [
         `audit_answers.user_confirmation is required. Read prompt_for_user from items.user_confirmation, ` +
-          `relay it verbatim to the user, then retry with audit_answers.user_confirmation: ` +
-          `{user_decision: "approve" | "reject", user_quote: "<verbatim user reply>"}`,
+          `relay it VERBATIM to the user as your text turn, wait for their fresh yes/no reply about THIS save, ` +
+          `then retry with audit_answers.user_confirmation: ` +
+          `{user_decision: "approve" | "reject", user_quote: "<their fresh reply>"}. ` +
+          `Do NOT reuse the user's reply to a prior ack_checkpoint (triage_plan, surface_changed) or any earlier turn — ` +
+          `the runtime cannot detect recycled replies, so the contract is on you.`,
       ];
     }
     return validateAnswerShape(answer);
@@ -325,7 +332,7 @@ export const userConfirmationClassifier: Classifier<Strategy, SaveStrategyCtx, u
   remedy: () => ({
     kind: 'no_programmatic_remedy',
     reason:
-      "user confirmation is the user's decision. The runtime has no structural alternative to surface — relay the prompt_for_user prose verbatim to the user, get yes/no, retry with `audit_answers.user_confirmation: {user_decision, user_quote}`.",
+      "user confirmation is the user's decision about THIS save. The runtime has no structural alternative to surface — relay the prompt_for_user prose verbatim to the user, wait for their fresh yes/no reply about this specific save, and submit it as user_quote. Reusing the user's reply to a prior ack_checkpoint or any earlier turn defeats the gate; freshness is on the agent.",
   }),
 };
 
