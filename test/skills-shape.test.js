@@ -129,7 +129,7 @@ test('notes.params.kind must be from the allowed enum', () => {
       ...base(),
       notes: { params: { user_id: { kind: 'integer' } } },
     },
-    /kind = "integer" is not allowed/,
+    /kind.*one of.*"id".*"slug".*"text"/,
   );
 });
 
@@ -139,7 +139,7 @@ test('notes.params.example must be a string', () => {
       ...base(),
       notes: { params: { user_id: { example: 123 } } },
     },
-    /example.*(must be a string|expected string)|notes\.params\.user_id: Invalid input/,
+    /notes\.params\.user_id\.example.*(must be a string|expected string)/,
   );
 });
 
@@ -159,7 +159,7 @@ test('notes.params entry must be a string or an object', () => {
       ...base(),
       notes: { params: { user_id: 42 } },
     },
-    /must be a string .* or an object|notes\.params\.user_id: Invalid input/,
+    /must be a string|must be an object|tried 2 shapes/,
   );
 });
 

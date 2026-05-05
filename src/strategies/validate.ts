@@ -10,11 +10,12 @@ export {
 } from './validate/providers';
 
 export {
-  describeNotesAllowlist,
   JS_EVAL_TIMEOUT_HARD_CAP_MS,
   JS_EVAL_TIMEOUT_DEFAULT_MS,
   WireProtocol,
 } from './validate/constants';
+
+export { describeNotesAllowlist } from './validate/notes';
 
 export { validateStrategyShape } from './validate/shape';
 export { validateNoOpaqueUserParams } from './validate/opaque-params';

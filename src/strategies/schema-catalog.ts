@@ -13,8 +13,8 @@ import { z } from 'zod';
 import { prereqSchemas, PREREQ_KINDS, prereqReferenceSlug } from './schemas/prereqs';
 import { strategySchemas } from './schemas/strategy';
 import { renderZodSkeleton } from './schemas/zod-helpers';
+import { describeNotesAllowlist } from './validate/notes';
 import {
-  describeNotesAllowlist,
   RECORDED_PATH_ACTIONS,
   PARAM_KIND_VALUES,
   ANCHOR_TYPES,

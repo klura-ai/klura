@@ -27,6 +27,8 @@ import type { Strategy } from '../skills';
 import { exampleLooksOpaque as helperExampleLooksOpaque } from './helpers';
 import { OPAQUE_EXAMPLE_PATTERNS } from './constants';
 import { collectDeclaredPlaceholders, collectPlaceholderUses } from '../placeholder-semantics';
+import { paramDocSchema } from '../schemas/notes';
+import { renderZodSkeletonInline } from '../schemas/zod-helpers';
 import {
   findCandidatesForLiteral,
   findRawCaptureMatches,
@@ -107,9 +109,7 @@ export function validateNoOpaqueUserParams(
         `\`{kind: "capability"}\` prereq that chains to a lookup_<entity>_by_<key> strategy, or a ` +
         `\`page-extract\`/\`js-eval\` prereq reading from the page. The placeholder \`{{${name}}}\` stays the same — ` +
         `the runtime resolves it from prereq vars instead of caller args.\n\n` +
-        `Expected shape:\n` +
-        `  {\n    kind: "text" | "slug" | "email" | "url" | "enum",  // user-typed value\n` +
-        `    example: "<verbatim value the caller would type>"\n  }\n\n` +
+        `Expected shape for notes.params.<name>:\n  ${renderZodSkeletonInline(paramDocSchema)}\n\n` +
         `See SKILL.md steps 7-8 + klura://reference#capability-parameters.`,
     );
   }

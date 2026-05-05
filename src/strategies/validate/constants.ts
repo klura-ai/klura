@@ -1,37 +1,10 @@
-// Shared constants and small describer helpers extracted from validate.ts
-
-// `notes` is LLM-owned: every key here is something the agent fills in.
-// Runtime-stamped artifacts (provenance URLs, probe outputs, lifecycle
-// warnings) live on the sibling `runtime_meta` field — see
-// RUNTIME_META_FIELD_HINTS below — so the agent's input surface stays
-// tightly validated and the runtime can mutate its own metadata without
-// tripping the notes allowlist.
-const NOTES_SCHEMA_LINES: ReadonlyArray<{ key: string; hint: string }> = [
-  {
-    key: 'params',
-    hint: '{ paramName: { type, source, example } }  — caller-arg documentation',
-  },
-  {
-    key: 'description',
-    hint: '"<one-line summary of what the capability does>"',
-  },
-  {
-    key: 'anchor_type',
-    hint: '"module" | "protocol" | "dom" | "unknown"  — page-script durability classification',
-  },
-  {
-    key: 'save_warnings_acked',
-    hint: '[{kind: "<emitted warning kind>", reason: "<one-sentence justification>"}]  — agent acknowledgement that unblocks the save despite emitted warnings',
-  },
-];
-
-export const NOTES_ALLOWED_KEYS: ReadonlySet<string> = new Set(
-  NOTES_SCHEMA_LINES.map((f) => f.key),
-);
-
-export function describeNotesAllowlist(): string {
-  return NOTES_SCHEMA_LINES.map((f) => `  ${f.key}: ${f.hint}`).join('\n');
-}
+// Shared constants and small describer helpers extracted from validate.ts.
+//
+// The `notes` allowlist + synopsis renderer live with the validator that
+// consumes them (`./notes.ts`) and derive directly from the Zod schema in
+// `../schemas/notes.ts`. A hand-written parallel table here is the canonical
+// drift point we eliminated — see also `renderZodSkeletonInline` in
+// `../schemas/zod-helpers.ts` for the underlying mechanism.
 
 export const ANCHOR_TYPES = ['module', 'protocol', 'dom', 'unknown'] as const;
 

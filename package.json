@@ -21,8 +21,9 @@
   "scripts": {
     "build": "tsc",
     "start": "node bin/klura.js daemon",
-    "test": "node --test test/*.test.js && npm run check:vocab",
+    "test": "node --test test/*.test.js && npm run check:vocab && npm run check:no-static-synopses",
     "check:vocab": "node scripts/check-ref-links.js",
+    "check:no-static-synopses": "node scripts/check-no-static-synopses.js",
     "coverage": "node --test --experimental-test-coverage test/*.test.js",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",

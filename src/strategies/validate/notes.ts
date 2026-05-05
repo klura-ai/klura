@@ -2,11 +2,46 @@
 // top-level `notes` allowlist, validate the runtime-owned `runtime_meta`
 // shape, and reject non-http(s) URL schemes on baseUrl / origin.
 
+import { z } from 'zod';
 import { closestAllowed, didYouMeanSuffix } from '../../validators';
 import { isPlainObject } from './helpers';
-import { NOTES_ALLOWED_KEYS, describeNotesAllowlist } from './constants';
-import { notesParamsSchema } from '../schemas/notes';
-import { zodErrorToIssues } from '../schemas/zod-helpers';
+import { notesSchema, notesParamsSchema } from '../schemas/notes';
+import { renderZodSkeletonInline, zodErrorToIssues } from '../schemas/zod-helpers';
+
+// Derive the allowlist directly from the Zod schema so renames in
+// `schemas/notes.ts` cascade. A hand-written parallel table is the canonical
+// drift point this module is designed to eliminate.
+export const NOTES_ALLOWED_KEYS: ReadonlySet<string> = new Set(Object.keys(notesSchema.shape));
+
+// Render the agent-facing notes-allowlist synopsis. Walks notesSchema's
+// fields and emits one bullet per field via `renderZodSkeletonInline`. Field
+// descriptions come from `.describe()` on each child schema in
+// `schemas/notes.ts`. Adding / renaming / removing a notes field needs only
+// a Zod edit — this renderer picks it up automatically.
+export function describeNotesAllowlist(): string {
+  const lines: string[] = [];
+  for (const [key, child] of Object.entries(notesSchema.shape)) {
+    const childSchema = child as z.ZodType;
+    const inline = renderZodSkeletonInline(childSchema);
+    const description = readDescription(childSchema);
+    const trailing = description ? `  — ${description}` : '';
+    lines.push(`  ${key}: ${inline}${trailing}`);
+  }
+  return lines.join('\n');
+}
+
+// Pull `.describe()` text from a Zod schema, walking through `.optional()`
+// wrappers. Zod 4 stores it on the inner type's def; the outer ZodOptional
+// has no description of its own.
+function readDescription(schema: z.ZodType): string | null {
+  const direct =
+    (schema as unknown as { description?: string }).description ??
+    (schema as unknown as { _def?: { description?: string } })._def?.description;
+  if (typeof direct === 'string' && direct.length > 0) return direct;
+  const inner = (schema as unknown as { _def?: { innerType?: z.ZodType } })._def?.innerType;
+  if (inner) return readDescription(inner);
+  return null;
+}
 
 // Accept the JSON-Schema-style array form of notes.params and rewrite it in
 // place to the canonical object form. Per principles.md §"Forgive surface
@@ -61,8 +96,9 @@ export function validateNotesParamsShape(data: Record<string, unknown>): void {
     const issues = zodErrorToIssues(parsed.error, 'notes.params');
     const bullets = issues.map((issue) => `  - ${issue}`).join('\n');
     const issueLabel = issues.length === 1 ? '1 issue' : `${issues.length} issues`;
+    const expectedShape = renderZodSkeletonInline(notesParamsSchema);
     throw new Error(
-      `invalid_strategy: notes.params has ${issueLabel} — fix all before retrying:\n${bullets}`,
+      `invalid_strategy: notes.params has ${issueLabel} — fix all before retrying:\n${bullets}\n\nExpected shape: notes.params is ${expectedShape}`,
     );
   }
 }
