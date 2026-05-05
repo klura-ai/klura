@@ -62,8 +62,37 @@ function parseDefenseSurface(raw: unknown): DefenseSurface {
     asArray(v, `defense_surface.${field}`).map((entry, i) =>
       asString(entry, `defense_surface.${field}[${i}]`),
     );
+  const observed_origins = stringArray(obj.observed_origins, 'observed_origins');
+  // Each observed_origins entry must be a parseable origin (scheme + host).
+  // Bare hostnames like "x.com" are silently dropped downstream by
+  // `originOf()` (in audit/triage-plan.ts) because `new URL("x.com")`
+  // throws — the agent then sees a "request_pattern not on observed_origin"
+  // rejection without knowing why their entries weren't recognized. Reject
+  // explicitly here so the message is "observed_origins[i] missing scheme,"
+  // not the downstream symptom.
+  observed_origins.forEach((entry, i) => {
+    let parsed: URL;
+    try {
+      parsed = new URL(entry);
+    } catch {
+      const suggestion = JSON.stringify('https://' + entry.replace(/^https?:\/\//, ''));
+      throw new Error(
+        `invalid_strategy: defense_surface.observed_origins[${i}] = ${JSON.stringify(entry)} ` +
+          `is not a parseable URL. Each entry must include the scheme: ` +
+          `e.g. ${suggestion}, not ${JSON.stringify(entry)}. Bare hostnames are silently dropped by the ` +
+          `downstream audit, leading to a confusing "request_pattern not on observed_origin" ` +
+          `rejection. Add the scheme and re-submit.`,
+      );
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error(
+        `invalid_strategy: defense_surface.observed_origins[${i}] = ${JSON.stringify(entry)} ` +
+          `uses ${parsed.protocol} scheme; must be http: or https:.`,
+      );
+    }
+  });
   return {
-    observed_origins: stringArray(obj.observed_origins, 'observed_origins'),
+    observed_origins,
     observed_scripts: stringArray(obj.observed_scripts, 'observed_scripts'),
     cookies_set: stringArray(obj.cookies_set, 'cookies_set'),
     request_patterns: stringArray(obj.request_patterns, 'request_patterns'),
