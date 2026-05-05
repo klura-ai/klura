@@ -4,7 +4,12 @@ import { PARAM_EXAMPLE_MAX, PARAM_FIELD_MAX, PARAM_KIND_VALUES } from '../valida
 export const paramDocSchema = z
   .object({
     description: z.string().max(PARAM_FIELD_MAX, 'is too long').optional(),
-    kind: z.enum(PARAM_KIND_VALUES).optional(),
+    kind: z
+      .enum(PARAM_KIND_VALUES)
+      .optional()
+      .describe(
+        'classifies what the caller TYPES, not the value\'s data type. Counts/limits/numbers/messages/dates/names are "text" (free-form caller input). "id" / "uuid" are for opaque server-issued identifiers (long hex blobs, UUIDs, base64 tokens). "slug" is for human-readable IDs. "email" / "url" are those formats. "enum" requires observed_values grounded in capture.',
+      ),
     source: z.string().max(PARAM_FIELD_MAX, 'is too long').optional(),
     example: z.string().max(PARAM_EXAMPLE_MAX, 'is too long').optional(),
     observed_values: z

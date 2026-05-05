@@ -82,6 +82,14 @@ export const fetchSchema = z
           message: 'is not a field on HTTP fetch strategies — the canonical name is "baseUrl"',
         });
       }
+      if ('frameFromPage' in value && value.frameFromPage !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['frameFromPage'],
+          message:
+            'is only valid on WebSocket strategies (set protocol:"websocket" + wsUrl). For HTTP fetch with caller-supplied data, template the body with {{placeholder}} and bind from a js-eval / page-extract / fetch-extract / capability prereq. The runtime silently ignores frameFromPage on non-ws strategies, which would produce a working save but a broken warm execute.',
+        });
+      }
     }
   });
 
@@ -121,6 +129,14 @@ export const pageScriptSchema = z
       }
       if (typeof value.endpoint !== 'string' || value.endpoint.length === 0) {
         ctx.addIssue({ code: 'custom', path: ['endpoint'], message: 'is required' });
+      }
+      if ('frameFromPage' in value && value.frameFromPage !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['frameFromPage'],
+          message:
+            'is only valid on WebSocket strategies (set protocol:"websocket" + wsUrl). The runtime silently ignores frameFromPage on non-ws page-scripts — warm execute would fire the bare HTTP request and ignore the in-page expression. For DOM extraction with no real HTTP, model it as a js-eval prereq with `binds: "<name>"` and reference {{<name>}} in the body / response binding; the prereq runs the expression in the page and the strategy templates from its return value.',
+        });
       }
     }
   });

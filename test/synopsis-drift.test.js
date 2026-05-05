@@ -30,11 +30,14 @@ import { describeNotesAllowlist } from '../dist/strategies/validate/notes.js';
 // Synopsis snapshots — every drift point in one place.
 // ---------------------------------------------------------------------------
 
-test('paramDocSchema renders inline with kind enum + observed_values shape', () => {
-  assert.strictEqual(
-    renderZodSkeletonInline(paramDocSchema),
-    '{ description?: string, kind?: "id" | "slug" | "email" | "url" | "uuid" | "enum" | "text", source?: string, example?: string, observed_values?: { value: string, label?: string }[] }',
-  );
+test('paramDocSchema renders inline with kind enum + observed_values + semantic guidance', () => {
+  // The kind enum's `.describe()` carries semantic guidance ("text for
+  // counts/numbers, id for opaque server IDs, ...") that surfaces inline as
+  // a `// <description>` tail comment — single source, no external doubling.
+  const inline = renderZodSkeletonInline(paramDocSchema);
+  assert.match(inline, /^\{ description\?: string, kind\?: "id" \| "slug" \| "email" \| "url" \| "uuid" \| "enum" \| "text"  \/\//);
+  assert.match(inline, /Counts\/limits\/numbers.*are "text"/);
+  assert.match(inline, /, source\?: string, example\?: string, observed_values\?: \{ value: string, label\?: string \}\[\] \}$/);
 });
 
 test('describeShape is the project-wide alias for renderZodSkeletonInline', () => {
@@ -45,16 +48,15 @@ test('describeShape is the project-wide alias for renderZodSkeletonInline', () =
 });
 
 test('notesParamsSchema renders inline as record-of-(string|paramDoc)', () => {
-  assert.strictEqual(
-    renderZodSkeletonInline(notesParamsSchema),
-    '{ <key>: string | { description?: string, kind?: "id" | "slug" | "email" | "url" | "uuid" | "enum" | "text", source?: string, example?: string, observed_values?: { value: string, label?: string }[] } }',
-  );
+  const inline = renderZodSkeletonInline(notesParamsSchema);
+  assert.match(inline, /^\{ <key>: string \| \{ description\?: string, kind\?: "id" \| "slug"/);
+  assert.match(inline, /\}\[\] \} \}  \/\/ caller-arg documentation$/);
 });
 
-test('saveWarningAckSchema renders inline with required fields', () => {
+test('saveWarningAckSchema renders inline with required fields and per-field descriptions', () => {
   assert.strictEqual(
     renderZodSkeletonInline(saveWarningAckSchema),
-    '{ kind: string, reason: string }',
+    '{ kind: string  // emitted warning kind, reason: string  // one-sentence justification }',
   );
 });
 
@@ -73,14 +75,15 @@ test('describeNotesAllowlist emits one bullet per notes top-level field', () => 
   const lines = out.split('\n');
   assert.strictEqual(lines.length, 4, `expected 4 lines, got:\n${out}`);
   assert.match(lines[0], /^ {2}params: \{ <key>: string \| \{/);
-  assert.match(lines[1], /^ {2}description: string {2}— one-line summary/);
+  assert.match(lines[0], /\/\/ caller-arg documentation$/);
+  assert.match(lines[1], /^ {2}description: string {2}\/\/ one-line summary/);
   assert.match(
     lines[2],
-    /^ {2}anchor_type: "module" \| "protocol" \| "dom" \| "unknown" {2}— page-script durability/,
+    /^ {2}anchor_type: "module" \| "protocol" \| "dom" \| "unknown" {2}\/\/ page-script durability/,
   );
   assert.match(
     lines[3],
-    /^ {2}save_warnings_acked: \{ kind: string, reason: string \}\[\] {2}— agent acknowledgement/,
+    /^ {2}save_warnings_acked: \{ kind: string {2}\/\/ emitted warning kind, reason: string {2}\/\/ one-sentence justification \}\[\] {2}\/\/ agent acknowledgement/,
   );
 });
 

@@ -210,6 +210,15 @@ export function renderZodSkeletonInline(schema: ZodType): string {
 export const describeShape = renderZodSkeletonInline;
 
 function jsonSchemaToInline(node: JsonSchemaNode): string {
+  const base = jsonSchemaToInlineBase(node);
+  // Append `.describe()` text as a tail comment on any node that has one.
+  // Single source — the inline form carries the description; callers must
+  // NOT also append `— ${description}` externally or it doubles.
+  if (node.description) return `${base}  // ${node.description}`;
+  return base;
+}
+
+function jsonSchemaToInlineBase(node: JsonSchemaNode): string {
   if (node.const !== undefined) return JSON.stringify(node.const);
   if (Array.isArray(node.enum) && node.enum.length > 0) {
     return node.enum.map((v) => JSON.stringify(v)).join(' | ');

@@ -14,33 +14,18 @@ import { renderZodSkeletonInline, zodErrorToIssues } from '../schemas/zod-helper
 export const NOTES_ALLOWED_KEYS: ReadonlySet<string> = new Set(Object.keys(notesSchema.shape));
 
 // Render the agent-facing notes-allowlist synopsis. Walks notesSchema's
-// fields and emits one bullet per field via `renderZodSkeletonInline`. Field
-// descriptions come from `.describe()` on each child schema in
-// `schemas/notes.ts`. Adding / renaming / removing a notes field needs only
-// a Zod edit — this renderer picks it up automatically.
+// fields and emits one bullet per field via `renderZodSkeletonInline`. The
+// inline renderer surfaces each field's `.describe()` as a `// <text>` tail
+// comment on the type — single source for the description, no doubling.
+// Adding / renaming / removing a notes field needs only a Zod edit; this
+// renderer picks it up automatically.
 export function describeNotesAllowlist(): string {
   const lines: string[] = [];
   for (const [key, child] of Object.entries(notesSchema.shape)) {
     const childSchema = child as z.ZodType;
-    const inline = renderZodSkeletonInline(childSchema);
-    const description = readDescription(childSchema);
-    const trailing = description ? `  — ${description}` : '';
-    lines.push(`  ${key}: ${inline}${trailing}`);
+    lines.push(`  ${key}: ${renderZodSkeletonInline(childSchema)}`);
   }
   return lines.join('\n');
-}
-
-// Pull `.describe()` text from a Zod schema, walking through `.optional()`
-// wrappers. Zod 4 stores it on the inner type's def; the outer ZodOptional
-// has no description of its own.
-function readDescription(schema: z.ZodType): string | null {
-  const direct =
-    (schema as unknown as { description?: string }).description ??
-    (schema as unknown as { _def?: { description?: string } })._def?.description;
-  if (typeof direct === 'string' && direct.length > 0) return direct;
-  const inner = (schema as unknown as { _def?: { innerType?: z.ZodType } })._def?.innerType;
-  if (inner) return readDescription(inner);
-  return null;
 }
 
 // Accept the JSON-Schema-style array form of notes.params and rewrite it in
