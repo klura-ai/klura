@@ -62,30 +62,85 @@ test('attach calls Network.enable first', async () => {
   assert.equal(cdp.sends[0].method, 'Network.enable');
 });
 
-test('GET requests without /api/ are dropped', async () => {
-  const cdp = makeFakeCdp();
-  const sink = [];
-  await attachCdpNetworkCapture(cdp, sink);
-
-  cdp.emit('Network.requestWillBeSent', {
-    requestId: '1',
-    request: { url: 'https://x.com/home', method: 'GET', headers: {} },
-    type: 'Document',
-  });
-  assert.equal(sink.length, 0);
+test('XHR / Fetch / Document / EventSource / Preflight / Other types are kept', async () => {
+  // Filter is by CDP resource type, not pathname pattern. Any path that
+  // arrives as an agent-relevant type lands in the sink — sites using
+  // `/ajax/`, `/storelocator/`, `/inventory/`, etc. (bauhaus.se) get
+  // captured even though their paths lack the literal `/api/` substring.
+  for (const type of ['XHR', 'Fetch', 'Document', 'EventSource', 'Preflight', 'Other']) {
+    const cdp = makeFakeCdp();
+    const sink = [];
+    await attachCdpNetworkCapture(cdp, sink);
+    cdp.emit('Network.requestWillBeSent', {
+      requestId: '1',
+      request: { url: 'https://x.com/some/path', method: 'GET', headers: {} },
+      type,
+    });
+    assert.equal(sink.length, 1, `type "${type}" should be kept`);
+  }
 });
 
-test('GET to /api/ is captured', async () => {
+test('non-data resource types (Image, Stylesheet, Script, Media, Font, etc.) are dropped', async () => {
+  // Belt-and-suspenders backstop on top of isStaticAsset's extension
+  // check — covers cases where the URL has no telltale extension but
+  // the browser classifies it as a passive asset.
+  for (const type of [
+    'Stylesheet',
+    'Image',
+    'Media',
+    'Font',
+    'Script',
+    'TextTrack',
+    'Manifest',
+    'Ping',
+    'CSPViolationReport',
+    'WebSocket',
+  ]) {
+    const cdp = makeFakeCdp();
+    const sink = [];
+    await attachCdpNetworkCapture(cdp, sink);
+    cdp.emit('Network.requestWillBeSent', {
+      requestId: '1',
+      request: { url: 'https://x.com/no-extension', method: 'GET', headers: {} },
+      type,
+    });
+    assert.equal(sink.length, 0, `type "${type}" should be dropped`);
+  }
+});
+
+test('GET to a non-/api/ path is captured when type=XHR (regression: bauhaus /search/ajax/suggest)', async () => {
+  // The prior shape filtered GETs by pathname.includes("/api/") which
+  // dropped real signal on sites using /ajax/ / /storelocator/ etc.
+  // The bauhaus.se discovery session lost three legitimate fetches
+  // this way: /search/ajax/suggest/, /catalogsearch/ajax/suggest/,
+  // /bauhaus_inventory/home/delivery/. All now pass under XHR type.
   const cdp = makeFakeCdp();
   const sink = [];
   await attachCdpNetworkCapture(cdp, sink);
+  cdp.emit('Network.requestWillBeSent', {
+    requestId: '1',
+    request: {
+      url: 'https://www.bauhaus.se/search/ajax/suggest/?q=borrmaskin',
+      method: 'GET',
+      headers: { 'x-requested-with': 'XMLHttpRequest' },
+    },
+    type: 'XHR',
+  });
+  const entries = getInterceptedFromSink({ intercepted: sink });
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].url, 'https://www.bauhaus.se/search/ajax/suggest/?q=borrmaskin');
+  assert.equal(entries[0].method, 'GET');
+});
 
+test('GET to /api/ still captured (no regression on api-prefixed paths)', async () => {
+  const cdp = makeFakeCdp();
+  const sink = [];
+  await attachCdpNetworkCapture(cdp, sink);
   cdp.emit('Network.requestWillBeSent', {
     requestId: '1',
     request: { url: 'https://x.com/api/users', method: 'GET', headers: { accept: 'application/json' } },
     type: 'XHR',
   });
-
   const entries = getInterceptedFromSink({ intercepted: sink });
   assert.equal(entries.length, 1);
   assert.equal(entries[0].method, 'GET');

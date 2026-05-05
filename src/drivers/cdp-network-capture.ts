@@ -64,6 +64,23 @@ export function isStaticAsset(url: string): boolean {
   }
 }
 
+// CDP resource types we keep in the network log. Source of truth for the
+// type-based filter in the Network.requestWillBeSent handler. Per CDP's
+// `Network.ResourceType` enum, the full set is: Document, Stylesheet,
+// Image, Media, Font, Script, TextTrack, XHR, Fetch, EventSource,
+// WebSocket, Manifest, SignedExchange, Ping, CSPViolationReport,
+// Preflight, Other. We keep the agent-relevant subset; the rest are
+// either static assets (already filtered by isStaticAsset's extension
+// check) or instrumentation noise (Ping, CSPViolationReport).
+export const KEEP_RESOURCE_TYPES: ReadonlySet<string> = new Set([
+  'XHR',
+  'Fetch',
+  'EventSource',
+  'Document',
+  'Preflight',
+  'Other',
+]);
+
 interface CdpRequest {
   url: string;
   method: string;
@@ -161,14 +178,20 @@ export async function attachCdpNetworkCapture(cdp: CDPLike, sink: RawIntercepted
 
     const request = params.request;
     if (isStaticAsset(request.url)) return;
-    if (request.method === 'GET') {
-      try {
-        const pathname = new URL(request.url).pathname;
-        if (!pathname.includes('/api/')) return;
-      } catch {
-        return;
-      }
-    }
+    // Filter by CDP resource type — structural signal of what the browser
+    // thinks this request is, not a pathname-substring heuristic. The
+    // prior shape skipped every GET whose pathname lacked `/api/`, which
+    // ate real signal on sites using `/ajax/`, `/storelocator/`,
+    // `/inventory/`, `/search/`, etc. (a bauhaus.se discovery session
+    // saw 3 fetches dropped this way). Keep agent-relevant types:
+    // XHR/Fetch (the load-bearing data calls), EventSource (SSE),
+    // Document (navigation; tagged isNavigation below), Preflight (CORS
+    // pre-flight; useful for credentials inspection), Other (catch-all).
+    // Static / passive types (Stylesheet, Image, Media, Font, Script,
+    // TextTrack, Manifest, SignedExchange, Ping, CSPViolationReport,
+    // WebSocket — the latter is captured via webSocketFrame events, not
+    // requestWillBeSent) drop here as a backstop on top of isStaticAsset.
+    if (params.type && !KEEP_RESOURCE_TYPES.has(params.type)) return;
 
     const entry: RawIntercepted = {
       method: request.method,
