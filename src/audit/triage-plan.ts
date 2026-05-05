@@ -36,6 +36,7 @@ export interface TriagePlanPayload {
   surface_label: string;
   defense_surface: DefenseSurface;
   tier_justification: string;
+  expected_tier: 'fetch' | 'page-script' | 'recorded-path';
 }
 
 export interface TriagePlanCtx {
@@ -372,6 +373,69 @@ const enumValueBakedIntoSlug: Detector<TriagePlanPayload, TriagePlanCtx> = {
   },
 };
 
+/** Detector 6: when `expected_tier === "recorded-path"`, at least one
+ *  request_pattern URL should match a captured `domNavigations` URL — the
+ *  recorded-path strategy will save with a `navigate` step whose URL must
+ *  bind to this surface at save time, and `request_patterns` is what the
+ *  surface binding cross-references. Without a navigate URL in patterns,
+ *  the agent will hit `surface_triage_missing` at save time. Catch it here
+ *  so the agent fixes the plan once instead of round-tripping at save.
+ *
+ *  Ackable (Level-2): the agent may be deliberately scoping this triage to
+ *  the XHR-side and planning to re-triage for the navigation surface, or
+ *  the recorded-path will navigate to a URL not yet captured. Reason
+ *  required. */
+const recordedPathNavigateUrlUnbound: Detector<TriagePlanPayload, TriagePlanCtx> = {
+  kind: 'recorded_path_navigate_url_unbound',
+  ackReason: 'required',
+  detect: (payload, ctx) => {
+    if (payload.expected_tier !== 'recorded-path') return [];
+    const navUrls = (ctx.session.domNavigations ?? [])
+      .map((n) => n.url)
+      .filter((u): u is string => typeof u === 'string' && u.length > 0);
+    if (navUrls.length === 0) return [];
+    const navKeys = new Set<string>();
+    for (const u of navUrls) {
+      const k = urlKey(u);
+      if (k) navKeys.add(k);
+    }
+    if (navKeys.size === 0) return [];
+    const patternKeys = new Set<string>();
+    for (const pattern of payload.defense_surface.request_patterns) {
+      const token = extractUrlToken(pattern);
+      if (!token) continue;
+      const resolved = resolveAgainstOrigin(token, payload.defense_surface.observed_origins);
+      if (!resolved) continue;
+      const k = urlKey(resolved);
+      if (k) patternKeys.add(k);
+    }
+    for (const k of navKeys) {
+      if (patternKeys.has(k)) return [];
+    }
+    const navKeysArr = [...navKeys];
+    const sample = navKeysArr
+      .slice(0, 5)
+      .map((u) => JSON.stringify(u))
+      .join(', ');
+    const more = navKeysArr.length > 5 ? ` (+${navKeysArr.length - 5} more)` : '';
+    const suggested = navKeysArr[0];
+    return [
+      {
+        kind: 'recorded_path_navigate_url_unbound',
+        message:
+          `expected_tier="recorded-path" but request_patterns doesn't include any captured navigation URL. ` +
+          `Recorded-path strategies anchor on the first navigate step's URL, which must match an entry in this ` +
+          `surface's request_patterns or save_strategy will reject with surface_triage_missing. ` +
+          `Captured navigations this session: ${sample}${more}.`,
+        hint:
+          `Add \`GET ${suggested}\` to defense_surface.request_patterns and re-submit, ` +
+          `or ack with reason if this surface triages only the XHR side and the recorded-path will land on a different (re-triaged) surface.`,
+        context: { captured_nav_urls: navKeysArr, request_pattern_urls: [...patternKeys] },
+      },
+    ];
+  },
+};
+
 export const triagePlanAudit = new Audit<TriagePlanPayload, TriagePlanCtx>({
   kind: 'submit_triage_plan',
   detectors: [
@@ -380,6 +444,7 @@ export const triagePlanAudit = new Audit<TriagePlanPayload, TriagePlanCtx>({
     capabilityNotDeclared,
     tierJustificationUnciteable,
     enumValueBakedIntoSlug,
+    recordedPathNavigateUrlUnbound,
   ],
   classifiers: [],
 });

@@ -196,6 +196,7 @@ export const REF_LINKS = {
   strategySchemasOverview: 'strategy-schemas-overview',
   tagPrereq: 'tag-prereq',
   triage: 'triage',
+  triageSurfaceBinding: 'triage-surface-binding',
   websocketProtocol: 'websocket-protocol',
 } as const;
 

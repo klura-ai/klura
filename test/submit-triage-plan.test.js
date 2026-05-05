@@ -55,10 +55,13 @@ function plan(overrides = {}) {
   return {
     surface_label: 'checkout',
     defense_surface: {
-      observed_origins: ['https://collector.example.net'],
+      observed_origins: ['https://collector.example.net', 'https://shop.example.com'],
       observed_scripts: ['https://collector.example.net/sensor.js'],
       cookies_set: ['__sd_pix'],
-      request_patterns: ['POST to /collect every ~2s with binary blob'],
+      request_patterns: [
+        'POST to /collect every ~2s with binary blob',
+        'GET https://shop.example.com/checkout',
+      ],
       mechanism_hypothesis: 'behavioral telemetry + per-page sensor token',
     },
     expected_tier: 'recorded-path',

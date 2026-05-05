@@ -191,6 +191,7 @@ export async function submitTriagePlan(rawArgs: unknown): Promise<SubmitTriagePl
       surface_label: args.surface_label,
       defense_surface: args.defense_surface,
       tier_justification: args.tier_justification,
+      expected_tier: args.expected_tier,
     },
     { session, capability: args.capability },
     { acks: args.acks },

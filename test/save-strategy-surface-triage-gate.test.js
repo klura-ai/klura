@@ -108,7 +108,7 @@ test('surface_triage_missing fires when no surface is bound (fetch)', () => {
   assert.equal(r.status, 'rejected');
   const w = (r.rejection.warnings || []).find((x) => x.kind === 'surface_triage_missing');
   assert.ok(w, 'expected surface_triage_missing warning');
-  assert.match(w.message, /not bound to any triaged surface/);
+  assert.match(w.message, /doesn't match the `request_patterns` of any triaged surface/);
 });
 
 test('surface_triage_missing fires when no surface is bound (page-script)', () => {

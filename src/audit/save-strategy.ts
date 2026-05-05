@@ -116,22 +116,51 @@ const surfaceTriageMissingDetector: Detector<Strategy, SaveStrategyCtx> = {
     if (phase !== 'lift' && phase !== 'triage') return [];
     const targetUrl = firstObservableUrl(data as unknown as Record<string, unknown>);
     if (!targetUrl) return [];
-    const knownSurfaces = ctx.session.surfaceMap
-      ? Array.from(new Set(ctx.session.surfaceMap.values()))
-      : [];
     const surface = lookupSurface(ctx.session, targetUrl);
     const targetKey = urlKey(targetUrl) ?? targetUrl;
+    const tier = (data as { strategy?: unknown }).strategy;
+    const tierStr = typeof tier === 'string' ? tier : 'unknown';
+    const urlSource = describeUrlSource(data as Record<string, unknown>, tierStr);
+    const suggestedMethod = describeSuggestedMethod(data as Record<string, unknown>, tierStr);
     if (!surface) {
+      const triagedSurfaces = listTriagedSurfaces(ctx.session.platform);
+      const surfaceList =
+        triagedSurfaces.length > 0
+          ? triagedSurfaces
+              .map(
+                (s) =>
+                  `  - "${s.label}" request_patterns: [${s.patterns.map((p) => JSON.stringify(p)).join(', ')}]`,
+              )
+              .join('\n')
+          : '  <no triage plans submitted yet>';
+      const fixOptions =
+        triagedSurfaces.length > 0
+          ? [
+              `(a) Re-submit \`submit_triage_plan\` for an existing surface, adding \`${suggestedMethod} ${targetKey}\` to its \`request_patterns\` (re-use the prior plan's other fields);`,
+              `(b) Submit a new \`submit_triage_plan\` with a fresh \`surface_label\` whose \`request_patterns\` includes \`${suggestedMethod} ${targetKey}\`.`,
+            ]
+          : [
+              `Submit your first \`submit_triage_plan\` for this URL — pick a \`surface_label\`, include \`${suggestedMethod} ${targetKey}\` in \`request_patterns\`, declare the defense surface (third-party origins / scripts / cookies you observed), write a cited \`tier_justification\`.`,
+            ];
       return [
         {
           kind: 'surface_triage_missing',
           message:
-            `\`save_strategy\` targets \`${targetKey}\` which is not bound to any triaged surface in this session. ` +
-            `Submit a defense-surface plan first via \`submit_triage_plan\` (pick a \`surface_label\`, ` +
-            `read the third-party origins / scripts / cookies on the page, and write a cited \`tier_justification\`). ` +
-            `Known surfaces this session: ${knownSurfaces.length > 0 ? knownSurfaces.join(', ') : '<none yet>'}.`,
-          hint: 'Surface needs a triage plan before any save (T0/T1/T2 = fetch/page-script/recorded-path). See klura://reference#triage.',
-          context: { target_url: targetKey, known_surfaces: knownSurfaces },
+            `\`save_strategy\` (${tierStr}) ${tierStr === 'recorded-path' ? 'navigates to' : 'targets'} \`${targetKey}\` (${urlSource}). ` +
+            `This URL doesn't match the \`request_patterns\` of any triaged surface in this session.\n` +
+            `\n` +
+            `Triaged surfaces (${triagedSurfaces.length}):\n` +
+            surfaceList +
+            `\n\n` +
+            `Fix one of:\n` +
+            fixOptions.map((opt) => `  ${opt}`).join('\n'),
+          hint: `Surface→strategy URL binding is tier-aware (\`recorded-path\` binds the first \`navigate\` step URL; \`fetch\`/\`page-script\` bind the resolved endpoint). See klura://reference#triage-surface-binding.`,
+          context: {
+            target_url: targetKey,
+            tier: tierStr,
+            suggested_method: suggestedMethod,
+            triaged_surfaces: triagedSurfaces,
+          },
         },
       ];
     }
@@ -154,11 +183,16 @@ const surfaceTriageMissingDetector: Detector<Strategy, SaveStrategyCtx> = {
         {
           kind: 'surface_triage_missing',
           message:
-            `\`save_strategy\` targets surface \`${surface}\` (URL: \`${targetKey}\`) which has no current triage plan ` +
-            `in the platform logbook. The session bound this URL to the surface but the plan record is missing — ` +
-            `re-submit via \`submit_triage_plan\` with \`surface_label: "${surface}"\`.`,
-          hint: 'Re-submit triage for the bound surface. See klura://reference#triage.',
-          context: { target_url: targetKey, surface, capability: ctx.capability },
+            `\`save_strategy\` (${tierStr}) ${tierStr === 'recorded-path' ? 'navigates to' : 'targets'} \`${targetKey}\` (${urlSource}), bound to surface \`${surface}\`, but the platform logbook has no current triage plan for that surface. ` +
+            `Re-submit via \`submit_triage_plan\` with \`surface_label: "${surface}"\` and \`${suggestedMethod} ${targetKey}\` in \`request_patterns\`.`,
+          hint: 'Re-submit triage for the bound surface. See klura://reference#triage-surface-binding.',
+          context: {
+            target_url: targetKey,
+            tier: tierStr,
+            suggested_method: suggestedMethod,
+            surface,
+            capability: ctx.capability,
+          },
         },
       ];
     }
@@ -166,6 +200,64 @@ const surfaceTriageMissingDetector: Detector<Strategy, SaveStrategyCtx> = {
   },
   ackReason: 'none',
 };
+
+/** Describe where in the strategy the target URL came from, for the
+ *  rejection prose. Recorded-path strategies anchor on the first navigate
+ *  step; fetch/page-script anchor on the endpoint. */
+function describeUrlSource(data: Record<string, unknown>, tier: string): string {
+  if (tier === 'recorded-path') {
+    const steps = data.steps;
+    if (Array.isArray(steps)) {
+      for (let i = 0; i < steps.length; i++) {
+        const step: unknown = steps[i];
+        if (
+          step &&
+          typeof step === 'object' &&
+          (step as { action?: unknown }).action === 'navigate'
+        ) {
+          return `from steps[${i}].url`;
+        }
+      }
+    }
+    return 'from first navigate step';
+  }
+  if (tier === 'fetch' || tier === 'page-script') return 'from endpoint';
+  return 'derived from strategy';
+}
+
+/** Suggest the METHOD token for the `request_patterns` entry the agent
+ *  should add. Recorded-path navigate steps are document loads (GET);
+ *  fetch/page-script use whatever method the strategy declares (default
+ *  GET when omitted). */
+function describeSuggestedMethod(data: Record<string, unknown>, tier: string): string {
+  if (tier === 'recorded-path') return 'GET';
+  if (tier === 'fetch' || tier === 'page-script') {
+    const method = data.method;
+    if (typeof method === 'string' && method.length > 0) return method.toUpperCase();
+    return 'GET';
+  }
+  return 'GET';
+}
+
+/** List every (surface_label, request_patterns) pair the platform has on
+ *  disk. One surface label may be shared across sibling capabilities; we
+ *  surface the FIRST plan's request_patterns per label since `request_patterns`
+ *  is a per-surface declaration that doesn't differ between siblings. */
+function listTriagedSurfaces(
+  platform: string | undefined,
+): Array<{ label: string; patterns: string[] }> {
+  if (!platform) return [];
+  const logbook = loadLogbook(platform);
+  const seen = new Map<string, string[]>();
+  for (const entry of Object.values(logbook.per_capability)) {
+    if (!entry.triage_plans_by_surface) continue;
+    for (const [label, plan] of Object.entries(entry.triage_plans_by_surface)) {
+      if (seen.has(label)) continue;
+      seen.set(label, plan.defense_surface.request_patterns);
+    }
+  }
+  return Array.from(seen, ([label, patterns]) => ({ label, patterns }));
+}
 
 // Tier downgrade vs. agent's own triage verdict. The agent submits a
 // `submit_triage_plan` with an `expected_tier` (the cleanest answer it

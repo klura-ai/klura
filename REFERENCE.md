@@ -2252,7 +2252,7 @@ Calling `submit_triage_plan` again from LIFT drops back to triage with a fresh r
 
 ### Save-time gate
 
-Every `save_strategy` call passes through `surface_triage_missing` on the consolidated audit (`runtime/src/audit/save-strategy.ts`). It derives a representative URL from the strategy (`baseUrl + endpoint` for fetch / page-script; first `navigate` step URL for recorded-path), looks up the surface, and rejects if either the URL isn't bound or the bound surface has no current plan. Tier-agnostic.
+Every `save_strategy` call passes through `surface_triage_missing` on the consolidated audit (`runtime/src/audit/save-strategy.ts`). It derives a representative URL from the strategy, looks up the surface, and rejects if either the URL isn't bound or the bound surface has no current plan. Tier-agnostic. Full URL-extraction rules: `klura://reference#triage-surface-binding`.
 
 ### Behavior by lift_mode
 
@@ -2266,6 +2266,22 @@ For autonomous runs (benchmark / CI), register a checkpoint handler claiming `tr
 ### How data accumulates
 
 Each natural user invocation writes a session archive under `working/sessions/<sessionId>/`. The logbook (and its per-capability triage plans) recomputes lazily on `get_platform_logbook`. N ≥ 3 samples is usually enough for URL-param classification to converge. Passive accumulation costs nothing; each repeat is another free sample.
+
+## triage-surface-binding
+
+A triaged surface binds to a strategy at save time via URL match. The `surface_triage_missing` detector derives a representative URL from the strategy, canonicalizes via `urlKey` (origin + pathname; query / fragment stripped; host lowercased; trailing slash on a non-root path stripped), and looks it up in the session's surface map. The map was populated by `submit_triage_plan` from `defense_surface.request_patterns` (extracted URL tokens) plus the runtime-derived `observed_at_urls`.
+
+The URL extracted from the strategy is **tier-aware**:
+
+| Strategy tier | URL extracted from | Bound to surface whose `request_patterns` contains |
+| --- | --- | --- |
+| `fetch` | `baseUrl + endpoint` (resolved) | `<METHOD> <URL>` — the strategy's `method` |
+| `page-script` | `baseUrl + endpoint`, or `wsUrl` for websocket | `<METHOD> <URL>` |
+| `recorded-path` | first `steps[i].url` where `action === "navigate"` | `GET <URL>` |
+
+For recorded-path strategies specifically: the triage plan's `request_patterns` MUST include the navigate-step URLs (as `GET <URL>` entries) alongside any XHR / fetch endpoints captured during discovery — otherwise `save_strategy` rejects with `surface_triage_missing` even though the surface is "triaged." The proactive `recorded_path_navigate_url_unbound` detector at triage submit time catches this when `expected_tier === "recorded-path"` and no captured `domNavigations` URL appears in `request_patterns`.
+
+`request_patterns` entries can be either `<METHOD> <URL>` or just `<URL>`; the URL is what binds. Method tokens are documentation; the runtime matches on the canonicalized URL key alone.
 
 ## revisit-prompt
 
