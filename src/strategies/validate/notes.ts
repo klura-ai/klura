@@ -138,7 +138,8 @@ export function validateNotesAllowlist(data: Record<string, unknown>): void {
     const key = unknownKeys[0] as string;
     throw new Error(
       `invalid_strategy: notes has unknown field "${key}". Allowed top-level notes fields:\n${describeNotesAllowlist()}\n` +
-        `${didYouMeanSuffix(key, notesAllowedFields)}Companion capabilities you observed but didn't lift are recorded via the \`record_observed_capability\` MCP tool (writes to the platform logbook), not in \`notes\`.`,
+        `${didYouMeanSuffix(key, notesAllowedFields)}Companion capabilities you observed but didn't lift are recorded via the \`record_observed_capability\` MCP tool (writes to the platform logbook), not in \`notes\`.` +
+        topLevelRedirectHint(unknownKeys),
     );
   }
   if (unknownKeys.length > 1) {
@@ -153,9 +154,39 @@ export function validateNotesAllowlist(data: Record<string, unknown>): void {
     const hintLine = perKeyHints.length > 0 ? `Did you mean: ${perKeyHints}?\n` : '';
     throw new Error(
       `invalid_strategy: notes has unknown fields ${list}. Allowed top-level notes fields:\n${describeNotesAllowlist()}\n` +
-        `${hintLine}Companion capabilities you observed but didn't lift are recorded via the \`record_observed_capability\` MCP tool (writes to the platform logbook), not in \`notes\`.`,
+        `${hintLine}Companion capabilities you observed but didn't lift are recorded via the \`record_observed_capability\` MCP tool (writes to the platform logbook), not in \`notes\`.` +
+        topLevelRedirectHint(unknownKeys),
     );
   }
+}
+
+// Known save_strategy top-level argument names that agents most commonly
+// misplace under `notes`. The reflex is "metadata about the save lives in
+// notes" — but `changelog` is a top-level arg of save_strategy (logged to
+// history alongside the strategy), `capability`/`platform`/`session_id`/
+// `strategy` are the call's own positional-shaped args, and `audit_token`/
+// `audit_answers` belong on the retry call body. When one of these appears
+// under notes, the rejection redirects explicitly so the agent doesn't
+// have to guess.
+const KNOWN_TOP_LEVEL_SAVE_STRATEGY_ARGS: ReadonlySet<string> = new Set([
+  'changelog',
+  'capability',
+  'platform',
+  'session_id',
+  'strategy',
+  'audit_token',
+  'audit_answers',
+]);
+
+function topLevelRedirectHint(unknownKeys: string[]): string {
+  const matches = unknownKeys.filter((k) => KNOWN_TOP_LEVEL_SAVE_STRATEGY_ARGS.has(k));
+  if (matches.length === 0) return '';
+  if (matches.length === 1) {
+    const k = matches[0] as string;
+    return `\nNote: \`${k}\` is a top-level argument on save_strategy itself, not a notes field. Move it out of \`notes\` to the save_strategy call's body.`;
+  }
+  const list = matches.map((k) => `\`${k}\``).join(', ');
+  return `\nNote: ${list} are top-level arguments on save_strategy itself, not notes fields. Move them out of \`notes\` to the save_strategy call's body.`;
 }
 
 // `runtime_meta` is runtime-owned — agents must not emit it. Run this on
