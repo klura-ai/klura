@@ -45,7 +45,48 @@ test('perform_action description mentions navigate semantics', () => {
   const performAction = tools.find((t) => t.name === 'perform_action');
   assert.match(
     performAction.description,
-    /navigate.*URL.*selector|navigate.*top-level page navigation/i,
+    /navigate.*selector.*url|navigate: selector=<url>/i,
     `description should explain navigate semantics; got: ${performAction.description.slice(0, 200)}`,
   );
+});
+
+test('perform_action accepts both `text` and `value` (CiC convention)', () => {
+  // The Claude-in-Chrome computer tool uses `text` for the string to type;
+  // klura historically used `value`. Both are accepted now (text wins
+  // if both supplied) so the LLM's instinct from CiC translates directly.
+  const stubKlura = {
+    GRAPH_MODES: ['discover', 'map', 'execute'],
+    CHECKPOINT_KINDS: [],
+    composeAckHint: () => '',
+  };
+  const defineTools = require('../../mcp/tools.js');
+  const tools = defineTools(stubKlura);
+  const performAction = tools.find((t) => t.name === 'perform_action');
+  assert.ok(
+    performAction.inputSchema.properties.text,
+    'schema must declare `text` property',
+  );
+  assert.ok(
+    performAction.inputSchema.properties.value,
+    'schema must keep `value` for backwards compatibility',
+  );
+
+  // Handler dispatch: text wins over value when both present, value
+  // works alone, text alone works.
+  let captured = null;
+  const stubPerform = {
+    ...stubKlura,
+    performAction: (...a) => {
+      captured = a;
+      return Promise.resolve({});
+    },
+  };
+  const tools2 = defineTools(stubPerform);
+  const pa = tools2.find((t) => t.name === 'perform_action');
+  pa.handler({ session_id: 's', action: 'type', selector: 'input', text: 'hello' });
+  assert.equal(captured[3], 'hello', 'text passed through');
+  pa.handler({ session_id: 's', action: 'type', selector: 'input', value: 'world' });
+  assert.equal(captured[3], 'world', 'value still works (back-compat)');
+  pa.handler({ session_id: 's', action: 'type', selector: 'input', text: 'a', value: 'b' });
+  assert.equal(captured[3], 'a', 'text wins when both supplied');
 });
