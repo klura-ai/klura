@@ -169,17 +169,22 @@ test('admissibility: get_a11y_tree admitted in triage and lift too', () => {
   assert.ok(currentSpec(liftSession).checkAdmissibility('get_a11y_tree', liftSession).ok);
 });
 
-test('admissibility: map mode admits save_strategy in drive via extraDriveTools', async () => {
-  // Map graph has no triage/lift phases — drive is the only phase. Without
-  // save_strategy admissible in drive, the documented "call save_strategy
-  // for what you want to keep" hint is unreachable and map sessions
-  // produce zero strategy files. Map's GraphConfig declares
-  // extraDriveTools = {save_strategy} for exactly this reason.
+test('admissibility: map mode REJECTS save_strategy in drive — observation-only contract', async () => {
+  // Map is observation-only by design. Strategies are committed in
+  // 'discover' graph (which has triage + lift phases for surface
+  // classification and per-save audit). Map sessions persist findings via
+  // record_observed_capability / save_verified_expression / add_discovery_note
+  // / add_resume_pointer; a follow-up discover({capability}) session reads
+  // those priors at turn 0 and warm-starts the lift.
+  //
+  // The rejection text is the moment-of-mistake teaching surface: agent
+  // who reaches for save_strategy in map sees the four persistence tools
+  // and the discover handoff inline.
   const { graphFor } = await import('../dist/session-phase/graphs/index.js');
   const map = graphFor('map');
   const discover = graphFor('discover');
   const session = fresh();
-  // Discover graph (default): save_strategy rejects in drive.
+  // Discover graph: save_strategy rejects in drive (must hand to triage).
   const discoverReject = currentSpec(session).checkAdmissibility(
     'save_strategy',
     session,
@@ -187,21 +192,36 @@ test('admissibility: map mode admits save_strategy in drive via extraDriveTools'
   );
   assert.equal(discoverReject.ok, false, 'discover drive rejects save_strategy');
   assert.match(discoverReject.reason, /hand over to triage/);
-  // Map graph: save_strategy admits.
-  const mapAdmit = currentSpec(session).checkAdmissibility(
+  // Map graph: save_strategy ALSO rejects, with prose pointing at the
+  // four persistence tools + discover handoff.
+  const mapReject = currentSpec(session).checkAdmissibility(
     'save_strategy',
     session,
     map.config,
   );
-  assert.ok(mapAdmit.ok, 'map drive admits save_strategy via extraDriveTools');
-  // Map rejection prose for an unrelated tool reflects map's flow.
-  const mapReject = currentSpec(session).checkAdmissibility(
+  assert.equal(mapReject.ok, false, 'map drive rejects save_strategy (observation-only)');
+  assert.match(mapReject.reason, /observation-only/);
+  for (const persistTool of [
+    'record_observed_capability',
+    'save_verified_expression',
+    'add_discovery_note',
+    'add_resume_pointer',
+  ]) {
+    assert.match(
+      mapReject.reason,
+      new RegExp(persistTool),
+      `map save_strategy rejection should name ${persistTool} as a persistence path`,
+    );
+  }
+  assert.match(mapReject.reason, /discover/, 'rejection should point at discover graph follow-up');
+  // Map rejection prose for an unrelated tool reflects map's exit (end_drive).
+  const mapRejectOther = currentSpec(session).checkAdmissibility(
     'submit_triage_plan',
     session,
     map.config,
   );
-  assert.equal(mapReject.ok, false);
-  assert.match(mapReject.reason, /map mode.*save_strategy.*end_drive/s);
+  assert.equal(mapRejectOther.ok, false);
+  assert.match(mapRejectOther.reason, /observation-only.*end_drive/s);
 });
 
 test('graph topology: map has no lift phase', async () => {
