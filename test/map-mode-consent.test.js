@@ -225,3 +225,77 @@ test('map graph: <a> with mutating onclick → consent required', async () => {
     restore();
   }
 });
+
+test('map graph: session-wide ack (mapGateAcked=true) admits any subsequent mutating click', async () => {
+  // Once the session has acked once, no further per-action prompts —
+  // session-wide consent. The bauhaus loop bug was the prior per-(action,
+  // selector) sticky-cache: each new selector re-prompted, even after the
+  // user had already opted into mapping.
+  const { session, getClickCount, restore } = fakeSession({
+    graph: 'map',
+    clickTarget: {
+      tag: 'button',
+      href: null,
+      onclick: null,
+      formaction: null,
+      inWriteForm: false,
+      submitLike: true,
+    },
+  });
+  try {
+    // Prior ack flips the session bool — short-circuit the prompt path.
+    session.mapGateAcked = true;
+    const r1 = await performAction(session.id, 'click', 'button:has-text("Buy")');
+    assert.ok(r1);
+    assert.equal(getClickCount(), 1, 'first click after ack fires');
+    // A different selector, still mutating, still admits — no re-prompt.
+    const r2 = await performAction(session.id, 'click', 'button.confirm-delete');
+    assert.ok(r2);
+    assert.equal(getClickCount(), 2, 'second different selector also fires session-wide');
+  } finally {
+    restore();
+  }
+});
+
+test('map graph: cancellation does NOT flip the session bool', async () => {
+  // Consenting flips mapGateAcked; cancelling clears the pending nonce
+  // but leaves mapGateAcked false so the next mutating action prompts
+  // again — preserves the user's right to decline.
+  const { session, getClickCount, restore } = fakeSession({
+    graph: 'map',
+    clickTarget: {
+      tag: 'button',
+      href: null,
+      onclick: null,
+      formaction: null,
+      inWriteForm: false,
+      submitLike: true,
+    },
+  });
+  try {
+    let err;
+    try {
+      await performAction(session.id, 'click', 'button:has-text("Buy")');
+    } catch (e) {
+      err = e;
+    }
+    assert.ok(err);
+    assert.match(err.message, /action_consent_required/);
+    assert.equal(session.mapGateAcked, undefined, 'mapGateAcked unset before ack');
+    // Simulating cancellation: the nonce is consumed but the flag stays unset.
+    session.pendingActionConsents?.clear();
+    assert.notEqual(session.mapGateAcked, true);
+    // Next action still prompts (no flip happened).
+    let err2;
+    try {
+      await performAction(session.id, 'click', 'button.different');
+    } catch (e) {
+      err2 = e;
+    }
+    assert.ok(err2);
+    assert.match(err2.message, /action_consent_required/);
+    assert.equal(getClickCount(), 0, 'no driver.click ever fired');
+  } finally {
+    restore();
+  }
+});

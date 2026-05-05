@@ -397,21 +397,24 @@ export interface Session {
   }>;
   /**
    * Mutating-action consent cache. Keyed by `${action}|${normalizedSelector}`
-   * for every (action, target) tuple the agent acked via `ack_checkpoint`
-   * this session. Populated only when the active graph's drive-phase config
-   * has `gateMutatingActions: true`. Subsequent matching `perform_action`
-   * calls skip the consent prompt — kills the loop where each click on the
-   * same target re-prompted with a fresh nonce. Cleared with the rest of
-   * session state on end_drive.
+   * Map-mode mutating-action consent: session-wide bool. The first
+   * mutating perform_action prompts via `_checkpoint`; on successful ack
+   * (non-cancelled) the agent commits to "I'm exploring this site, no
+   * transactions" and this flag flips to true. All subsequent mutating
+   * actions in the session admit without re-prompting. Per-(action,
+   * selector) bookkeeping was the prior shape — every new selector
+   * re-prompted, which produced ack-loop friction on sites with cookie
+   * banners + product clicks + UI exploration. One ack covers session.
+   * Populated only when the active graph's drive-phase config has
+   * `gateMutatingActions: true`.
    */
-  gatedActionConsentCache?: Set<string>;
+  mapGateAcked?: boolean;
   /**
    * Mutating-action consent staging. Pending consents indexed by their
    * 4-char nonce — when `perform_action` raises the consent checkpoint, the
    * runtime stores `{action, selector}` here so `ack_checkpoint` can echo
-   * the nonce back, validate it, and populate `gatedActionConsentCache`.
-   * Local to the session so the global gate-token store stays unused for
-   * this surface.
+   * the nonce back, validate it, and flip `mapGateAcked` to true.
+   * Cleared on cancellation (no flip) or on successful ack (flip + delete).
    */
   pendingActionConsents?: Map<string, { action: string; selector: string }>;
   /**

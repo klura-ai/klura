@@ -19,13 +19,6 @@ export interface AckCheckpointArgs {
   reason?: string;
 }
 
-// Match the same canonicalization perform-action.ts uses for sticky-cache
-// keys — trim, collapse whitespace, single-quotes → double. Lives here so
-// the ack populates the cache with the same shape perform-action consults.
-function normalizeGatedSelector(selector: string): string {
-  return selector.trim().replace(/\s+/g, ' ').replace(/'/g, '"');
-}
-
 /**
  * Consume a pending checkpoint handover. Validates the echoed token +
  * payload through `assertNoPendingCheckpoint`; on success clears the
@@ -34,9 +27,9 @@ function normalizeGatedSelector(selector: string): string {
  *
  * Mutating-action consent acks short-circuit before the generic gate path:
  * they're session-local nonces (stored in `session.pendingActionConsents`),
- * not gate-store tokens. On valid ack, the (action, selector) tuple is
- * added to `session.gatedActionConsentCache` so subsequent identical
- * perform_action calls fire without re-prompting.
+ * not gate-store tokens. On valid ack, `session.mapGateAcked` flips to
+ * true and every subsequent mutating action in the session admits without
+ * re-prompting (one ack covers session, not per-(action, selector)).
  *
  * The response carries a per-kind `_hint` field telling the agent what
  * to do next. The composer (`composeAckHint`) is exhaustive over
@@ -79,19 +72,20 @@ export function ackCheckpoint(args: AckCheckpointArgs): { ok: true; _hint: strin
       }
       if (typeof args.user_response !== 'string' || args.user_response.trim().length === 0) {
         throw new Error(
-          'action-consent ack requires a non-empty `user_response` — one sentence on what you expect this action to do and why it is safe',
+          'action-consent ack requires a non-empty `user_response` — one sentence on what you intend to map and why the session is exploratory',
         );
       }
-      if (!session.gatedActionConsentCache) session.gatedActionConsentCache = new Set();
-      session.gatedActionConsentCache.add(
-        `${pending.action}|${normalizeGatedSelector(pending.selector)}`,
-      );
+      // Session-wide flip: one ack covers all subsequent mutating actions.
+      // The pending nonce is consumed but its (action, selector) is not
+      // recorded — the bool is the only state we read at gate-check time.
+      session.mapGateAcked = true;
       session.pendingActionConsents.delete(args.checkpoint_token);
       return {
         ok: true,
         _hint:
-          'Action approved. The (action, selector) tuple is whitelisted for this session — ' +
-          'subsequent identical perform_actions fire without re-prompting.',
+          'Map session unlocked. All subsequent mutating actions in this session will admit ' +
+          'without re-prompting — the consent applies session-wide. End the session via ' +
+          'end_drive when done; a fresh start_session({graph: "map"}) requires a new ack.',
       };
     }
   }

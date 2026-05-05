@@ -102,15 +102,6 @@ export function resolvePageHandle(
 // session-obligations.ts MUTATING_ACTIONS.
 const MUTATING_MAP_GATE_ACTIONS = new Set(['click', 'type', 'fill_editor', 'key_press', 'select']);
 
-// Normalize a selector for sticky-cache matching. Trim, collapse internal
-// whitespace, normalize the common single-vs-double-quote variants. Same
-// agent that re-issues an identical click after acking should hash to the
-// same key — false-misses leak into "I just acked this and it prompted
-// again," which is the loop bug we're fixing.
-function normalizeMapGateSelector(selector: string): string {
-  return selector.trim().replace(/\s+/g, ' ').replace(/'/g, '"');
-}
-
 // Plain text-shaped input types where typing only mutates local DOM state
 // (the browser holds the value in memory until form submit). Excludes
 // password (sensitive — keep the gate so the agent acknowledges intent),
@@ -348,30 +339,22 @@ export async function performAction(
   }
 
   // Map-mode pre-action consent gate. Map-mode sessions are surface-discovery
-  // only — the agent should observe what a platform CAN do, not act on the
-  // user's account. Every mutating perform_action raises a consent prompt
-  // unless either (a) the same (action, target) tuple was already acked
-  // earlier this session (sticky cache), or (b) the target's HTML semantics
-  // mark it as structurally safe (anchor navigation with a non-script href
-  // outside any write-form, plain text input fills outside any write-form).
-  // The structural exemption uses element-tag / input-type / form-method
-  // signals — HTML contracts, not name/text patterns — so it doesn't fall
-  // into the keyword-regex trap that the prior heuristic gate did. Free-text
-  // judgement (intent of a button labeled "Send", page-context destructiveness)
-  // remains the LLM's call via the ack path.
+  // — the agent should observe what a platform CAN do, not act on the user's
+  // account. Once-per-session ack: the FIRST mutating perform_action raises
+  // the consent prompt; on approve, the session flips `mapGateAcked = true`
+  // and every subsequent mutating action admits without re-prompting. Single
+  // commitment moment, no per-(action, selector) bookkeeping — the prior
+  // shape produced ack-loops on sites with cookie banners + product clicks
+  // + UI exploration where each new selector re-prompted.
   //
-  // Mechanics: 4-char hex nonce, stored on the session next to a sticky cache
-  // of acked tuples. ack_checkpoint validates the echoed nonce, demands a
-  // non-empty user_response (one-sentence rationale), populates the sticky
-  // cache, then the agent re-issues perform_action and the action fires
-  // through. Cancel path: ack_checkpoint({cancelled: true, reason}) — no
-  // nonce-match needed; the consent is dropped without populating the cache.
+  // Mechanics: 4-char hex nonce when prompting. ack_checkpoint validates,
+  // demands a non-empty user_response, flips the session bool. Cancel path:
+  // ack_checkpoint({cancelled: true, reason}) — no flip; bool stays false
+  // and the next mutating action prompts fresh.
   if (graphConfig(session).gateMutatingActions && MUTATING_MAP_GATE_ACTIONS.has(action)) {
-    if (!session.gatedActionConsentCache) session.gatedActionConsentCache = new Set<string>();
     if (!session.pendingActionConsents) session.pendingActionConsents = new Map();
-    const cacheKey = `${action}|${normalizeMapGateSelector(selector)}`;
     if (
-      !session.gatedActionConsentCache.has(cacheKey) &&
+      session.mapGateAcked !== true &&
       !(await isStructurallySafeMapAction(driver, session, action, selector))
     ) {
       const nonce = randomBytes(2).toString('hex'); // 4 hex chars
@@ -383,37 +366,31 @@ export async function performAction(
       const lines: string[] = [];
       lines.push('invalid_action: action_consent_required');
       lines.push('');
-      lines.push(`This graph gates mutating actions, and you're about to ${targetDescription}.`);
-      lines.push('');
       lines.push(
-        'Mutating actions are gated to keep the agent surface-mapping rather than acting. Before ' +
-          'proceeding, read the page context around this element. Do NOT click, type into, or submit ' +
-          'anything that would commit money, place orders, delete data, change account state, send ' +
-          "messages on the user's behalf, or otherwise act on the user's account. \"Looks like " +
-          'navigation" is not enough — confirm from the surrounding text and your knowledge of the ' +
-          'site that this fires nothing destructive.',
+        `Map-mode requires a one-time consent before any mutating action this session. ` +
+          `You're about to ${targetDescription}.`,
       );
       lines.push('');
       lines.push(
-        'If this action is genuinely safe (navigation, view-only, exploratory), ack with:',
+        "Map mode is for observing what a platform can do, not acting on the user's account. " +
+          'Before acking, confirm this site is one you intend to map (no transactions, no account ' +
+          "state changes, no sends on the user's behalf). The ack covers the WHOLE session — " +
+          'subsequent clicks / types / submits will fire without re-prompting.',
       );
+      lines.push('');
+      lines.push('To approve and unlock the session for mapping:');
       lines.push('  ack_checkpoint({');
       lines.push(`    session_id: "${sessionId}",`);
       lines.push(`    checkpoint_token: "${nonce}",`);
       lines.push(
-        '    user_response: "<one sentence: what you expect this to do and why it is safe>"',
+        '    user_response: "<one sentence: what you intend to map and why this is exploratory>"',
       );
       lines.push('  })');
       lines.push('');
       lines.push(
-        `After ack, the same (${action}, selector) pair won't prompt again this session. ` +
-          'A new selector — even on the same page — will prompt fresh.',
-      );
-      lines.push('');
-      lines.push(
-        'If this action would mutate state, cancel: ack_checkpoint({session_id, ' +
-          'checkpoint_token, cancelled: true, reason: "<why this is unsafe>"}). The action is ' +
-          'dropped; pick a different next step.',
+        "If this action would mutate state in a way you don't want to authorize, cancel: " +
+          'ack_checkpoint({session_id, checkpoint_token, cancelled: true, reason: "<why>"}). ' +
+          'The session-wide ack is NOT granted; the next mutating action will prompt again.',
       );
       throw new Error(lines.join('\n'));
     }
