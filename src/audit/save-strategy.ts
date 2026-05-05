@@ -400,7 +400,7 @@ const mutatingVerificationRequiredDetector: Detector<Strategy, SaveStrategyCtx> 
 
     if (shapeTagsUsed.length === 0 && matchedPaths.length === 0) {
       out.push(
-        `reason must name the verification approach by structural anchor. Either reference a real path of the saved strategy (e.g. response.extract.<field>, prerequisites[N], frameFromPage.expression) OR include a shape tag (transaction-shape / chat-shape / dom-poll / intrinsic-to-caller / fire-and-forget). Prose-only reasons are rejected.`,
+        `reason must name the verification approach by structural anchor. Either reference a real path of the saved strategy (e.g. response.extract.<field>, prerequisites[N], frameFromPage.expression) OR include a shape tag (transaction-shape / chat-shape / dom-poll / intrinsic-to-caller / rpc-read / fire-and-forget). Prose-only reasons are rejected.`,
       );
       return out;
     }

@@ -1098,6 +1098,26 @@ test('verify-required: ack with fire-and-forget + telemetry noun → save commit
   assert.equal(second.status, 'committed', JSON.stringify(second));
 });
 
+test('verify-required: ack with rpc-read tag → save commits (POST envelope, read operation)', () => {
+  const strategy = mutatingPostStrategy();
+  const ctx = verifyCtx();
+  const acks = {
+    mutating_verification_required:
+      'rpc-read: GraphQL query, response.data is the payload — no side effect to verify',
+  };
+  const first = saveStrategyAudit.process(strategy, ctx, { acks });
+  assert.equal(first.rejection.reason, 'pending');
+  const second = saveStrategyAudit.process(strategy, ctx, {
+    token: first.rejection.token,
+    acks,
+    answers: {
+      literal_provenance: { endpoint: 'static' },
+      observed_siblings: {},
+    },
+  });
+  assert.equal(second.status, 'committed', JSON.stringify(second));
+});
+
 test('verify-required: ack with fire-and-forget but no justifying noun → ack rejected', () => {
   const strategy = mutatingPostStrategy();
   const ctx = verifyCtx();

@@ -99,6 +99,7 @@ export function detectMutatingStrategyVerificationApproach(data: Strategy): Save
         `  • chat-shape (read back our own outbound): "chat-shape: frameFromPage.expression polls thread DOM for the typed text appearing as outbound before returning"\n` +
         `  • dom-poll (fragile but sometimes the only signal): "dom-poll: verify_sent js-eval prereq polls .toast-success for 2s after publish"\n` +
         `  • intrinsic-to-caller (the next capability IS the verification): "intrinsic-to-caller — caller's next move is read_messages"\n` +
+        `  • rpc-read (POST envelope is a read, not a mutation — GraphQL query, JSON-RPC read, search endpoint): "rpc-read: GraphQL query; response.data is the payload, no side effect"\n` +
         `  • fire-and-forget (rare; specific noun required): "fire-and-forget — telemetry beacon, no UI surface, idempotent"\n\n` +
         `Verification verifies the SEND, not the recipient's reply. For chat: "we confirmed our outbound message appeared in the thread" — not "we waited for a reply." The reply is a separate capability.\n\n` +
         `Anchor-match: verification durability must match notes.anchor_type. Module/protocol-anchored strategies cannot ack with dom-poll only — that makes the DOM the new fragility bottleneck. Match the verification anchor to the capability's anchor.\n\n` +
@@ -199,13 +200,19 @@ function collectStructuralPaths(data: Strategy): string[] {
 }
 
 /** Recognized shape tags the agent can use in the ack reason. Case-
- *  sensitive — these are tags, not English prose. */
+ *  sensitive — these are tags, not English prose. `rpc-read` covers
+ *  POST-as-read (GraphQL queries, JSON-RPC reads, "search" endpoints)
+ *  where the response payload IS the data and there's no side effect
+ *  to verify; the heuristic can't crisply distinguish read-shaped POST
+ *  from write-shaped POST without brand-specific URL parsing, so the
+ *  ack vocabulary carries the load. */
 export const VERIFICATION_SHAPE_TAGS = [
   'transaction-shape',
   'chat-shape',
   'dom-poll',
   'intrinsic-to-caller',
   'fire-and-forget',
+  'rpc-read',
 ] as const;
 
 /** Justifying nouns that must accompany `fire-and-forget`. The tag
