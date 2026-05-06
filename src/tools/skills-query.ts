@@ -44,8 +44,10 @@ const TEST_BEFORE_BUILD_HINT =
   `    cycle + a duplicate strategy file on disk.\n` +
   `  • Inventing a new slug for an existing operation TRIPS THE\n` +
   `    endpoint_collides_with_saved_capability AUDIT AT SAVE TIME.\n` +
-  `    The audit is UNACKABLE — your save will be rejected and you'll\n` +
-  `    have to start over with the existing slug anyway.\n\n` +
+  `    The audit is ACKABLE for genuinely-different ops on multiplexed\n` +
+  `    gateways (GraphQL, JSON-RPC) — but a same-op-under-new-slug save\n` +
+  `    still has to articulate the (nonexistent) structural diff and\n` +
+  `    leaves a permanent reason on disk. Use the existing slug.\n\n` +
   `If you find yourself typing a capability name that doesn't appear\n` +
   `in the list above — STOP and look harder. The right answer is almost\n` +
   `always one of the names you already see.`;

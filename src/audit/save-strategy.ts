@@ -450,7 +450,25 @@ const endpointCollidesWithSavedCapabilityDetector: Detector<Strategy, SaveStrate
       ),
     );
   },
-  ackReason: 'none',
+  // Ackable: multiplexed gateways (GraphQL, JSON-RPC, generic /api/v1/)
+  // legitimately route many ops through one (path, query, method) tuple
+  // and discriminate on body fields the canonical key can't see. The agent
+  // articulates the structural diff in the ack reason; validateAck below
+  // catches the lowest-effort canned replies. Two saves of the SAME op
+  // under different slugs (the parallel-capability-bake anti-pattern) still
+  // get the rejection — they just have to articulate why they think it's
+  // different, and a reviewer reading the saved file sees the reason.
+  ackReason: 'required',
+  validateAck: (reason): string[] => {
+    const trimmed = reason.trim();
+    if (trimmed.length < 30) {
+      return [
+        `endpoint_collides_with_saved_capability ack reason must name the structural diff in ≥30 chars ` +
+          `(body field, operationName, response shape, auth surface). Got ${trimmed.length} chars: "${trimmed.slice(0, 60)}".`,
+      ];
+    }
+    return [];
+  },
 };
 
 // `mutating_verification_required` and `parameterization_disclosure_required`

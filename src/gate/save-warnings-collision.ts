@@ -148,7 +148,14 @@ export function detectEndpointCollidesWithSavedCapability(
         {
           kind: 'endpoint_collides_with_saved_capability',
           message,
-          hint: `Pick one of the three branches above. This rejection is unackable — there's no "save anyway" path.`,
+          hint:
+            `Pick one of the three branches above. The first two (consolidate / overwrite) are the ` +
+            `right move 90% of the time. The third — genuinely different operation multiplexed onto ` +
+            `the same path+method (GraphQL gateway, JSON-RPC router, generic /api/v1/) — acks via ` +
+            `notes.save_warnings_acked: [{kind: "endpoint_collides_with_saved_capability", reason: ` +
+            `"<one sentence naming the structural diff: body field, operationName, response shape>"}]. ` +
+            `The runtime trusts the articulation; the rejection still surfaces the existing capability ` +
+            `so a future reviewer sees both side-by-side.`,
         },
       ];
     }
@@ -209,18 +216,33 @@ function buildCollisionMessage(input: CollisionMessageInput): string {
   );
   lines.push('');
   lines.push(
-    `  ✗ GENUINELY DIFFERENT (different response shape, different auth) on the SAME endpoint+method`,
+    `  ✓ GENUINELY DIFFERENT (different request body / operationName / response shape / auth)`,
   );
   lines.push(
-    `    → not allowed. Differentiate via endpoint, method, or extended args; or merge into "${cap}".`,
+    `    on the SAME path+query+method — common on multiplexed gateways (GraphQL, JSON-RPC).`,
+  );
+  lines.push(
+    `    → ack via notes.save_warnings_acked: [{kind: "endpoint_collides_with_saved_capability",`,
+  );
+  lines.push(
+    `      reason: "<one sentence naming the structural diff: e.g. 'body.operationName=updateCurrentStore`,
+  );
+  lines.push(
+    `      vs marketModal — different mutation' or 'response.data.user vs response.data.posts'>"}].`,
   );
   return lines.join('\n');
 }
 
-/** Canonical (path, method) key — what `endpoint_collides_with_saved_capability`
- *  uses to compare two strategies. Same path + different method is a legitimate
- *  sibling (GET vs POST on a REST resource); same path + same method is the
- *  duplicate signal. Returns null when the strategy isn't HTTP-shaped. */
+/** Canonical (path+query, method) key — what `endpoint_collides_with_saved_capability`
+ *  uses to compare two strategies. Same key + different method is a legitimate
+ *  sibling (GET vs POST on a REST resource); same key + same method is the
+ *  duplicate signal. Returns null when the strategy isn't HTTP-shaped.
+ *
+ *  Includes the sorted query string in the canonical so multiplexed endpoints
+ *  (GraphQL `?operationName=foo` vs `?operationName=bar`, JSON-RPC routers
+ *  that key on a query param) read as different operations. Templates
+ *  (`{{placeholder}}`) survive the canonical so two strategies templating the
+ *  same param still collide — the parallel-capability bake signal stays. */
 function canonicalizeEndpointKey(
   data: Record<string, unknown>,
 ): { canonical: string; method: string } | null {
@@ -272,10 +294,18 @@ function collectExampleSummary(strategy: Strategy): string {
   return serialized;
 }
 
-/** Canonicalize a strategy's endpoint to origin+pathname for collision
- *  comparison. Drops query string, fragment, and trailing slash. Returns
- *  null when the strategy doesn't have an HTTP-shaped endpoint (recorded-
- *  path strategies, ws-only strategies). */
+/** Canonicalize a strategy's endpoint to origin+pathname+sorted-query for
+ *  collision comparison. Drops fragment and trailing slash. Returns null when
+ *  the strategy doesn't have an HTTP-shaped endpoint (recorded-path strategies,
+ *  ws-only strategies).
+ *
+ *  Query string is preserved with params sorted by key so multiplexed gateways
+ *  read as different operations: GraphQL `?operationName=marketModal` vs
+ *  `?operationName=updateCurrentStore` get different canonicals and don't
+ *  collide. Templates (`{{placeholder}}`) round-trip through `URLSearchParams`
+ *  unchanged, so two strategies templating the same param still produce
+ *  identical canonicals — the parallel-capability bake signal (e.g. two
+ *  saves of `?category={{category}}`) is preserved. */
 export function canonicalizeEndpoint(data: Record<string, unknown>): string | null {
   const baseUrl = data.baseUrl;
   const endpoint = data.endpoint;
@@ -294,7 +324,13 @@ export function canonicalizeEndpoint(data: Record<string, unknown>): string | nu
     const u = new URL(fullUrl);
     let pathname = u.pathname || '/';
     if (pathname.length > 1 && pathname.endsWith('/')) pathname = pathname.slice(0, -1);
-    return `${u.protocol}//${u.host.toLowerCase()}${pathname}`;
+    const params = [...u.searchParams.entries()].sort((a, b) => {
+      const k = a[0].localeCompare(b[0]);
+      return k !== 0 ? k : a[1].localeCompare(b[1]);
+    });
+    const queryString =
+      params.length > 0 ? '?' + params.map(([k, v]) => `${k}=${v}`).join('&') : '';
+    return `${u.protocol}//${u.host.toLowerCase()}${pathname}${queryString}`;
   } catch {
     return null;
   }

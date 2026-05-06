@@ -3,11 +3,18 @@
 // and its registration on the save-strategy audit.
 //
 // Pinned behavior:
-//   - Same canonical endpoint + same HTTP method  → fires (unackable).
-//   - Same canonical endpoint + different method   → no fire.
-//   - Different endpoint                           → no fire.
+//   - Same canonical (path+query, method) + same HTTP method  → fires (ackable).
+//   - Same canonical + different method                        → no fire.
+//   - Different path                                           → no fire.
+//   - Different static query params (GraphQL multiplexing)    → no fire —
+//     the canonical key includes sorted query so /q?op=A and /q?op=B
+//     diverge automatically.
+//   - Same templated query param → fires (parallel-capability bake signal
+//     preserved — both `/q?cat={{cat}}` saves still collide).
 //   - Rejection message inlines the existing capability's shape
 //     (name, tier, endpoint, args, observed_values, example).
+//   - Hint surfaces the ack path for genuinely-different ops on
+//     multiplexed gateways.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -104,8 +111,9 @@ test('rejection inlines existing capability params + observed values', () => {
   assert.match(message, /SAME OPERATION/);
   assert.match(message, /STALE/);
   assert.match(message, /GENUINELY DIFFERENT/);
-  // Hints that this is unackable
-  assert.match(issues[0].hint, /unackable|no "save anyway"/i);
+  // Hint surfaces the ack path for multiplexed-gateway cases.
+  assert.match(issues[0].hint, /save_warnings_acked/);
+  assert.match(issues[0].hint, /endpoint_collides_with_saved_capability/);
 });
 
 test('rejection inlines example_response excerpt when present', () => {
@@ -144,13 +152,53 @@ test('skips comparing a capability against itself', () => {
   assert.equal(issues.length, 0);
 });
 
-test('canonicalizes URL — query strings and trailing slashes ignored', () => {
+test('canonical drops fragment + trailing slash (no-query baseline)', () => {
+  // No query on either side → templated-vs-bare path collapses, fragment
+  // is dropped. Same canonical → collision fires.
+  const incoming = strategy({ endpoint: '/api/restaurants#anchor', method: 'GET' });
+  const existing = strategy({ endpoint: '/api/restaurants/', method: 'GET' });
+  const issues = detectEndpointCollidesWithSavedCapability(
+    incoming,
+    'list_top_restaurants',
+    () => [existing],
+    () => ['find_top_restaurants'],
+  );
+  assert.equal(issues.length, 1);
+});
+
+test('different static query params on same path do not collide (GraphQL multiplexing)', () => {
+  // Two GraphQL operations on the same /frontend/query endpoint, distinguished
+  // by a static `?operationName=...`. The canonical key includes the sorted
+  // query string so they diverge → no collision. Without this, every GraphQL
+  // capability past the first would be hard-blocked.
+  const incoming = strategy({
+    endpoint: '/frontend/query?fitlocale=sv-SE&operationName=updateCurrentStore',
+    method: 'POST',
+  });
+  const existing = strategy({
+    endpoint: '/frontend/query?fitlocale=sv-SE&operationName=marketModal',
+    method: 'POST',
+  });
+  const issues = detectEndpointCollidesWithSavedCapability(
+    incoming,
+    'set_current_store',
+    () => [existing],
+    () => ['get_product_per_store_stock'],
+  );
+  assert.equal(issues.length, 0);
+});
+
+test('same templated query param still collides (parallel-capability bake)', () => {
+  // The canonical-key logic must NOT relax the parallel-capability case:
+  // two saves of `?category={{category}}` are saving the same operation
+  // with different slugs — the bake anti-pattern. Templates round-trip
+  // through searchParams unchanged, so canonicals match → collision fires.
   const incoming = strategy({
     endpoint: '/api/restaurants?category={{cuisine}}',
     method: 'GET',
   });
   const existing = strategy({
-    endpoint: '/api/restaurants/',
+    endpoint: '/api/restaurants?category={{cuisine}}',
     method: 'GET',
   });
   const issues = detectEndpointCollidesWithSavedCapability(
@@ -158,6 +206,24 @@ test('canonicalizes URL — query strings and trailing slashes ignored', () => {
     'list_top_restaurants',
     () => [existing],
     () => ['find_top_restaurants'],
+  );
+  assert.equal(issues.length, 1);
+});
+
+test('canonical sorts query params so order does not affect collision', () => {
+  const incoming = strategy({
+    endpoint: '/q?b=2&a=1',
+    method: 'GET',
+  });
+  const existing = strategy({
+    endpoint: '/q?a=1&b=2',
+    method: 'GET',
+  });
+  const issues = detectEndpointCollidesWithSavedCapability(
+    incoming,
+    'cap_a',
+    () => [existing],
+    () => ['cap_b'],
   );
   assert.equal(issues.length, 1);
 });
