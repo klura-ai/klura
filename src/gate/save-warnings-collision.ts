@@ -344,6 +344,18 @@ export function detectAuthGatedWithoutAuthPrereq(
   if (!sessionId) return [];
   const tier = (data as { strategy?: string }).strategy;
   if (tier !== 'fetch' && tier !== 'page-script') return [];
+  // Scope to mutating methods. Public read endpoints on auth-bearing origins
+  // (e.g. a storelocator GET on a site whose homepage sets analytics cookies)
+  // were the dominant false-positive shape: cookies in the jar are auto-sent
+  // by the browser on every same-origin request, so the structural signal
+  // "the strategy's request rode a session cookie" is true even when the
+  // endpoint is provably anonymous-friendly. POST/PUT/DELETE/PATCH narrows
+  // to the cases where session-cookie dependence is materially load-bearing.
+  // Truly auth-gated GETs that fail cold-execute fall through to the auth-
+  // wall recovery layer at execute time.
+  const method = ((data as { method?: string }).method ?? '').toUpperCase();
+  const MUTATING = new Set(['POST', 'PUT', 'DELETE', 'PATCH']);
+  if (!MUTATING.has(method)) return [];
   const provider = getCapturedRequestsProvider();
   if (!provider) return [];
   const captured = provider(sessionId);

@@ -114,6 +114,37 @@ test('auth_gated: existing {kind: "tag", tag: "auth"} prereq still suppresses', 
   }
 });
 
+test('auth_gated: GET endpoint on cookie-bearing origin is exempt (false-positive scope cut)', () => {
+  // bauhaus.se shape: homepage sets analytics/preferences cookies during
+  // initial Document load; the agent's saved strategy is a public read
+  // (storelocator GET, search suggest GET, inventory GET). The browser
+  // auto-sends the jar's cookies on every same-origin fetch, so the prior
+  // detector fired on every saved GET — pure noise. GETs are read-only and
+  // truly auth-gated GETs surface as 401/403 at execute time, recovered by
+  // the auth-wall handler.
+  setCapturedRequestsProvider(() => [
+    {
+      url: 'https://www.bauhaus.se/',
+      method: 'GET',
+      setCookieNames: ['_dd_s', 'analytics_id'],
+    },
+  ]);
+  try {
+    const warnings = detectAuthGatedWithoutAuthPrereq(
+      {
+        strategy: 'fetch',
+        baseUrl: 'https://www.bauhaus.se',
+        endpoint: '/storelocator/api/stores',
+        method: 'GET',
+      },
+      'sess_test',
+    );
+    assert.deepStrictEqual(warnings, []);
+  } finally {
+    setCapturedRequestsProvider(null);
+  }
+});
+
 // ---------- unreferenced_prereq_binding ----------
 
 test('unreferenced_prereq_binding: fires when js-eval binds name has no {{name}} reference anywhere', () => {
