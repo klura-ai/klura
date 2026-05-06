@@ -772,8 +772,16 @@ export function rejectionToErrorMessage(
   // The `pending` reason in particular reads as bureaucratic ("being
   // processed") unless the no-commit state is stated outright.
   lines.push(`  → Your ${kind} call is NOT committed. Nothing was saved.`);
+  // save_strategy uniquely consumes acks via notes.save_warnings_acked on
+  // the strategy itself (so they persist with the saved file), not via a
+  // top-level acks parameter. submit_triage_plan and end_drive take a
+  // top-level acks: {kind: reason} map. Render the contract that fits the
+  // tool so the agent doesn't see contradictory hints in the same response.
+  const isSaveStrategy = toolName === 'save_strategy';
   lines.push(
-    `  → To commit: call ${toolName} again with {audit_token, audit_answers, acks} (fix the issues above).`,
+    isSaveStrategy
+      ? `  → To commit: call ${toolName} again with {audit_token, audit_answers} and embed notes.save_warnings_acked: [{kind, reason}] on the strategy for any warnings (fix the issues above).`
+      : `  → To commit: call ${toolName} again with {audit_token, audit_answers, acks} (fix the issues above).`,
   );
   lines.push(
     `  → DO NOT end your turn after this rejection — the rejection IS the iteration loop, not a stop signal. Expect 1-3 retries before the save lands.`,
@@ -818,17 +826,28 @@ export function rejectionToErrorMessage(
     rejection.classifier_answer_shapes &&
     Object.keys(rejection.classifier_answer_shapes).length > 0
   ) {
-    const acksClause = rejection.warnings.length > 0 ? ', acks' : '';
+    const hasWarnings = rejection.warnings.length > 0;
+    let acksClause = '';
+    if (hasWarnings) {
+      acksClause = isSaveStrategy
+        ? ' (and embed notes.save_warnings_acked on the strategy)'
+        : ', acks';
+    }
     lines.push(
-      `  how_to_respond: call ${toolName} again with {audit_token, audit_answers${acksClause}}.`,
+      `  how_to_respond: call ${toolName} again with {audit_token, audit_answers}${acksClause}.`,
     );
     lines.push('    audit_answers shapes:');
     for (const shape of Object.values(rejection.classifier_answer_shapes)) {
       lines.push(`      - ${shape}`);
     }
-    if (rejection.warnings.length > 0) {
-      lines.push('    acks shape:');
-      lines.push('      - {<warning_kind>: "<one-sentence reason>"}');
+    if (hasWarnings) {
+      if (isSaveStrategy) {
+        lines.push('    notes.save_warnings_acked shape (embed on the strategy):');
+        lines.push('      - [{kind: "<warning_kind>", reason: "<one-sentence reason>"}, ...]');
+      } else {
+        lines.push('    acks shape:');
+        lines.push('      - {<warning_kind>: "<one-sentence reason>"}');
+      }
     }
   }
 

@@ -401,3 +401,47 @@ test('rejectionToErrorMessage: Stage-2 rejection renders audit_token + how_to_re
   assert.match(msg, /classify/);
   assert.match(msg, /how_to_respond:/);
 });
+
+test('rejectionToErrorMessage: save_strategy renders acks shape as notes.save_warnings_acked', () => {
+  // save_strategy uniquely consumes acks via notes.save_warnings_acked on
+  // the strategy itself. The rejection envelope must reflect that — agents
+  // were getting contradictory hints when the generic acks-map shape ran
+  // alongside detector hints pointing at notes.save_warnings_acked. Need
+  // Stage-2 (acks supplied → classifiers active) to reach the
+  // how_to_respond block where the acks shape renders.
+  const audit = new Audit({
+    kind: 'save_strategy',
+    detectors: [
+      { kind: 'warner', detect: () => [{ kind: 'warner', message: 'warning thing', hint: 'fix or ack' }], ackReason: 'required' },
+    ],
+    classifiers: [
+      { kind: 'classify', buildItems: () => ['itemA'], validate: () => [], remedy: NO_REMEDY, expectedAnswerShape: TEST_SHAPE },
+    ],
+  });
+  const r = audit.process({}, {}, { acks: { warner: 'intentional' } });
+  const msg = rejectionToErrorMessage('save_strategy', r.rejection, { toolName: 'save_strategy' });
+  assert.match(msg, /To commit:.*notes\.save_warnings_acked/);
+  assert.match(msg, /notes\.save_warnings_acked shape \(embed on the strategy\):/);
+  assert.match(msg, /\[\{kind: "<warning_kind>", reason: "<one-sentence reason>"\}/);
+  // The generic top-level acks-map prose must NOT appear for save_strategy.
+  assert.doesNotMatch(msg, /^ {4}acks shape:/m);
+});
+
+test('rejectionToErrorMessage: end_drive keeps top-level acks shape', () => {
+  // end_drive (and submit_triage_plan) accept top-level acks: {kind: reason}
+  // — the generic shape stays put for those tools.
+  const audit = new Audit({
+    kind: 'end_drive',
+    detectors: [
+      { kind: 'warner', detect: () => [{ kind: 'warner', message: 'flagged', hint: 'fix or ack' }], ackReason: 'required' },
+    ],
+    classifiers: [
+      { kind: 'classify', buildItems: () => ['itemA'], validate: () => [], remedy: NO_REMEDY, expectedAnswerShape: TEST_SHAPE },
+    ],
+  });
+  const r = audit.process({}, {}, { acks: { warner: 'intentional' } });
+  const msg = rejectionToErrorMessage('end_drive', r.rejection, { toolName: 'end_drive' });
+  assert.match(msg, /^ {4}acks shape:/m);
+  assert.match(msg, /\{<warning_kind>: "<one-sentence reason>"\}/);
+  assert.doesNotMatch(msg, /notes\.save_warnings_acked/);
+});
