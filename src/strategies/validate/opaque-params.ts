@@ -33,6 +33,7 @@ import {
   findCandidatesForLiteral,
   findRawCaptureMatches,
 } from '../../response/session-observations';
+import { getTypedValuesProvider } from './providers';
 
 export function validateNoOpaqueUserParams(
   data: Strategy,
@@ -69,6 +70,15 @@ export function validateNoOpaqueUserParams(
     const observedInLookup = kindTreatsAsOpaque
       ? accumulatorMatchesLiteral(sessionId, example)
       : false;
+
+    // Caller-arg exemption: when the literal value was typed by the user
+    // into the page this session via perform_action(type / fill_editor),
+    // it is by-construction caller-sourced — even when the same value
+    // appears in a captured response body (autocomplete echo, suggestion
+    // list returning the typed prefix back, search result containing the
+    // typed term). The on-the-wire ground truth is "the user typed this";
+    // an accumulator match is downstream of that source.
+    if (observedInLookup && wasTypedThisSession(sessionId, example)) continue;
 
     // Secondary signal: shape match against known opaque-id patterns. Kept as a
     // narrow backstop for saves without session context (programmatic saves,
@@ -123,4 +133,15 @@ function accumulatorMatchesLiteral(sessionId: string | undefined, literal: strin
   if (findCandidatesForLiteral(sessionId, literal).length > 0) return true;
   if (findRawCaptureMatches(sessionId, literal).length > 0) return true;
   return false;
+}
+
+/** True when the user typed the literal value into the page this session
+ *  via perform_action({action: 'type'|'fill_editor', value}). Caller-arg
+ *  exemption from the opaque-params accumulator-match rejection. */
+function wasTypedThisSession(sessionId: string | undefined, literal: string): boolean {
+  if (!sessionId) return false;
+  const provider = getTypedValuesProvider();
+  if (!provider) return false;
+  const typed = provider(sessionId);
+  return typed instanceof Set && typed.has(literal);
 }

@@ -394,3 +394,116 @@ test('accumulator-grounded path does not fire without session context (programma
   };
   validateNoOpaqueUserParams(data);
 });
+
+// ---- caller-arg exemption: user-typed values bypass accumulator rejection ----
+
+test('caller-arg exemption: user-typed value also echoed in lookup response → accepted', async () => {
+  // Bauhaus-shape: agent types a SKU into a search field, server's
+  // autocomplete responds with [{sku: "<typed>", name: "..."}], then agent
+  // saves a strategy with notes.params.sku.example = "<typed>" and
+  // kind: "id". Without the exemption the accumulator match rejects the
+  // save even though the value is by-construction caller-sourced.
+  const { setTypedValuesProvider } = await import('../dist/strategies/skills.js');
+  const sid = 'sess-typed-1';
+  clearForSession(sid);
+  recordLookupCandidate(sid, {
+    request_i: 3,
+    url: 'https://www.example.com/search/ajax/suggest/?q=sku-12345',
+    method: 'GET',
+    input_shape: {
+      method: 'GET',
+      url_host: 'www.example.com',
+      url_path: '/search/ajax/suggest/',
+      query_keys: ['q'],
+      body_keys: null,
+      path_tail: null,
+    },
+    output_shape: {
+      response_format: 'json',
+      has_array_of_objects: true,
+      id_fields: [
+        {
+          field_path: 'data.suggestions[0].sku',
+          value_shape: 'short alphanumeric',
+          sample_value: 'sku-12345',
+        },
+      ],
+    },
+    looks_like_lookup: true,
+    lookup_confidence: 0.85,
+  });
+
+  setTypedValuesProvider(() => new Set(['sku-12345']));
+  try {
+    const data = {
+      strategy: 'fetch',
+      baseUrl: 'https://www.example.com',
+      endpoint: 'GET /products/{{sku}}',
+      notes: {
+        params: {
+          sku: { kind: 'id', example: 'sku-12345', description: 'SKU' },
+        },
+      },
+    };
+    validateNoOpaqueUserParams(data, sid, 'test-platform');
+  } finally {
+    setTypedValuesProvider(null);
+    clearForSession(sid);
+  }
+});
+
+test('caller-arg exemption: lookup-only value (never typed) still rejects', async () => {
+  // Negative case: the literal appears in a captured lookup response but
+  // the user never typed it. Provider returns a Set without the value.
+  // Behavior unchanged — accumulator match still rejects.
+  const { setTypedValuesProvider } = await import('../dist/strategies/skills.js');
+  const sid = 'sess-typed-2';
+  clearForSession(sid);
+  recordLookupCandidate(sid, {
+    request_i: 1,
+    url: 'https://www.example.com/api/threads',
+    method: 'GET',
+    input_shape: {
+      method: 'GET',
+      url_host: 'www.example.com',
+      url_path: '/api/threads',
+      query_keys: null,
+      body_keys: null,
+      path_tail: null,
+    },
+    output_shape: {
+      response_format: 'json',
+      has_array_of_objects: true,
+      id_fields: [
+        {
+          field_path: 'data[0].id',
+          value_shape: '15+ digit numeric',
+          sample_value: '156025504001094',
+        },
+      ],
+    },
+    looks_like_lookup: true,
+    lookup_confidence: 0.9,
+  });
+
+  setTypedValuesProvider(() => new Set(['something_else']));
+  try {
+    const data = {
+      strategy: 'fetch',
+      baseUrl: 'https://www.example.com',
+      endpoint: 'GET /threads/{{thread_id}}',
+      notes: {
+        params: {
+          thread_id: { kind: 'id', example: '156025504001094' },
+        },
+      },
+    };
+    assert.throws(
+      () => validateNoOpaqueUserParams(data, sid, 'test-platform'),
+      /lookup accumulator observed this exact value/,
+    );
+  } finally {
+    setTypedValuesProvider(null);
+    clearForSession(sid);
+  }
+});

@@ -127,6 +127,26 @@ skills.setCapturedRequestsProvider((sessionId) => {
   }
 });
 
+// Typed-values provider — exposes the set of string values the user typed
+// via perform_action({action: 'type'|'fill_editor'}) this session. Feeds the
+// opaque-params validator's caller-arg exemption: a literal that the user
+// typed verbatim is by-construction caller-sourced even when it also appears
+// in a server response (autocomplete echo, suggestion list).
+skills.setTypedValuesProvider((sessionId) => {
+  try {
+    const session = pool.getSession(sessionId);
+    const out = new Set<string>();
+    for (const rec of session.performActionHistory ?? []) {
+      if (rec.action !== 'type' && rec.action !== 'fill_editor') continue;
+      if (typeof rec.value !== 'string' || rec.value.length === 0) continue;
+      out.add(rec.value);
+    }
+    return out;
+  } catch {
+    return null;
+  }
+});
+
 // Start proactive token refresh — emits log when tokens are about to expire.
 // Actual re-auth is triggered by the LLM (via 401 → needs_reauth response), but
 // this ensures we don't silently hold stale tokens.

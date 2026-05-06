@@ -37,3 +37,18 @@ export function setCapturedRequestsProvider(p: CapturedRequestsProvider | null):
 export function getCapturedRequestsProvider(): CapturedRequestsProvider | null {
   return capturedRequestsProvider;
 }
+
+// Typed-values provider — returns the set of string values the user typed
+// into the page this session via perform_action({action: 'type'|'fill_editor'}).
+// Feeds the opaque-params validator's caller-arg exemption: a literal that
+// the user typed verbatim is by-construction caller-sourced, even when the
+// same value also appears in a server response (the autocomplete echoes
+// what was typed, the suggestion list returns the typed prefix back, etc.).
+export type TypedValuesProvider = (sessionId: string) => Set<string> | null;
+let typedValuesProvider: TypedValuesProvider | null = null;
+export function setTypedValuesProvider(p: TypedValuesProvider | null): void {
+  typedValuesProvider = p;
+}
+export function getTypedValuesProvider(): TypedValuesProvider | null {
+  return typedValuesProvider;
+}

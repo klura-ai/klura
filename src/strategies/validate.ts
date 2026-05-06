@@ -7,6 +7,7 @@ export {
   getTryGeneratorStatsForSession,
   setDeclaredArgsProvider,
   setCapturedRequestsProvider,
+  setTypedValuesProvider,
 } from './validate/providers';
 
 export {
