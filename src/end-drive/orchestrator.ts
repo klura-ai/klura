@@ -402,6 +402,15 @@ export async function endDrive(
 > {
   const session = pool.getSession(sessionId);
 
+  // Resolve platform once. Explicit opts.platform wins; otherwise fall back
+  // to whatever the session was opened with so callers don't have to remember
+  // to re-pass it on end_drive. Every platform-dependent decision below
+  // (capability inference, triage handoff predicate, LIFT handoff branch,
+  // storage-state save, auto-synth) reads from this single binding so an
+  // omitted opts.platform can no longer silently reroute the flow into the
+  // terminal-close path while a session-bound platform sits unused.
+  const platform = opts.platform ?? session.platform;
+
   // Reject obviously-fabricated audit_token values up-front. The string
   // `"undefined"` / `"null"` shape comes from a JS-serialization
   // hallucination — the agent constructed the args object with a JS
@@ -432,12 +441,12 @@ export async function endDrive(
   // whether the audit subsequently blocks. Without running here, an
   // audit-blocked auto-close would prevent the inference from ever
   // landing in the logbook.
-  if (opts.platform) {
+  if (platform) {
     try {
-      const inferred = inferObservedCapabilitiesFromTriage(opts.platform, sessionId);
+      const inferred = inferObservedCapabilitiesFromTriage(platform, sessionId);
       for (const entry of inferred) {
         try {
-          recordObservedCapability(opts.platform, entry);
+          recordObservedCapability(platform, entry);
         } catch {
           /* per-entry rejection shouldn't block the others */
         }
@@ -460,13 +469,11 @@ export async function endDrive(
   // decide whether to gate: when the runtime would otherwise skip triage
   // (everything resolved, no stale strategies), the agent must echo an ack
   // token instead of silently bypassing the triage step.
-  const triageWouldFire = opts.platform
-    ? wouldReverseEngineerHandoffFire(session, opts.platform)
-    : false;
+  const triageWouldFire = platform ? wouldReverseEngineerHandoffFire(session, platform) : false;
   const auditPayload = buildEndDrivePayload(
     session,
     { reCallCount, persistCallCount, actionCallCount },
-    { platform: opts.platform, triageWouldFire },
+    { platform, triageWouldFire },
   );
   const auditResult = endDriveAudit.process(
     auditPayload,
@@ -536,11 +543,11 @@ export async function endDrive(
   // is a defensive backstop — no in-process programmatic caller should reach
   // this branch on a graph without a lift phase.
   const graphHasLift = currentGraph(session).nodes.has('lift');
-  if (opts.platform && !isAbandonFromLift && graphHasLift) {
-    const handoff = computeReverseEngineerHandoff(session, opts.platform);
+  if (platform && !isAbandonFromLift && graphHasLift) {
+    const handoff = computeReverseEngineerHandoff(session, platform);
     if (handoff) {
       try {
-        const statePath = skills.storageStatePath(opts.platform, session.identity);
+        const statePath = skills.storageStatePath(platform, session.identity);
         await pool.driverFor(sessionId).saveStorageState(session, statePath);
       } catch {
         /* non-fatal — handoff still returned */
@@ -550,7 +557,7 @@ export async function endDrive(
       // (agent declines LIFT, field-report transcript cuts, benchmark
       // aborts). Without a dump on this path, post-hoc inspectors see an empty
       // network-logs dir despite the runtime having full captures in memory.
-      await maybeDumpCapturedLogs(sessionId, opts.platform);
+      await maybeDumpCapturedLogs(sessionId, platform);
       // Mark the session as having entered LIFT. The round counter starts
       // fresh each close-attempt that hits this branch.
       if (!session.lift) {
@@ -565,10 +572,7 @@ export async function endDrive(
     }
   }
 
-  // Persist storage state if the session is bound to a platform. Explicit
-  // opts.platform wins; otherwise fall back to whatever the session was opened
-  // with so callers don't have to remember it.
-  const platform = opts.platform ?? session.platform;
+  // Persist storage state if the session is bound to a platform.
   if (platform) {
     // Identity travels on the session — set when start_session was called
     // with `identity`. Default-when-omitted writes the historical
@@ -757,8 +761,8 @@ export async function endDrive(
 
   // If end-drive skipped RE mode because user policy caps the tier, tell
   // the agent WHY close succeeded without a handoff.
-  if (opts.platform) {
-    const platformForPolicy = opts.platform;
+  if (platform) {
+    const platformForPolicy = platform;
     const applied = (session.declaredCapabilities ?? [])
       .map((d) => {
         const policy = loadCapabilityPolicyFull(platformForPolicy, d.capability);
