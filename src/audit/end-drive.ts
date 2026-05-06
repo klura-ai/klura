@@ -309,9 +309,14 @@ const triageAcknowledgmentClassifier: Classifier<EndDrivePayload, EndDriveCtx, u
         `end_drive ALWAYS goes through triage. Every declared capability on this session is ` +
         `already saved (no unresolved work, no stale strategies), so the runtime would skip the ` +
         `triage handoff — but triage is the runtime-mandated review point. The agent does not ` +
-        `get to decide "this was a one-off task, no triage needed." Either submit a triage_plan ` +
-        `(graduation candidate? observed_capabilities to record? defense-surface notes worth ` +
-        `persisting?), or echo the audit_token + acknowledge with a non-trivial reason.`,
+        `get to decide "this was a one-off task, no triage needed." Echo the audit_token + ` +
+        `acknowledge with a non-trivial reason explaining why no further triage is warranted ` +
+        `(e.g. "all declared caps are saved at fetch tier, no graduation candidate observed in ` +
+        `captures"). NOTE: submit_triage_plan is admissible from drive only when work is still ` +
+        `unresolved — when it would route to lift after end_drive. In this all-saved case the ` +
+        `audit's only forward path is the ack; observed_capabilities and defense-surface metadata ` +
+        `from any triage_plans you submitted earlier this session are auto-recorded by the ` +
+        `runtime when end_drive commits.`,
       acknowledge_shape:
         '{triage_acknowledgment: {acknowledged: true, reason: "<your reason, ≥20 chars>"}}',
     };
@@ -349,14 +354,9 @@ const triageAcknowledgmentClassifier: Classifier<EndDrivePayload, EndDriveCtx, u
     kind: 'classification_options',
     options: [
       {
-        choice: 'submit_triage_plan({...})',
-        rationale:
-          'go through triage properly — pick a surface, name the defense surface, propose an expected_tier, write a summary_for_user',
-      },
-      {
         choice: '{triage_acknowledgment: {acknowledged: true, reason: "<own words>"}}',
         rationale:
-          'explicit no-triage acknowledgment with a reason a future reader can audit (e.g. "all caps fetch-tier, no graduation candidate observed in captures")',
+          'explicit no-triage acknowledgment with a reason a future reader can audit (e.g. "all caps fetch-tier, no graduation candidate observed in captures"). This is the ONLY achievable forward path from this audit moment: submit_triage_plan is admissibility-blocked from drive phase, and after the ack lands the session closes (when triageWouldFire is false there is no LIFT phase to enter). Triage metadata you want to persist for future sessions should have been submitted via submit_triage_plan BEFORE end_drive — the runtime auto-records observed_capabilities and defense-surface notes from those plans when this audit commits.',
       },
     ],
   }),

@@ -45,6 +45,45 @@ test('triage_acknowledgment: fires when triage would skip and capability declare
   assert.match(r.items.triage_acknowledgment.prompt, /ALWAYS goes through triage/);
 });
 
+test('triage_acknowledgment: prose does NOT promise submit_triage_plan as alternative path', () => {
+  // submit_triage_plan is admissibility-blocked from drive phase, so the
+  // prior "Either submit a triage_plan OR acknowledge" framing was a lie:
+  // the agent followed the hint, hit tool_not_admissible, fell back to ack
+  // and lost their work. The new prose only offers the ack path and
+  // explains why submit_triage_plan isn't available from here.
+  __resetStore();
+  const result = endDriveAudit.process(makePayload(), {}, {});
+  const prompt = result.rejection.items.triage_acknowledgment.prompt;
+  assert.doesNotMatch(
+    prompt,
+    /Either submit a triage_plan/i,
+    'prompt must not present submit_triage_plan as an alternative path',
+  );
+  assert.match(
+    prompt,
+    /Echo the audit_token \+ acknowledge/,
+    'prompt must direct the agent to the ack path',
+  );
+});
+
+test('triage_acknowledgment: remedy lists ack as the only achievable choice', () => {
+  // The remedy block previously listed submit_triage_plan({...}) as a
+  // valid choice. From this audit moment it isn't — drive-phase
+  // admissibility blocks it. Single choice now: the ack.
+  __resetStore();
+  const result = endDriveAudit.process(makePayload(), {}, {});
+  const remedy = result.rejection.classifier_remedies?.triage_acknowledgment;
+  assert.ok(remedy, 'triage_acknowledgment remedy missing');
+  assert.equal(remedy.kind, 'classification_options');
+  assert.equal(remedy.options.length, 1, 'remedy must list exactly one achievable choice');
+  assert.match(remedy.options[0].choice, /triage_acknowledgment.*acknowledged: true/);
+  // The rationale explains why submit_triage_plan isn't on the list.
+  assert.match(
+    remedy.options[0].rationale,
+    /submit_triage_plan is admissibility-blocked|admissibility-blocked from drive/i,
+  );
+});
+
 test('triage_acknowledgment: does NOT fire when triageWouldFire (handoff covers it)', () => {
   __resetStore();
   const result = endDriveAudit.process(
