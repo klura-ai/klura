@@ -557,3 +557,198 @@ export async function removePageInitScript(
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Tool registry metadata
+// ---------------------------------------------------------------------------
+
+import { TOOL_NAMES } from '../vocab';
+import type { ToolDef } from '../tool-types';
+
+export const TOOL_DEFS: ToolDef[] = [
+  {
+    name: TOOL_NAMES.getJsSource,
+    description:
+      'Read the source body of a JS script the page has already loaded, windowed around `line` with surrounding context. The fast path for binary-WS / signed-request reverse engineering: `inspect_ws_frame.js_callstack.frames[0]` names the file:line of the encoder; `get_js_source(file, {line: that_line, context_lines: 80})` reads the surrounding source, so you SEE the actual derivations (`epoch_id = Date.now() * 1e6n`, `otid = nextOtid()`, etc.) instead of guessing them from output bytes. Pretty-prints minified single-line bundles before windowing so the slice has structure. Per-session cache means paginated reads share one fetch. Response: `{url, format, total_lines, start_line, end_line, source, truncated?}`.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        url: {
+          type: 'string',
+          description:
+            'Script URL (typically the `file` field of a js_callstack frame). Must be a script the page has already loaded — the fetch runs inside the page context and reuses the browser cache + cookies.',
+        },
+        line: { type: 'number', description: '1-indexed line to center the window on. Default 1.' },
+        context_lines: {
+          type: 'number',
+          description:
+            'Lines of surrounding context (above + below the target line). Default 60, max 200. Combined window is ≤ MCP output budget; oversized requests get `truncated: true`.',
+        },
+        format: {
+          type: 'string',
+          enum: ['raw', 'pretty'],
+          description:
+            'Default "pretty" — single-line minified scripts get split + indented for legibility. Pass "raw" to skip pretty-printing.',
+        },
+      },
+      required: ['session_id', 'url'],
+    },
+    handler: (args: any) =>
+      getJsSource({
+        session_id: args.session_id,
+        url: args.url,
+        line: args.line,
+        context_lines: args.context_lines,
+        format: args.format,
+      }),
+  },
+
+  {
+    name: TOOL_NAMES.getSendEncoder,
+    description:
+      'Read the per-ws_i side-channel that the page-side WebSocket.send wrapper stashed at send time. On a matching captured send: `{sent_args_preview, sent_args_type, sent_args_byte_length, ws_url, head_hex, ts, handle_alive, encoder_handle, advice}` — `encoder_handle` is a JS expression like `window.__kluraSendEncoders[471]` addressable via `js_eval` to read `<handle>.ws` (captured WebSocket instance) and `<handle>.sentArgs` (original data passed to send). When no stash entry matches, returns `{encoder: null, reason, advice}` — `reason` is one of `frame_out_of_range` (ws_i past buffer), `frame_received` (not a sent frame — pick a sent one), `wrapper_not_installed` (no WS-using JS on the page yet), `no_matching_fingerprint` (page may have re-wrapped WebSocket.send; fall back to reading encoder source via `get_js_source` with `inspect_ws_frame.js_callstack`). The `advice` field names the best next action for each reason. Pair with `inspect_ws_frame.js_callstack` + `get_js_source` for the reverse-engineer toolkit.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        ws_i: {
+          type: 'number',
+          description:
+            'Index into the captured wsFrames array (same value used for inspect_ws_frame).',
+        },
+      },
+      required: ['session_id', 'ws_i'],
+    },
+    handler: (args: any) =>
+      getSendEncoder({
+        session_id: args.session_id,
+        ws_i: args.ws_i,
+      }),
+  },
+
+  {
+    name: TOOL_NAMES.searchJsSource,
+    description:
+      'Substring-search a JS script the page already loaded. Returns `{line, column, preview}` for each hit (max 100). Line numbers are raw-source coordinates matching `Error.stack` and `get_js_source({line})`. Use to find encoder call sites: search for protocol literals observed in captured bytes (e.g. `"/ls_req"`, `"encodeSend"`, a field name from the envelope JSON). Literal-substring only — no regex; run multiple searches when needed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        url: { type: 'string', description: 'Script URL the page loaded.' },
+        pattern: { type: 'string', description: 'Literal substring (≤ 500 chars).' },
+        case_sensitive: { type: 'boolean', description: 'Default true.' },
+        max_matches: { type: 'number', description: 'Default 20, max 100.' },
+      },
+      required: ['session_id', 'url', 'pattern'],
+    },
+    handler: (args: any) =>
+      searchJsSourceTool({
+        session_id: args.session_id,
+        url: args.url,
+        pattern: args.pattern,
+        case_sensitive: args.case_sensitive,
+        max_matches: args.max_matches,
+      }),
+  },
+
+  {
+    name: TOOL_NAMES.readJsFunction,
+    description:
+      'Given a line inside a JS source, extract the enclosing function: name, params, start/end line, body preview (default 2000 chars cap). Handles `function(...)`, `function name(...)`, and arrow functions. Use after `search_js_source` finds a candidate call site — read ONE function instead of windowing source with guessed line ranges.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        url: { type: 'string' },
+        line: { type: 'number', description: 'Raw-source line (1-indexed).' },
+        max_body_chars: { type: 'number', description: 'Default 2000.' },
+      },
+      required: ['session_id', 'url', 'line'],
+    },
+    handler: (args: any) =>
+      readJsFunctionTool({
+        session_id: args.session_id,
+        url: args.url,
+        line: args.line,
+        max_body_chars: args.max_body_chars,
+      }),
+  },
+
+  {
+    name: TOOL_NAMES.listLoadedScripts,
+    description:
+      'List every JS script URL the page loaded, observed via the captured network log. Filtered to JS content-types, deduped, in load order. Use when the `inspect_ws_frame.js_callstack` bundle turns out not to contain the encoder — widen the search to other bundles.',
+    inputSchema: {
+      type: 'object',
+      properties: { session_id: { type: 'string' } },
+      required: ['session_id'],
+    },
+    handler: (args: any) => listLoadedScriptsTool({ session_id: args.session_id }),
+  },
+
+  {
+    name: TOOL_NAMES.jsEval,
+    description:
+      'Evaluate a JS expression inside the live page and return the result. Binary values (ArrayBuffer, Uint8Array) come back as hex strings automatically — no JSON-serialization holes. Strings, numbers, and plain objects pass through. Use this to probe the page during discovery: verify globals exist, inspect module registries, call encoder functions with sample args, compare output byte lengths against captured frames. This is the primary reverse-engineer probe — pair it with `search_js_source` + `read_js_function` + `get_js_source` to locate and verify the encoder path before committing to a `frameFromPage` strategy. Blocked in `execute_only` sessions (warm-measurement mode). Timeout default 5000ms, max 30000. Expression cap 4096 chars.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        expression: { type: 'string', description: 'JS expression. Async OK (runtime awaits).' },
+        timeout_ms: { type: 'number', description: 'Max wall-clock ms. Default 5000, max 30000.' },
+      },
+      required: ['session_id', 'expression'],
+    },
+    handler: (args: any) =>
+      jsEval({
+        session_id: args.session_id,
+        expression: args.expression,
+        timeout_ms: args.timeout_ms,
+        result_offset: args.result_offset,
+        result_length: args.result_length,
+      }),
+  },
+
+  {
+    name: TOOL_NAMES.installPageInitScript,
+    description:
+      "Install a JS expression that runs on every fresh document — before the page's own bundle, on every navigation. Wraps Playwright `addInitScript` (CDP `Page.addScriptToEvaluateOnNewDocument`). Canonical use: monkey-patch `window.fetch` / `XMLHttpRequest` for capture-on-real-send during RE on SPA sites where a one-shot `js_eval` patch would be stomped when the bundle re-runs after navigation. The agent's wrapper runs first; the page's own wrappers wrap the agent's, so the agent gets visibility into every send across navigations. Returns `{handle}` for `remove_page_init_script`. See klura://reference#reverse-engineer-playbook for the canonical fetch-wrapper template. Blocked in execute_only mode. Expression cap 4096 chars.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        expression: {
+          type: 'string',
+          description:
+            'JS expression to run on every fresh document. Wrapped in an async IIFE; runs once per page bootstrap.',
+        },
+      },
+      required: ['session_id', 'expression'],
+    },
+    handler: (args: any) =>
+      installPageInitScript({
+        session_id: args.session_id,
+        expression: args.expression,
+      }),
+  },
+
+  {
+    name: TOOL_NAMES.removePageInitScript,
+    description:
+      "Disable a previously-installed page init script by handle. Best-effort: Playwright does not expose a removal API on `addInitScript`, so the runtime adds the handle to a session-scoped removed-set; the wrapper checks this set on every navigation and short-circuits. Already-running wrappers in the current page also notice via an in-page `__klura_init_removed` set. The init script itself remains installed for the browser context's lifetime, but its body is a no-op once removed.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        handle: { type: 'string', description: 'Handle returned from `install_page_init_script`.' },
+      },
+      required: ['session_id', 'handle'],
+    },
+    handler: (args: any) =>
+      removePageInitScript({
+        session_id: args.session_id,
+        handle: args.handle,
+      }),
+  },
+];

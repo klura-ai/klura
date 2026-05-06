@@ -62,3 +62,34 @@ export function declareCapability(args: DeclareCapabilityArgs): { ok: true; _hin
   if (priorHints.length === 0) return { ok: true };
   return { ok: true, _hint: priorHints.join('\n\n') };
 }
+
+// ---------------------------------------------------------------------------
+// Tool registry metadata
+// ---------------------------------------------------------------------------
+
+import { TOOL_NAMES } from '../vocab';
+import type { ToolDef } from '../tool-types';
+
+export const TOOL_DEF: ToolDef = {
+  name: TOOL_NAMES.declareCapability,
+  description:
+    'Declare a capability the agent is about to discover on this session. Call once per capability the user asked for (e.g. "send_message", "search_contact"). `args` is a map `{paramName: literalValue}` of user-supplied values the agent will type (e.g. `{text: "hello", recipient: "Bob"}`). The runtime uses this to partition perform_action history per capability at end_drive, and to template captured request bodies into reusable strategies (substituting each arg value with `{{paramName}}`). For single-capability sessions, pass `{capability, args}` to start_session and skip this tool.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      session_id: { type: 'string' },
+      capability: {
+        type: 'string',
+        description: 'Capability slug the agent is about to discover.',
+      },
+      args: { type: 'object', description: 'Map of user-supplied literals the agent will type.' },
+    },
+    required: ['session_id', 'capability'],
+  },
+  handler: (args: any) =>
+    declareCapability({
+      session_id: args.session_id,
+      capability: args.capability,
+      args: args.args,
+    }),
+};

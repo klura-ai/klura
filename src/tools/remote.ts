@@ -139,3 +139,58 @@ export async function waitForRemote(
   const timeoutMs = (options.timeoutSeconds ?? 600) * 1000;
   return waitForRemoteDone(sessionId, timeoutMs);
 }
+
+// ---------------------------------------------------------------------------
+// Tool registry metadata
+// ---------------------------------------------------------------------------
+
+import { TOOL_NAMES } from '../vocab';
+import type { ToolDef } from '../tool-types';
+
+export const TOOL_DEFS: ToolDef[] = [
+  {
+    name: TOOL_NAMES.startRemoteSession,
+    description:
+      'Start a remote viewer so the user can see and interact with the browser. Returns `{viewerUrl, _render_verbatim_block}` — the runtime hoists the URL into a leading content block with a "paste this verbatim" preface, no backticks/markdown/quotes around it (the user copy-pastes the URL out of chat and any wrapping characters break the JWT-signed request). Use when you hit a gate you cannot pass (captcha, bot detection, QR code). Also invoked transparently at execute time by `strategy.interrupts[]` entries whose handler is `user-assist` — those fire the viewer on an existing warm session without an explicit tool call. Idempotent within the 60s short-token TTL: a second call returns the same URL while the relay token is live, and auto-rotates to a fresh short URL once the prior one expired (so "user missed the 60s click window, give me a new link" Just Works by re-calling). The short link is multi-use within its TTL — clicking the same URL several times during the window is fine, so a failed page-load is recoverable by re-clicking. For a full session refresh (rare — corrupted relay, dead tunnel), call `stop_remote_session` then `start_remote_session`.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        prompt: {
+          type: 'string',
+          description:
+            'What the USER must do that the AGENT cannot — typically the auth/identity gate. NOT the full task: the agent resumes control after the user clicks Done and finishes the rest itself. Good: "Log in to your account", "Complete the payment authorization", "Connect your account", "Verify your identity". Bad — asks the user to do the agent\'s work: "Log in and send the message X to Y", "Log in and click Submit", "Find the chat with Bob and type hello" (the agent does the messaging / clicking after login). Bad — too step-specific: "Solve the captcha", "Enter the 2FA code", "Tick the checkbox" — the user may hit captcha → 2FA → login in sequence and the prompt sticks for all of them, so name the auth goal, not the current step. The runtime appends ", then press Done or tell me in chat" automatically — leave that off.',
+        },
+      },
+      required: ['session_id'],
+    },
+    handler: (args: any) => startRemote(args.session_id, { prompt: args.prompt }),
+  },
+
+  {
+    name: TOOL_NAMES.stopRemoteSession,
+    description: 'Stop a remote viewer session.',
+    inputSchema: {
+      type: 'object',
+      properties: { session_id: { type: 'string' } },
+      required: ['session_id'],
+    },
+    handler: (args: any) => stopRemote(args.session_id),
+  },
+
+  {
+    name: TOOL_NAMES.waitForRemote,
+    description:
+      'Block until the user clicks Done in the remote viewer. Call this immediately after start_remote_session instead of a bash polling loop. Returns {done: true} when the user clicks Done, or {done: false, reason: "timeout"} if they did not respond in time.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        timeout_seconds: { type: 'number', description: 'How long to wait (default 600)' },
+      },
+      required: ['session_id'],
+    },
+    handler: (args: any) =>
+      waitForRemote(args.session_id, { timeoutSeconds: args.timeout_seconds }),
+  },
+];

@@ -120,3 +120,67 @@ export async function findInPage(
     ...(matchesTruncated ? { matches_truncated: true as const } : {}),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Tool registry metadata
+// ---------------------------------------------------------------------------
+
+import { TOOL_NAMES } from '../vocab';
+import type { ToolDef } from '../tool-types';
+
+export const TOOL_DEFS: ToolDef[] = [
+  {
+    name: TOOL_NAMES.getScreenshot,
+    description: 'Take a screenshot of the current page. Returns base64-encoded PNG.',
+    inputSchema: {
+      type: 'object',
+      properties: { session_id: { type: 'string' } },
+      required: ['session_id'],
+    },
+    handler: (args: any) => getScreenshot(args.session_id),
+  },
+
+  {
+    name: TOOL_NAMES.getAttribute,
+    description:
+      'Read an attribute off the first element matching a CSS selector — use this to verify that a candidate selector (e.g. a `meta[name=csrf-token]` nonce, a hidden `input[name=authenticity_token]`, a `data-*` attribute) actually exists on the live page before saving it into a strategy. If `attr` is omitted, returns the element\'s text content. Returns `{value: string}` on success; throws if the selector does not resolve (so you can tell "doesn\'t exist" apart from "exists but empty"). Meta tags and other non-a11y elements are not in the accessibility tree — use this tool to read them directly.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        selector: {
+          type: 'string',
+          description:
+            'CSS selector for the element, e.g. "meta[name=csrf-token]", "input[name=authenticity_token]", "[data-token]"',
+        },
+        attr: {
+          type: 'string',
+          description:
+            'Attribute name to read (e.g. "content", "value"). Omit to read the element\'s text content.',
+        },
+      },
+      required: ['session_id', 'selector'],
+    },
+    handler: (args: any) => getAttribute(args.session_id, args.selector, args.attr),
+  },
+
+  {
+    name: TOOL_NAMES.findInPage,
+    description:
+      "Scan the current page for elements whose text content or any attribute value contains `needle`. Returns up to `limit` matches with a usable CSS selector, the matching attribute (if any), and a truncated value preview. **Use this to trace opaque values you see in captured request bodies back to the DOM that rendered them.** When `get_network_log` shows a POST body with a value you didn't provide (internal IDs, nonces, opaque tokens), call `find_in_page` with that value — you'll usually get back the `<meta>` tag, hidden `<input>`, or `data-*` attribute the web app read it from. Then turn that selector into a `page-extract` prereq. If the exact value isn't found, try progressively: shorter substrings (numeric or alphanumeric fragments from inside the value), then the base64-decoded form, then a decoded substring. Many web apps encode a visible numeric ID into an opaque API ID via a deterministic transform (base64, hex, hash) — when you find the numeric on the page but the opaque form in the body, write a small generator that re-applies the transform.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        needle: {
+          type: 'string',
+          description:
+            'Substring to search for. Try the raw value first; if no match, try shorter substrings or a base64-decoded form.',
+        },
+        limit: { type: 'number', description: 'Max matches to return. Default 20.' },
+      },
+      required: ['session_id', 'needle'],
+    },
+    handler: (args: any) => findInPage(args.session_id, args.needle, args.limit),
+  },
+];

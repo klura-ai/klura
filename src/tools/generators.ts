@@ -741,3 +741,131 @@ export async function tryGeneratorInPage(opts: TryGeneratorInPageArgs): Promise<
     ...(staleNote !== undefined ? { stale_upgrade_note: staleNote } : {}),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Tool registry metadata
+// ---------------------------------------------------------------------------
+
+import { TOOL_NAMES } from '../vocab';
+import type { ToolDef } from '../tool-types';
+
+export const TOOL_DEFS: ToolDef[] = [
+  {
+    name: TOOL_NAMES.tryGenerator,
+    description:
+      'Dry-run a candidate `generated.<name>.code` snippet in the warm-execute vm sandbox, optionally diffing output byte-for-byte against a captured WebSocket frame. On `ok:false` the response names `first_diff_offset` + `expected_byte` + `got_byte` + a 16-byte hex context window on each side. Sandbox globals: `Date`, `Math`, `Buffer`, `JSON`, string/number helpers, `encodeURIComponent`/`decodeURIComponent`, `crypto` (`randomUUID`, `randomBytes`, `createHash`, `createHmac`), `args` (frozen). 100ms timeout. Must return a string; for binary, return base64. Full loop + convergence signals + structural-match mode: klura://reference#try-generator.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: {
+          type: 'string',
+          description:
+            'Session ID from start_session. Required only when verify_against.ws_i is used so the captured ws frame can be looked up.',
+        },
+        code: {
+          type: 'string',
+          description:
+            'The JS snippet to run. Identical shape to strategy.generated.<name>.code. Wrapped in an IIFE at runtime, must use `return` to emit the frame. Return a string; return base64 for binary frames (encoding:"binary").',
+        },
+        args: {
+          type: 'object',
+          description:
+            'The `args` object exposed to the sandbox. Mirror the execute-time shape (e.g. {message: "hello"}). Pass the same values you\'d pass to execute() so the test matches reality.',
+        },
+        encoding: {
+          type: 'string',
+          enum: ['text', 'binary'],
+          description:
+            'How to interpret the generator\'s return string when diffing: "binary" (default) base64-decodes before comparing; "text" compares the string verbatim. Must match the strategy\'s frameEncoding.',
+        },
+        verify_against: {
+          type: 'object',
+          description:
+            'Optional ground truth to diff against. One of {ws_i}, {ws_hash}, or {base64}. ws_hash preferred over ws_i (survives ring rotation). Omit to just run the code and return its output without diffing.',
+          properties: {
+            ws_i: { type: 'number', description: 'Positional ring-buffer index (fragile).' },
+            ws_hash: { type: 'string', description: 'Stable content hash. Preferred.' },
+            base64: {
+              type: 'string',
+              description:
+                'Explicit ground-truth bytes as base64. Use when you already have the expected bytes in hand (e.g. from a prior get_network_log response) without needing a live session.',
+            },
+          },
+        },
+        match: {
+          type: 'string',
+          enum: ['bytes', 'structural'],
+          description:
+            '"bytes" (default) — byte-perfect match required. "structural" — extract JSON from both sides, compare shapes (keys + value types) while ignoring actual values. Use when the envelope is right and only rotating-value differences remain; skips the diminishing-returns byte-perfect convergence.',
+        },
+      },
+      required: ['code'],
+    },
+    handler: (args: any) =>
+      tryGenerator({
+        session_id: args.session_id,
+        code: args.code,
+        args: args.args ?? {},
+        verify_against: args.verify_against,
+        encoding: args.encoding,
+        match: args.match,
+      }),
+  },
+
+  {
+    name: TOOL_NAMES.tryGeneratorInPage,
+    description:
+      'Page-side sibling of `try_generator`: runs a `frameFromPage`-shaped expression in the LIVE page (via `driver.evaluateExpression`), decodes its hex/base64 output to bytes, and diffs against a captured ws frame. Gives you the same convergence feedback `try_generator` gives for Node-VM generators, but for expressions that can read `document` / `window.*` / live session state. A successful run (`ok:true`) means the expression can be saved verbatim as `frameFromPage.expression` on a `page-script` strategy. Use this when you hit the "HARD PIVOT — write the encoder yourself" path on a binary-WS nag: iterate your expression against the captured frame until bytes match, then save.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        expression: {
+          type: 'string',
+          description:
+            'JS expression run in the live page. Interpolated with {{paramName}} against `args` before eval. Must produce a string encoded per `returns`.',
+        },
+        args: {
+          type: 'object',
+          description:
+            'Template args substituted into the expression. Mirror the warm-execute shape.',
+        },
+        returns: {
+          type: 'string',
+          enum: ['hex', 'base64'],
+          description: 'How the expression\'s return string is decoded to bytes. Default "hex".',
+        },
+        verify_against: {
+          type: 'object',
+          description:
+            'Captured ws frame to compare output against. Accepts ws_i (positional, fragile across ring rotation) or ws_hash (content-addressed, survives rotation and works for pinned frames). Prefer ws_hash for any iteration loop.',
+          properties: {
+            ws_i: { type: 'number', description: 'Positional ring-buffer index (fragile).' },
+            ws_hash: { type: 'string', description: 'Stable content hash. Preferred.' },
+          },
+        },
+        timeout_ms: {
+          type: 'number',
+          description: 'Page-eval timeout in ms. Default 5000, capped 30000.',
+        },
+        match: {
+          type: 'string',
+          enum: ['bytes', 'structural'],
+          description:
+            '"bytes" (default) — byte-perfect match required. "structural" — shape-only comparison; see try_generator for details.',
+        },
+      },
+      required: ['session_id', 'expression', 'verify_against'],
+    },
+    handler: (args: any) =>
+      tryGeneratorInPage({
+        session_id: args.session_id,
+        expression: args.expression,
+        args: args.args ?? {},
+        match: args.match,
+        returns: args.returns,
+        verify_against: args.verify_against,
+        timeout_ms: args.timeout_ms,
+      }),
+  },
+];

@@ -51,3 +51,33 @@ test('TOOL_REGISTRY: every entry has an inputSchema object', () => {
     assert.notEqual(def.inputSchema, null);
   }
 });
+
+test('TOOL_REGISTRY: every TOOL_NAMES value appears in the registry', () => {
+  const registryNames = new Set(TOOL_REGISTRY.map((d) => d.name));
+  const missing = Object.values(TOOL_NAMES).filter((n) => !registryNames.has(n));
+  assert.deepEqual(
+    missing,
+    [],
+    `TOOL_NAMES values missing from TOOL_REGISTRY: ${missing.join(', ')} — every named tool must have a TOOL_DEF`,
+  );
+});
+
+test('TOOL_REGISTRY: gate-owning tools set their bypass flags', () => {
+  const byName = new Map(TOOL_REGISTRY.map((d) => [d.name, d]));
+  const ack = byName.get(TOOL_NAMES.ackCheckpoint);
+  assert.ok(ack, 'ack_checkpoint missing from TOOL_REGISTRY');
+  assert.equal(
+    ack.skipCheckpointGate,
+    true,
+    'ack_checkpoint must set skipCheckpointGate:true — it resolves the pending checkpoint',
+  );
+  for (const name of [TOOL_NAMES.resolveInterruption, TOOL_NAMES.listInterruptionResolvers]) {
+    const def = byName.get(name);
+    assert.ok(def, `${name} missing from TOOL_REGISTRY`);
+    assert.equal(
+      def.skipInterruptionGate,
+      true,
+      `${name} must set skipInterruptionGate:true — interruption-resolver tools own the pending-interruption gate`,
+    );
+  }
+});

@@ -306,3 +306,217 @@ export function getDiscoveryArtifactField(args: GetDiscoveryArtifactFieldArgs): 
   const value = (artifact as unknown as Record<string, unknown>)[args.field];
   return { field: args.field, value: value ?? null };
 }
+
+// ---------------------------------------------------------------------------
+// Tool registry metadata
+// ---------------------------------------------------------------------------
+
+import { TOOL_NAMES } from '../vocab';
+import type { ToolDef } from '../tool-types';
+
+export const TOOL_DEFS: ToolDef[] = [
+  {
+    name: TOOL_NAMES.addDiscoveryNote,
+    description:
+      'Drop a typed, prose-length hint for the next session to read from the discovery artifact. Unlike `add_resume_pointer` (pointers to bytes at specific offsets), notes carry reasoning — function hints, module paths, field-rotation rules, byte-layout observations, open questions. Next session\'s agent reads these inline in `list_platform_skills.discovery_artifact.notes` and picks up where you left off. When reverse-engineering a complex send, drop a note whenever you confirm something non-obvious: "appId is sourced from meta[name=app_id]", "epoch_id = (Date.now() << 22) | random22", "sync tasks use label 46 for SendMessage, label 21 for MarkRead", etc. Cap 20 entries per capability.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        capability: { type: 'string', description: 'Capability slug this note applies to.' },
+        kind: {
+          type: 'string',
+          enum: [
+            'function_hint',
+            'module_path',
+            'field_rotation',
+            'byte_layout',
+            'verified_expression',
+            'open_question',
+            'user_declined_send',
+            'other',
+          ],
+          description:
+            'Descriptive category. `function_hint`: "the encoder appears to be at window.X.Y". `module_path`: webpack/require path confirmed. `field_rotation`: how a session-scoped field changes per send. `byte_layout`: wire-format breakdown. `verified_expression`: a string-form note about an expression that worked (pair with `save_verified_expression` for the runnable form). `open_question`: something you didn\'t have time to confirm. `other`: catch-all.',
+        },
+        body: {
+          type: 'string',
+          description:
+            'The note body (≤ 500 chars). Prose, not code. Structural claims — no pasted tokens.',
+        },
+        verified: {
+          type: 'boolean',
+          description:
+            'True when the claim has been confirmed via js_eval / try_generator / similar. Resets the hardness-check counter.',
+        },
+      },
+      required: ['session_id', 'capability', 'kind', 'body'],
+    },
+    handler: (args: any) =>
+      addDiscoveryNote({
+        session_id: args.session_id,
+        capability: args.capability,
+        kind: args.kind,
+        body: args.body,
+        verified: args.verified,
+      }),
+  },
+
+  {
+    name: TOOL_NAMES.saveVerifiedExpression,
+    description:
+      "Persist an expression the agent has confirmed works this session. The runtime evaluates the expression once via `evaluateExpression` (with the same hex-wrapping as `js_eval`) to confirm it doesn't throw and matches the declared `returns` shape; only then does it land in the discovery artifact. Next session reads these from `list_platform_skills.discovery_artifact.verified_expressions` and can try them first instead of re-deriving. For WS sends, a successful `try_generator_in_page` result is typically the expression you save here. Cap 5 entries per capability; expressions referencing {{paramName}} placeholders must list them in `binds_args`.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        capability: { type: 'string' },
+        expression: {
+          type: 'string',
+          description:
+            'JS expression (≤ 2048 chars). Interpolated with {{args}} placeholders at future reuse time.',
+        },
+        binds_args: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Names of declared args the expression references via {{name}}. Empty array allowed when the expression is parameter-free (rare).',
+        },
+        returns: {
+          type: 'string',
+          enum: ['hex', 'base64', 'string', 'object'],
+          description: 'Declared return shape. `hex` / `base64` trigger a decode check after eval.',
+        },
+        sample_byte_length: {
+          type: 'number',
+          description:
+            'Optional — byte length the expression produced on the test run. Useful for next-session sanity checks.',
+        },
+        notes: { type: 'string', description: 'Optional prose context (≤ 200 chars).' },
+      },
+      required: ['session_id', 'capability', 'expression', 'binds_args', 'returns'],
+    },
+    handler: (args: any) =>
+      saveVerifiedExpression({
+        session_id: args.session_id,
+        capability: args.capability,
+        expression: args.expression,
+        binds_args: args.binds_args,
+        returns: args.returns,
+        sample_byte_length: args.sample_byte_length,
+        notes: args.notes,
+      }),
+  },
+
+  {
+    name: TOOL_NAMES.addResumePointer,
+    description:
+      "Record a forward-looking pointer on this session for `capability` — an intention the next run should read when deciding where to resume discovery. `kind` is one of: `js_source` (URL of a script to read; pair with `line` for a specific offset), `request_index` (captured HTTP request index), `frame_index` (captured WS frame index), `page_url` (a page worth re-visiting), `other` (free-form). `ref` carries the kind-specific reference string. Use when you identified a productive next step but the current session ran out of budget — the pointer lands on the capability's discovery artifact and the next session sees it inline in list_platform_skills / start_session / execute responses. Works even when no save_strategy succeeded this session.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        capability: { type: 'string', description: 'Capability slug this pointer applies to.' },
+        kind: {
+          type: 'string',
+          enum: ['js_source', 'request_index', 'frame_index', 'page_url', 'other'],
+        },
+        ref: { type: 'string', description: 'The reference string; shape depends on `kind`.' },
+        line: {
+          type: 'number',
+          description: 'Only valid when kind === "js_source" — the 1-indexed line.',
+        },
+        note: { type: 'string', description: 'Short disambiguation note (≤ 120 chars).' },
+      },
+      required: ['session_id', 'capability', 'kind', 'ref'],
+    },
+    handler: (args: any) =>
+      addResumePointer({
+        session_id: args.session_id,
+        capability: args.capability,
+        kind: args.kind,
+        ref: args.ref,
+        line: args.line,
+        note: args.note,
+      }),
+  },
+
+  {
+    name: TOOL_NAMES.getDiscoveryArtifactField,
+    description:
+      'Fetch a single named field from an on-disk discovery artifact when `list_platform_skills` / `start_session` / `execute` elided it due to the MCP output budget. Check the `_elided_fields` marker on the inlined artifact to see which fields to request via this tool. Mirrors `get_network_log {full: true}`: default responses stay inside the budget, you opt into detail on demand. `field` is one of: `tool_call_trace`, `observations`, `resume_pointers`, `recommended_next_steps`.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        platform: { type: 'string' },
+        capability: { type: 'string' },
+        field: {
+          type: 'string',
+          enum: ['tool_call_trace', 'observations', 'resume_pointers', 'recommended_next_steps'],
+        },
+      },
+      required: ['platform', 'capability', 'field'],
+    },
+    handler: (args: any) =>
+      getDiscoveryArtifactField({
+        platform: args.platform,
+        capability: args.capability,
+        field: args.field,
+      }),
+  },
+
+  {
+    name: TOOL_NAMES.recordObservedCapability,
+    description:
+      "Record a companion capability you noticed during discovery but didn't lift as its own saved strategy. Persists to the platform logbook under `observed_capabilities[]`. Next run's `list_platform_skills` surfaces these so the next agent sees known unfinished candidates and can lift them. Dedup-by-name: re-observing updates `last_observed_at` and bumps `observed_in_sessions` once per session.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        platform: { type: 'string' },
+        name: {
+          type: 'string',
+          description:
+            'Canonical capability name, slug-shaped (≤60 chars, snake_case). e.g. "lookup_thread_by_name".',
+        },
+        evidence: {
+          type: 'object',
+          description:
+            'Evidence pointer. Must include `source` (e.g. "network" or "ui"); carry whatever source-specific fields help the next agent re-find the observation (endpoint, request_i, ws_i, ui_selector, ui_hint, etc.).',
+          properties: {
+            source: {
+              type: 'string',
+              description:
+                'Where the observation came from — "network", "ui", or another descriptor.',
+            },
+          },
+          required: ['source'],
+        },
+        why_not_lifted: {
+          type: 'string',
+          description:
+            'One of: "separate_capability", "turn_budget", "unverified", "blocked", "other".',
+        },
+        hypothesis: {
+          type: 'string',
+          description:
+            'Optional structural prose (≤800 chars) — describe what the endpoint does, not the bytes it returned.',
+        },
+        session_id: {
+          type: 'string',
+          description:
+            'Optional current session id; repeat calls within the same session only bump `observed_in_sessions` once.',
+        },
+      },
+      required: ['platform', 'name', 'evidence', 'why_not_lifted'],
+    },
+    handler: (args: any) =>
+      recordObservedCapability({
+        platform: args.platform,
+        name: args.name,
+        evidence: args.evidence,
+        why_not_lifted: args.why_not_lifted,
+        hypothesis: args.hypothesis,
+        session_id: args.session_id,
+      }),
+  },
+];

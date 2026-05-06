@@ -4,18 +4,11 @@
 // implementation. This file imports every TOOL_DEF and assembles the
 // flat `TOOL_REGISTRY` array that the MCP wrapper (mcp/tools.js) consumes.
 //
-// **Migration status (in progress).** The tool catalog historically lived in
-// mcp/tools.js as hand-maintained `{name, description, inputSchema, handler}`
-// entries — sole source. This registry colocates each entry with its
-// implementation so a reviewer sees both halves at once and a rename
-// cascades through tsc instead of relying on convention.
-//
-// The migration is incremental: tools land in this registry one (or one
-// file) at a time. Until every tool is migrated, the MCP wrapper falls back
-// to mcp/tools.js for any tool whose name isn't in TOOL_REGISTRY. The
-// registry-parity test in runtime/test/registry-parity.test.js asserts that
-// every entry in TOOL_REGISTRY (a) has a unique name in TOOL_NAMES, (b)
-// references a real tool, (c) has a callable handler.
+// `runtime/test/registry-parity.test.js` asserts internal consistency:
+// every entry has a unique name in TOOL_NAMES, every name references a
+// callable handler, every TOOL_NAMES value appears in the registry, and
+// gate-owning tools (ack_checkpoint, resolve_interruption,
+// list_interruption_resolvers) set their bypass flags.
 //
 // **Adding a new tool** — define `TOOL_DEF` next to the implementation:
 //
@@ -38,11 +31,46 @@
 
 import type { ToolDef } from '../tool-types';
 
-// Migrated TOOL_DEFs go here. Pattern:
-//   import { TOOL_DEF as someTool } from './some-tool';
-// then include in the array below.
+import { TOOL_DEF as startSession } from './start-session';
+import { TOOL_DEFS as performActionTools } from './perform-action';
+import { TOOL_DEFS as pageHelperTools } from './page-helpers';
+import { TOOL_DEFS as wsFrameTools } from './ws-frames';
+import { TOOL_DEF as triggerReferenceSend } from './trigger-reference-send';
+import { TOOL_DEFS as generatorTools } from './generators';
+import { TOOL_DEFS as sessionEnvelopeTools } from './session-envelopes';
+import { TOOL_DEFS as saveStrategyTools } from './save-strategy';
+import { TOOL_DEF as submitTriagePlan } from './submit-triage-plan';
+import { TOOL_DEFS as skillsQueryTools } from './skills-query';
+import { TOOL_DEF as getStrategyHealth } from './health';
+import { TOOL_DEF as declareCapability } from './declare-capability';
+import { TOOL_DEFS as discoveryArtifactTools } from './discovery-artifact-tools';
+import { TOOL_DEFS as jsTools } from './js-tools';
+import { TOOL_DEFS as debuggerTools } from './debugger';
+import { TOOL_DEFS as remoteTools } from './remote';
+import { TOOL_DEFS as listenerTools } from './listeners';
+import { TOOL_DEF as resumeExecution } from './execute';
+import { TOOL_DEFS as configTools } from './config-tools';
+import { TOOL_DEFS as interruptionTools } from './interruption-tools';
 
 export const TOOL_REGISTRY: ToolDef[] = [
-  // (Empty during migration — mcp/tools.js still owns the full catalog.
-  //  Add entries as tools migrate.)
+  startSession,
+  ...performActionTools,
+  ...pageHelperTools,
+  ...wsFrameTools,
+  triggerReferenceSend,
+  ...generatorTools,
+  ...sessionEnvelopeTools,
+  ...saveStrategyTools,
+  submitTriagePlan,
+  ...skillsQueryTools,
+  getStrategyHealth,
+  declareCapability,
+  ...discoveryArtifactTools,
+  ...jsTools,
+  ...debuggerTools,
+  ...remoteTools,
+  ...listenerTools,
+  resumeExecution,
+  ...configTools,
+  ...interruptionTools,
 ];

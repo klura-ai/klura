@@ -467,3 +467,66 @@ export async function submitTriagePlan(rawArgs: unknown): Promise<SubmitTriagePl
     }),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Tool registry metadata
+// ---------------------------------------------------------------------------
+
+import { TOOL_NAMES } from '../vocab';
+import type { ToolDef } from '../tool-types';
+
+export const TOOL_DEF: ToolDef = {
+  name: TOOL_NAMES.submitTriagePlan,
+  description:
+    'Commit a defense-surface triage plan (per `surface_label`) and request user ack to enter LIFT. Inspect third-party origins / scripts / cookies / request patterns on the page; identify the bot-detection posture using your own knowledge (runtime never names vendors). Inputs: surface_label, defense_surface, expected_tier, tier_justification (must cite an observed origin / script / cookie / URL verbatim — runtime rejects empty or uncited justifications), summary_for_user. Tier suggestion is informational; the agent still aims T0 → T1 → T2 in lift. Multi-surface flows submit one plan per surface; the runtime fires a `surface_changed` checkpoint when navigation crosses to an un-triaged surface.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      session_id: { type: 'string' },
+      capability: { type: 'string' },
+      surface_label: {
+        type: 'string',
+        description:
+          'Semantic name for this surface (e.g. "checkout", "search", "settings/billing"). One plan per surface; later saves whose target URL binds to this label gate on this plan.',
+      },
+      defense_surface: {
+        type: 'object',
+        properties: {
+          observed_origins: { type: 'array', items: { type: 'string' } },
+          observed_scripts: { type: 'array', items: { type: 'string' } },
+          cookies_set: { type: 'array', items: { type: 'string' } },
+          request_patterns: { type: 'array', items: { type: 'string' } },
+          mechanism_hypothesis: { type: 'string' },
+        },
+        required: [
+          'observed_origins',
+          'observed_scripts',
+          'cookies_set',
+          'request_patterns',
+          'mechanism_hypothesis',
+        ],
+      },
+      expected_tier: { type: 'string', enum: ['fetch', 'page-script', 'recorded-path'] },
+      tier_justification: {
+        type: 'string',
+        description:
+          'Free-text justification — must cite at least one verbatim observed origin / script / cookie / URL.',
+      },
+      summary_for_user: {
+        type: 'string',
+        description:
+          '1-3 sentence non-technical summary the user reads via the triage_plan checkpoint.',
+      },
+    },
+    required: [
+      'session_id',
+      'capability',
+      'surface_label',
+      'defense_surface',
+      'expected_tier',
+      'tier_justification',
+      'summary_for_user',
+    ],
+  },
+  handler: (args: any) => submitTriagePlan(args),
+};

@@ -107,3 +107,23 @@ export function getStrategyHealth(args: GetStrategyHealthArgs = {}): GetStrategy
 
   return { threshold, entries };
 }
+
+// ---------------------------------------------------------------------------
+// Tool registry metadata
+// ---------------------------------------------------------------------------
+
+import { TOOL_NAMES } from '../vocab';
+import type { ToolDef } from '../tool-types';
+
+export const TOOL_DEF: ToolDef = {
+  name: TOOL_NAMES.getStrategyHealth,
+  description:
+    'Per-strategy rolling success rate + status for saved skills. Returns one row per (platform, capability, strategy_type) with `success_rate` (over the last ≤20 calls; null when fewer than 5 samples), `samples`, `status` (healthy/degraded/broken), `last_error`, `silenced`, and `rediscover_gate_armed` (true when the next `execute` call would raise the rediscover ack-gate). Pass `platform` to scope to one platform; omit to list all known platforms. Use this proactively to spot strategies that have rotted before they fire mid-flow. Threshold lives in `pool.rediscoverThreshold` (configure via the `configure` tool).',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      platform: { type: 'string', description: 'Platform slug. Omit to list all platforms.' },
+    },
+  },
+  handler: (args: any) => getStrategyHealth({ platform: args.platform }),
+};

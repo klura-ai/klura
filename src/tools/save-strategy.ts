@@ -969,3 +969,82 @@ function buildValidationTarget(data: Strategy): { method: string; url: string } 
   }
   return { method, url };
 }
+
+// ---------------------------------------------------------------------------
+// Tool registry metadata
+// ---------------------------------------------------------------------------
+
+import { TOOL_NAMES } from '../vocab';
+import type { ToolDef } from '../tool-types';
+import { patchStep } from '../public-api';
+
+export const TOOL_DEFS: ToolDef[] = [
+  {
+    name: TOOL_NAMES.saveStrategy,
+    description:
+      'Save a discovered execution strategy for a platform capability. klura stores only complete, runnable strategies on disk; iterative progress goes into the capability\'s discovery_artifact via `save_verified_expression` / `add_discovery_note` / `add_resume_pointer`, and into the platform logbook via `record_observed_capability`. On `end_drive` with no complete save, auto-synth drops a recorded-path fallback from perform_action history.\n\n**save_strategy commits the strategy file only.** It does not close the session. The session stays open until you explicitly call `end_drive`. Multi-capability sessions: save each capability, then `end_drive` to finalize. Single-capability sessions: save, persist any RE findings via `add_discovery_note` / `add_resume_pointer`, then `end_drive`. The close-time audit (re_persistence, capability_declaration_required, auto-synth, logbook flush) all live on `end_drive`.\n\nCommon save-time rejections (error message names the field; catalog here to front-load):\n  - **Pre-save audit (two-phase, token-gated)** — first call always rejected with `audit_token` + checklist. Echo on next call with `audit_answers` classifying every literal. Full shape: klura://reference#save-strategy-audit.\n  - **`user_confirmation` audit** — every save requires the user\'s explicit approval. The first call returns `items.user_confirmation.prompt_for_user` — relay it verbatim to the user, get yes/no, retry with `audit_answers.user_confirmation: {user_decision: "approve"|"reject", user_quote: "<verbatim user reply>"}`. Token binds to the whole strategy hash, so any structural change forces a fresh ask.\n  - **Selector self-reference** — prereq extract that reads the id already in `endpoint`/`wsUrl`. Extract from a structural source (URL regex, page global, JSON script tag).\n  - **recorded-path over observed binary WS write** — capability is liftable above recorded-path; start with `inspect_ws_frame` + `try_generator`. Persist partial progress to discovery_artifact and let end_drive auto-synth the fallback.\n  - **fetch with empty `prerequisites: []` that needs in-page cookies** — set `transport: "browser"`.\n  - **`notes.<unknown_subkey>`** — allowlisted keys: `params`, `quirks`, `auth`, `discovery` (string), `observed_capabilities[]`, `changelog`, `anchor_type`, `save_warnings`, `save_warnings_acked`.\n  - **Save-time warnings** — `unparametrized_session_id`, `unresolved_name_to_id_gap`, `entity_pinned_infra_prereq`. Either fix the strategy or ack inline via `notes.save_warnings_acked: [{kind, reason}]`. Reason required.\n  - **URL not observed in discovery network log** — pass `session_id` so the cross-reference catches recalled-from-training-data endpoints.\n  - **Enum param without grounding** — `kind: "enum"` caller_input needs `observed_values: [{value, label}...]` from captured traffic, or `source: "capability:<slug>"`. See klura://reference#enum-params.\n  - **`status` field on strategy body** — not in the schema. Iterative progress lives in the discovery_artifact, not the strategy body.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        platform: { type: 'string' },
+        capability: { type: 'string' },
+        strategy: {
+          type: 'object',
+          description:
+            'Strategy body. `strategy` field: "fetch" | "page-script" | "recorded-path". For fetch/page-script: method, baseUrl, endpoint, headers, body. Use page-script (with `origin`) when bot-protection cookies can\'t replay outside the browser — runtime fires the fetch from inside the page. For page-script, declare `notes.anchor_type`: "module" | "protocol" | "dom" | "unknown" (default; treated as fragile). HTML reads add `response: {format: "html", extract: {name: {selector, attr?, multiple?}}}`. Auto-generated values via `generated.<name>`; reference as {{__gen.<name>}}. Full schemas + worked examples: klura://reference#strategy-schemas-overview, klura://reference#page-script-anchors.',
+        },
+        changelog: {
+          type: 'string',
+          description: 'Human-readable summary of what changed (logged to history)',
+        },
+        session_id: {
+          type: 'string',
+          description:
+            'Discovery session id (REQUIRED for agent-driven saves). The session anchors the pre-save audit — URL cross-check against the captured network log, literal_provenance classifier, user_confirmation decider integration. Without it, the audit is skipped (the audit-skip path is reserved for in-process programmatic callers like auto-synth and tests, which call `saveStrategy()` directly rather than going through MCP).',
+        },
+        audit_token: {
+          type: 'string',
+          description: 'Echo the audit_token returned on the prior save_strategy rejection.',
+        },
+        audit_answers: {
+          type: 'object',
+          description:
+            'Classification answers per the checklist from the prior rejection. Shape: {literal_provenance: {<path>: "static"|{caller_input:"<param>"}|{prereq_output:"<binds>"}|"single_entity"}, capability_name_justification?: string, observed_siblings: {<"METHOD url">: "recorded"|"not_worth_recording:<reason>"}, user_confirmation: {user_decision: "approve"|"reject", user_quote: "<verbatim user reply>"}}. See klura://reference#save-strategy-audit for details.',
+        },
+      },
+      required: ['platform', 'capability', 'strategy', 'session_id'],
+    },
+    handler: (args: any) =>
+      saveStrategy(args.platform, args.capability, args.strategy, args.changelog, args.session_id, {
+        token: args.audit_token,
+        answers: args.audit_answers,
+      }),
+  },
+
+  {
+    name: TOOL_NAMES.patchStep,
+    description:
+      'Patch a single step in a recorded-path strategy by its stable slug id. Use for step-level healing when execution fails at a specific step — update the locators, action, or value without rewriting the whole strategy. Steps carry a required `id` field (e.g. "click_send", "type_message"); pass that id as `step_id`. 404 error names the known ids in the strategy.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        platform: { type: 'string' },
+        capability: { type: 'string' },
+        strategy_type: { type: 'string', description: 'Strategy type (e.g. "recorded-path")' },
+        step_id: {
+          type: 'string',
+          description:
+            'Slug id of the step to patch (matches the `id` field on the recorded-path step, e.g. "click_send"). See klura://reference#recorded-path-schema.',
+        },
+        patch: {
+          type: 'object',
+          description:
+            'Fields to merge into the step (e.g. {"locators": {"css": "button.new-class"}})',
+        },
+      },
+      required: ['platform', 'capability', 'strategy_type', 'step_id', 'patch'],
+    },
+    handler: (args: any) =>
+      patchStep(args.platform, args.capability, args.strategy_type, args.step_id, args.patch),
+  },
+];

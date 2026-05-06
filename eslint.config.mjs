@@ -120,13 +120,43 @@ export default tseslint.config(
     },
   },
   {
-    // Start-session orchestrator: bundles identity normalization, drive-start
-    // nudges, warm-path advisories, capability resolution. Cohesive lifecycle
-    // entry point — splitting would mostly thread shared session/options
-    // refs through new module boundaries.
-    files: ['src/tools/start-session.ts'],
+    // Tool files where the impl + colocated TOOL_DEF / TOOL_DEFS together
+    // exceed the 1000-line cap. Splitting the TOOL_DEF off into a sibling
+    // would defeat the colocation goal (a reviewer reading the impl sees
+    // the description and schema right there).
+    //
+    // start-session.ts: bundles identity normalization, drive-start nudges,
+    //   warm-path advisories, capability resolution.
+    // perform-action.ts: bundles every action handler (click/type/navigate/
+    //   scroll/etc.) plus get_a11y_tree/get_action_history/get_network_log.
+    // save-strategy.ts: bundles save_strategy + patch_step entry points
+    //   plus the cross-tier audit handoff.
+    files: [
+      'src/tools/start-session.ts',
+      'src/tools/perform-action.ts',
+      'src/tools/save-strategy.ts',
+    ],
     rules: {
       'max-lines': 'off',
+    },
+  },
+  {
+    // Tool files house both typed implementations and the colocated
+    // TOOL_DEF / TOOL_DEFS exports whose handlers forward un-validated
+    // agent JSON (`args: any`) into the typed impls — the impls validate.
+    // The strict-type `no-unsafe-*` family flags every `args.foo` access
+    // in those handlers, but the handler boundary is exactly where typed
+    // and untyped meet, so the rules add noise without catching a real
+    // bug. Disable for tool files; the impl functions in the same files
+    // remain typed and tsc-checked.
+    files: ['src/tools/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'off',
+      '@typescript-eslint/no-unsafe-member-access': 'off',
+      '@typescript-eslint/no-unsafe-assignment': 'off',
+      '@typescript-eslint/no-unsafe-argument': 'off',
+      '@typescript-eslint/no-unsafe-call': 'off',
+      '@typescript-eslint/no-unsafe-return': 'off',
     },
   },
   {

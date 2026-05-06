@@ -59,3 +59,64 @@ export async function resolveInterruption(args: ResolveInterruptionArgs): Promis
     session,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Tool registry metadata
+// ---------------------------------------------------------------------------
+
+import { TOOL_NAMES } from '../vocab';
+import type { ToolDef } from '../tool-types';
+
+export const TOOL_DEFS: ToolDef[] = [
+  {
+    name: TOOL_NAMES.listInterruptionResolvers,
+    description:
+      'List registered interruption-handlers as `{name, description}` — the menu for agent-detected ambient page state (CAPTCHA, auth wall, 2FA prompt). Scope: AGENT-DETECTED only. Runtime-emitted events arrive as `_checkpoint` (ack via `ack_checkpoint`), NOT through this menu. Do not route dismissable UI noise (cookie banners, popups) through this surface — click those away yourself. See klura://reference#interruptions.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: {
+          type: 'string',
+          description: 'Optional. Reserved for future session-scoped filtering; ignored today.',
+        },
+      },
+    },
+    skipInterruptionGate: true,
+    handler: (args: any) => listInterruptionResolvers({ session_id: args.session_id }),
+  },
+
+  {
+    name: TOOL_NAMES.resolveInterruption,
+    description:
+      'Invoke a registered interruption handler by name. Scope: AGENT-DETECTED ambient page state (CAPTCHA / 2FA / auth-wall / login-form). Build context including a `reason` string matching handler-description phrasing (e.g. `{reason: "captcha_challenge", sitekey: "..."}`). Runtime-emitted checkpoints route via `_checkpoint` + `ack_checkpoint`, NOT this tool. Response: `{resolution: {status: "resolved"|"handover"|"continue", ...}, interruption_token?}`. On `handover` the next tool call must echo `interruption_token` + an ack (`user_response` / `viewer_result`) or `{cancelled: true, reason}`; otherwise subsequent calls reject with `invalid_strategy: pending_interruption`. Unknown resolver names throw `invalid_strategy: unknown resolver "<name>"`. See klura://reference#interruptions.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        resolver: {
+          type: 'string',
+          description:
+            'Name of a registered handler — one of the `candidates[].name` from `_interruption` OR `list_interruption_resolvers()`.',
+        },
+        context: {
+          type: 'object',
+          description:
+            'Event context. For runtime-initiated interruptions: echo back the `_interruption.context` verbatim. For agent-initiated: build a fresh object including a `reason` string that matches handler descriptions (e.g. `{reason: "captcha_challenge", sitekey: "...", iframe_src: "..."}`).',
+        },
+        capability: {
+          type: 'string',
+          description: 'Optional capability slug relevant to this event.',
+        },
+      },
+      required: ['session_id', 'resolver', 'context'],
+    },
+    skipInterruptionGate: true,
+    handler: (args: any) =>
+      resolveInterruption({
+        session_id: args.session_id,
+        resolver: args.resolver,
+        context: args.context,
+        capability: args.capability,
+      }),
+  },
+];

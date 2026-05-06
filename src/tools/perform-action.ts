@@ -917,3 +917,185 @@ export async function getNetworkLog(
   }
   return result;
 }
+
+// ---------------------------------------------------------------------------
+// Tool registry metadata
+// ---------------------------------------------------------------------------
+
+import { TOOL_NAMES } from '../vocab';
+import type { ToolDef } from '../tool-types';
+
+export const TOOL_DEFS: ToolDef[] = [
+  {
+    name: TOOL_NAMES.performAction,
+    description:
+      'Interact with the page. Per-action args:\n  - click: selector (CSS / a11y / role-name)\n  - type: selector + text (the string to type — APPENDS by default; pass replace:true to clear first)\n  - fill_editor: selector + text (contenteditable rich-text editors — Lexical/Slate/Draft/ProseMirror — where type fails on zero-height bounding boxes)\n  - select: selector + text (the <option>\'s value attribute)\n  - key_press: selector + text (the key, e.g. "Enter", "Escape", "ArrowDown")\n  - mouse_click: selector="x,y" (coordinates as a string)\n  - mouse_drag: selector="x,y" (start) + text="x,y" (end)\n  - scroll: selector="x,y" (anchor, optional) + text="deltaX,deltaY"\n  - navigate: selector=<url> (top-level page navigation)\n\n`text` is the canonical name for the string-to-send, matching the Claude-in-Chrome convention. `value` is accepted as a deprecated alias for `text` and produces an identical effect. Returns the updated accessibility tree (~2-4s on heavy DOMs); pass `return_tree: false` when the next tool call (get_network_log, get_screenshot, another perform_action) will supersede the tree anyway. Pass `page` to target a popup or `target=_blank` tab — `subPages[]` lists open handles.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        action: {
+          type: 'string',
+          enum: [
+            'navigate',
+            'click',
+            'type',
+            'select',
+            'fill_editor',
+            'mouse_click',
+            'mouse_drag',
+            'key_press',
+            'scroll',
+          ],
+          description: 'Action to perform',
+        },
+        selector: {
+          type: 'string',
+          description:
+            'CSS / a11y selector for click/type/fill_editor/select/key_press; coordinate pair "x,y" for mouse_click/mouse_drag/scroll; target URL for navigate.',
+        },
+        text: {
+          type: 'string',
+          description:
+            'For type/fill_editor: the string to type. For select: the <option> value to pick. For key_press: the key name (e.g. "Enter"). For mouse_drag: end coordinate "x,y". For scroll: "deltaX,deltaY". Matches Claude-in-Chrome\'s convention. Either `text` or `value` works (text wins if both given).',
+        },
+        value: {
+          type: 'string',
+          description:
+            'Deprecated alias for `text`. Same semantics. Kept for backwards compatibility; prefer `text`.',
+        },
+        return_tree: {
+          type: 'boolean',
+          description:
+            'Default true. Set false when the next tool call is going to supersede the tree anyway (network log, screenshot, another interaction) — skips the ~2-4s a11y read.',
+        },
+        page: {
+          type: 'string',
+          description:
+            'Page handle. Default "main" (the page the session opened with). Pass a popup id from session.subPages[].id (e.g. "popup-1") to act on a tracked popup or target=_blank tab. Unknown handles reject with a list of the currently-open ones.',
+        },
+      },
+      required: ['session_id', 'action', 'selector'],
+    },
+    handler: (args: any) =>
+      performAction(args.session_id, args.action, args.selector, args.text ?? args.value, {
+        returnTree: args.return_tree !== false,
+        replace: args.replace === true,
+        page: args.page,
+      }),
+  },
+
+  {
+    name: TOOL_NAMES.getNetworkLog,
+    description:
+      'Captured network activity — **HTTP requests AND WebSocket frames** in one call. **For write-capability discovery, ALWAYS narrow with a filter on the first call** — do not scan the raw summary and then fetch {i, full: true} per entry, that is the slow anti-pattern. A narrowing filter auto-promotes HTTP entries to detail-lite mode (full request headers + full postData + 512-char responseBody preview per entry) AND surfaces matching WebSocket frames in the response\'s `wsFrames` field (url + direction + 512-char payload preview per frame). Three filter patterns, in order of specificity: (1) {text_contains: "<literal>"} — the best primitive when you know a string you just typed. Substring-searches URL + headers + postData + responseBody for HTTP AND payload for every captured WS frame; the request OR ws frame that carried or echoed your input is almost always the only match. **On realtime / chat sites the write is usually a sent WS frame, not an HTTP POST** — it appears in `wsFrames`, not `requests`. (2) {url_contains: "<path>"} — when the endpoint path is distinctive (e.g. /graphql, /api/orders). (3) {last: 20} — when neither of the above applies, tails the final entries of the session. Detail-lite auto-paginates when the narrowed set is larger than one response; walk pages with {page: N}. The other modes: unfiltered call → summary (one tiny object per HTTP request + the last 30 WS frame previews); {i: N, full: true} → a single verbatim HTTP entry; {ws_i: N, full: true} → a single untrimmed WS frame (use this to capture the exact payload bytes for a `protocol:"websocket"` strategy); {full: true} → paginated raw detail-list for HTTP, rarely needed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        i: {
+          type: 'number',
+          description:
+            'Absolute index into the HTTP requests array. With full:true returns one entry verbatim, bypassing filters and pagination.',
+        },
+        ws_i: {
+          type: 'number',
+          description:
+            'Absolute index into the WebSocket frames array. With full:true returns one frame verbatim (untrimmed payload). Use after scanning the clipped wsFrames previews to capture the exact payload of a specific frame for a protocol:"websocket" strategy.',
+        },
+        full: {
+          type: 'boolean',
+          description:
+            'Return raw entries with all headers and full bodies (no response-body clipping). With i: single HTTP entry. With ws_i: single untrimmed WS frame. Without either: paginated detail-list (default page_size 5, max 20). Suppresses detail-lite auto-promotion.',
+        },
+        url_contains: {
+          type: 'string',
+          description:
+            'Case-insensitive URL substring filter — applies to both HTTP entries and WS frames. Triggers detail-lite auto-promotion when the filtered set fits the budget.',
+        },
+        text_contains: {
+          type: 'string',
+          description:
+            "Case-insensitive substring search across every field (URL, header names + values, postData, responseBody) of each HTTP entry AND every captured WebSocket frame's payload. Use when you know a literal string the request carried or the response / ws frame echoed — e.g. the message you just sent. Combines with url_contains. Triggers detail-lite auto-promotion.",
+        },
+        last: {
+          type: 'number',
+          description:
+            'Tail the last N entries after filters (applies independently to HTTP requests and WS frames). Use to narrow to the window right after a submit action — the send/post/order request OR the sent WS frame is almost always in the final few entries. Triggers detail-lite auto-promotion.',
+        },
+        page: {
+          type: 'number',
+          description:
+            '1-indexed page number. Default 1. Explicit pagination suppresses detail-lite auto-promotion.',
+        },
+        page_size: {
+          type: 'number',
+          description:
+            'Override default page size. Summary default 50 (max 200); detail-list default 5 (max 20). Explicit page_size suppresses detail-lite auto-promotion.',
+        },
+      },
+      required: ['session_id'],
+    },
+    handler: (args: any) =>
+      getNetworkLog(args.session_id, {
+        i: args.i,
+        ws_i: args.ws_i,
+        full: args.full,
+        url_contains: args.url_contains,
+        text_contains: args.text_contains,
+        last: args.last,
+        page: args.page,
+        page_size: args.page_size,
+        body_offset: args.body_offset,
+        body_length: args.body_length,
+      }),
+  },
+
+  {
+    name: TOOL_NAMES.getA11yTree,
+    description:
+      'Fetch the full, untrimmed accessibility tree for a live session, paginated. Use when the default trimmed tree from `start_session` / `perform_action` (or the healable-error body from `execute`) came back with `a11y_truncated: true` and you need to see the rest of the page to pick a selector. Response shape: `{tree, total_chars, page, page_size, total_pages, has_more}`. Most discovery turns do NOT need this — the trimmed defaults cover the top ~15 KB of the tree, which is enough for nearly every real-world page. Reach for this tool only when you have evidence the element you want is outside the trimmed window (e.g. deeply nested content, very long lists).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        page: {
+          type: 'number',
+          description: '1-indexed page number. Default 1. Follow has_more to walk the whole tree.',
+        },
+        page_size: {
+          type: 'number',
+          description: 'Characters per page. Default 15000. Max 20000 (the tool-output budget).',
+        },
+      },
+      required: ['session_id'],
+    },
+    handler: (args: any) =>
+      getA11yTree(args.session_id, { page: args.page, page_size: args.page_size }),
+  },
+
+  {
+    name: TOOL_NAMES.getActionHistory,
+    description:
+      'Return the session\'s timestamped perform_action history. Each entry carries `at` (Unix ms), `action`, and whichever of `selector` / `value` / `key` / `url` apply. Filter with `since` / `until` to time-correlate against XHR timestamps from `get_network_log` — e.g. "I clicked X at time T; which XHR fired between T and T+2s was the data load for that click?" Compact response; no pagination needed (histories are typically 10-30 entries). Primary use case: at end_drive review time, when you need to figure out which captured request carried the data you reported to the user, scan action history for the last click/navigate + use that timestamp as a floor on `get_network_log` to narrow the candidate window.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        since: {
+          type: 'number',
+          description:
+            'Unix-ms floor — include only actions at or after this timestamp. Default: no floor.',
+        },
+        until: {
+          type: 'number',
+          description:
+            'Unix-ms ceiling — include only actions at or before this timestamp. Default: no ceiling.',
+        },
+      },
+      required: ['session_id'],
+    },
+    handler: (args: any) =>
+      getActionHistory(args.session_id, { since: args.since, until: args.until }),
+  },
+];

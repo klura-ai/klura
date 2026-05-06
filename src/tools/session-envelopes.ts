@@ -77,3 +77,95 @@ export function getSessionObligation(
   }
   return computeSessionObligation(session);
 }
+
+// ---------------------------------------------------------------------------
+// Tool registry metadata
+// ---------------------------------------------------------------------------
+
+import { TOOL_NAMES } from '../vocab';
+import type { ToolDef } from '../tool-types';
+import { endDrive } from '../end-drive/orchestrator';
+import { ackCheckpoint } from '../checkpoints-api';
+import { CHECKPOINT_KINDS, composeAckHint } from '../checkpoints';
+
+const checkpointAckTable = CHECKPOINT_KINDS.map(
+  (kind) => `- ${kind}: ${composeAckHint(kind, {})}`,
+).join('\n');
+
+const ackCheckpointDescription = `Acknowledge a runtime-emitted checkpoint. When a tool response carries \`_checkpoint: {kind, prompt?, viewer_url?, checkpoint_token}\`, runtime paused at a known lifecycle boundary and a handler returned \`handover\`. Echo \`checkpoint_token\` + the ack that matches the target: \`user_response: "<reply>"\` for text-turn checkpoints, \`viewer_result: {...}\` for viewer-handover checkpoints after the user completed the action in the viewer, OR \`{cancelled: true, reason: "..."}\` to abandon. Current checkpoint kinds and post-ack hints:\n${checkpointAckTable}\nWithout an ack, every other tool call on the session rejects with \`invalid_strategy: pending_checkpoint\`. See klura://reference#checkpoints.`;
+
+export const TOOL_DEFS: ToolDef[] = [
+  {
+    name: TOOL_NAMES.endDrive,
+    description:
+      'End the DRIVE phase. The agent has finished driving the UI; runtime ALWAYS hands over to TRIAGE — agent does not get to decide "this was a one-off task, no triage needed." When any declared capability is unresolved, the triage handoff returns with captures inventory + diagnostic tools menu + plan-structure preview. When every declared capability is already saved (no unresolved work), the end_drive_audit `triage_acknowledgment` classifier fires instead: agent must echo `audit_token` + `{triage_acknowledgment: {acknowledged: true, reason: "<own words ≥20 chars>"}}` to confirm triage was considered. Phase-locked to drive — calling from triage or lift returns a structured rejection. Auto-close on terminal save_strategy means most sessions never need to call this explicitly.\n\nCloses the browser session. Runs auto-synthesis: builds `page-script`/`fetch` strategies by joining typed literals to captured HTTP request bodies, and a `recorded-path` from perform_action history. Also persists the discovery artifact (resume pointers + tool-call trace). Response carries `auto_synthesized: [{capability, tier, path}]`, `artifacts_updated: [{capability, sessions_contributed, has_blob}]`, and `_diagnostics.synth: [{pass, capability, phase, outcome, detail}]` explaining exactly what each synth pass found — whether it matched, where (http_request_body / ws_frame_sent / etc.), and why it saved or skipped. Read `_diagnostics` when you need to understand why auto-save produced nothing — the most common case is `outcome: "literal_in_ws_frame_only"` which means the send rode a binary WS frame and needs manual lift via `inspect_ws_frame` + `try_generator`.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        platform: { type: 'string', description: 'Platform name to save storage state for' },
+        audit_token: {
+          type: 'string',
+          description:
+            'Echo the audit_token returned on the prior end_drive audit rejection (capability_declaration_required / save_attempted_none_landed Detectors, or re_persistence / triage_acknowledgment Classifiers). See klura://reference#end-drive-audit.',
+        },
+        audit_answers: {
+          type: 'object',
+          description:
+            'Audit answers per the checklist from the prior rejection. Shape: {re_persistence?: {acknowledge_no_progress: true}, triage_acknowledgment?: {acknowledged: true, reason: "<own words ≥20 chars>"}}. For re_persistence: only pass acknowledge_no_progress when you genuinely have nothing worth persisting; preferred path is save_verified_expression / add_discovery_note / add_resume_pointer and retry. For triage_acknowledgment: only ack when you truly considered triage — explain in your own words why no triage round was warranted (e.g. "all caps fetch-tier saved, no graduation candidate observed in captures").',
+        },
+      },
+      required: ['session_id'],
+    },
+    handler: (args: any) =>
+      endDrive(args.session_id, {
+        platform: args.platform,
+        auditToken: args.audit_token,
+        auditAnswers: args.audit_answers,
+      }),
+  },
+
+  {
+    name: TOOL_NAMES.ackCheckpoint,
+    description: ackCheckpointDescription,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        checkpoint_token: {
+          type: 'string',
+          description: 'Token from the `_checkpoint` envelope on the prior tool response.',
+        },
+        user_response: {
+          type: 'string',
+          description:
+            "The user's reply for text-turn checkpoints (triage_plan, surface_changed, post_save_validation_consent).",
+        },
+        viewer_result: {
+          type: 'object',
+          description:
+            'Structured result for viewer-handover checkpoints (recorded_step_failed, session_expired) after the user completed the action in the viewer.',
+        },
+        cancelled: {
+          type: 'boolean',
+          description: 'Set true to abandon the checkpoint. Requires `reason`.',
+        },
+        reason: {
+          type: 'string',
+          description: 'When `cancelled:true`, a one-sentence reason for abandoning.',
+        },
+      },
+      required: ['session_id', 'checkpoint_token'],
+    },
+    skipCheckpointGate: true,
+    handler: (args: any) =>
+      ackCheckpoint({
+        session_id: args.session_id,
+        checkpoint_token: args.checkpoint_token,
+        user_response: args.user_response,
+        viewer_result: args.viewer_result,
+        cancelled: args.cancelled,
+        reason: args.reason,
+      }),
+  },
+];

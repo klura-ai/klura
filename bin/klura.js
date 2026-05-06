@@ -2,27 +2,46 @@
 'use strict';
 
 const { isDaemonRunning, ensureDaemon, sendToDaemon } = require('../dist/daemon');
+const { TOOL_REGISTRY } = require('../dist/tools/registry');
 
 const args = process.argv.slice(2);
 const command = args[0];
 
+// CLI command catalog for `klura --help`. Tool-overlapping commands derive
+// their one-line description from the matching MCP TOOL_DEF in
+// `runtime/src/tools/*.ts`, so the CLI and MCP surfaces share one source of
+// truth. CLI-only commands (daemon-management, policy/identity/secret
+// administration, internal warmup) carry their descriptions inline.
+const REGISTRY_BY_NAME = new Map(TOOL_REGISTRY.map((t) => [t.name, t]));
+function describeTool(snakeName) {
+  const def = REGISTRY_BY_NAME.get(snakeName);
+  if (!def) {
+    throw new Error(
+      `bin/klura.js references a tool not in TOOL_REGISTRY: ${snakeName} — ` +
+        `add the TOOL_DEF to its impl file or remove the CLI dispatch case.`,
+    );
+  }
+  const m = def.description.match(/^[\s\S]*?\./);
+  return (m ? m[0] : def.description).trim();
+}
+
 const COMMANDS = {
-  'start-session': 'Open browser at URL',
-  'action': 'Perform action (click/type/select)',
-  'network-log': 'Show intercepted network requests',
-  'screenshot': 'Take page screenshot',
-  'end-drive': 'Close browser session',
-  'save-strategy': 'Save a strategy from stdin',
+  'start-session': describeTool('start_session'),
+  'perform-action': describeTool('perform_action'),
+  'get-network-log': describeTool('get_network_log'),
+  'get-screenshot': describeTool('get_screenshot'),
+  'end-drive': describeTool('end_drive'),
+  'save-strategy': describeTool('save_strategy'),
   'execute': 'Execute a saved strategy',
-  'start-remote': 'Start remote viewer (returns URL for user to interact)',
-  'stop-remote': 'Stop remote viewer',
-  'start-listener': 'Start real-time event listener',
-  'stop-listener': 'Stop event listener',
-  'get-events': 'Get queued listener events',
+  'start-remote-session': describeTool('start_remote_session'),
+  'stop-remote-session': describeTool('stop_remote_session'),
+  'start-listener': describeTool('start_listener'),
+  'stop-listener': describeTool('stop_listener'),
+  'get-events': describeTool('get_events'),
   'hook-events': 'Claude Code hook helper — drain queue into hook JSON',
-  'patch-step': 'Patch a step in a recorded-path strategy',
+  'patch-step': describeTool('patch_step'),
   'mark-healed': 'Mark a strategy as healed after patching',
-  'resume': 'Resume paused recorded-path execution',
+  'resume': describeTool('resume'),
   'history': 'Show mutation history for a platform',
   'device': "Manage this daemon's device profile (optional; default desktop preset accepts mouse+touch)",
   'policy': 'Manage per-platform policy (show/set/clear)',
@@ -39,8 +58,9 @@ function usage() {
   console.log('klura — web automation skill runtime\n');
   console.log('Usage: klura <command> [options]\n');
   console.log('Commands:');
+  const width = Math.max(...Object.keys(COMMANDS).map((n) => n.length)) + 2;
   for (const [name, desc] of Object.entries(COMMANDS)) {
-    console.log(`  ${name.padEnd(18)} ${desc}`);
+    console.log(`  ${name.padEnd(width)} ${desc}`);
   }
   console.log('\nDaemon:');
   console.log('  klura daemon start    Start background daemon');
@@ -160,29 +180,29 @@ async function main() {
         break;
       }
 
-      case 'action': {
+      case 'perform-action': {
         const sessionId = args[1];
         const action = args[2];
         const selector = args[3];
         const value = parseFlag('--value') ?? args[4];
         if (!sessionId || !action || !selector) {
-          console.error('Usage: klura action <sessionId> <click|type|select> <selector> [--value text]');
+          console.error('Usage: klura perform-action <sessionId> <click|type|select> <selector> [--value text]');
           process.exit(1);
         }
         out(await sendToDaemon('POST', '/session/action', { sessionId, action, selector, value }));
         break;
       }
 
-      case 'network-log': {
+      case 'get-network-log': {
         const sessionId = args[1];
-        if (!sessionId) { console.error('Usage: klura network-log <sessionId>'); process.exit(1); }
+        if (!sessionId) { console.error('Usage: klura get-network-log <sessionId>'); process.exit(1); }
         out(await sendToDaemon('GET', `/session/network?sessionId=${sessionId}`));
         break;
       }
 
-      case 'screenshot': {
+      case 'get-screenshot': {
         const sessionId = args[1];
-        if (!sessionId) { console.error('Usage: klura screenshot <sessionId>'); process.exit(1); }
+        if (!sessionId) { console.error('Usage: klura get-screenshot <sessionId>'); process.exit(1); }
         const outputFile = parseFlag('--output');
         const result = await sendToDaemon('GET', `/session/screenshot?sessionId=${sessionId}`);
         if (outputFile) {
@@ -272,17 +292,17 @@ async function main() {
         break;
       }
 
-      case 'start-remote': {
+      case 'start-remote-session': {
         const sessionId = args[1];
-        if (!sessionId) { console.error('Usage: klura start-remote <sessionId> [--prompt "..."]'); process.exit(1); }
+        if (!sessionId) { console.error('Usage: klura start-remote-session <sessionId> [--prompt "..."]'); process.exit(1); }
         const prompt = parseFlag('--prompt') ?? undefined;
         out(await sendToDaemon('POST', '/remote/start', { sessionId, prompt }));
         break;
       }
 
-      case 'stop-remote': {
+      case 'stop-remote-session': {
         const sessionId = args[1];
-        if (!sessionId) { console.error('Usage: klura stop-remote <sessionId>'); process.exit(1); }
+        if (!sessionId) { console.error('Usage: klura stop-remote-session <sessionId>'); process.exit(1); }
         out(await sendToDaemon('POST', '/remote/stop', { sessionId }));
         break;
       }

@@ -1282,3 +1282,102 @@ export async function startSession(
 
   return result;
 }
+
+// ---------------------------------------------------------------------------
+// Tool registry metadata
+// ---------------------------------------------------------------------------
+
+import { TOOL_NAMES } from '../vocab';
+import type { ToolDef } from '../tool-types';
+
+const graphModesList = GRAPH_MODES.map((g) => `"${g}"`).join(', ');
+const startSessionDescription = `Start a klura session: open a browser and navigate to the given URL. Returns \`{sessionId, a11yTree, url, artifacts?, executed?, execute_result?, graph?}\`. The \`graph\` parameter selects one of: ${graphModesList}. **Default is "discover" — pick that for ANY user-driven request, including ones where the agent has to navigate around an unfamiliar site to find the right page.** "discover": drive→triage→lift→closed, the standard goal-directed reverse-engineering flow ending in a saved strategy. "map": drive→closed, **only for deliberate platform onboarding with no specific user goal** (e.g. "walk this site so future sessions can use it") — has no triage/lift phase and rejects \`capability\` declarations; mutating-action consent gates and skipped auto-synth. "execute": execute→triage→lift→closed (or terminal{failed}), runs a saved strategy and falls into triage on stale-strategy failure so the agent can re-plan and re-lift. When you pass \`{capability, args}\` and a complete saved strategy covers that capability, the runtime auto-runs the strategy in-session and returns \`executed: true\` with the result — call end_drive and you are done.`;
+
+export const TOOL_DEF: ToolDef = {
+  name: TOOL_NAMES.startSession,
+  description: startSessionDescription,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      url: { type: 'string', description: 'URL to navigate to' },
+      platform: {
+        type: 'string',
+        description:
+          'Platform slug — keys the on-disk skill dir (`~/.klura/skills/<platform>/`) and storage-state file (`~/.klura/storage-state/<platform>.json`). REQUIRED when `capability` is set; optional in pure-exploration mode (no capability declared). Common pattern: second-level domain (`messenger` for messenger.com, `reddit` for reddit.com).',
+      },
+      capability: {
+        type: 'string',
+        description:
+          'The capability slug being discovered or executed (e.g. "send_message"). Required for auto-execute and for auto-save at end_drive.',
+      },
+      args: {
+        type: 'object',
+        description:
+          'Per-capability argument map: {paramName: literalValue}. These are the user-supplied values the agent will type (e.g. {text: "hello", recipient: "Bob"}). Used at auto-execute time to run the saved strategy, and at end_drive time to template captured traffic into a reusable strategy body.',
+      },
+      policy: {
+        type: 'object',
+        description:
+          'Create permanent platform policy at session creation time. This is create-only: if policy.json already exists for the platform, start_session rejects rather than mutating it. Requires `platform`. Friendly aliases: `max_tier` / `max_strategy_tier` set the declared capability cap when `capability` is present, otherwise the platform default; `default_max_tier` / `default_max_strategy_tier` set the platform default. Tiers: "recorded-path", "page-script", "fetch". Per-capability entries may use `max_tier` or `max_strategy_tier`. After creation, policy is user-owned via CLI / policy.json, not MCP.',
+        properties: {
+          max_tier: {
+            type: 'string',
+            enum: ['recorded-path', 'page-script', 'fetch'],
+            description:
+              'Alias for max_strategy_tier. With `capability`, caps that capability; without it, sets the platform default.',
+          },
+          max_strategy_tier: {
+            type: 'string',
+            enum: ['recorded-path', 'page-script', 'fetch'],
+            description:
+              'With `capability`, caps that capability; without it, sets the platform default.',
+          },
+          default_max_tier: {
+            type: 'string',
+            enum: ['recorded-path', 'page-script', 'fetch'],
+            description: 'Alias for default_max_strategy_tier.',
+          },
+          default_max_strategy_tier: {
+            type: 'string',
+            enum: ['recorded-path', 'page-script', 'fetch'],
+          },
+          reason: {
+            type: 'string',
+            description:
+              'Optional audit reason stored when `max_tier` / `max_strategy_tier` creates a per-capability cap.',
+          },
+          per_capability: {
+            type: 'object',
+            description:
+              'Per-capability caps, keyed by capability slug. Entry fields: max_tier/max_strategy_tier and optional reason.',
+          },
+          forbid_capabilities: { type: 'array', items: { type: 'string' } },
+          throttle: { type: 'object' },
+          respect_robots_txt: { type: 'boolean' },
+          notes: { type: 'string' },
+        },
+      },
+      graph: {
+        type: 'string',
+        enum: [...GRAPH_MODES],
+        description:
+          'Default: "discover". **Pick "discover" for any user-driven request, even ones requiring navigation through an unfamiliar site to find the right page** — the goal-directedness is what matters, not whether the path is known. "map" is ONLY for deliberate platform onboarding with no user goal in flight; declaring a `capability` on a `map` session is rejected (map has no lift phase). "discover": drive→triage→lift→closed. "map": drive→closed; mutating actions gate on a one-time session-wide consent checkpoint, auto-synth is skipped at close, the re-persistence gate fires when ≥5 perform_actions land with zero persistence calls. "execute": execute→triage→lift→closed (or terminal{failed}); runs a saved strategy and on stale-strategy failure transitions into triage with the failure as defense-surface input — arg/auth/structural failures terminate with status: failed.',
+      },
+      identity: {
+        type: 'string',
+        description:
+          'Optional account name on `platform`. Default-when-omitted (or `"default"`) uses the historical platform-only cookie jar / profile — single-account behavior. Pass `"work"`, `"personal"`, etc. to scope cookies (`<platform>--<identity>.json`), the credential-autofill profile slot, and the warm-pool key so two accounts on the same platform never share state. Use this when the agent needs to "use account A and do X, use account B and do Y" in one conversation. See klura://reference#identities.',
+      },
+    },
+    required: ['url'],
+  },
+  handler: (args: any) =>
+    startSession(args.url, {
+      platform: args.platform,
+      capability: args.capability,
+      args: args.args,
+      policy: args.policy,
+      graph: args.graph,
+      identity: args.identity,
+    }),
+};

@@ -33,4 +33,14 @@ export interface ToolDef<Args = unknown, Result = unknown> {
    *  function (e.g. `startSession()`); the MCP wrapper just passes args
    *  through. Sync-or-async — registry callers always await the result. */
   handler: (args: Args) => Promise<Result> | Result;
+  /** Bypass the pending-interruption pre-call gate. Set on tools that
+   *  resolve the matching pending state (e.g. `resolve_interruption`); every
+   *  other tool inherits the default of being blocked until the interruption
+   *  is acknowledged. */
+  skipInterruptionGate?: boolean;
+  /** Bypass the pending-checkpoint pre-call gate. Set on tools that resolve
+   *  the matching pending state (e.g. `ack_checkpoint`); every other tool
+   *  inherits the default of being blocked until the checkpoint is
+   *  acknowledged. */
+  skipCheckpointGate?: boolean;
 }

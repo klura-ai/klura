@@ -210,3 +210,82 @@ export function clearAll(): void {
 export function clearSkills(): void {
   skills.clearSkills();
 }
+
+// ---------------------------------------------------------------------------
+// Tool registry metadata
+// ---------------------------------------------------------------------------
+
+import { TOOL_NAMES } from '../vocab';
+import type { ToolDef } from '../tool-types';
+import { getStrategyEvents } from '../public-api';
+
+export const TOOL_DEFS: ToolDef[] = [
+  {
+    name: TOOL_NAMES.listPlatformSkills,
+    description:
+      'List every platform skill — one entry per platform with its saved capabilities and any observed-but-not-lifted ones. The "platform skill" is the bundle of all capabilities klura has learned for one site.',
+    inputSchema: { type: 'object', properties: {} },
+    handler: () => listPlatformSkills(),
+  },
+
+  {
+    name: TOOL_NAMES.getStrategy,
+    description:
+      "Return the full body of a previously-saved strategy — including `generated.<name>.code` and the complete `notes` block — so you can inspect a saved skill in detail. `list_platform_skills` only returns a summary; this is the detail-on-demand tool. Prior-discovery continuation context (verified expressions, envelope notes, resume pointers) lives in the capability's discovery_artifact, not in the strategy body — fetch it via `get_discovery_artifact_field` or read the inline block on end_drive's LIFT handoff (`triage[<cap>].discovery_artifact`). Ordering: if `tier` is omitted, returns the highest-tier saved strategy. Returns the raw strategy object, or `null` if none exists.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        platform: { type: 'string', description: 'Platform name (e.g. "chat-app")' },
+        capability: { type: 'string', description: 'Capability name (e.g. "send_message")' },
+        tier: {
+          type: 'string',
+          enum: ['fetch', 'page-script', 'recorded-path'],
+          description:
+            'Optional: fetch a specific tier. Omit to use the default ordering (highest-tier saved strategy).',
+        },
+      },
+      required: ['platform', 'capability'],
+    },
+    handler: (args: any) =>
+      getStrategy({
+        platform: args.platform,
+        capability: args.capability,
+        tier: args.tier,
+      }),
+  },
+
+  {
+    name: TOOL_NAMES.getStrategyEvents,
+    description:
+      'Return strategy life-cycle events for a platform, most recent first. Events are appended whenever a saved strategy is mutated: `discovered` / `rediscovered` on save, `tier_demote` on persistent transport failure, `archived` / `unarchived` on manual reset, `patched` on step patch, `healed` when a broken strategy recovers. Pass `capability` to narrow; pass `limit` to cap the slice (default 50). Use to answer "what changed about this skill lately?" without loading the full logbook.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        platform: { type: 'string' },
+        capability: { type: 'string', description: 'Optional capability slug to narrow.' },
+        limit: { type: 'number', description: 'Max events to return (default 50).' },
+      },
+      required: ['platform'],
+    },
+    handler: (args: any) => getStrategyEvents(args.platform, args.capability, args.limit),
+  },
+
+  {
+    name: TOOL_NAMES.getPlatformLogbook,
+    description:
+      'Return the platform working-dir summary: per-capability lift history, cross-session data sufficiency, field-stability classifier output, bundle-drift events, signer-anchor history, AND `known_modules` (in-page module / global names referenced by the platform\'s saved strategies — extract source is lexical, so if `LSMqttChannel` appears in a saved `require(...)` call, it\'s listed here as `{name:"LSMqttChannel", source:"require", used_by:["send_message", ...]}`). Use at end_drive / LIFT entry to see "how much do we already know about this platform?" — BEFORE enumerating training-prior module name guesses at `js_eval`, probe the names in `known_modules` first; those are the identifiers the page actually exposed in prior successful lifts. Pass `capability` to narrow the payload to one capability.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        platform: { type: 'string' },
+        capability: { type: 'string', description: 'Optional capability slug to narrow.' },
+      },
+      required: ['platform'],
+    },
+    handler: (args: any) =>
+      getPlatformLogbook({
+        platform: args.platform,
+        capability: args.capability,
+      }),
+  },
+];

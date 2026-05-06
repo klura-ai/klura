@@ -261,3 +261,78 @@ export async function triggerReferenceSend(
     settle_ms_used: settleMs,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Tool registry metadata
+// ---------------------------------------------------------------------------
+
+import { TOOL_NAMES } from '../vocab';
+import type { ToolDef } from '../tool-types';
+
+export const TOOL_DEF: ToolDef = {
+  name: TOOL_NAMES.triggerReferenceSend,
+  description:
+    'Fire a short action sequence (perform_action-shaped steps) and surface every new sent WebSocket frame that arrives during / within `settle_ms` of the final step. Returns each candidate with `ws_hash` + `ws_i` + byte length so the agent can pick one and pin it via pin_ws_frame (or opt into `auto_pin: true` which pins the first sent frame over 100 bytes — a rough "probably the real send, not a keepalive" heuristic). Use this when you need a fresh reference frame AFTER the end_drive auto-pin window has passed, or on execute-only sessions that never hit end_drive. **Consent gate (Level-3 token-gated):** this tool re-fires a submit, producing a real side-effect on every call. The first call always returns a `consent_token` + checklist; the second call must echo the token and include `consent_answers` ({tier, action_description, recipient_description, user_acknowledgement_quote}). Tier 2 (destructive, irreversible, monetary, OR any third-party recipient human/bot) requires a non-empty user_acknowledgement_quote with the user\'s own words. The token binds to a hash of the consented payload — changing actions between calls forces re-classification. See klura://reference#checkpoints.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      session_id: { type: 'string' },
+      actions: {
+        type: 'array',
+        description:
+          'Up to 10 perform_action-shaped steps to run in order before listening for frames.',
+        items: {
+          type: 'object',
+          properties: {
+            action: { type: 'string' },
+            selector: { type: 'string' },
+            value: { type: 'string' },
+          },
+          required: ['action'],
+        },
+      },
+      settle_ms: {
+        type: 'number',
+        description: 'Post-action settle window. Default 1500, clamped [100, 10000].',
+      },
+      auto_pin: {
+        type: 'boolean',
+        description: 'Pin the first sent frame >100 bytes automatically. Default false.',
+      },
+      consent_token: {
+        type: 'string',
+        description:
+          'Echo the consent_token returned on the prior rejection. Bound to a hash of the action sequence — changing actions invalidates the token.',
+      },
+      consent_answers: {
+        type: 'object',
+        description:
+          'Classification of the side-effect. Tier 1 = low-stakes (sandbox, idempotent, read-only). Tier 2 = destructive, irreversible, monetary, OR any third-party recipient (human/bot). Tier 2 requires non-empty user_acknowledgement_quote.',
+        properties: {
+          tier: { type: 'string', enum: ['1', '2'] },
+          action_description: { type: 'string', description: 'What will fire, in your own words.' },
+          recipient_description: {
+            type: 'string',
+            description: 'Who or what service receives the side effect.',
+          },
+          user_acknowledgement_quote: {
+            type: 'string',
+            description:
+              'REQUIRED for tier "2". The user\'s own words confirming consent — tamper-evident paper trail.',
+          },
+        },
+        required: ['tier', 'action_description', 'recipient_description'],
+      },
+    },
+    required: ['session_id', 'actions'],
+  },
+  handler: (args: any) =>
+    triggerReferenceSend({
+      session_id: args.session_id,
+      actions: args.actions,
+      settle_ms: args.settle_ms,
+      auto_pin: args.auto_pin,
+      consent_token: args.consent_token,
+      consent_answers: args.consent_answers,
+    }),
+};

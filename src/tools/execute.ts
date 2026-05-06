@@ -14,3 +14,22 @@ import type { ExecuteResult } from '../execution/types';
 export async function resumeExecution(sessionId: string): Promise<ExecuteResult> {
   return await resumeRecordedPath(sessionId, pool);
 }
+
+// ---------------------------------------------------------------------------
+// Tool registry metadata
+// ---------------------------------------------------------------------------
+
+import { TOOL_NAMES } from '../vocab';
+import type { ToolDef } from '../tool-types';
+
+export const TOOL_DEF: ToolDef = {
+  name: TOOL_NAMES.resumeExecution,
+  description:
+    'Resume a paused recorded-path execution from the step after the last failure. Use after patching the failed step.',
+  inputSchema: {
+    type: 'object',
+    properties: { session_id: { type: 'string' } },
+    required: ['session_id'],
+  },
+  handler: (args: any) => resumeExecution(args.session_id),
+};
