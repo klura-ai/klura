@@ -36,6 +36,7 @@ import {
   type SaveAuthoringContract,
 } from '../save-authoring-contract';
 import { triagePlanAudit, extractUrlToken, resolveAgainstOrigin } from '../audit/triage-plan';
+import { classifyTriageSurface } from '../audit/triage-surface-classifier';
 import { rejectionToErrorMessage, type Issue } from '../audit/index';
 import { renderSaveStrategySchemaMarkdown, type StrategyTier } from '../strategies/schema-catalog';
 
@@ -345,27 +346,47 @@ export async function submitTriagePlan(rawArgs: unknown): Promise<SubmitTriagePl
   // resets the counter; from lift, it transitions back to triage.
   dispatch(session, { kind: 'plan_submitted' });
 
-  // Step B — fire the triage_plan checkpoint. The default handler
-  // surfaces the user-facing summary as a handover prompt; the
-  // autonomous benchmark stub resolves `continue`. In both cases the
-  // tool transitions to LIFT — the agent reads the user's reply via
-  // `ack_checkpoint({user_response})` after this returns and decides
-  // whether to re-submit (rejected) or proceed (approved). The runtime
-  // does not classify the reply itself.
-  const { envelope } = await invokeCheckpointAndGate('triage_plan', {
-    session_id: session.id,
-    capability: args.capability,
-    context: {
-      kind: 'triage_plan',
+  // Trivial-surface fast-path: when the captured network activity for
+  // this surface matches "open GET / JSON or text / no Set-Cookie /
+  // no auth-shaped request headers / no request bodies," the user-relay
+  // checkpoint is friction without value (interactive users almost
+  // always approve, autonomous runs auto-continue anyway). Classifier
+  // is read-only and additive: skips the checkpoint, leaves the audit
+  // pipeline untouched. Non-trivial surfaces (any signed / mutating /
+  // session-bearing signal) still fire the checkpoint as before.
+  const surfaceVerdict = classifyTriageSurface(args.defense_surface, session.intercepted);
+  let envelope: CheckpointEnvelope | undefined;
+  let fastPathHint: string | undefined;
+  if (surfaceVerdict.trivial) {
+    fastPathHint =
+      `Trivial surface detected (${surfaceVerdict.reason}) — auto-approving the plan and ` +
+      `entering LIFT directly without user-relay. Save_strategy still passes through its full ` +
+      `audit pipeline; if you want explicit user gating on a future re-plan, change the surface ` +
+      `(e.g. add a mutating request_pattern) and the checkpoint reactivates.`;
+  } else {
+    // Step B — fire the triage_plan checkpoint. The default handler
+    // surfaces the user-facing summary as a handover prompt; the
+    // autonomous benchmark stub resolves `continue`. In both cases the
+    // tool transitions to LIFT — the agent reads the user's reply via
+    // `ack_checkpoint({user_response})` after this returns and decides
+    // whether to re-submit (rejected) or proceed (approved). The runtime
+    // does not classify the reply itself.
+    const result = await invokeCheckpointAndGate('triage_plan', {
+      session_id: session.id,
       capability: args.capability,
-      surface_label: args.surface_label,
-      summary_for_user: args.summary_for_user,
-      expected_tier: args.expected_tier,
-      tier_justification: args.tier_justification,
-      defense_surface: args.defense_surface,
-      is_replan: cameFromLift,
-    },
-  });
+      context: {
+        kind: 'triage_plan',
+        capability: args.capability,
+        surface_label: args.surface_label,
+        summary_for_user: args.summary_for_user,
+        expected_tier: args.expected_tier,
+        tier_justification: args.tier_justification,
+        defense_surface: args.defense_surface,
+        is_replan: cameFromLift,
+      },
+    });
+    envelope = result.envelope;
+  }
 
   dispatch(session, { kind: 'plan_handoff' });
 
@@ -411,6 +432,7 @@ export async function submitTriagePlan(rawArgs: unknown): Promise<SubmitTriagePl
       `call submit_triage_plan again with updated defense_surface — re-plans drop you back to triage with a fresh budget. ` +
       `Relay this summary to the user before proceeding: "${args.summary_for_user}"`,
     ...(envelope ? { _checkpoint: envelope } : {}),
+    ...(fastPathHint ? { _hint: fastPathHint } : {}),
     ...(triageWarnings.length > 0 ? { triage_warnings: triageWarnings } : {}),
     ...((): { save_authoring_contract?: SaveAuthoringContract } => {
       // Compose + cache the save-authoring contract on the session. The

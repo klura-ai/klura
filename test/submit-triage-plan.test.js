@@ -154,6 +154,133 @@ test('surface-binding side effect: observed URLs bound to the surface label', as
   }
 });
 
+// ---- triage fast-path: trivial-surface checkpoint skip ----
+
+function trivialSession() {
+  // Open public GET on observed origin, no Set-Cookie, no auth headers.
+  // Bauhaus storelocator-shape: page navigation (Document, ignored by
+  // classifier) + clean XHR data call.
+  const session = {
+    id: 'sess_stp_trivial_' + Math.random().toString(36).slice(2, 8),
+    platform: 'stp-trivial-' + Math.random().toString(36).slice(2, 8),
+    intercepted: [
+      {
+        method: 'GET',
+        url: 'https://www.example.com/',
+        headers: { 'content-type': 'text/html' },
+        postData: null,
+        status: 200,
+        responseBody: '<html></html>',
+        isNavigation: true,
+        setCookieNames: ['_ga'],
+      },
+      {
+        method: 'GET',
+        url: 'https://www.example.com/storelocator/api/stores',
+        headers: { accept: 'application/json' },
+        postData: null,
+        status: 200,
+        responseBody: { ok: true, stores: [] },
+      },
+    ],
+    domNavigations: [],
+    declaredCapabilities: [{ capability: 'list_stores', args: {}, declared_at: 1 }],
+  };
+  dispatch(session, { kind: 'end_drive_unresolved' });
+  const after = (session.triage?.enteredAt ?? 0) + 1;
+  session.domNavigations = [{ at: after, url: 'https://www.example.com/storelocator', via: 'nav' }];
+  return session;
+}
+
+function trivialPlan() {
+  return {
+    surface_label: 'storelocator',
+    defense_surface: {
+      observed_origins: ['https://www.example.com'],
+      observed_scripts: [],
+      cookies_set: [],
+      request_patterns: ['GET https://www.example.com/storelocator/api/stores'],
+      mechanism_hypothesis: 'public read endpoint, no auth gate',
+    },
+    expected_tier: 'fetch',
+    tier_justification:
+      'GET https://www.example.com/storelocator/api/stores returned application/json with no auth headers and no Set-Cookie',
+    summary_for_user: 'Public GET; saving as fetch tier.',
+  };
+}
+
+test('fast-path: trivial-surface plan skips checkpoint and emits _hint', async () => {
+  const session = trivialSession();
+  const restore = patchPool(session);
+  try {
+    const r = await submitTriagePlan({
+      session_id: session.id,
+      capability: 'list_stores',
+      ...trivialPlan(),
+    });
+    assert.equal(r.ok, true);
+    assert.equal(r.phase, 'lift');
+    assert.equal(r._checkpoint, undefined, 'no checkpoint on trivial surface');
+    assert.ok(typeof r._hint === 'string', '_hint present on trivial surface');
+    assert.match(r._hint, /Trivial surface detected/);
+  } finally {
+    restore();
+  }
+});
+
+test('fast-path: non-trivial (POST) plan still fires checkpoint, no _hint', async () => {
+  // Mutating method on the surface → classifier returns trivial:false →
+  // checkpoint path runs.
+  const session = {
+    id: 'sess_stp_nontrivial_' + Math.random().toString(36).slice(2, 8),
+    platform: 'stp-nontrivial-' + Math.random().toString(36).slice(2, 8),
+    intercepted: [
+      {
+        method: 'POST',
+        url: 'https://www.example.com/api/submit',
+        headers: { 'content-type': 'application/json' },
+        postData: '{"x":1}',
+        status: 200,
+        responseBody: { ok: true },
+      },
+    ],
+    domNavigations: [],
+    declaredCapabilities: [{ capability: 'submit_form', args: {}, declared_at: 1 }],
+  };
+  dispatch(session, { kind: 'end_drive_unresolved' });
+  const after = (session.triage?.enteredAt ?? 0) + 1;
+  session.domNavigations = [{ at: after, url: 'https://www.example.com/form', via: 'nav' }];
+
+  const restore = patchPool(session);
+  try {
+    const r = await submitTriagePlan({
+      session_id: session.id,
+      capability: 'submit_form',
+      surface_label: 'form',
+      defense_surface: {
+        observed_origins: ['https://www.example.com'],
+        observed_scripts: [],
+        cookies_set: [],
+        request_patterns: ['POST https://www.example.com/api/submit'],
+        mechanism_hypothesis: 'JSON form post',
+      },
+      expected_tier: 'fetch',
+      tier_justification:
+        'POST https://www.example.com/api/submit accepts JSON body; no signed headers observed',
+      summary_for_user: 'Form post; saving as fetch tier.',
+    });
+    assert.equal(r.ok, true);
+    assert.equal(r.phase, 'lift');
+    assert.equal(r._hint, undefined, 'no fast-path hint on non-trivial surface');
+    // _checkpoint may be undefined when no handler is registered for
+    // triage_plan in this test environment — the relevant assertion is
+    // that the fast-path hint is absent, proving the classifier branch
+    // didn't fire.
+  } finally {
+    restore();
+  }
+});
+
 test('per-surface history: re-submitting the same surface rotates the prior into history', async () => {
   const session = triageSession({ cookieNames: ['__sd_pix'] });
   const restore = patchPool(session);
