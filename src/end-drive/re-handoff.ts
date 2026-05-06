@@ -219,14 +219,13 @@ export function classifyUrlParams(
  * `triage_acknowledgment` classifier can decide whether to gate.
  *
  * Mirrors the early-exit conditions in `computeReverseEngineerHandoff`:
- * lift_mode opt-out, no declared capability, every declared capability
- * already has a non-stale saved strategy (or is user-capped at recorded-path).
+ * no declared capability, every declared capability already has a non-stale
+ * saved strategy (or is user-capped at recorded-path).
  */
 export function wouldReverseEngineerHandoffFire(
   session: ReturnType<typeof pool.getSession>,
   platform: string,
 ): boolean {
-  if (session.liftMode === 'skip') return false;
   const declared = session.declaredCapabilities ?? [];
   if (declared.length === 0) return false;
   const staleSet = session.staleStrategyCapabilities;
@@ -246,10 +245,6 @@ export function computeReverseEngineerHandoff(
   session: ReturnType<typeof pool.getSession>,
   platform: string,
 ): null | CloseHandoff {
-  // Session-level opt-out. `start_session(lift_mode: "skip")` is the caller
-  // saying "don't gate close on anything for this session."
-  if (session.liftMode === 'skip') return null;
-
   const declared = session.declaredCapabilities ?? [];
   if (declared.length === 0) return null;
 

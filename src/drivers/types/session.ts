@@ -486,28 +486,6 @@ export interface Session {
    */
   status?: import('../../session-phase/types').SessionStatus;
   /**
-   * LIFT mode selector. Controls what end_drive does when a
-   * declared capability is unresolved at session end.
-   *
-   *   - `'explicit_learn'` (default): interactive "let the user pick" mode.
-   *     The LIFT handoff fires with suggested_user_prompt worded as "the
-   *     answer has been delivered; I can spend N rounds trying to lift this
-   *     to page-script (sub-second warm calls forever), or stop here with
-   *     recorded-path (~30s per warm call). Want me to try?" The agent
-   *     asks, waits for user, then proceeds.
-   *
-   *   - `'skip'`: no handoff at all — end_drive just tears down, any
-   *     auto-synthesized recorded-path still lands. Used when the caller
-   *     has permanently opted out for this session.
-   *
-   * For autonomous runs without a human (benchmark / CI), register a
-   * checkpoint stub that resolves every kind to `{status: 'continue'}` —
-   * see e.g. field-reports/lib/checkpoint-stubs.js. The runtime routes
-   * mid-flow events through the interruption registry; plugins decide
-   * what to do with them.
-   */
-  liftMode?: 'explicit_learn' | 'skip';
-  /**
    * Capabilities whose saved strategy auto-executed during this session
    * but failed in a way that signals the strategy is stale (HTTP 4xx/5xx
    * or an executor throw). Read by `computeReverseEngineerHandoff` to

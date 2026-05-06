@@ -35,10 +35,6 @@ export interface TriageConfig {
   max_rounds: number;
 }
 
-export interface SessionDefaultsConfig {
-  lift_mode: 'explicit_learn' | 'skip';
-}
-
 export interface RemoteConfig {
   mode: 'auto' | 'direct' | 'cloudflared' | 'local';
   publicUrl?: string;
@@ -108,7 +104,6 @@ export interface DaemonConfig {
   drive: DriveConfig;
   triage: TriageConfig;
   lift: LiftConfig;
-  defaults: SessionDefaultsConfig;
   pool: PoolConfig;
   remote: RemoteConfig;
   /** Map of scheme → shell command template. Managed via addSecretResolver /
@@ -123,7 +118,6 @@ export const CONFIG_DEFAULTS: DaemonConfig = {
   drive: { max_rounds: 0 },
   triage: { max_rounds: 10 },
   lift: { max_rounds: 0 },
-  defaults: { lift_mode: 'explicit_learn' },
   pool: {
     idleTimeout: 300,
     maxSessions: 8,
@@ -213,17 +207,6 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     description:
       'Round budget for the lift phase (agent executes the RE playbook). ' +
       '0 = unlimited (default). When >0, tools outside the lift exhausted-set are hard-blocked once the counter crosses this.',
-    needsRestart: false,
-  },
-  {
-    path: 'defaults.lift_mode',
-    type: 'enum',
-    enum: ['explicit_learn', 'skip'] as const,
-    default: CONFIG_DEFAULTS.defaults.lift_mode,
-    description:
-      'Fallback lift_mode when start_session does not supply one. ' +
-      '"explicit_learn" (default) asks the user before spending rounds on a lift; ' +
-      '"skip" disables the RE handoff entirely.',
     needsRestart: false,
   },
   {
@@ -396,7 +379,6 @@ function mergeWithDefaults(loaded: unknown): DaemonConfig {
     drive: { ...CONFIG_DEFAULTS.drive, ...(src.drive ?? {}) },
     triage: { ...CONFIG_DEFAULTS.triage, ...(src.triage ?? {}) },
     lift: { ...CONFIG_DEFAULTS.lift, ...(src.lift ?? {}) },
-    defaults: { ...CONFIG_DEFAULTS.defaults, ...(src.defaults ?? {}) },
     pool: {
       ...CONFIG_DEFAULTS.pool,
       ...loadedPool,

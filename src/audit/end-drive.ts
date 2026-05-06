@@ -51,7 +51,6 @@ export const WRITE_SHAPED_ACTIONS = new Set(['type', 'fill_editor', 'fill', 'sub
 export interface EndDrivePayload {
   sessionId: string;
   platform: string;
-  liftMode: 'skip' | 'explicit_learn' | undefined;
   endDriveAttempts: number;
   declaredCapabilityCount: number;
   writeActions: ReadonlyArray<{ action: string; value_preview?: string }>;
@@ -74,10 +73,10 @@ export interface EndDrivePayload {
    *  When undefined, the classifier never fires. */
   rePersistenceThreshold: { reCalls: number; actions: number } | undefined;
   /** Caller-computed: would the post-audit reverse-engineer handoff produce
-   *  a non-null triage handoff? When false AND declaredCapabilityCount > 0
-   *  AND liftMode !== 'skip', the triage_acknowledgment classifier fires —
-   *  the runtime forces the agent to acknowledge that triage was considered
-   *  even though the runtime would have skipped it. */
+   *  a non-null triage handoff? When false AND declaredCapabilityCount > 0,
+   *  the triage_acknowledgment classifier fires — the runtime forces the
+   *  agent to acknowledge that triage was considered even though the
+   *  runtime would have skipped it. */
   triageWouldFire: boolean;
 }
 
@@ -98,7 +97,6 @@ const declarationRequiredDetector: Detector<EndDrivePayload, EndDriveCtx> = {
     // as the legacy `attempts > 2` post-bump check.
     if (p.endDriveAttempts >= 2) return [];
     if (p.declaredCapabilityCount > 0) return [];
-    if (p.liftMode === 'skip') return [];
     if (p.skipDeclarationGuard) return [];
     // Fire whenever the agent meaningfully drove the page (any
     // perform_action call) without declaring a capability. Read
@@ -365,8 +363,6 @@ const triageAcknowledgmentClassifier: Classifier<EndDrivePayload, EndDriveCtx, u
 };
 
 function shouldRunTriageAcknowledgment(p: EndDrivePayload): boolean {
-  // System-level opt-out wins (autonomous runs, benchmarks).
-  if (p.liftMode === 'skip') return false;
   // Third-attempt force-tear-down releases every gate, mirroring
   // declaration_required / save_attempted_none_landed.
   if (p.endDriveAttempts >= 2) return false;
@@ -392,7 +388,6 @@ interface SessionLike {
   id: string;
   platform?: string;
   graph?: import('../session-phase/types').GraphName;
-  liftMode?: 'skip' | 'explicit_learn';
   endDriveAttempts?: number;
   declaredCapabilities?: ReadonlyArray<unknown>;
   performActionHistory?: ReadonlyArray<{ action?: string; value?: unknown }>;
@@ -446,7 +441,6 @@ export function buildEndDrivePayload(
   return {
     sessionId: session.id,
     platform: opts.platform ?? session.platform ?? '<platform>',
-    liftMode: session.liftMode,
     endDriveAttempts: session.endDriveAttempts ?? 0,
     declaredCapabilityCount: (session.declaredCapabilities ?? []).length,
     writeActions: collectWriteActions(session),

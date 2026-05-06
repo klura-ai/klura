@@ -23,7 +23,6 @@ function makePayload(overrides = {}) {
   return {
     sessionId: 'sess-test',
     platform: 'p',
-    liftMode: undefined,
     endDriveAttempts: 0,
     declaredCapabilityCount: 1, // sidestep declaration detector
     writeActions: [],
@@ -244,21 +243,6 @@ test('declaration_required: endDriveAttempts >= 2 → guard releases (force-tear
       writeActions: [{ action: 'type' }],
       reCallCount: 0,
       endDriveAttempts: 2,
-    }),
-    {},
-    {},
-  );
-  assert.equal(result.status, 'committed');
-});
-
-test('declaration_required: liftMode "skip" → guard releases', () => {
-  __resetStore();
-  const result = endDriveAudit.process(
-    makePayload({
-      declaredCapabilityCount: 0,
-      writeActions: [{ action: 'type' }],
-      reCallCount: 0,
-      liftMode: 'skip',
     }),
     {},
     {},

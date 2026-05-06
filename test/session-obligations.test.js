@@ -98,14 +98,6 @@ test('re-fires when a fresh mutation happens after a save', () => {
   assert.ok(obl);
 });
 
-test('respects liftMode: "skip"', () => {
-  const session = mkSession({
-    liftMode: 'skip',
-    performActionHistory: [{ at: 1, action: 'click' }],
-  });
-  assert.equal(computeSessionObligation(session), null);
-});
-
 test('message text mentions end_drive and LIFT', () => {
   const session = mkSession({
     performActionHistory: [{ at: 1, action: 'click' }],

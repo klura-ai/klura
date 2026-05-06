@@ -18,7 +18,6 @@ function makePayload(overrides = {}) {
   return {
     sessionId: 'sess-test',
     platform: 'p',
-    liftMode: undefined,
     endDriveAttempts: 0,
     declaredCapabilityCount: 1,
     writeActions: [],
@@ -50,16 +49,6 @@ test('triage_acknowledgment: does NOT fire when triageWouldFire (handoff covers 
   __resetStore();
   const result = endDriveAudit.process(
     makePayload({ triageWouldFire: true }),
-    {},
-    {},
-  );
-  assert.equal(result.status, 'committed');
-});
-
-test('triage_acknowledgment: does NOT fire when liftMode === "skip" (caller opt-out)', () => {
-  __resetStore();
-  const result = endDriveAudit.process(
-    makePayload({ liftMode: 'skip' }),
     {},
     {},
   );

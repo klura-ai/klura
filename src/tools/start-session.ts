@@ -16,7 +16,6 @@ import {
 } from '../strategies/policy';
 import { buildPlatformMapSummary, type PlatformMapSummary } from '../response/platform-map-summary';
 import { getDeviceProfile } from '../identity/devices';
-import { loadConfig } from '../config/handler';
 import {
   readArtifactFromDisk,
   listArtifactsForPlatform,
@@ -231,12 +230,6 @@ interface StartSessionOptions {
    * See klura://reference#graphs.
    */
   graph?: import('../session-phase/types').GraphName;
-  /**
-   * LIFT mode selector. `'explicit_learn'` (default) = triage +
-   * ask the user before spending rounds on a lift; `'skip'` = no RE handoff
-   * at all, let auto-synth drop whatever recorded-path it can.
-   */
-  lift_mode?: 'explicit_learn' | 'skip';
   /**
    * Permanent platform policy to merge before the session starts. Friendly
    * aliases:
@@ -1072,8 +1065,6 @@ export async function startSession(
   // dispatcher and graph-config readers see it on the very first dispatch.
   session.graph = opts.graph ?? 'discover';
   session.status = 'active';
-  const cfgDefaults = loadConfig().defaults;
-  session.liftMode = opts.lift_mode ?? cfgDefaults.lift_mode;
   if (opts.platform && opts.capability) {
     session.declaredCapabilities = [
       {

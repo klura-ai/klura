@@ -67,7 +67,6 @@ export interface SessionObligation {
  * Returns the obligation for a session, or `null` if none.
  *
  * Obligation fires when ALL of:
- *   - session.liftMode !== 'skip'
  *   - performActionHistory contains ≥1 mutating action (after demoting
  *     nav-only clicks via the dom-navigation correlation window)
  *   - The session shows commitment to RE: at least one of declaredCapabilities
@@ -80,8 +79,6 @@ export interface SessionObligation {
  *     re-fires.
  */
 export function computeSessionObligation(session: Session): SessionObligation | null {
-  if (session.liftMode === 'skip') return null;
-
   const history = session.performActionHistory ?? [];
   const domNavs = session.domNavigations ?? [];
 
