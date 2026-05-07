@@ -3,6 +3,7 @@
 
 const { isDaemonRunning, ensureDaemon, sendToDaemon, startDaemon } = require('../dist/daemon');
 const { TOOL_REGISTRY } = require('../dist/tools/registry');
+const { TOOL_NAMES } = require('../dist/vocab');
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -26,22 +27,22 @@ function describeTool(snakeName) {
 }
 
 const COMMANDS = {
-  'start-session': describeTool('start_session'),
-  'perform-action': describeTool('perform_action'),
-  'get-network-log': describeTool('get_network_log'),
-  'get-screenshot': describeTool('get_screenshot'),
-  'end-drive': describeTool('end_drive'),
-  'save-strategy': describeTool('save_strategy'),
+  'start-session': describeTool(TOOL_NAMES.startSession),
+  'perform-action': describeTool(TOOL_NAMES.performAction),
+  'get-network-log': describeTool(TOOL_NAMES.getNetworkLog),
+  'get-screenshot': describeTool(TOOL_NAMES.getScreenshot),
+  'end-drive': describeTool(TOOL_NAMES.endDrive),
+  'save-strategy': describeTool(TOOL_NAMES.saveStrategy),
   'execute': 'Execute a saved strategy',
-  'start-remote-session': describeTool('start_remote_session'),
-  'stop-remote-session': describeTool('stop_remote_session'),
-  'start-listener': describeTool('start_listener'),
-  'stop-listener': describeTool('stop_listener'),
-  'get-events': describeTool('get_events'),
+  'start-remote-session': describeTool(TOOL_NAMES.startRemoteSession),
+  'stop-remote-session': describeTool(TOOL_NAMES.stopRemoteSession),
+  'start-listener': describeTool(TOOL_NAMES.startListener),
+  'stop-listener': describeTool(TOOL_NAMES.stopListener),
+  'get-events': describeTool(TOOL_NAMES.getEvents),
   'hook-events': 'Claude Code hook helper — drain queue into hook JSON',
-  'patch-step': describeTool('patch_step'),
+  'patch-step': describeTool(TOOL_NAMES.patchStep),
   'mark-healed': 'Mark a strategy as healed after patching',
-  'resume': describeTool('resume'),
+  'resume': describeTool(TOOL_NAMES.resume),
   'history': 'Show mutation history for a platform',
   'device': "Manage this daemon's device profile (optional; default desktop preset accepts mouse+touch)",
   'policy': 'Manage per-platform policy (show/set/clear)',
