@@ -50,7 +50,7 @@ For driver internals, see [drivers.md](drivers.md). For pool internals, see [poo
 
 ## Daemon lifecycle
 
-The daemon is **auto-started** on first tool call and stays alive:
+The daemon is **auto-started** on first tool call and stays alive. For local debugging, run it attached to the current terminal with `klura daemon start --foreground` (or `npm start` from `runtime/`):
 
 ```
 LLM calls klura tool for the first time

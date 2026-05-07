@@ -20,7 +20,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "start": "node bin/klura.js daemon",
+    "start": "node bin/klura.js daemon start --foreground",
     "test": "node --test test/*.test.js && npm run check:vocab && npm run check:no-static-synopses",
     "check:vocab": "node scripts/check-ref-links.js",
     "check:no-static-synopses": "node scripts/check-no-static-synopses.js",

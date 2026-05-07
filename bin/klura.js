@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
-const { isDaemonRunning, ensureDaemon, sendToDaemon } = require('../dist/daemon');
+const { isDaemonRunning, ensureDaemon, sendToDaemon, startDaemon } = require('../dist/daemon');
 const { TOOL_REGISTRY } = require('../dist/tools/registry');
 
 const args = process.argv.slice(2);
@@ -63,9 +63,10 @@ function usage() {
     console.log(`  ${name.padEnd(width)} ${desc}`);
   }
   console.log('\nDaemon:');
-  console.log('  klura daemon start    Start background daemon');
-  console.log('  klura daemon stop     Stop daemon');
-  console.log('  klura daemon status   Check if daemon is running');
+  console.log('  klura daemon start                 Start background daemon');
+  console.log('  klura daemon start --foreground    Start daemon in the current terminal (-f)');
+  console.log('  klura daemon stop                  Stop daemon');
+  console.log('  klura daemon status                Check if daemon is running');
   console.log('\nOther commands auto-start the daemon if needed.');
 }
 
@@ -102,6 +103,8 @@ async function handleDaemon() {
   if (sub === 'start') {
     if (isDaemonRunning()) {
       console.log('Daemon already running');
+    } else if (args.includes('--foreground') || args.includes('-f')) {
+      startDaemon();
     } else {
       ensureDaemon();
       console.log('Daemon started');
@@ -120,7 +123,7 @@ async function handleDaemon() {
       out(await sendToDaemon('GET', '/status'));
     }
   } else {
-    console.error('Usage: klura daemon <start|stop|status>');
+    console.error('Usage: klura daemon <start|stop|status> [--foreground]');
     process.exit(1);
   }
 }
