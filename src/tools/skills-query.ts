@@ -9,8 +9,8 @@ import {
   readArtifactFromDisk,
   LIST_PLATFORM_SKILLS_ARTIFACT_BUDGET,
 } from '../strategies/discovery-artifact';
-import { computeLiftRate, formatLiftRateReport } from '../lift/report';
-import type { LiftRateReport } from '../lift/report';
+import { computeLiftRate, formatLiftRateReport } from '../telemetry/report';
+import type { LiftRateReport } from '../telemetry/report';
 import { asEnum } from '../validators';
 import { inlineArtifactForResponse } from './_internals';
 

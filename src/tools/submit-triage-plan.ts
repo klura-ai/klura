@@ -24,11 +24,11 @@
 import { pool } from '../runtime-state';
 import { loadLogbook, writeLogbook } from '../working-dir/logbook';
 import type { TriagePlan, DefenseSurface } from '../working-dir/schema';
-import { dispatch } from '../session-phase/state-machine';
-import { currentPhase } from '../session-phase/registry';
+import { dispatch } from '../phases/state-machine';
+import { currentPhase } from '../phases/registry';
 import { invokeCheckpointAndGate, type CheckpointEnvelope } from '../checkpoints';
 import { asString, asObject, asArray, asEnum } from '../validators';
-import { bindUrlsToSurface, urlKey } from '../session-phase/surface-binding';
+import { bindUrlsToSurface, urlKey } from '../phases/surface-binding';
 import type { Session } from '../drivers/types/session';
 import { loadConfig } from '../config/handler';
 import {

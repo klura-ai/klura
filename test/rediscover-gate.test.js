@@ -17,7 +17,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 const { rediscoverFailureGate } = await import(
-  '../dist/session-phase/guards/rediscover.js'
+  '../dist/graphs/guards/rediscover.js'
 );
 
 const fakeSession = {};

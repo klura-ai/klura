@@ -458,7 +458,7 @@ export class Pool implements BrowserPool {
     this._sessionRoundCounts.set(id, (this._sessionRoundCounts.get(id) ?? 0) + 1);
     // LIFT round counter: once end_drive has handed off, every tool-call
     // lookup increments. Drives the LIFT phase budget enforcement in
-    // `runtime/src/session-phase/middleware.ts` and the freshly-handed-off
+    // `runtime/src/phases/middleware.ts` and the freshly-handed-off
     // guard in `runtime/src/end-drive/re-handoff.ts`.
     if (session.lift) {
       session.lift.roundsSinceHandoff += 1;

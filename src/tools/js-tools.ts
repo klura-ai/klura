@@ -15,7 +15,7 @@ import {
 import { guardLargeResult, MAX_TOOL_OUTPUT_CHARS } from '../response/response-size';
 import { wrapAgentExpression } from '../response/js-eval-wrapper';
 import { recordObservations } from '../observation-trace';
-import { maybeFireSurfaceChanged } from '../session-phase/surface-changed';
+import { maybeFireSurfaceChanged } from '../phases/surface-changed';
 import type { CheckpointEnvelope } from '../checkpoints';
 
 export interface GetJsSourceArgs {

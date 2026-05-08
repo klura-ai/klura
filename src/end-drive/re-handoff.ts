@@ -21,8 +21,8 @@ import { computeTriageBundle, type TriageBundle } from '../working-dir/triage-bu
 import type { CheckpointEnvelope } from '../checkpoints';
 import { loadConfig } from '../config/handler';
 import { resolveReferenceResource } from '../response/reference-sections';
-import { dispatch } from '../session-phase/state-machine';
-import { currentPhase } from '../session-phase/registry';
+import { dispatch } from '../phases/state-machine';
+import { currentPhase } from '../phases/registry';
 
 // Pull the Reverse-engineer playbook prose at module load. The LIFT handoff
 // inlines this verbatim so agents see the playbook on the response they're

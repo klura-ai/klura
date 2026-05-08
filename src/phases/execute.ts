@@ -4,9 +4,9 @@
 // otherwise). The agent's tool surface here is intentionally narrow: the
 // strategy runs without per-call agent prompting.
 
-import type { PhaseSpec, AdmissibilityResult, PhaseEvent, GraphConfig } from '../types';
-import type { Session } from '../../drivers/types/session';
-import type { DaemonConfig } from '../../config/handler';
+import type { PhaseSpec, AdmissibilityResult, PhaseEvent, GraphConfig } from './types';
+import type { Session } from '../drivers/types/session';
+import type { DaemonConfig } from '../config/handler';
 
 const ALLOWED: ReadonlySet<string> = new Set([
   // Strategy invocation lifecycle the agent can drive while inside execute.

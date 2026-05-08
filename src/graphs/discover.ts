@@ -3,7 +3,7 @@
 // read the defense surface, the user approves a per-surface plan, and lift
 // runs the RE playbook to land a saved strategy.
 
-import type { Graph } from '../types';
+import type { Graph } from '../phases/types';
 
 export const DISCOVER_GRAPH: Graph = {
   name: 'discover',

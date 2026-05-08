@@ -4,7 +4,7 @@
 // consent), skips auto-synth at close, lowers the re-persistence threshold
 // so a session that mapped without persisting fires the gate.
 
-import type { Graph } from '../types';
+import type { Graph } from '../phases/types';
 
 export const MAP_GRAPH: Graph = {
   name: 'map',

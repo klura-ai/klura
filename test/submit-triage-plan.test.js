@@ -14,7 +14,7 @@ process.env.KLURA_HOME = TMP;
 const { submitTriagePlan } = await import('../dist/tools/submit-triage-plan.js');
 const { pool } = await import('../dist/runtime-state.js');
 const { loadLogbook } = await import('../dist/working-dir/logbook.js');
-const { dispatch } = await import('../dist/session-phase/state-machine.js');
+const { dispatch } = await import('../dist/phases/state-machine.js');
 
 function patchPool(session) {
   const orig = pool.getSession.bind(pool);

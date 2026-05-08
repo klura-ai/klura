@@ -5,14 +5,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { dispatch, forceTransition } = await import('../dist/session-phase/state-machine.js');
+const { dispatch, forceTransition } = await import('../dist/phases/state-machine.js');
 const { currentPhase, currentSpec, checkAdmissibility, UNIVERSAL_TOOLS } = await import(
-  '../dist/session-phase/registry.js'
+  '../dist/phases/registry.js'
 );
 const { SessionPhaseTransitionError, ToolNotAdmissibleError } = await import(
-  '../dist/session-phase/types.js'
+  '../dist/phases/types.js'
 );
-const { DEFAULT_TRIAGE_MAX_ROUNDS } = await import('../dist/session-phase/phases/triage.js');
+const { DEFAULT_TRIAGE_MAX_ROUNDS } = await import('../dist/phases/triage.js');
 
 function fresh() {
   return { id: 'sess_test_' + Math.random().toString(36).slice(2, 8) };
@@ -180,7 +180,7 @@ test('admissibility: map mode REJECTS save_strategy in drive — observation-onl
   // The rejection text is the moment-of-mistake teaching surface: agent
   // who reaches for save_strategy in map sees the four persistence tools
   // and the discover handoff inline.
-  const { graphFor } = await import('../dist/session-phase/graphs/index.js');
+  const { graphFor } = await import('../dist/graphs/index.js');
   const map = graphFor('map');
   const discover = graphFor('discover');
   const session = fresh();
@@ -230,7 +230,7 @@ test('graph topology: map has no lift phase', async () => {
   // session.lift; if a future graph rev added 'lift' to map's node set
   // without the matching state-machine transitions, the guard would
   // incorrectly write bookkeeping for an unreachable phase.
-  const { graphFor } = await import('../dist/session-phase/graphs/index.js');
+  const { graphFor } = await import('../dist/graphs/index.js');
   const map = graphFor('map');
   assert.equal(map.nodes.has('lift'), false, 'map graph must not contain a lift phase');
   assert.equal(map.nodes.has('triage'), false, 'map graph must not contain a triage phase');

@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import type { GeneratorEntry } from './generators';
 import { isTierAllowed, isCapabilityForbidden } from './policy';
-import { stampTier, type TierStamp } from '../lift/telemetry';
+import { stampTier, type TierStamp } from '../telemetry/telemetry';
 import { asPlatformSlug, asIdentifierSlug, asEnum, ValidationError } from '../validators';
 
 import { KLURA_DIR, SKILLS_DIR, WORKDIR_DIR } from '../paths';

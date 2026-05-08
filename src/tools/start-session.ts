@@ -28,8 +28,8 @@ import {
   DEFAULT_A11Y_BUDGET,
 } from '../response/response-size';
 import type { Session, SessionOptions } from '../drivers/types/session';
-import { graphConfig } from '../session-phase/registry';
-import { dispatch } from '../session-phase/state-machine';
+import { graphConfig } from '../phases/registry';
+import { dispatch } from '../phases/state-machine';
 import { asIdentifierSlug, asObject, ValidationError } from '../validators';
 import {
   captureAndAppendForms,
@@ -277,7 +277,7 @@ interface StartSessionOptions {
    *     the agent can re-plan and re-lift.
    * See klura://reference#graphs.
    */
-  graph?: import('../session-phase/types').GraphName;
+  graph?: import('../phases/types').GraphName;
   /**
    * Permanent platform policy to merge before the session starts. Friendly
    * aliases:

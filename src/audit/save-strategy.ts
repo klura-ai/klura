@@ -19,7 +19,7 @@ import {
 import type { Session } from '../drivers/types/session';
 import { findUnobservedStrategyUrls, firstObservableUrl } from '../strategies/verify-observed';
 import { loadLogbook } from '../working-dir/logbook';
-import { lookupSurface, urlKey } from '../session-phase/surface-binding';
+import { lookupSurface, urlKey } from '../phases/surface-binding';
 import {
   detectSessionScopedIdExtraction,
   detectNameIdMismatch,

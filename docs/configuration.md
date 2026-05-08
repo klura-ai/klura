@@ -72,7 +72,7 @@ See [remote.md](remote.md) for the viewer protocol.
 
 ### `drive.*` / `triage.*` / `lift.*` — per-phase round budgets
 
-Each non-terminal session phase carries a configurable round budget. When the agent crosses the budget while in that phase, the runtime hard-blocks tools outside the phase's `allowedToolsWhenExhausted` set — see `runtime/src/session-phase/phases/<phase>.ts` for the per-phase narrowed sets, and [session-phases.md](session-phases.md) for the full state machine.
+Each non-terminal session phase carries a configurable round budget. When the agent crosses the budget while in that phase, the runtime hard-blocks tools outside the phase's `allowedToolsWhenExhausted` set — see `runtime/src/phases/<phase>.ts` for the per-phase narrowed sets, and [session-phases.md](session-phases.md) for the full state machine.
 
 | Field | Type | Default | Purpose |
 | --- | --- | --- | --- |

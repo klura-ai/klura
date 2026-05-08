@@ -1,4 +1,4 @@
-// URL→surface routing index for the session-phase machine.
+// URL→surface routing index for the phase machine.
 //
 // `submit_triage_plan` binds every URL in `observed_at_urls` to the plan's
 // `surface_label` via `bindUrlsToSurface`. `perform_action` reads the index

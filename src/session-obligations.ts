@@ -24,7 +24,7 @@
 // structurally-true MUSTs in checkpoint / interruption gates.
 
 import type { Session } from './drivers/types/session';
-import { graphConfig } from './session-phase/registry';
+import { graphConfig } from './phases/registry';
 
 /**
  * Action kinds that count as mutating — the agent intentionally changed

@@ -38,7 +38,7 @@
 // nothing (end-drive has no on-disk artifact equivalent to a strategy).
 
 import { Audit, type Classifier, type Detector } from './index';
-import { graphFor } from '../session-phase/graphs';
+import { graphFor } from '../graphs';
 
 export const RE_CALL_THRESHOLD = 2;
 export const ACTION_CALL_THRESHOLD = 5;
@@ -360,7 +360,7 @@ export const endDriveAudit = new Audit<EndDrivePayload, EndDriveCtx>({
 interface SessionLike {
   id: string;
   platform?: string;
-  graph?: import('../session-phase/types').GraphName;
+  graph?: import('../phases/types').GraphName;
   endDriveAttempts?: number;
   declaredCapabilities?: ReadonlyArray<unknown>;
   performActionHistory?: ReadonlyArray<{ action?: string; value?: unknown }>;

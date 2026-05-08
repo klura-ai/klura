@@ -121,20 +121,20 @@ export type { TriagePlan, DefenseSurface } from './working-dir/schema';
 // Session-phase machine — exported for plugin / scenario authors who want
 // to read the current phase or dispatch transitions from outside the
 // runtime's tool tree.
-export { dispatch as dispatchPhaseEvent } from './session-phase/state-machine';
+export { dispatch as dispatchPhaseEvent } from './phases/state-machine';
 export {
   currentPhase,
   currentSpec,
   checkAdmissibility as checkPhaseAdmissibility,
   UNIVERSAL_TOOLS,
-} from './session-phase/registry';
+} from './phases/registry';
 export {
   assertToolAdmissible,
   assertToolAdmissibleBySessionId,
   tickPhaseCounter,
-} from './session-phase/middleware';
-export type { SessionPhase, PhaseSpec, PhaseEvent, PhaseEventKind } from './session-phase/types';
-export { ToolNotAdmissibleError, SessionPhaseTransitionError } from './session-phase/types';
+} from './phases/middleware';
+export type { SessionPhase, PhaseSpec, PhaseEvent, PhaseEventKind } from './phases/types';
+export { ToolNotAdmissibleError, SessionPhaseTransitionError } from './phases/types';
 
 // Public, runtime-state-bound entry point for the saved-strategy executor.
 // The lower-level `execute` in `runtime/src/execution.ts` takes pool +

@@ -32,7 +32,7 @@ import { clearForSession as clearSessionObservations } from '../response/session
 import { computeReverseEngineerHandoff, wouldReverseEngineerHandoffFire } from './re-handoff';
 import { endDriveAudit, buildEndDrivePayload } from '../audit/end-drive';
 import { rejectionToErrorMessage } from '../audit';
-import { graphConfig, currentGraph } from '../session-phase/registry';
+import { graphConfig, currentGraph } from '../phases/registry';
 
 function outcomeForTier(tier: string): SessionMetaPayload['outcome'] {
   if (tier === 'page-script') return 'page_script_saved';

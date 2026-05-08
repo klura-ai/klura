@@ -1,5 +1,5 @@
 // Graph invariant tests. The session FSM is data — three Graph literals in
-// runtime/src/session-phase/graphs/. These tests assert structural
+// runtime/src/graphs/. These tests assert structural
 // invariants by walking each graph's transition table; if a graph
 // definition drifts (transition added/removed, terminal swapped), the
 // test that depends on the invariant fails with a clear message.
@@ -7,8 +7,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { GRAPHS } = await import('../dist/session-phase/graphs/index.js');
-const { isTerminal } = await import('../dist/session-phase/types.js');
+const { GRAPHS } = await import('../dist/graphs/index.js');
+const { isTerminal } = await import('../dist/phases/types.js');
 
 /** BFS over a graph's transitions starting at `from`; returns the set of
  *  reachable phase nodes (excludes terminal nodes). */

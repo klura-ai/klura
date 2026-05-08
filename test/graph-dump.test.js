@@ -6,8 +6,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { dumpMermaid, dumpAllMermaid } = await import('../dist/session-phase/dump.js');
-const { GRAPHS } = await import('../dist/session-phase/graphs/index.js');
+const { dumpMermaid, dumpAllMermaid } = await import('../dist/graphs/dump.js');
+const { GRAPHS } = await import('../dist/graphs/index.js');
 
 test('discover graph: Mermaid dump contains expected nodes and transitions', () => {
   const out = dumpMermaid(GRAPHS.discover);

@@ -7,9 +7,9 @@
 // Every `save_strategy` flows through the per-surface triage gate — no
 // escape hatch.
 
-import type { PhaseSpec, AdmissibilityResult, PhaseEvent, GraphConfig } from '../types';
-import type { Session } from '../../drivers/types/session';
-import type { DaemonConfig } from '../../config/handler';
+import type { PhaseSpec, AdmissibilityResult, PhaseEvent, GraphConfig } from './types';
+import type { Session } from '../drivers/types/session';
+import type { DaemonConfig } from '../config/handler';
 import {
   DISCOVERY_ARTIFACT,
   ESCAPE_VALVE,
@@ -17,7 +17,7 @@ import {
   READ_ONLY_DIAGNOSTIC,
   TRIAGE_AND_LIFT_WRITE,
   unionSets,
-} from '../tool-catalog';
+} from './tool-catalog';
 
 const ALLOWED = unionSets(
   READ_ONLY_DIAGNOSTIC,

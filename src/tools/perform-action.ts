@@ -16,8 +16,8 @@ import {
 import { correlateUiAction, CORRELATION_WINDOW_MS } from '../response/action-correlator';
 import { asNonEmptyBoundedString, ValidationError } from '../validators';
 import { captureAndAppendForms, enumerateStringParams } from './_internals';
-import { graphConfig } from '../session-phase/registry';
-import { maybeFireSurfaceChanged } from '../session-phase/surface-changed';
+import { graphConfig } from '../phases/registry';
+import { maybeFireSurfaceChanged } from '../phases/surface-changed';
 import type { CheckpointEnvelope } from '../checkpoints';
 
 export interface ActionResult {

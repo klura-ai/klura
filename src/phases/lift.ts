@@ -12,9 +12,9 @@
 //     accumulated counter, which can fire a soft-block the new surface
 //     doesn't deserve.
 
-import type { PhaseSpec, AdmissibilityResult, PhaseEvent, GraphConfig } from '../types';
-import type { Session } from '../../drivers/types/session';
-import type { DaemonConfig } from '../../config/handler';
+import type { PhaseSpec, AdmissibilityResult, PhaseEvent, GraphConfig } from './types';
+import type { Session } from '../drivers/types/session';
+import type { DaemonConfig } from '../config/handler';
 import {
   DISCOVERY_ARTIFACT,
   ESCAPE_VALVE,
@@ -23,7 +23,7 @@ import {
   TRIAGE_AND_LIFT_WRITE,
   LIFT_RE_ACTIVE,
   unionSets,
-} from '../tool-catalog';
+} from './tool-catalog';
 
 // `end_drive` is admitted in lift as the abandon path. Without it the agent
 // has no exit when an audit loop fails to converge — the rejection messages

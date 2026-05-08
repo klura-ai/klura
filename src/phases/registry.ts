@@ -8,11 +8,11 @@
 
 import type { Session } from '../drivers/types/session';
 import type { Graph, PhaseSpec, GraphConfig, SessionPhase, AdmissibilityResult } from './types';
-import { DRIVE_SPEC } from './phases/drive';
-import { TRIAGE_SPEC } from './phases/triage';
-import { LIFT_SPEC } from './phases/lift';
-import { EXECUTE_SPEC } from './phases/execute';
-import { GRAPHS, graphFor } from './graphs';
+import { DRIVE_SPEC } from './drive';
+import { TRIAGE_SPEC } from './triage';
+import { LIFT_SPEC } from './lift';
+import { EXECUTE_SPEC } from './execute';
+import { GRAPHS, graphFor } from '../graphs';
 import { UNIVERSAL_TOOLS } from './tool-catalog';
 
 const PHASES: Record<SessionPhase, PhaseSpec> = {

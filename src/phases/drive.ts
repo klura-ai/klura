@@ -5,9 +5,9 @@
 // auto-synth skip, re-persistence threshold) lives in `graphConfig`, not in
 // this spec.
 
-import type { PhaseSpec, AdmissibilityResult, PhaseEvent, GraphConfig } from '../types';
-import type { Session } from '../../drivers/types/session';
-import type { DaemonConfig } from '../../config/handler';
+import type { PhaseSpec, AdmissibilityResult, PhaseEvent, GraphConfig } from './types';
+import type { Session } from '../drivers/types/session';
+import type { DaemonConfig } from '../config/handler';
 import {
   DISCOVERY_ARTIFACT,
   DRIVE_ACTIVE,
@@ -15,7 +15,7 @@ import {
   LOGBOOK_WRITE,
   READ_ONLY_DIAGNOSTIC,
   unionSets,
-} from '../tool-catalog';
+} from './tool-catalog';
 
 const ALLOWED = unionSets(
   DRIVE_ACTIVE,

@@ -11,7 +11,7 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'klura-surface-gate-'));
 process.env.KLURA_HOME = TMP;
 
 const { saveStrategyAudit } = await import('../dist/audit/save-strategy.js');
-const { bindUrlsToSurface } = await import('../dist/session-phase/surface-binding.js');
+const { bindUrlsToSurface } = await import('../dist/phases/surface-binding.js');
 const { loadLogbook, writeLogbook } = await import('../dist/working-dir/logbook.js');
 
 // Bypass Stage 0 shape checks — detector behavior under test, fixtures are

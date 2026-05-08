@@ -5,8 +5,8 @@
 // arg/auth/structural failures terminate with status: 'failed' (agent gets
 // a structured error back).
 
-import type { Graph, GraphTransition } from '../types';
-import { rediscoverFailureGate } from '../guards/rediscover';
+import type { Graph, GraphTransition } from '../phases/types';
+import { rediscoverFailureGate } from './guards/rediscover';
 
 const transitions: GraphTransition[] = [
   { from: 'execute', on: 'execute_succeeded', to: { kind: 'terminal', status: 'closed' } },

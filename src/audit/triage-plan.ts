@@ -29,7 +29,7 @@ import { Audit, type Detector, type Issue } from './index';
 import type { Session } from '../drivers/types/session';
 import type { DefenseSurface } from '../working-dir/schema';
 import { findObservedMatch } from '../strategies/verify-observed';
-import { urlKey } from '../session-phase/surface-binding';
+import { urlKey } from '../phases/surface-binding';
 
 export interface TriagePlanPayload {
   surface_label: string;

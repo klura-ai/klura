@@ -4,9 +4,9 @@
 // runtime. Tests snapshot this output so transition changes show up as
 // reviewable diffs.
 
-import type { Graph, GraphTransition } from './types';
-import { isTerminal } from './types';
-import { GRAPHS } from './graphs';
+import type { Graph, GraphTransition } from '../phases/types';
+import { isTerminal } from '../phases/types';
+import { GRAPHS } from '.';
 
 function escape(label: string): string {
   return label.replace(/"/g, '\\"');

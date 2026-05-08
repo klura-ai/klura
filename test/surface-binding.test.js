@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 const { urlKey, bindUrlsToSurface, lookupSurface, isPathDistinct } = await import(
-  '../dist/session-phase/surface-binding.js'
+  '../dist/phases/surface-binding.js'
 );
 
 test('urlKey: origin + pathname; query and fragment stripped', () => {

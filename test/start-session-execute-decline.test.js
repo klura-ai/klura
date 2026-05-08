@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 
 const { dispatchExecuteGraphOutcome } = await import('../dist/tools/start-session.js');
 const { checkAdmissibility, UNIVERSAL_TOOLS } = await import(
-  '../dist/session-phase/registry.js'
+  '../dist/phases/registry.js'
 );
 
 function executeSession() {

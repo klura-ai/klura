@@ -4,7 +4,7 @@ Detailed strategy schemas, authentication flows, healing formats, and graduation
 
 ## graphs
 
-A klura session belongs to one of three named graphs. The `graph` parameter on `start_session` selects the FSM topology the session walks; per-graph behavior (mutating-action consent gates, auto-synth at close, re-persistence threshold) is data-driven from the graph's `GraphConfig`, not from session-level flags. Adding a new graph is one new file in `runtime/src/session-phase/graphs/`.
+A klura session belongs to one of three named graphs. The `graph` parameter on `start_session` selects the FSM topology the session walks; per-graph behavior (mutating-action consent gates, auto-synth at close, re-persistence threshold) is data-driven from the graph's `GraphConfig`, not from session-level flags. Adding a new graph is one new file in `runtime/src/graphs/`.
 
 | Graph | Topology | Use it when |
 | --- | --- | --- | --- |
@@ -14,7 +14,7 @@ A klura session belongs to one of three named graphs. The `graph` parameter on `
 
 **Picking between `discover` and `map`.** The temptation is to read "I'll be exploring around" as map. Don't — exploring on behalf of a user goal is `discover`. Map is only correct when the user said something like "go map out platform X" with no operational task attached. If you're not sure, default to `discover` (the runtime sets that when `graph` is omitted). Picking `map` and then declaring a capability mid-session is structurally impossible — `start_session` rejects the combination because map's FSM has no lift phase to land the saved strategy.
 
-The runtime tracks the active graph on `session.graph` and the lifecycle status on `session.status` (`'active' | 'closed' | 'failed'`). Universal tools (`ack_checkpoint`, memory reads, control plane) admit on terminal sessions; phase-scoped tools reject. Mid-session, the active phase plus the active graph's `GraphConfig` together determine which tools are admissible and how `perform_action` / `end_drive` behave. Generate a Mermaid diagram of any graph by reading `runtime/src/session-phase/graphs/<name>.ts` and the dumper at `runtime/src/session-phase/dump.ts`.
+The runtime tracks the active graph on `session.graph` and the lifecycle status on `session.status` (`'active' | 'closed' | 'failed'`). Universal tools (`ack_checkpoint`, memory reads, control plane) admit on terminal sessions; phase-scoped tools reject. Mid-session, the active phase plus the active graph's `GraphConfig` together determine which tools are admissible and how `perform_action` / `end_drive` behave. Generate a Mermaid diagram of any graph by reading `runtime/src/graphs/<name>.ts` and the dumper at `runtime/src/graphs/dump.ts`.
 
 ## Strategy schemas — overview
 

@@ -469,14 +469,14 @@ export interface Session {
   extractedContentBytes?: number;
   /**
    * Active graph — selects the FSM topology + per-phase configuration for
-   * this session. See runtime/src/session-phase/graphs/. `'discover'`
+   * this session. See runtime/src/graphs/. `'discover'`
    * (default) walks drive→triage→lift→closed; `'map'` walks drive→closed
    * with mutating-action consent + skipped auto-synth + tightened
    * re-persistence threshold; `'execute'` walks execute→triage→lift→closed
    * (or terminal{failed}) with auto-fall into triage on stale-strategy
    * failure.
    */
-  graph?: import('../../session-phase/types').GraphName;
+  graph?: import('../../phases/types').GraphName;
   /**
    * Session lifecycle status. `'active'` while the graph is in progress;
    * stamped to `'closed'` or `'failed'` when the FSM hits a terminal node.
@@ -484,7 +484,7 @@ export interface Session {
    * 'active'). Universal-tools middleware uses status to short-circuit
    * admissibility on a finalized session.
    */
-  status?: import('../../session-phase/types').SessionStatus;
+  status?: import('../../phases/types').SessionStatus;
   /**
    * Capabilities whose saved strategy auto-executed during this session
    * but failed in a way that signals the strategy is stale (HTTP 4xx/5xx
@@ -552,11 +552,11 @@ export interface Session {
 
   /** Phase-machine state. `undefined` ≡ the active graph's entry phase;
    *  the registry's `currentPhase` resolves to `GRAPHS[session.graph].entryPhase`
-   *  for fresh sessions. The session-phase state machine in
-   *  `runtime/src/session-phase/` is the only writer of this field and the
+   *  for fresh sessions. The state machine in
+   *  `runtime/src/phases/` is the only writer of this field and the
    *  per-phase bookkeeping below. Terminal-ness is carried by `session.status`,
-   *  not by this enum. See PhaseSpec / Graph in `session-phase/types.ts`. */
-  phase?: import('../../session-phase/types').SessionPhase;
+   *  not by this enum. See PhaseSpec / Graph in `phases/types.ts`. */
+  phase?: import('../../phases/types').SessionPhase;
 
   /** Drive-phase bookkeeping — agent driving the UI to the goal. */
   drive?: {
@@ -579,14 +579,14 @@ export interface Session {
     budget: number;
     softBlockEngaged: boolean;
     liftBudgetSnapshot?: number;
-    triggeredBy?: import('../../session-phase/types').PhaseEventKind | null;
+    triggeredBy?: import('../../phases/types').PhaseEventKind | null;
   };
 
   /** URL→surface binding. Populated by `submit_triage_plan` from each
    *  plan's `observed_at_urls`; read by `perform_action` to decide whether
    *  a new navigation crosses to an un-triaged surface (firing the
    *  `surface_changed` checkpoint). Keyed by `urlKey()` from
-   *  `session-phase/surface-binding.ts` (origin + pathname; query / hash
+   *  `phases/surface-binding.ts` (origin + pathname; query / hash
    *  stripped; host lowercased). The durable canonical store is
    *  `triage_plans_by_surface` in the logbook — this is the in-session
    *  routing index. */

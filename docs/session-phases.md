@@ -2,13 +2,13 @@
 
 Every klura session walks one of three named graphs (**discover**, **map**, **execute**). Each graph is a small declarative state machine over a shared phase set: **drive | triage | lift | execute**. Terminal-ness is a property of the Graph node, not the phase enum — `session.status` carries `'active' | 'closed' | 'failed'` when the FSM hits a terminal. Each phase has its own admissible-tool set, round budget, and entry hook; per-graph behavior (consent gates, auto-synth, re-persistence threshold) lives in each Graph's `GraphConfig`, not in the phase spec.
 
-Phase transitions are driven by explicit events (agent calls a tool, runtime classifies an outcome) and are owned by a single dispatcher in `runtime/src/session-phase/state-machine.ts`. **No other module writes `session.phase` or `session.status`** — out-of-band writes are forbidden by code review.
+Phase transitions are driven by explicit events (agent calls a tool, runtime classifies an outcome) and are owned by a single dispatcher in `runtime/src/phases/state-machine.ts`. **No other module writes `session.phase` or `session.status`** — out-of-band writes are forbidden by code review.
 
 This page is the canonical reference for the phase machine: what each graph contains, what each phase admits, when transitions fire, and how to extend the system. The agent-facing prose lives in `runtime/SKILL.md` (compact) and `runtime/REFERENCE.md#triage` / `#graphs` (full).
 
 ## The three graphs
 
-Graphs are data — `runtime/src/session-phase/graphs/<name>.ts` exports each as a `Graph` literal (nodes, transitions, per-graph `GraphConfig`). Adding a graph is one new file. The Mermaid dumper in `runtime/src/session-phase/dump.ts` reads any Graph and emits flowchart source.
+Graphs are data — `runtime/src/graphs/<name>.ts` exports each as a `Graph` literal (nodes, transitions, per-graph `GraphConfig`). Adding a graph is one new file. The Mermaid dumper in `runtime/src/graphs/dump.ts` reads any Graph and emits flowchart source.
 
 | Graph | Topology | Notable per-graph config |
 | --- | --- | --- |
@@ -67,13 +67,13 @@ lift    ──[resolved_via_save]───→ terminal{closed}
 
 **No `plan_rejected` event.** The runtime never classifies the user's ack reply as approve / reject — that's the agent's job. The agent reads `user_response` from `ack_checkpoint`, decides, and either calls `submit_triage_plan` again (`plan_submitted` re-enters triage) or proceeds with RE moves (the original `plan_handoff` already transitioned to LIFT).
 
-**Guarded transitions.** A single `(from, on)` pair can declare multiple destinations with a `when(session, payload)` predicate. The first matching entry wins; an unguarded entry serves as the fallback. This is how `execute_failed` routes between triage and `terminal{failed}` in the execute graph: the guard wraps `runtime/src/session-phase/guards/rediscover.ts`, which checks the saved-strategy's rolling success rate against `pool.rediscoverThreshold`. Stale strategies fall into triage with the failure as defense-surface input; structurally bad calls (wrong args, expired auth) terminate `failed`.
+**Guarded transitions.** A single `(from, on)` pair can declare multiple destinations with a `when(session, payload)` predicate. The first matching entry wins; an unguarded entry serves as the fallback. This is how `execute_failed` routes between triage and `terminal{failed}` in the execute graph: the guard wraps `runtime/src/graphs/guards/rediscover.ts`, which checks the saved-strategy's rolling success rate against `pool.rediscoverThreshold`. Stale strategies fall into triage with the failure as defense-surface input; structurally bad calls (wrong args, expired auth) terminate `failed`.
 
 Anything not in any graph's transition table is illegal for that graph — `dispatch` throws `SessionPhaseTransitionError`. Programmer bugs surface loudly.
 
 ## Per-phase admissibility (hard tool blocking)
 
-Every MCP tool dispatch goes through `assertToolAdmissibleBySessionId` (`runtime/src/session-phase/middleware.ts`). The middleware:
+Every MCP tool dispatch goes through `assertToolAdmissibleBySessionId` (`runtime/src/phases/middleware.ts`). The middleware:
 
 1. Looks up the session (skips check if no live session — e.g. `start_session` itself).
 2. Checks **universal tools** first (`UNIVERSAL_TOOLS` in `tool-catalog.ts`). These are admissible in every non-terminal phase: `ack_checkpoint`, `resolve_interruption`, `list_platform_skills`, `get_platform_logbook`, `start_remote_session`, plus admin / read-only-config tools.
@@ -223,7 +223,7 @@ interface Graph {
 }
 ```
 
-Each phase exports its `PhaseSpec` from `runtime/src/session-phase/phases/{drive,triage,lift,execute}.ts`. Each graph exports its `Graph` literal from `runtime/src/session-phase/graphs/{discover,map,execute}.ts`. Adding or modifying a tool's phase membership = a one-line edit to that phase's `allowedTools` set (or to the shared catalogs in `tool-catalog.ts`). No cross-cutting concerns.
+Each phase exports its `PhaseSpec` from `runtime/src/phases/{drive,triage,lift,execute}.ts`. Each graph exports its `Graph` literal from `runtime/src/graphs/{discover,map,execute}.ts`. Adding or modifying a tool's phase membership = a one-line edit to that phase's `allowedTools` set (or to the shared catalogs in `tool-catalog.ts`). No cross-cutting concerns.
 
 The **graphs index** (`graphs/index.ts`) maps `GraphName` → `Graph`. The **registry** (`registry.ts`) resolves the active graph from `session.graph`, exposes `currentPhase`, `currentSpec`, `currentGraph`, `graphConfig`, and `checkAdmissibility`. The **state machine** (`state-machine.ts`) is a tiny dispatcher that looks up the active graph's transition table, runs guards, applies the destination (phase + onEnter, or terminal + `session.status`), and mutates `session.phase` — the single writer.
 
@@ -237,15 +237,15 @@ To add a new graph: create `graphs/<name>.ts` exporting a `Graph` literal, add i
 
 ## Critical files
 
-- `runtime/src/session-phase/types.ts` — `PhaseSpec`, `Graph`, `GraphConfig`, `PhaseEvent`, `TerminalNode`, error classes
-- `runtime/src/session-phase/graphs/{index,discover,map,execute}.ts` — graph definitions + the `GRAPHS` map
-- `runtime/src/session-phase/guards/rediscover.ts` — failure-gate predicate for the execute graph
-- `runtime/src/session-phase/registry.ts` — `currentGraph`, `currentPhase`, `graphConfig`, accessor + admissibility helpers
-- `runtime/src/session-phase/state-machine.ts` — `dispatch`, `forceTransition`; the only writers of `session.phase` and `session.status`
-- `runtime/src/session-phase/middleware.ts` — `assertToolAdmissibleBySessionId`, `tickPhaseCounter`
-- `runtime/src/session-phase/tool-catalog.ts` — single source of truth for tool categories
-- `runtime/src/session-phase/phases/{drive,triage,lift,execute}.ts` — per-phase `PhaseSpec` modules
-- `runtime/src/session-phase/dump.ts` — Mermaid renderer for any Graph
+- `runtime/src/phases/types.ts` — `PhaseSpec`, `Graph`, `GraphConfig`, `PhaseEvent`, `TerminalNode`, error classes
+- `runtime/src/graphs/{index,discover,map,execute}.ts` — graph definitions + the `GRAPHS` map
+- `runtime/src/graphs/guards/rediscover.ts` — failure-gate predicate for the execute graph
+- `runtime/src/phases/registry.ts` — `currentGraph`, `currentPhase`, `graphConfig`, accessor + admissibility helpers
+- `runtime/src/phases/state-machine.ts` — `dispatch`, `forceTransition`; the only writers of `session.phase` and `session.status`
+- `runtime/src/phases/middleware.ts` — `assertToolAdmissibleBySessionId`, `tickPhaseCounter`
+- `runtime/src/phases/tool-catalog.ts` — single source of truth for tool categories
+- `runtime/src/phases/{drive,triage,lift,execute}.ts` — per-phase `PhaseSpec` modules
+- `runtime/src/graphs/dump.ts` — Mermaid renderer for any Graph
 - `runtime/src/tools/submit-triage-plan.ts` — the triage-exit tool
 - `runtime/src/audit/save-strategy.ts` — `surfaceTriageMissingDetector`
 - `runtime/src/working-dir/schema.ts` — `TriagePlan` type + logbook fields
