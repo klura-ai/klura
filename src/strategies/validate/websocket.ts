@@ -13,7 +13,7 @@
 import { isPlainObject } from './helpers';
 import { WS_FIELDS, WS_UNSAFE_HEADERS, HTTP_EXCLUSIVE_FIELDS } from './constants';
 import { asBoundedScript } from '../js-eval-validators';
-import { collectInlinePlaceholderRefs } from '../../placeholders';
+import { collectInlinePlaceholderRefs } from '../../execution/placeholders';
 import { collectDeclaredPlaceholders } from '../placeholder-semantics';
 import { validateRecordedPathStepShape } from './recorded-path';
 import { websocketFieldsSchema } from '../schemas/websocket';

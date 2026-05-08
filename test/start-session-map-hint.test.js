@@ -18,7 +18,7 @@ process.on('exit', () => {
 });
 
 const { startSession } = await import('../dist/index.js');
-const { pool } = await import('../dist/runtime-state.js');
+const { pool } = await import('../dist/runtime-state/index.js');
 
 function patchPoolForFakeBrowser() {
   const fakeDriver = {

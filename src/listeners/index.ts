@@ -1,11 +1,11 @@
 import { EventEmitter } from 'events';
 import { randomInt } from 'crypto';
 import WebSocket from 'ws';
-import * as skills from './strategies/skills';
-import type { TokenCache } from './strategies/tokens';
-import type { BrowserPool, Session } from './drivers/types/session';
-import { interpolateVars } from './execution/vars';
-import { parseSseChunk, parseNdjsonChunk } from './listeners/parse-fetch-stream';
+import * as skills from '../strategies/skills';
+import type { TokenCache } from '../strategies/tokens';
+import type { BrowserPool, Session } from '../drivers/types/session';
+import { interpolateVars } from '../execution/vars';
+import { parseSseChunk, parseNdjsonChunk } from './parse-fetch-stream';
 
 // Shared pool surface — any BrowserPool implementation. Listeners need it to
 // spin up long-lived browser sessions for the browser-event transport, which

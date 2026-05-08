@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { checkCapabilityArgs } = await import('../dist/well-known-capabilities.js');
+const { checkCapabilityArgs } = await import('../dist/tools/well-known-capabilities.js');
 
 test('returns null for unknown capability slug', () => {
   assert.equal(checkCapabilityArgs('not_a_real_slug', { foo: 'bar' }), null);

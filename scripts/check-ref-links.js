@@ -3,7 +3,7 @@
 //
 // Walks agent-facing surfaces for `klura://reference#<slug>` URLs and asserts
 // every slug resolves to a real `## ` or `#### ` header in REFERENCE.md.
-// Also asserts every entry in REF_LINKS (runtime/src/vocab.ts) maps to a
+// Also asserts every entry in REF_LINKS (runtime/src/vocab/index.ts) maps to a
 // real header — orphan REF_LINKS entries are stale.
 //
 // Run via `npm test`. Failure exits non-zero.
@@ -52,7 +52,7 @@ function readRealSlugs() {
 
 function readVocabSlugs() {
   // Parse vocab.ts as text; extract REF_LINKS values.
-  const vocab = fs.readFileSync(path.join(RUNTIME_ROOT, 'src', 'vocab.ts'), 'utf8');
+  const vocab = fs.readFileSync(path.join(RUNTIME_ROOT, 'src', 'vocab', 'index.ts'), 'utf8');
   const start = vocab.indexOf('export const REF_LINKS = {');
   if (start === -1) throw new Error('REF_LINKS not found in vocab.ts');
   const end = vocab.indexOf('} as const;', start);

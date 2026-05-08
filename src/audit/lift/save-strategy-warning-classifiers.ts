@@ -18,7 +18,7 @@ import {
   FIRE_AND_FORGET_JUSTIFYING_NOUNS,
   NON_DOM_VERIFICATION_MARKERS,
 } from '../../gate/save-warnings';
-import { findObservedKeys, findObservedLiterals } from '../../observation-trace';
+import { findObservedKeys, findObservedLiterals } from '../../response/observation-trace';
 
 // ---------- parameterization_disclosure_required ----------
 

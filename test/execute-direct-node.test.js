@@ -25,7 +25,7 @@ process.env.KLURA_HOME = TMP;
 
 const klura = await import('../dist/index.js');
 const skillsMod = await import('../dist/strategies/skills.js');
-const runtimeState = await import('../dist/runtime-state.js');
+const runtimeState = await import('../dist/runtime-state/index.js');
 const { execute, setDeviceProfile } = klura;
 // Use the low-level skills.saveStrategy (synchronous) to skip the probe —
 // these tests are unit-level and don't want the save-time browser probe

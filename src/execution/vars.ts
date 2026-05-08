@@ -5,7 +5,7 @@
 import { getIdentity } from '../identity/identities';
 import { resolveSecrets } from '../identity/secrets';
 import { extractFromHtml } from '../response/html-extract';
-import { lookupPlaceholderPath, replacePlaceholders } from '../placeholders';
+import { lookupPlaceholderPath, replacePlaceholders } from '../execution/placeholders';
 
 // Walk a dotted path into a nested object. Supports `response.items[0].node_id`
 // style. Returns undefined if the path doesn't resolve, or if the final value

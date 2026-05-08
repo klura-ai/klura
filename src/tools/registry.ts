@@ -14,7 +14,7 @@
 //
 //     // runtime/src/tools/my-tool.ts
 //     import { TOOL_NAMES, refUrl, REF_LINKS } from '../vocab';
-//     import type { ToolDef } from '../tool-types';
+//     import type { ToolDef } from '../tools/types';
 //
 //     export const TOOL_DEF: ToolDef = {
 //       name: TOOL_NAMES.myTool,
@@ -29,7 +29,7 @@
 //
 // Then add the import to TOOL_REGISTRY below.
 
-import type { ToolDef } from '../tool-types';
+import type { ToolDef } from '../tools/types';
 
 import { TOOL_DEF as abortSession } from './abort_session';
 import { TOOL_DEF as startSession } from './start-session';

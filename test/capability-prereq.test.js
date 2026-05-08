@@ -27,7 +27,7 @@ const { saveStrategy, validateStrategyShape } = await import(
   '../dist/strategies/skills.js'
 );
 const { walkJsonPath, MAX_PREREQ_DEPTH } = await import(
-  '../dist/execution.js'
+  '../dist/execution/index.js'
 );
 
 function expectRejectSave(platform, capability, data, matcher) {

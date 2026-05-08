@@ -19,7 +19,7 @@ import {
   asIdentifierSlug,
   asUrl,
   assertNoReservedKeys,
-} from '../dist/validators.js';
+} from '../dist/validators/index.js';
 import {
   asBoundedScript,
   asReturnShape,

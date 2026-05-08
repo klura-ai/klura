@@ -64,7 +64,7 @@ export function getUnusedSignerDiscoveryTools(session: Session): string[] {
  * Compute the LIFT obligation for a session — a sticky reminder surfaced
  * on tool responses when mutating actions have happened but no strategy is
  * saved (and end_drive hasn't completed). Returns null if no obligation
- * applies. See `runtime/src/session-obligations.ts` for the full rationale.
+ * applies. See `runtime/src/session-obligations/index.ts` for the full rationale.
  */
 export function getSessionObligation(
   sessionId: string,
@@ -83,9 +83,9 @@ export function getSessionObligation(
 // ---------------------------------------------------------------------------
 
 import { TOOL_NAMES } from '../vocab';
-import type { ToolDef } from '../tool-types';
+import type { ToolDef } from '../tools/types';
 import { endDrive } from '../phases/drive/end-drive-orchestrator';
-import { ackCheckpoint } from '../checkpoints-api';
+import { ackCheckpoint } from '../checkpoints/api';
 import { CHECKPOINT_KINDS, composeAckHint } from '../checkpoints';
 
 const checkpointAckTable = CHECKPOINT_KINDS.map(

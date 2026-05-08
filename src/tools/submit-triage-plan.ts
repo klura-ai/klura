@@ -477,7 +477,7 @@ export async function submitTriagePlan(rawArgs: unknown): Promise<SubmitTriagePl
 // ---------------------------------------------------------------------------
 
 import { TOOL_NAMES } from '../vocab';
-import type { ToolDef } from '../tool-types';
+import type { ToolDef } from '../tools/types';
 
 export const TOOL_DEF: ToolDef = {
   name: TOOL_NAMES.submitTriagePlan,

@@ -1,7 +1,7 @@
-import { invokeInterruptionHandler } from './interruptions';
-import type { InterruptionEvent, InterruptionResolution } from './interruptions';
-import { buildTokenGate } from './gate';
-import type { Session } from './drivers/types/session';
+import { invokeInterruptionHandler } from '../interruptions';
+import type { InterruptionEvent, InterruptionResolution } from '../interruptions';
+import { buildTokenGate } from '../gate';
+import type { Session } from '../drivers/types/session';
 
 /**
  * Unified interruption envelope attached to tool responses when the runtime

@@ -1,6 +1,6 @@
 // Validators specific to the `js-eval` prereq shape — bounded-script acceptance
 // + the {kind, min_length, max_length, required_keys} return-shape declaration.
-// Kept here (not in the generic runtime/src/validators.ts toolkit) because the
+// Kept here (not in the generic runtime/src/validators/index.ts toolkit) because the
 // shape language is klura-domain and only this one prereq method reads it; the
 // toolkit stays focused on type-coercion primitives + schema-rendering helpers.
 

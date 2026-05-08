@@ -15,9 +15,9 @@
 // what the failed request would have had — no Node-side cookie
 // reconstruction.
 
-import type { BrowserDriver } from './drivers/interface';
-import type { Session } from './drivers/types/session';
-import { isLoginWallUrl } from './response/auth-wall';
+import type { BrowserDriver } from '../drivers/interface';
+import type { Session } from '../drivers/types/session';
+import { isLoginWallUrl } from '../response/auth-wall';
 
 export type AuthState = 'logged_in' | 'logged_out' | 'indeterminate';
 

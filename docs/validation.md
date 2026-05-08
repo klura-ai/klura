@@ -8,7 +8,7 @@ The full flow lives in `runtime/src/strategies/skills.ts:saveStrategy`. For the 
 
 ## The five layers
 
-**Layer 1 — primitive validators.** `runtime/src/validators.ts` is a tiny dependency-free module that provides `asPlatformSlug`, `asIdentifierSlug`, `asUrl`, `asEnum`, `asPositiveInt`, `assertNoReservedKeys`, and friends. Every LLM-supplied artifact (platform slug, capability name, identity key, secret-resolver scheme, URL template) is routed through these. `asPlatformSlug` enforces kebab-case filesystem-safe platform names; `asIdentifierSlug` enforces snake_case identifiers (capabilities, binds, step ids); both reject path traversal. `asUrl` enforces an http/https allowlist; `assertNoReservedKeys` blocks `__proto__`/`constructor`/`prototype` prototype pollution.
+**Layer 1 — primitive validators.** `runtime/src/validators/index.ts` is a tiny dependency-free module that provides `asPlatformSlug`, `asIdentifierSlug`, `asUrl`, `asEnum`, `asPositiveInt`, `assertNoReservedKeys`, and friends. Every LLM-supplied artifact (platform slug, capability name, identity key, secret-resolver scheme, URL template) is routed through these. `asPlatformSlug` enforces kebab-case filesystem-safe platform names; `asIdentifierSlug` enforces snake_case identifiers (capabilities, binds, step ids); both reject path traversal. `asUrl` enforces an http/https allowlist; `assertNoReservedKeys` blocks `__proto__`/`constructor`/`prototype` prototype pollution.
 
 **Layer 2 — shape check per strategy type.** `validateStrategyShape` enforces:
 

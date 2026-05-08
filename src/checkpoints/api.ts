@@ -4,11 +4,11 @@
 // wiring stays symmetric with interruptions (`resolveInterruption` in
 // `src/index.ts` dispatches through `tool-helpers.ts`).
 
-import { pool } from './runtime-state';
-import { assertNoPendingCheckpoint } from './checkpoints';
-import { peekPendingCheckpointKind } from './checkpoints/gate-glue';
-import { composeAckHint } from './checkpoints/ack-hints';
-export { assertNoPendingCheckpoint } from './checkpoints';
+import { pool } from '../runtime-state';
+import { assertNoPendingCheckpoint } from '../checkpoints';
+import { peekPendingCheckpointKind } from '../checkpoints/gate-glue';
+import { composeAckHint } from '../checkpoints/ack-hints';
+export { assertNoPendingCheckpoint } from '../checkpoints';
 
 export interface AckCheckpointArgs {
   session_id: string;

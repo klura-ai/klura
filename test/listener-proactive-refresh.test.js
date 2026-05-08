@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { ListenerManager } = await import('../dist/listeners.js');
+const { ListenerManager } = await import('../dist/listeners/index.js');
 
 function mockTokenCache(needsRefreshByName) {
   return {

@@ -198,7 +198,7 @@ test('unregisterCheckpointHandler: no-op on unknown', () => {
 
 // -- token-gate --------------------------------------------
 
-const { pool } = await import('../dist/runtime-state.js');
+const { pool } = await import('../dist/runtime-state/index.js');
 const { mintCheckpointToken, assertNoPendingCheckpoint } = await import(
   '../dist/checkpoints/index.js'
 );

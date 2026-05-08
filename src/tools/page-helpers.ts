@@ -1,7 +1,7 @@
 import { pool } from '../runtime-state';
 import { ensureAccumulator, ringPush, digestSelector } from '../strategies/discovery-artifact';
 import { truncateString, ATTRIBUTE_VALUE_BUDGET } from '../response/response-size';
-import { recordObservations } from '../observation-trace';
+import { recordObservations } from '../response/observation-trace';
 
 export async function getScreenshot(sessionId: string): Promise<string> {
   const session = pool.getSession(sessionId);
@@ -106,7 +106,7 @@ export async function findInPage(
   // trace. The agent is searching for a known string and getting back
   // where it lives; both the needle's surrounding context and the matched
   // selector are observation, not contract. See
-  // runtime/src/observation-trace.ts.
+  // runtime/src/response/observation-trace.ts.
   recordObservations(session, matches);
   ringPush(ensureAccumulator(session).findInPageCalls, {
     needle_slug: needle.slice(0, 60),
@@ -126,7 +126,7 @@ export async function findInPage(
 // ---------------------------------------------------------------------------
 
 import { TOOL_NAMES } from '../vocab';
-import type { ToolDef } from '../tool-types';
+import type { ToolDef } from '../tools/types';
 
 export const TOOL_DEFS: ToolDef[] = [
   {

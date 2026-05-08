@@ -7,26 +7,26 @@
 // without also pulling in every other tool's transitive surface. index.ts is
 // the agent-facing barrel; runtime-state.ts is the daemon's shared backbone.
 
-import { createPool } from './pool/pool';
-import { TokenCache } from './strategies/tokens';
-import { defaultCapabilityCache } from './cache/capability-cache';
-import { ListenerManager } from './listeners';
-import * as skills from './strategies/skills';
-import { runPrerequisites } from './execution';
+import { createPool } from '../pool/pool';
+import { TokenCache } from '../strategies/tokens';
+import { defaultCapabilityCache } from '../cache/capability-cache';
+import { ListenerManager } from '../listeners';
+import * as skills from '../strategies/skills';
+import { runPrerequisites } from '../execution';
 import {
   registerDefaults as registerInterruptionDefaults,
   setViewerOpener as setInterruptionViewerOpener,
-} from './interruptions';
+} from '../interruptions';
 import {
   registerCheckpointDefaults,
   setViewerOpener as setCheckpointViewerOpener,
-} from './checkpoints';
-import { startRemoteSession } from './remote';
+} from '../checkpoints';
+import { startRemoteSession } from '../remote';
 // Default plugins that ship with klura. Imported for side-effect — each
 // plugin file calls `registerInterruptionHandler(...)` at module load,
 // the same way an enterprise plugin would. Removing an import here is
 // how a deployment opts out of a shipped plugin.
-import './plugins/credential-autofill';
+import '../plugins/credential-autofill';
 
 // Register built-in interruption + checkpoint handlers at module-load
 // time. Scenario / enterprise plugins register after to pre-empt these

@@ -9,7 +9,7 @@
 // renames a tool, the metadata next to the implementation reminds them to
 // update both. Drift is impossible by construction.
 
-import type { ToolName } from './vocab';
+import type { ToolName } from '../vocab';
 
 /** JSON Schema fragment describing one tool's `inputSchema`. Open-shape
  *  Record because the JSON Schema spec allows arbitrary nested keywords;

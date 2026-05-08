@@ -23,7 +23,7 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'klura-popups-'));
 process.env.KLURA_HOME = TMP;
 
 const klura = await import('../dist/index.js');
-const { pool } = await import('../dist/runtime-state.js');
+const { pool } = await import('../dist/runtime-state/index.js');
 
 test.after(async () => {
   try {

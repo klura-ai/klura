@@ -11,7 +11,7 @@ import path from 'node:path';
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'klura-js-eval-per-call-test-'));
 process.env.KLURA_HOME = TMP;
 
-const { runPrerequisites } = await import('../dist/execution.js');
+const { runPrerequisites } = await import('../dist/execution/index.js');
 
 test.after(() => {
   try {

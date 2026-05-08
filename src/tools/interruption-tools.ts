@@ -1,6 +1,6 @@
 import { pool } from '../runtime-state';
 import { listInterruptionHandlers } from '../interruptions';
-import { invokeAndGateHandover } from '../tool-helpers';
+import { invokeAndGateHandover } from '../tools/helpers';
 
 /**
  * List every registered interruption handler as `{name, description}`. The
@@ -65,7 +65,7 @@ export async function resolveInterruption(args: ResolveInterruptionArgs): Promis
 // ---------------------------------------------------------------------------
 
 import { TOOL_NAMES } from '../vocab';
-import type { ToolDef } from '../tool-types';
+import type { ToolDef } from '../tools/types';
 
 export const TOOL_DEFS: ToolDef[] = [
   {

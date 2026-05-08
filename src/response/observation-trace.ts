@@ -19,7 +19,7 @@
 // Listed in the heuristics-exceptions table at runtime/docs/principles.md
 // §"Delegate to the LLM, but allow narrowly-scoped runtime heuristics."
 
-import type { Session } from './drivers/types/session';
+import type { Session } from '../drivers/types/session';
 
 /**
  * Per-session cap on the observed-strings set. LRU-evicted on overflow.

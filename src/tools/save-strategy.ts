@@ -36,7 +36,7 @@ import { detectAuthGatedWithoutAuthPrereq } from '../gate/save-warnings';
  *  `SaveStrategyRejection`). Lets the runner / harness see where time goes
  *  per attempt — most notably, that `probe_ms` is 0 on the rejected-attempt
  *  fast path. Mirrors the `result.elapsedMs` pattern in
- *  `runtime/src/execution.ts`. */
+ *  `runtime/src/execution/index.ts`. */
 export interface SaveStrategyTimings {
   total_ms: number;
   validators_ms: number;
@@ -975,7 +975,7 @@ function buildValidationTarget(data: Strategy): { method: string; url: string } 
 // ---------------------------------------------------------------------------
 
 import { TOOL_NAMES } from '../vocab';
-import type { ToolDef } from '../tool-types';
+import type { ToolDef } from '../tools/types';
 import { patchStep } from '../public-api';
 
 export const TOOL_DEFS: ToolDef[] = [

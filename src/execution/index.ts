@@ -1,6 +1,6 @@
-import * as skills from './strategies/skills';
-import type { BrowserDriver } from './drivers/interface';
-import type { Session, SessionOptions } from './drivers/types/session';
+import * as skills from '../strategies/skills';
+import type { BrowserDriver } from '../drivers/interface';
+import type { Session, SessionOptions } from '../drivers/types/session';
 import type {
   AnyPool,
   FetchStrategy,
@@ -9,33 +9,33 @@ import type {
   RecordedPathStrategy,
   ExecuteResult,
   WebSocketStrategy,
-} from './execution/types';
-import { TokenCache } from './strategies/tokens';
+} from './types';
+import { TokenCache } from '../strategies/tokens';
 import {
   markHealthy,
   markFailed,
   isBroken,
   getHealth,
   recordNodeTransportSuccess,
-} from './strategies/health';
-import { getDeviceProfile } from './identity/devices';
-import { isTierAllowed, isCapabilityForbidden, loadCapabilityPolicy } from './strategies/policy';
-import { isLoginWallUrl } from './response/auth-wall';
-import type { StrategyNotes } from './strategies/skills';
-import { evaluatePredicate as registryEvaluatePredicate } from './strategies/predicate-registry';
-import { dispatchWebSocket } from './execution/websocket';
-import { interpolateVars, mergeWithIdentity } from './execution/vars';
-export { joinBaseAndPath } from './execution/vars';
+} from '../strategies/health';
+import { getDeviceProfile } from '../identity/devices';
+import { isTierAllowed, isCapabilityForbidden, loadCapabilityPolicy } from '../strategies/policy';
+import { isLoginWallUrl } from '../response/auth-wall';
+import type { StrategyNotes } from '../strategies/skills';
+import { evaluatePredicate as registryEvaluatePredicate } from '../strategies/predicate-registry';
+import { dispatchWebSocket } from './websocket';
+import { interpolateVars, mergeWithIdentity } from './vars';
+export { joinBaseAndPath } from './vars';
 import {
   TransportFailureError,
   recordNodeTransportFailure,
   executeFetchNode as executeFetchNodeRaw,
-} from './execution/fetch-node';
-import { executeFetchInBrowser } from './execution/fetch-browser';
-export { runPrerequisites, executeFetchInBrowser } from './execution/fetch-browser';
-import { executeRecordedPath, replayRecordedPathToAnchor } from './execution/recorded-path';
-export { resumeRecordedPath } from './execution/recorded-path';
-import { defaultCapabilityCache, getCachedOrExecute, parseTtl } from './cache/capability-cache';
+} from './fetch-node';
+import { executeFetchInBrowser } from './fetch-browser';
+export { runPrerequisites, executeFetchInBrowser } from './fetch-browser';
+import { executeRecordedPath, replayRecordedPathToAnchor } from './recorded-path';
+export { resumeRecordedPath } from './recorded-path';
+import { defaultCapabilityCache, getCachedOrExecute, parseTtl } from '../cache/capability-cache';
 
 // False positives are harmless — the DOMParser walker handles non-HTML input by
 // emitting an empty tree.
@@ -1048,7 +1048,7 @@ export interface AutoExecDiagnosis {
    *  (401/403). Absent for non-auth-shaped failures. The runtime fires the
    *  probe lazily — only when an auth-shape failure makes the
    *  stale_nonce-vs-auth_failed disambiguation worth a network round-trip.
-   *  See runtime/src/auth-probe.ts. */
+   *  See runtime/src/auth/probe.ts. */
   probe?: {
     url: string;
     status: number | null;
@@ -1066,7 +1066,7 @@ const PREREQ_FAILURE_RE =
 
 /**
  * Disambiguates `stale_nonce` vs `auth_failed` via the auth-probe outcome
- * (see runtime/src/auth-probe.ts). Both classes produce the same HTTP
+ * (see runtime/src/auth/probe.ts). Both classes produce the same HTTP
  * status (401/403); the structural ground truth that distinguishes them
  * is whether a probe of an auth-gated page the agent has previously
  * authenticated to (`notes.discovered_from_url` ideally, `baseUrl` as

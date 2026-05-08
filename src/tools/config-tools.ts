@@ -56,7 +56,7 @@ export function restartRuntime(args: { force?: boolean } = {}): {
 // ---------------------------------------------------------------------------
 
 import { TOOL_NAMES } from '../vocab';
-import type { ToolDef } from '../tool-types';
+import type { ToolDef } from '../tools/types';
 import { getSecret } from '../public-api';
 
 export const TOOL_DEFS: ToolDef[] = [

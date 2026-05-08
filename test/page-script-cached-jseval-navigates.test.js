@@ -12,7 +12,7 @@ import path from 'node:path';
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'klura-pscj-test-'));
 process.env.KLURA_HOME = TMP;
 
-const { executeFetchInBrowser } = await import('../dist/execution.js');
+const { executeFetchInBrowser } = await import('../dist/execution/index.js');
 
 test.after(() => {
   try {

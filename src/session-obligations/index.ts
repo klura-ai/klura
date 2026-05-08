@@ -23,8 +23,8 @@
 // trains agents to read klura's MUST claims as advisory, devaluing the
 // structurally-true MUSTs in checkpoint / interruption gates.
 
-import type { Session } from './drivers/types/session';
-import { graphConfig } from './phases/registry';
+import type { Session } from '../drivers/types/session';
+import { graphConfig } from '../phases/registry';
 
 /**
  * Action kinds that count as mutating — the agent intentionally changed

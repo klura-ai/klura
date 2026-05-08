@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { classifyAutoExecDiagnosis } = await import('../dist/execution.js');
+const { classifyAutoExecDiagnosis } = await import('../dist/execution/index.js');
 
 test('401 + auth-probe says logged_in → kind=stale_nonce', () => {
   // Crisp disambiguation via auth-probe (runtime/src/auth-probe.ts):

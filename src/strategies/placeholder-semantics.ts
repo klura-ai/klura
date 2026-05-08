@@ -1,5 +1,5 @@
 import type { Strategy } from './skills';
-import { collectInlinePlaceholderRefs } from '../placeholders';
+import { collectInlinePlaceholderRefs } from '../execution/placeholders';
 
 export interface DeclaredPlaceholders {
   genNames: Set<string>;

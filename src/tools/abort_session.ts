@@ -21,7 +21,7 @@ import { clearStartersForSession } from '../response/starter-cache';
 import { clearForSession as clearSessionObservations } from '../response/session-observations';
 import { clearObservedSessionTracking } from '../working-dir/logbook';
 import { TOOL_NAMES } from '../vocab';
-import type { ToolDef } from '../tool-types';
+import type { ToolDef } from '../tools/types';
 
 const REASON_MIN_LENGTH = 20;
 

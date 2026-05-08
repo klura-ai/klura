@@ -10,7 +10,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert';
-import { finalizeCascadeFailure, looksLikeHtml } from '../dist/execution.js';
+import { finalizeCascadeFailure, looksLikeHtml } from '../dist/execution/index.js';
 
 const baseStrategy = {
   strategy: 'fetch',

@@ -7,7 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 
 const { closestAllowed, didYouMeanSuffix, asEnum } = await import(
-  '../dist/validators.js'
+  '../dist/validators/index.js'
 );
 
 // ---- closestAllowed: the pure fuzzy-match core ----

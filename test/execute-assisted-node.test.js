@@ -22,7 +22,7 @@ process.env.KLURA_HOME = TMP;
 
 const klura = await import('../dist/index.js');
 const skillsMod = await import('../dist/strategies/skills.js');
-const runtimeState = await import('../dist/runtime-state.js');
+const runtimeState = await import('../dist/runtime-state/index.js');
 const { execute } = klura;
 const saveStrategy = skillsMod.saveStrategy;
 

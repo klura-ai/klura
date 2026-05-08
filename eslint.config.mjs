@@ -105,7 +105,7 @@ export default tseslint.config(
     // Top-level execute() orchestrator + cascade-failure helpers live as
     // one cohesive module. Splitting bounces the reader between files for
     // very tightly-coupled error-classification logic. Ignore for now.
-    files: ['src/execution.ts'],
+    files: ['src/execution/index.ts'],
     rules: {
       'max-lines': 'off',
     },

@@ -2,7 +2,7 @@ import { pool, tokenCache } from '../runtime-state';
 import * as skills from '../strategies/skills';
 import { execute as executeStrategy } from '../execution';
 import type { ExecuteResult } from '../execution/types';
-import { pickProbeUrl, probeAuthState } from '../auth-probe';
+import { pickProbeUrl, probeAuthState } from '../auth/probe';
 import { classifyAutoExecDiagnosis } from '../execution';
 import { invokeCheckpointAndGate } from '../checkpoints';
 import { loadLogbook as loadLogbookForPlatform, readRecentAborts } from '../working-dir/logbook';
@@ -36,7 +36,7 @@ import {
   inlineArtifactForResponse,
   NETWORKLOG_TRIM_HINT,
 } from './_internals';
-import { checkCapabilityArgs } from '../well-known-capabilities';
+import { checkCapabilityArgs } from '../tools/well-known-capabilities';
 
 export const GRAPH_MODES = ['discover', 'map', 'execute'] as const;
 
@@ -732,7 +732,7 @@ async function maybeAutoExecuteOnStart(
       // "rotating-token rejection" (stale_nonce — re-extract via prereq)
       // from "session expired" (auth_failed — escalate to user re-auth).
       // The disambiguation is crisp (HTTP status + final URL after
-      // redirect-follow) — see runtime/src/auth-probe.ts and principles.md
+      // redirect-follow) — see runtime/src/auth/probe.ts and principles.md
       // §"Crisp vs fuzzy".
       const body = (execResult as { body?: Record<string, unknown> }).body;
       const status = (execResult as { status?: number }).status;
@@ -907,7 +907,7 @@ export function dispatchExecuteGraphOutcome(
   // `error` summary. Absent when the executor didn't run (auto_execute_reason
   // path) — the gate handles that by falling through to its rate-based
   // signal. `body.diagnosis` shape comes from `AutoExecDiagnosis` in
-  // `runtime/src/execution.ts`.
+  // `runtime/src/execution/index.ts`.
   let diagnosisKind: string | undefined;
   if (body && typeof body.diagnosis === 'object' && body.diagnosis !== null) {
     const k = (body.diagnosis as { kind?: unknown }).kind;
@@ -1311,7 +1311,7 @@ export async function startSession(
 // ---------------------------------------------------------------------------
 
 import { TOOL_NAMES } from '../vocab';
-import type { ToolDef } from '../tool-types';
+import type { ToolDef } from '../tools/types';
 
 const graphModesList = GRAPH_MODES.map((g) => `"${g}"`).join(', ');
 const startSessionDescription = `Start a klura session: open a browser and navigate to the given URL. Returns \`{sessionId, a11yTree, url, artifacts?, executed?, execute_result?, graph?}\`. The \`graph\` parameter selects one of: ${graphModesList}. **Default is "discover" — pick that for ANY user-driven request, including ones where the agent has to navigate around an unfamiliar site to find the right page.** "discover": drive→triage→lift→closed, the standard goal-directed reverse-engineering flow ending in a saved strategy. "map": drive→closed, **only for deliberate platform onboarding with no specific user goal** (e.g. "walk this site so future sessions can use it") — has no triage/lift phase and rejects \`capability\` declarations; mutating-action consent gates and skipped auto-synth. "execute": execute→triage→lift→closed (or terminal{failed}), runs a saved strategy and falls into triage on stale-strategy failure so the agent can re-plan and re-lift. When you pass \`{capability, args}\` and a complete saved strategy covers that capability, the runtime auto-runs the strategy in-session and returns \`executed: true\` with the result — call end_drive and you are done.`;

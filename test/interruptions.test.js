@@ -205,9 +205,9 @@ test('unregisterInterruptionHandler: no-op on unknown', () => {
 // exercise the lower-level `mintInterruptionToken` + `assertNoPendingInterruption`
 // via a real session stand-in.
 
-const { pool } = await import('../dist/runtime-state.js');
+const { pool } = await import('../dist/runtime-state/index.js');
 const { mintInterruptionToken, assertNoPendingInterruption } = await import(
-  '../dist/tool-helpers.js'
+  '../dist/tools/helpers.js'
 );
 
 function withFakeSession(fn) {

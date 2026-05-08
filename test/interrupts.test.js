@@ -20,7 +20,7 @@ process.on('exit', () => {
 });
 
 const { saveStrategy } = await import('../dist/strategies/skills.js');
-const { evaluatePredicate } = await import('../dist/execution.js');
+const { evaluatePredicate } = await import('../dist/execution/index.js');
 const predicateRegistry = await import('../dist/strategies/predicate-registry.js');
 const handlerRegistry = await import('../dist/strategies/interrupt-registry.js');
 const { z } = await import('zod');

@@ -1244,7 +1244,7 @@ When a named identity has no scoped slot, `getIdentity(platform, identity)` fall
 
 - **CLI subcommands** for managing identity jars (`klura identity list <platform>`, `klura identity rm <platform> <identity>`). Edit JSON files directly for now.
 - **`setIdentity` API extension to scoped slots.** The write path stays platform-only in v1.
-- **Listener identity scoping.** `runtime/src/listeners.ts` opens listeners per platform without an identity axis. Multi-account listening requires running multiple listener registrations for now.
+- **Listener identity scoping.** `runtime/src/listeners/index.ts` opens listeners per platform without an identity axis. Multi-account listening requires running multiple listener registrations for now.
 - **Save-time probe identity scoping.** `runtime/src/strategies/probe/index.ts` runs internal probes against the platform-default jar — strategies are platform-shape, not account-shape, so probes don't grow the axis.
 - **Migration tool.** No `<platform>.json` → `<platform>--default.json` rename. The default-identity sentinel reads the unsuffixed file forever.
 
@@ -1305,7 +1305,7 @@ Fresh execute calls don't add the field at all; absence = miss.
 
 - In-memory per daemon. No disk persistence in v1 — daemon restart starts the cache empty.
 - Periodic sweeper evicts expired entries every 60s. Reads also evict on hit-after-expiry.
-- The two read sites — `runtime/src/tools/execute.ts` (direct `execute` calls) and `runtime/src/execution.ts:resolveCapabilityPrereq` (capability prereqs like `send_message`'s dependency on `search_contact`) — share one singleton, so a memoized direct lookup is also seen by a later call that uses the capability as a prereq.
+- The two read sites — `runtime/src/tools/execute.ts` (direct `execute` calls) and `runtime/src/execution/index.ts:resolveCapabilityPrereq` (capability prereqs like `send_message`'s dependency on `search_contact`) — share one singleton, so a memoized direct lookup is also seen by a later call that uses the capability as a prereq.
 
 ### When to set this
 

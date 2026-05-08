@@ -562,7 +562,7 @@ export interface SaveAuditContext {
    *  `static` classifications on values the agent OBSERVED at runtime —
    *  observed values are by-construction not contract, so they need a
    *  prereq_output or caller_input classification. See
-   *  runtime/src/observation-trace.ts. */
+   *  runtime/src/response/observation-trace.ts. */
   observedStrings?: Set<string>;
 }
 

@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 const { saveStrategyAudit } = await import('../dist/audit/lift/save-strategy.js');
-const { recordObservations } = await import('../dist/observation-trace.js');
+const { recordObservations } = await import('../dist/response/observation-trace.js');
 const { registerSaveConfirmationDecider } = await import(
   '../dist/audit/lift/save-confirmation-decider.js'
 );

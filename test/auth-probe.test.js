@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { pickProbeUrl } = await import('../dist/auth-probe.js');
+const { pickProbeUrl } = await import('../dist/auth/probe.js');
 const { isLoginWallUrl } = await import('../dist/response/auth-wall.js');
 
 test('isLoginWallUrl: positive cases', () => {

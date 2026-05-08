@@ -13,7 +13,7 @@ const {
   extractPropertyKeys,
   findObservedKeys,
   STABLE_API_NAMES,
-} = await import('../dist/observation-trace.js');
+} = await import('../dist/response/observation-trace.js');
 
 function mkSession() {
   return {

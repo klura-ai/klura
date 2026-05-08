@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { looksLikeAuthFailure, looksLikeStaleEndpoint } from '../dist/execution.js';
+import { looksLikeAuthFailure, looksLikeStaleEndpoint } from '../dist/execution/index.js';
 
 // looksLikeAuthFailure is structural: HTTP status (401/403), login-wall final
 // URL, and machine-readable code-enum fields (`error`, `code`, `errors[].type`,

@@ -26,8 +26,8 @@ export function getReferenceMd(): string {
 
 export { readObservedCapabilities, readUrlGraph, readFormsSeen } from './working-dir/logbook';
 
-export { assertNoPendingInterruption } from './tool-helpers';
-export { assertNoPendingCheckpoint, ackCheckpoint } from './checkpoints-api';
+export { assertNoPendingInterruption } from './tools/helpers';
+export { assertNoPendingCheckpoint, ackCheckpoint } from './checkpoints/api';
 
 export {
   resolveReferenceResource,
@@ -39,7 +39,7 @@ export {
 } from './response/reference-sections';
 export type { ReferenceSection } from './response/reference-sections';
 
-export type { InterruptionEnvelope } from './tool-helpers';
+export type { InterruptionEnvelope } from './tools/helpers';
 export type { CheckpointEnvelope } from './checkpoints';
 export {
   registerCheckpointHandler,
@@ -99,7 +99,7 @@ export type { ToolName, AuditKind, WarningKind, DecisionValue, RefLink } from '.
 
 // ---- Tool registry (single source of truth for MCP descriptions) ----
 
-export type { ToolDef, JsonSchema } from './tool-types';
+export type { ToolDef, JsonSchema } from './tools/types';
 export { TOOL_REGISTRY } from './tools/registry';
 
 // ---- Tool-surface re-exports ----
@@ -140,7 +140,7 @@ export type { SessionPhase, PhaseSpec, PhaseEvent, PhaseEventKind } from './phas
 export { ToolNotAdmissibleError, SessionPhaseTransitionError } from './phases/types';
 
 // Public, runtime-state-bound entry point for the saved-strategy executor.
-// The lower-level `execute` in `runtime/src/execution.ts` takes pool +
+// The lower-level `execute` in `runtime/src/execution/index.ts` takes pool +
 // tokenCache as positional args; this wrapper binds them from runtime
 // state so callers (daemon CLI bridge, programmatic Node consumers) get
 // the four-arg shape they expect.

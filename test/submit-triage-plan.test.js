@@ -12,7 +12,7 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'klura-stp-'));
 process.env.KLURA_HOME = TMP;
 
 const { submitTriagePlan } = await import('../dist/tools/submit-triage-plan.js');
-const { pool } = await import('../dist/runtime-state.js');
+const { pool } = await import('../dist/runtime-state/index.js');
 const { loadLogbook } = await import('../dist/working-dir/logbook.js');
 const { dispatch } = await import('../dist/phases/state-machine.js');
 

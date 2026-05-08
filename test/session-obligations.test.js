@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { computeSessionObligation } = await import('../dist/session-obligations.js');
+const { computeSessionObligation } = await import('../dist/session-obligations/index.js');
 
 // Default session shape represents a COMMITTED session — one capability
 // declared at start_session. Tests covering the exploration exemption

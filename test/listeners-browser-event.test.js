@@ -24,7 +24,7 @@ import fs from 'fs';
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'klura-bevtest-'));
 process.env.KLURA_HOME = HOME;
 
-const { ListenerManager } = await import('../dist/listeners.js');
+const { ListenerManager } = await import('../dist/listeners/index.js');
 
 // ---- Mock pool + driver ----
 

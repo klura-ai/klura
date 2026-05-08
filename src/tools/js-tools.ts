@@ -14,7 +14,7 @@ import {
 } from '../response/send-encoder-shape';
 import { guardLargeResult, MAX_TOOL_OUTPUT_CHARS } from '../response/response-size';
 import { wrapAgentExpression } from '../response/js-eval-wrapper';
-import { recordObservations } from '../observation-trace';
+import { recordObservations } from '../response/observation-trace';
 import { maybeFireSurfaceChanged } from '../phases/surface-changed';
 import type { CheckpointEnvelope } from '../checkpoints';
 
@@ -425,7 +425,7 @@ export async function jsEval(args: JsEvalArgs): Promise<
     // observation trace. Used at save time by the observed-key gate to
     // distinguish "agent baked an observed property name" (fragile) from
     // "agent baked a stable contract name" (fine). See
-    // runtime/src/observation-trace.ts.
+    // runtime/src/response/observation-trace.ts.
     recordObservations(session, result);
     // Surface-map: js_eval can mutate `window.location` to drive a SPA
     // navigation. Drain the framenavigated buffer + capture forms so those
@@ -563,7 +563,7 @@ export async function removePageInitScript(
 // ---------------------------------------------------------------------------
 
 import { TOOL_NAMES } from '../vocab';
-import type { ToolDef } from '../tool-types';
+import type { ToolDef } from '../tools/types';
 
 export const TOOL_DEFS: ToolDef[] = [
   {

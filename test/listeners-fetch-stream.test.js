@@ -35,7 +35,7 @@ test.after(() => {
 const { parseSseChunk, parseNdjsonChunk } = await import(
   '../dist/listeners/parse-fetch-stream.js'
 );
-const { ListenerManager } = await import('../dist/listeners.js');
+const { ListenerManager } = await import('../dist/listeners/index.js');
 
 // ---- Parser unit tests ----
 

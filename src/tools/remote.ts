@@ -145,7 +145,7 @@ export async function waitForRemote(
 // ---------------------------------------------------------------------------
 
 import { TOOL_NAMES } from '../vocab';
-import type { ToolDef } from '../tool-types';
+import type { ToolDef } from '../tools/types';
 
 export const TOOL_DEFS: ToolDef[] = [
   {

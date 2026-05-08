@@ -26,7 +26,7 @@ process.on('exit', () => {
 
 const { performAction } = await import('../dist/index.js');
 const { endDrive } = await import('../dist/phases/drive/end-drive-orchestrator.js');
-const { pool } = await import('../dist/runtime-state.js');
+const { pool } = await import('../dist/runtime-state/index.js');
 const { readUrlGraph, readFormsSeen } = await import('../dist/working-dir/logbook.js');
 
 function makeFakeDriver() {

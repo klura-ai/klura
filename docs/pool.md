@@ -15,7 +15,7 @@ With warm enabled, Chromium reuse saves the process spin-up (~300–500 ms), but
 The extension that unlocks sub-200 ms warm executes: when some _other_ caller already has a long-lived session parked on the right page with the right connections live, `execute()` borrows it instead of cold-spawning. Two callers qualify today:
 
 1. **A prior execute()** whose page never got `resetSession`'d because the borrower marked it `borrowed: true` and `closeSession` put it back without the reset — "pending reuse" state.
-2. **A `browser-event` listener** (`runtime/src/listeners.ts`) whose session holds a page + WebSocket open for the listener's lifetime (minutes to hours). After the listener opens its stream, it calls `pool.registerSharedSession(session, platform)` to expose itself to the checkout protocol.
+2. **A `browser-event` listener** (`runtime/src/listeners/index.ts`) whose session holds a page + WebSocket open for the listener's lifetime (minutes to hours). After the listener opens its stream, it calls `pool.registerSharedSession(session, platform)` to expose itself to the checkout protocol.
 
 The protocol is one method on `BrowserPool`:
 

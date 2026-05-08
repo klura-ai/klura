@@ -1,5 +1,5 @@
 import { pool } from '../runtime-state';
-import { checkCapabilityArgs } from '../well-known-capabilities';
+import { checkCapabilityArgs } from '../tools/well-known-capabilities';
 
 export interface DeclareCapabilityArgs {
   session_id: string;
@@ -68,7 +68,7 @@ export function declareCapability(args: DeclareCapabilityArgs): { ok: true; _hin
 // ---------------------------------------------------------------------------
 
 import { TOOL_NAMES } from '../vocab';
-import type { ToolDef } from '../tool-types';
+import type { ToolDef } from '../tools/types';
 
 export const TOOL_DEF: ToolDef = {
   name: TOOL_NAMES.declareCapability,

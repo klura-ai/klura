@@ -1,6 +1,6 @@
 // Saved-strategy invocation entry points used by the runtime.
 //
-// The full execution pipeline lives in `runtime/src/execution.ts` (and is
+// The full execution pipeline lives in `runtime/src/execution/index.ts` (and is
 // re-exported from `runtime/src/index.ts` as `execute`). Callers — the
 // daemon CLI bridge, the warm-execute path on `start_session`, the
 // `graph: 'execute'` entry phase — invoke that directly. This file keeps
@@ -20,7 +20,7 @@ export async function resumeExecution(sessionId: string): Promise<ExecuteResult>
 // ---------------------------------------------------------------------------
 
 import { TOOL_NAMES } from '../vocab';
-import type { ToolDef } from '../tool-types';
+import type { ToolDef } from '../tools/types';
 
 export const TOOL_DEF: ToolDef = {
   name: TOOL_NAMES.resumeExecution,

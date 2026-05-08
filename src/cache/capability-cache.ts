@@ -241,7 +241,7 @@ export class CapabilityCache {
 
 // Default daemon-wide singleton. Both the agent-facing tool surface
 // (runtime/src/tools/execute.ts) and the prereq-resolution path
-// (runtime/src/execution.ts:resolveCapabilityPrereq) read from this same
+// (runtime/src/execution/index.ts:resolveCapabilityPrereq) read from this same
 // instance so a `search_contact` result memoized via a direct
 // `execute("acme", "search_contact", {name})` call is also seen by a
 // later `send_message` call that uses `search_contact` as a capability

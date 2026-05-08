@@ -20,7 +20,7 @@ import path from 'node:path';
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'klura-listeners-int-'));
 process.env.KLURA_HOME = HOME;
 
-const { ListenerManager } = await import('../dist/listeners.js');
+const { ListenerManager } = await import('../dist/listeners/index.js');
 
 // ---- Mock platform server ----
 

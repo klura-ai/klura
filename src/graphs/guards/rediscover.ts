@@ -7,7 +7,7 @@
 // Two signals, structural-first then rate-based fallback:
 //
 //  1. **Structural**: the cascade's `AutoExecDiagnosis.kind` (composed in
-//     `runtime/src/execution.ts`). Stale-shape kinds (`stale_nonce`,
+//     `runtime/src/execution/index.ts`). Stale-shape kinds (`stale_nonce`,
 //     `endpoint_stale`, `needs_rediscovery`, `prereq_returned_undefined`)
 //     trip the gate on the first failure — the runtime already
 //     classified the failure as "the saved shape no longer fits the wire,"
@@ -43,7 +43,7 @@ export interface ExecuteFailedPayload {
   diagnosis_kind?: AutoExecDiagnosisKind;
 }
 
-/** Mirrors `AutoExecDiagnosis['kind']` in `runtime/src/execution.ts` —
+/** Mirrors `AutoExecDiagnosis['kind']` in `runtime/src/execution/index.ts` —
  *  duplicated here to keep this guard module free of an executor import.
  *  When a new diagnosis kind is added there, add it here too and decide
  *  its rediscover semantics in `STALE_SHAPE_KINDS`. */
