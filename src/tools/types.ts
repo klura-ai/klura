@@ -16,6 +16,20 @@ import type { ToolName } from '../vocab';
  *  the runtime trusts the registry author to write valid schemas. */
 export type JsonSchema = Record<string, unknown>;
 
+/** Per-call context the MCP wrapper passes to tool handlers. Every field
+ *  is optional — handlers that don't need progress reporting accept the
+ *  arg and ignore it. */
+export interface ToolCallContext {
+  /** Emit an MCP `notifications/progress` for the in-flight request.
+   *  Set by `mcp/index.js` when the client request carried a
+   *  `_meta.progressToken`; absent otherwise. Long-running tools call
+   *  this at phase boundaries so the client (Claude Desktop) resets
+   *  its request deadline. The `stage` string is surfaced as the
+   *  notification's `message` field. No-throws contract: a failed
+   *  notification send must not abort the tool. */
+  progress?: (params: { stage?: string; current?: number; total?: number }) => void;
+}
+
 /** A tool's complete metadata + handler. The MCP wrapper exposes one entry
  *  per TOOL_DEF as `{name, description, inputSchema, handler}`. */
 export interface ToolDef<Args = unknown, Result = unknown> {
@@ -31,8 +45,10 @@ export interface ToolDef<Args = unknown, Result = unknown> {
   inputSchema: JsonSchema;
   /** Direct invocation. Handler internally calls the sibling implementation
    *  function (e.g. `startSession()`); the MCP wrapper just passes args
-   *  through. Sync-or-async — registry callers always await the result. */
-  handler: (args: Args) => Promise<Result> | Result;
+   *  through. Sync-or-async — registry callers always await the result.
+   *  The optional `ctx` carries cross-cutting per-call hooks (currently
+   *  only `progress` for MCP progress notifications). */
+  handler: (args: Args, ctx?: ToolCallContext) => Promise<Result> | Result;
   /** Bypass the pending-interruption pre-call gate. Set on tools that
    *  resolve the matching pending state (e.g. `resolve_interruption`); every
    *  other tool inherits the default of being blocked until the interruption

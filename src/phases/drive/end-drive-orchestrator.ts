@@ -398,11 +398,13 @@ export async function endDrive(
     auditToken?: string;
     auditAnswers?: Record<string, unknown>;
   } = {},
+  ctx: { progress?: (params: { stage: string }) => void } = {},
 ): Promise<
   | { ok: true; auto_synthesized?: SynthLedgerEntry[] }
   | NonNullable<ReturnType<typeof computeReverseEngineerHandoff>>
   | EndDriveAuditRejection
 > {
+  const progress = ctx.progress ?? ((): void => {});
   const session = pool.getSession(sessionId);
 
   // Resolve platform once. Explicit opts.platform wins; otherwise fall back
@@ -436,6 +438,7 @@ export async function endDrive(
     );
   }
 
+  progress({ stage: 'inferring observed capabilities from triage' });
   // Triaged-but-not-lifted inference. Runs BEFORE the audit because it's
   // pure logbook->logbook derivation — translates triage plans the agent
   // already submitted into observed_capabilities entries when no saved
@@ -459,6 +462,7 @@ export async function endDrive(
     }
   }
 
+  progress({ stage: 'running end-drive audit' });
   // Close-session audit (Detector + Classifier) runs BEFORE any state
   // mutation (including endDriveAttempts bump). One Audit instance covers both
   // the declaration-required check (Detector, ackReason: 'none') and the
@@ -547,6 +551,7 @@ export async function endDrive(
   // this branch on a graph without a lift phase.
   const graphHasLift = currentGraph(session).nodes.has('lift');
   if (platform && !isAbandonFromLift && graphHasLift) {
+    progress({ stage: 'composing drive→triage handoff' });
     const handoff = computeReverseEngineerHandoff(session, platform);
     if (handoff) {
       try {
@@ -585,6 +590,7 @@ export async function endDrive(
     await pool.driverFor(sessionId).saveStorageState(session, statePath);
   }
 
+  progress({ stage: 'auto-synthesizing fallback strategies' });
   // Auto-synthesize fallback strategies from session history. Runs BEFORE the
   // session is torn down so the synthesizer can read `performActionHistory` +
   // `savedCapabilities` off the live session. Best-effort: a synthesis failure
@@ -684,6 +690,7 @@ export async function endDrive(
     };
   }
 
+  progress({ stage: 'merging discovery artifacts' });
   // Discovery-artifact flush: for every capability saved in this session (or
   // auto-synthesized just now), merge the session accumulator with any prior
   // on-disk artifact and write the result. Protocol-neutral — the runtime just
@@ -772,6 +779,7 @@ export async function endDrive(
     }
   }
 
+  progress({ stage: 'flushing working dir + closing session' });
   // Platform working dir flush: translate the live session state into
   // CaptureEvent[] and hand to the working-dir writer. This builds the
   // per-platform logbook + session archive that cross-run analysis

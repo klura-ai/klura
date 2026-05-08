@@ -117,12 +117,16 @@ export const TOOL_DEFS: ToolDef[] = [
       },
       required: ['session_id'],
     },
-    handler: (args: any) =>
-      endDrive(args.session_id, {
-        platform: args.platform,
-        auditToken: args.audit_token,
-        auditAnswers: args.audit_answers,
-      }),
+    handler: (args: any, ctx) =>
+      endDrive(
+        args.session_id,
+        {
+          platform: args.platform,
+          auditToken: args.audit_token,
+          auditAnswers: args.audit_answers,
+        },
+        { progress: ctx?.progress },
+      ),
   },
 
   {
