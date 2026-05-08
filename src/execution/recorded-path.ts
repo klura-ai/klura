@@ -26,7 +26,7 @@ import {
   registerAutoExecuteAlias,
   clearAutoExecuteAlias,
   resolveAutoExecuteAlias,
-} from '../auto-execute-alias';
+} from './auto-execute-alias';
 import {
   capturePageFingerprint,
   diffFingerprints,
@@ -205,7 +205,7 @@ export async function replayRecordedPathToAnchor(
 export async function resumeRecordedPath(sessionId: string, pool: AnyPool): Promise<ExecuteResult> {
   // Resolve outer (start_session-owned) ids to the auto-execute inner id
   // they alias. Direct lookup wins; fallback to alias when the agent uses
-  // the outer id from start_session. See `runtime/src/auto-execute-alias.ts`.
+  // the outer id from start_session. See `runtime/src/execution/auto-execute-alias.ts`.
   let effectiveId = sessionId;
   let paused = pausedExecutions.get(sessionId);
   if (!paused) {
@@ -500,7 +500,7 @@ async function executeSteps(
         // When auto-execute fired this from start_session, register the
         // outer→inner alias so resume_execution / ack_checkpoint with the
         // outer (agent-known) session id resolve to this inner session's
-        // entries. See `runtime/src/auto-execute-alias.ts` and
+        // entries. See `runtime/src/execution/auto-execute-alias.ts` and
         // `runtime/docs/run-lifecycle.md#auto-execute-session-topology`.
         if (ownerSessionId && ownerSessionId !== session.id) {
           registerAutoExecuteAlias(ownerSessionId, session.id);

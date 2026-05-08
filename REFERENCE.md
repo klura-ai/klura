@@ -743,7 +743,7 @@ invalid_strategy: end_drive_rejected (pending)
 
 The Detector design (no audit_answers escape) is deliberate: prior history showed agents satisfying ack classifiers with canned answers once they learned the shape, defeating the gate. State-fix-or-abort closes that hole. See `memory/feedback_klura_always_save_default.md` and `memory/feedback_llm_self_gate_cheating.md`.
 
-**Module location.** `runtime/src/audit/drive/end-drive.ts` (the Audit instance), `runtime/src/end-drive/orchestrator.ts` (the silent_no_save guard), `runtime/src/audit/index.ts` (the framework). See `runtime/docs/gates.md` for the Detector/Classifier shapes and `runtime/docs/principles.md` §pre-commit gates for the taxonomy.
+**Module location.** `runtime/src/audit/drive/end-drive.ts` (the Audit instance), `runtime/src/phases/drive/end-drive-orchestrator.ts` (the silent_no_save guard), `runtime/src/audit/index.ts` (the framework). See `runtime/docs/gates.md` for the Detector/Classifier shapes and `runtime/docs/principles.md` §pre-commit gates for the taxonomy.
 
 ## js-eval
 

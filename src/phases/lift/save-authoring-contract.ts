@@ -11,17 +11,17 @@
 // to lift (`submit_triage_plan`) or directly from drive to close
 // (`end_drive`). Re-reads via `get_save_authoring_contract`.
 
-import type { Session } from './drivers/types/session';
-import type { InterceptedRequest } from './drivers/types/network';
+import type { Session } from '../../drivers/types/session';
+import type { InterceptedRequest } from '../../drivers/types/network';
 import {
   collectDataLoadCandidates,
   collectListingCandidates,
   type DataLoadCandidate,
   type ListingCandidate,
-} from './strategies/synthesize-on-close';
-import { getAllParamObservations } from './response/session-observations';
-import * as skills from './strategies/skills';
-import { loadLogbook } from './working-dir/logbook';
+} from '../../strategies/synthesize-on-close';
+import { getAllParamObservations } from '../../response/session-observations';
+import * as skills from '../../strategies/skills';
+import { loadLogbook } from '../../working-dir/logbook';
 
 export interface SaveAuthoringContract {
   capability: string;

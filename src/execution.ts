@@ -356,7 +356,7 @@ interface ExecuteOpts {
    * outer→inner alias so `resume_execution(outerId)` and
    * `ack_checkpoint(outerId)` resolve to the inner-keyed registry entries
    * without forcing the agent to read `session_id` out of the failure
-   * envelope. See `runtime/src/auto-execute-alias.ts` and
+   * envelope. See `runtime/src/execution/auto-execute-alias.ts` and
    * `runtime/docs/run-lifecycle.md#auto-execute-session-topology`.
    */
   ownerSessionId?: string;

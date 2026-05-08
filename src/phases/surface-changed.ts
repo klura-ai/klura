@@ -17,7 +17,7 @@ import { isPathDistinct, lookupSurface } from './surface-binding';
 import { currentPhase } from './registry';
 import { dispatch } from './state-machine';
 import { invokeCheckpointAndGate, type CheckpointEnvelope } from '../checkpoints';
-import { composeTriageAuthoringContract } from '../triage-authoring-contract';
+import { composeTriageAuthoringContract } from './triage/triage-authoring-contract';
 import { loadConfig } from '../config/handler';
 
 export async function maybeFireSurfaceChanged(

@@ -8,7 +8,7 @@ import { pool } from '../runtime-state';
 import { invokeCheckpoint } from './registry';
 import type { CheckpointEvent, CheckpointKind, CheckpointResolution } from './types';
 import { buildTokenGate } from '../gate';
-import { resolveAutoExecuteAlias } from '../auto-execute-alias';
+import { resolveAutoExecuteAlias } from '../execution/auto-execute-alias';
 
 /**
  * Unified checkpoint envelope attached to tool responses when the
@@ -148,7 +148,7 @@ export function assertNoPendingCheckpoint(sessionId: string, args: CheckpointAck
   // they alias. The pending entry is registered under the inner id when
   // auto-execute pauses; without this fallback, ack_checkpoint with the
   // outer id no-ops, leaving the inner pending state to trip on the
-  // subsequent resume_execution. See `runtime/src/auto-execute-alias.ts`.
+  // subsequent resume_execution. See `runtime/src/execution/auto-execute-alias.ts`.
   let effectiveId = sessionId;
   let entry = pendingCheckpoints.get(sessionId);
   if (!entry) {

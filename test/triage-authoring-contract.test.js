@@ -9,7 +9,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 const { composeTriageAuthoringContract } = await import(
-  '../dist/triage-authoring-contract.js'
+  '../dist/phases/triage/triage-authoring-contract.js'
 );
 
 function session(overrides = {}) {

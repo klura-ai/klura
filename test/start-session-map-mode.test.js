@@ -18,7 +18,7 @@ process.on('exit', () => {
 });
 
 // Late-bind the runtime barrel after KLURA_HOME is set.
-const { endDrive } = await import('../dist/end-drive/orchestrator.js');
+const { endDrive } = await import('../dist/phases/drive/end-drive-orchestrator.js');
 const { pool } = await import('../dist/runtime-state.js');
 
 function fakeSessionShell({ graph, sessionId }) {

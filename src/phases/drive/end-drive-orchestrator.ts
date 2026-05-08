@@ -1,20 +1,20 @@
 import fs from 'fs';
 import path from 'path';
-import { pool } from '../runtime-state';
-import * as skills from '../strategies/skills';
+import { pool } from '../../runtime-state';
+import * as skills from '../../strategies/skills';
 import {
   synthesizeFallbacksOnClose,
   type AutoSynthResult as SynthLedgerEntry,
-} from '../strategies/synthesize-on-close';
-import { ingestCaptureEvents } from '../working-dir/writer';
+} from '../../strategies/synthesize-on-close';
+import { ingestCaptureEvents } from '../../working-dir/writer';
 import {
   clearObservedSessionTracking,
   readObservedCapabilities,
   recordObservedCapability,
-} from '../working-dir/logbook';
-import { inferObservedCapabilitiesFromGraph } from '../working-dir/url-graph';
-import { loadLogbook } from '../working-dir/logbook';
-import type { ObservedCapabilityInput } from '../working-dir/logbook';
+} from '../../working-dir/logbook';
+import { inferObservedCapabilitiesFromGraph } from '../../working-dir/url-graph';
+import { loadLogbook } from '../../working-dir/logbook';
+import type { ObservedCapabilityInput } from '../../working-dir/logbook';
 import type {
   CaptureEvent,
   HttpRequestPayload,
@@ -23,16 +23,19 @@ import type {
   SessionMetaPayload,
   ToolCallPayload,
   WsFramePayload,
-} from '../working-dir/schema';
-import { sha256 as sha256Bytes } from '../working-dir/bundle-archive';
-import { loadCapabilityPolicy as loadCapabilityPolicyFull } from '../strategies/policy';
-import { buildAndMergeArtifact, writeArtifact } from '../strategies/discovery-artifact';
-import { clearStartersForSession } from '../response/starter-cache';
-import { clearForSession as clearSessionObservations } from '../response/session-observations';
-import { computeReverseEngineerHandoff, wouldReverseEngineerHandoffFire } from './re-handoff';
-import { endDriveAudit, buildEndDrivePayload } from '../audit/drive/end-drive';
-import { rejectionToErrorMessage } from '../audit';
-import { graphConfig, currentGraph } from '../phases/registry';
+} from '../../working-dir/schema';
+import { sha256 as sha256Bytes } from '../../working-dir/bundle-archive';
+import { loadCapabilityPolicy as loadCapabilityPolicyFull } from '../../strategies/policy';
+import { buildAndMergeArtifact, writeArtifact } from '../../strategies/discovery-artifact';
+import { clearStartersForSession } from '../../response/starter-cache';
+import { clearForSession as clearSessionObservations } from '../../response/session-observations';
+import {
+  computeReverseEngineerHandoff,
+  wouldReverseEngineerHandoffFire,
+} from './drive-to-triage-handoff';
+import { endDriveAudit, buildEndDrivePayload } from '../../audit/drive/end-drive';
+import { rejectionToErrorMessage } from '../../audit';
+import { graphConfig, currentGraph } from '../registry';
 
 function outcomeForTier(tier: string): SessionMetaPayload['outcome'] {
   if (tier === 'page-script') return 'page_script_saved';

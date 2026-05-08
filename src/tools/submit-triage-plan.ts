@@ -34,7 +34,7 @@ import { loadConfig } from '../config/handler';
 import {
   composeSaveAuthoringContract,
   type SaveAuthoringContract,
-} from '../save-authoring-contract';
+} from '../phases/lift/save-authoring-contract';
 import {
   triagePlanAudit,
   extractUrlToken,

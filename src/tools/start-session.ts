@@ -703,7 +703,7 @@ async function maybeAutoExecuteOnStart(
         // pause register an alias so resume_execution / ack_checkpoint
         // with the agent's session id (the only one the agent knows from
         // start_session's response) resolve to the inner registry
-        // entries. See runtime/src/auto-execute-alias.ts.
+        // entries. See runtime/src/execution/auto-execute-alias.ts.
         ownerSessionId: session.id,
       });
       result.executed = true;

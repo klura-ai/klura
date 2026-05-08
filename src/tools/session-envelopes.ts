@@ -84,7 +84,7 @@ export function getSessionObligation(
 
 import { TOOL_NAMES } from '../vocab';
 import type { ToolDef } from '../tool-types';
-import { endDrive } from '../end-drive/orchestrator';
+import { endDrive } from '../phases/drive/end-drive-orchestrator';
 import { ackCheckpoint } from '../checkpoints-api';
 import { CHECKPOINT_KINDS, composeAckHint } from '../checkpoints';
 

@@ -1,28 +1,28 @@
-import { pool } from '../runtime-state';
-import * as skills from '../strategies/skills';
-import { loadCapabilityPolicy as loadCapabilityPolicyFull } from '../strategies/policy';
+import { pool } from '../../runtime-state';
+import * as skills from '../../strategies/skills';
+import { loadCapabilityPolicy as loadCapabilityPolicyFull } from '../../strategies/policy';
 import {
   collectDataLoadCandidates,
   collectListingCandidates,
   findLiteralInSessionCaptures,
   type DataLoadCandidate,
   type ListingCandidate,
-} from '../strategies/synthesize-on-close';
-import { getAllParamObservations } from '../response/session-observations';
+} from '../../strategies/synthesize-on-close';
+import { getAllParamObservations } from '../../response/session-observations';
 import {
   composeSaveAuthoringContract,
   type SaveAuthoringContract,
-} from '../save-authoring-contract';
+} from '../lift/save-authoring-contract';
 import {
   composeTriageAuthoringContract,
   type TriageAuthoringContract,
-} from '../triage-authoring-contract';
-import { computeTriageBundle, type TriageBundle } from '../working-dir/triage-bundle';
-import type { CheckpointEnvelope } from '../checkpoints';
-import { loadConfig } from '../config/handler';
-import { resolveReferenceResource } from '../response/reference-sections';
-import { dispatch } from '../phases/state-machine';
-import { currentPhase } from '../phases/registry';
+} from '../triage/triage-authoring-contract';
+import { computeTriageBundle, type TriageBundle } from '../../working-dir/triage-bundle';
+import type { CheckpointEnvelope } from '../../checkpoints';
+import { loadConfig } from '../../config/handler';
+import { resolveReferenceResource } from '../../response/reference-sections';
+import { dispatch } from '../state-machine';
+import { currentPhase } from '../registry';
 
 // Pull the Reverse-engineer playbook prose at module load. The LIFT handoff
 // inlines this verbatim so agents see the playbook on the response they're
@@ -316,7 +316,7 @@ export function computeReverseEngineerHandoff(
     // Per-capability save-authoring contract. Composed from session
     // state at handoff time; every constraint maps 1:1 to a
     // save_strategy detector. Reading this upfront replaces the
-    // cascading audit cycle. See `runtime/src/save-authoring-contract.ts`.
+    // cascading audit cycle. See `runtime/src/phases/lift/save-authoring-contract.ts`.
     let contract: SaveAuthoringContract | undefined;
     try {
       contract = composeSaveAuthoringContract(session, u.capability, u.declared_args, platform);

@@ -21,7 +21,7 @@
 // land here as both a Detector entry and a constraint entry, kept in
 // lockstep.
 
-import type { Session } from './drivers/types/session';
+import type { Session } from '../../drivers/types/session';
 
 export interface TriageAuthoringContract {
   /** The URLs the runtime captured this session, deduplicated by

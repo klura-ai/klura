@@ -26,7 +26,7 @@ process.on('exit', () => {
   }
 });
 
-const { endDrive } = await import('../dist/end-drive/orchestrator.js');
+const { endDrive } = await import('../dist/phases/drive/end-drive-orchestrator.js');
 const { pool } = await import('../dist/runtime-state.js');
 
 function fakeSessionShell({ sessionId, platform, capability }) {

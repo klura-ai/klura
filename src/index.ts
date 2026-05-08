@@ -79,8 +79,11 @@ export type {
   InterruptionHandler,
 } from './interruptions';
 
-export { classifyUrlParams, computeReverseEngineerHandoff } from './end-drive/re-handoff';
-export { endDrive } from './end-drive/orchestrator';
+export {
+  classifyUrlParams,
+  computeReverseEngineerHandoff,
+} from './phases/drive/drive-to-triage-handoff';
+export { endDrive } from './phases/drive/end-drive-orchestrator';
 
 // ---- Vocabulary (drift-prevention const maps) ----
 
