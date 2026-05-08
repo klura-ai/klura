@@ -6,7 +6,7 @@
 // covered by a saved sibling must be recorded or excused).
 //
 // The classifiers for these dimensions live on the consolidated
-// saveStrategyAudit (runtime/src/audit/save-strategy.ts). This file
+// saveStrategyAudit (runtime/src/audit/lift/save-strategy.ts). This file
 // retains the structural validators they reuse:
 // validateLiteralAnswer, validateNameJustification, validateObservedSiblings,
 // validateCallerInputKindsAndEnums, validateLookupPrereqsAreCapabilities.

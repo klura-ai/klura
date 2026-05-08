@@ -17,9 +17,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { saveStrategyAudit } = await import('../dist/audit/save-strategy.js');
+const { saveStrategyAudit } = await import('../dist/audit/lift/save-strategy.js');
 const { registerSaveConfirmationDecider } = await import(
-  '../dist/audit/save-confirmation-decider.js'
+  '../dist/audit/lift/save-confirmation-decider.js'
 );
 
 registerSaveConfirmationDecider({

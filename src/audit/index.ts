@@ -712,7 +712,7 @@ export function rejectionToErrorMessage(
     if (kind === 'save_strategy') {
       // Lazy-require: schema-catalog → schemas/prereqs → validate
       // constants. Eager top-of-file import would cycle through
-      // `audit/save-strategy.ts` ↔ `strategies/skills.ts`.
+      // `audit/lift/save-strategy.ts` ↔ `strategies/skills.ts`.
       /* eslint-disable @typescript-eslint/no-require-imports */
       const cat =
         require('../strategies/schema-catalog') as typeof import('../strategies/schema-catalog');

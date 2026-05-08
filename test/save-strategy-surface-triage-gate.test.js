@@ -10,7 +10,7 @@ import path from 'node:path';
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'klura-surface-gate-'));
 process.env.KLURA_HOME = TMP;
 
-const { saveStrategyAudit } = await import('../dist/audit/save-strategy.js');
+const { saveStrategyAudit } = await import('../dist/audit/lift/save-strategy.js');
 const { bindUrlsToSurface } = await import('../dist/phases/surface-binding.js');
 const { loadLogbook, writeLogbook } = await import('../dist/working-dir/logbook.js');
 

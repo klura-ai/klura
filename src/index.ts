@@ -59,11 +59,11 @@ export {
   registerSaveConfirmationDecider,
   unregisterSaveConfirmationDecider,
   getRegisteredSaveConfirmationDecider,
-} from './audit/save-confirmation-decider';
+} from './audit/lift/save-confirmation-decider';
 export type {
   SaveConfirmationDecider,
   SaveConfirmationDecision,
-} from './audit/save-confirmation-decider';
+} from './audit/lift/save-confirmation-decider';
 
 // Interruption registry — public surface for scenarios, enterprise plugins,
 // and the `list_interruption_resolvers` / `resolve_interruption` MCP tools.

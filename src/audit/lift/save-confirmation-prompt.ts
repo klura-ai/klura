@@ -7,7 +7,7 @@
 // Describes the save without judgement language ("lowest tier", "fold path"
 // avoided) — the user makes the quality call, not the prompt.
 
-import type { Strategy } from '../strategies/skills';
+import type { Strategy } from '../../strategies/skills';
 import type { SaveStrategyCtx } from './save-strategy';
 
 interface NormalizedStrategy {

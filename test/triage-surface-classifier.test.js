@@ -12,7 +12,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 
-const { classifyTriageSurface } = await import('../dist/audit/triage-surface-classifier.js');
+const { classifyTriageSurface } = await import('../dist/audit/triage/triage-surface-classifier.js');
 
 const ORIGIN = 'https://www.example.com';
 const SURFACE = { observed_origins: [ORIGIN] };

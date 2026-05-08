@@ -31,7 +31,7 @@ test.after(() => {
 const { validateRecordedPathStepShape } = await import(
   '../dist/strategies/validate/recorded-path.js'
 );
-const { saveStrategyAudit } = await import('../dist/audit/save-strategy.js');
+const { saveStrategyAudit } = await import('../dist/audit/lift/save-strategy.js');
 
 // ---------- Step shape: page field ----------
 

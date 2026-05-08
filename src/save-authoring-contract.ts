@@ -3,7 +3,7 @@
 // instead of cycling through audit rejections.
 //
 // Composed structurally from session state. Every constraint maps 1:1 to
-// a detector in `audit/save-strategy.ts` — the contract surfaces *what
+// a detector in `audit/lift/save-strategy.ts` — the contract surfaces *what
 // would fire* before the agent commits a shape. The audit stays as the
 // safety net for what the agent missed.
 //

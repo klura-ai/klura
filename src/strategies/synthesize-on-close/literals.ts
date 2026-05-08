@@ -5,7 +5,7 @@
 // save-warnings attachment helper, which both ride on the same primitive.
 
 import type { Session } from '../../drivers/types/session';
-import { WRITE_SHAPED_ACTIONS } from '../../audit/end-drive';
+import { WRITE_SHAPED_ACTIONS } from '../../audit/drive/end-drive';
 import { stringifyOrEmpty } from './helpers';
 
 /** One source of ground-truth matches for a typed literal across every

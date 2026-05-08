@@ -2,8 +2,8 @@
 // save-strategy.ts to keep the main audit file under the per-file line
 // cap; save-strategy.ts wires these into the Audit instance.
 
-import type { Classifier } from './index';
-import type { Strategy } from '../strategies/skills';
+import type { Classifier } from '../index';
+import type { Strategy } from '../../strategies/skills';
 import type { SaveStrategyCtx } from './save-strategy';
 import { composeUserPrompt } from './save-confirmation-prompt';
 import { getRegisteredSaveConfirmationDecider } from './save-confirmation-decider';
@@ -19,8 +19,8 @@ import {
   type LiteralClassification,
   type LiteralItem,
   type NameSegmentItem,
-} from '../gate/save-audit';
-import { collectScannedFields } from '../strategies/validate/helpers';
+} from '../../gate/save-audit';
+import { collectScannedFields } from '../../strategies/validate/helpers';
 
 // Resolve the placeholders in a field's value. A field with a single distinct
 // placeholder name `{{X}}` (any number of repetitions) is unambiguous: X
@@ -253,7 +253,7 @@ export const observedSiblingsClassifier: Classifier<Strategy, SaveStrategyCtx, u
 // the user's reply. The runtime structurally checks that agent_prompt
 // covers the load-bearing facts (capability slug, tier, target host,
 // anchor classification when page-script, presence of warnings) — same
-// pattern as `tierJustificationUnciteable` in `audit/triage-plan.ts`.
+// pattern as `tierJustificationUnciteable` in `audit/triage/triage-plan.ts`.
 //
 // Test harnesses bypass the round trip by registering a
 // SaveConfirmationDecider; the runtime synthesizes the answer (including

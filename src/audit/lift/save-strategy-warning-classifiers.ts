@@ -7,8 +7,8 @@
 // consume a token minted by a real rejection to commit, and the token's
 // hashFields scope cascade-invalidates if the relevant slice mutates.
 
-import type { Classifier, Issue } from './index';
-import type { Strategy } from '../strategies/skills';
+import type { Classifier, Issue } from '../index';
+import type { Strategy } from '../../strategies/skills';
 import type { SaveStrategyCtx } from './save-strategy';
 import {
   detectMutatingStrategyVerificationApproach,
@@ -17,8 +17,8 @@ import {
   VERIFICATION_SHAPE_TAGS,
   FIRE_AND_FORGET_JUSTIFYING_NOUNS,
   NON_DOM_VERIFICATION_MARKERS,
-} from '../gate/save-warnings';
-import { findObservedKeys, findObservedLiterals } from '../observation-trace';
+} from '../../gate/save-warnings';
+import { findObservedKeys, findObservedLiterals } from '../../observation-trace';
 
 // ---------- parameterization_disclosure_required ----------
 

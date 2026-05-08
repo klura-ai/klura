@@ -34,7 +34,7 @@ process.on('exit', () => {
 
 const { saveStrategy } = await import('../dist/strategies/skills.js');
 const { registerSaveConfirmationDecider } = await import(
-  '../dist/audit/save-confirmation-decider.js'
+  '../dist/audit/lift/save-confirmation-decider.js'
 );
 
 registerSaveConfirmationDecider({

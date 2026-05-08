@@ -177,7 +177,7 @@ Multi-cap sessions with remaining unresolved capabilities don't auto-close — t
 
 Every `save_strategy` must target a surface bound to a current triage plan. Tier-agnostic — fetch, page-script, and recorded-path all flow through this gate.
 
-`runtime/src/audit/save-strategy.ts` adds a Detector to the consolidated `saveStrategyAudit` instance:
+`runtime/src/audit/lift/save-strategy.ts` adds a Detector to the consolidated `saveStrategyAudit` instance:
 
 - **Trigger**: `firstObservableUrl(strategy)` is non-null AND either (a) `session.surfaceMap` doesn't bind that URL to a surface, or (b) the bound surface has no `triage_plans_by_surface[<label>]` plan in the platform logbook for the capability being saved.
 - **Rejection prose**: tells the agent which surfaces are known and instructs them to `submit_triage_plan` for the targeted surface before retrying. Lists the target URL canonically.
@@ -247,7 +247,7 @@ To add a new graph: create `graphs/<name>.ts` exporting a `Graph` literal, add i
 - `runtime/src/phases/{drive,triage,lift,execute}.ts` — per-phase `PhaseSpec` modules
 - `runtime/src/graphs/dump.ts` — Mermaid renderer for any Graph
 - `runtime/src/tools/submit-triage-plan.ts` — the triage-exit tool
-- `runtime/src/audit/save-strategy.ts` — `surfaceTriageMissingDetector`
+- `runtime/src/audit/lift/save-strategy.ts` — `surfaceTriageMissingDetector`
 - `runtime/src/working-dir/schema.ts` — `TriagePlan` type + logbook fields
 - `runtime/src/config/handler.ts` — `drive.max_rounds`, `triage.max_rounds`, `lift.max_rounds`
 

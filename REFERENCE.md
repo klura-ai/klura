@@ -439,7 +439,7 @@ The justification path is **structurally gated** — it's not a free pass:
 
 ## save-strategy-audit
 
-Every `save_strategy` call funnels through a single consolidated audit (`runtime/src/audit/save-strategy.ts`). It composes structural detectors (Level-2 acked warnings) and classifier dimensions (Level-3 token-gated commitments) into ONE rejection envelope. The first call is ALWAYS rejected with a server-minted `audit_token` plus a unified checklist; the second call must echo the token and include `audit_answers` for the classifier dimensions plus inline acks for any detector warnings whose `ackReason: 'required'`.
+Every `save_strategy` call funnels through a single consolidated audit (`runtime/src/audit/lift/save-strategy.ts`). It composes structural detectors (Level-2 acked warnings) and classifier dimensions (Level-3 token-gated commitments) into ONE rejection envelope. The first call is ALWAYS rejected with a server-minted `audit_token` plus a unified checklist; the second call must echo the token and include `audit_answers` for the classifier dimensions plus inline acks for any detector warnings whose `ackReason: 'required'`.
 
 The token is bound to a per-classifier `hashFields` slice of the strategy — sibling concerns mutating unrelated fields don't cascade-invalidate. Edit a literal-bearing field and only the `literal_provenance` token is invalidated; rewrite a prereq expression and the literal-classification answers stay valid.
 
@@ -701,7 +701,7 @@ Genuinely-parameterless capabilities exist (`logout`, `current_user_id`, `viewer
 
 ## end-drive-audit
 
-Every `end_drive` call funnels through a single consolidated audit (`runtime/src/audit/end-drive.ts`) — sibling shape to the `save-strategy-audit`. It composes structural detectors and token-gated classifiers into ONE rejection envelope.
+Every `end_drive` call funnels through a single consolidated audit (`runtime/src/audit/drive/end-drive.ts`) — sibling shape to the `save-strategy-audit`. It composes structural detectors and token-gated classifiers into ONE rejection envelope.
 
 **Detector — `capability_declaration_required` (no ack-through path).** Refuses close on attempts 1 and 2 when the session typed or submitted content but never declared a capability. Auto-save needs a capability slug to key under; without one, the session degrades to a keyless recorded-path that nobody can look up at warm execute. Fix is to call `declare_capability({session_id, capability, args})` before retrying — OR call `abort_session(session_id, reason)` if the session shouldn't have started in the first place. A third close attempt force-tears-down regardless — the orchestrator skips the audit on attempt 3.
 
@@ -743,7 +743,7 @@ invalid_strategy: end_drive_rejected (pending)
 
 The Detector design (no audit_answers escape) is deliberate: prior history showed agents satisfying ack classifiers with canned answers once they learned the shape, defeating the gate. State-fix-or-abort closes that hole. See `memory/feedback_klura_always_save_default.md` and `memory/feedback_llm_self_gate_cheating.md`.
 
-**Module location.** `runtime/src/audit/end-drive.ts` (the Audit instance), `runtime/src/end-drive/orchestrator.ts` (the silent_no_save guard), `runtime/src/audit/index.ts` (the framework). See `runtime/docs/gates.md` for the Detector/Classifier shapes and `runtime/docs/principles.md` §pre-commit gates for the taxonomy.
+**Module location.** `runtime/src/audit/drive/end-drive.ts` (the Audit instance), `runtime/src/end-drive/orchestrator.ts` (the silent_no_save guard), `runtime/src/audit/index.ts` (the framework). See `runtime/docs/gates.md` for the Detector/Classifier shapes and `runtime/docs/principles.md` §pre-commit gates for the taxonomy.
 
 ## js-eval
 
@@ -2228,7 +2228,7 @@ Calling `submit_triage_plan` again from LIFT drops back to triage with a fresh r
 
 ### Save-time gate
 
-Every `save_strategy` call passes through `surface_triage_missing` on the consolidated audit (`runtime/src/audit/save-strategy.ts`). It derives a representative URL from the strategy, looks up the surface, and rejects if either the URL isn't bound or the bound surface has no current plan. Tier-agnostic. Full URL-extraction rules: `klura://reference#triage-surface-binding`.
+Every `save_strategy` call passes through `surface_triage_missing` on the consolidated audit (`runtime/src/audit/lift/save-strategy.ts`). It derives a representative URL from the strategy, looks up the surface, and rejects if either the URL isn't bound or the bound surface has no current plan. Tier-agnostic. Full URL-extraction rules: `klura://reference#triage-surface-binding`.
 
 ### Behavior by lift_mode
 

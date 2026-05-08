@@ -15,8 +15,8 @@
 // (extra checkpoints) are acceptable; false positives (skipping a
 // checkpoint that should have fired) are the failure mode to avoid.
 
-import type { InterceptedRequest } from '../drivers/types/network';
-import type { DefenseSurface } from '../working-dir/schema';
+import type { InterceptedRequest } from '../../drivers/types/network';
+import type { DefenseSurface } from '../../working-dir/schema';
 
 export interface TriageSurfaceSignals {
   /** At least one captured XHR/Fetch landed on an observed_origin. Without

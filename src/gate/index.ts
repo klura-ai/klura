@@ -14,7 +14,7 @@ export type { TokenGate, TokenGateSpec } from './build';
 export type { GateChecklist, GateRejection, GateResult } from './types';
 
 // Save-warning detector functions live here for the audit to consume; the
-// audit (runtime/src/audit/save-strategy.ts) wraps each as a Detector spec.
+// audit (runtime/src/audit/lift/save-strategy.ts) wraps each as a Detector spec.
 export type { AuditAnswers, SaveAuditContext } from './save-audit';
 export {
   detectSessionScopedIdExtraction,

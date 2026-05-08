@@ -309,7 +309,7 @@ export interface UnobservedUrlIssue {
  * in which case the guard is a no-op).
  *
  * Used by the audit's `unobserved_url` Detector (`ackReason: 'none'`,
- * runtime/src/audit/save-strategy.ts) to reject saves with hallucinated
+ * runtime/src/audit/lift/save-strategy.ts) to reject saves with hallucinated
  * endpoints. Per principles.md §"Observe, not probe", the rejection is
  * runtime-enforced — no legitimate ack-through path.
  */

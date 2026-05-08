@@ -14,7 +14,7 @@
 // trip to the agent. This is what makes scenario quality-predicates run
 // inline during the bench instead of post-hoc.
 
-import type { Strategy } from '../strategies/skills';
+import type { Strategy } from '../../strategies/skills';
 import type { SaveStrategyCtx } from './save-strategy';
 
 export interface SaveConfirmationDecision {

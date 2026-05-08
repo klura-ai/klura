@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { endDriveAudit, RE_CALL_THRESHOLD } = await import('../dist/audit/end-drive.js');
+const { endDriveAudit, RE_CALL_THRESHOLD } = await import('../dist/audit/drive/end-drive.js');
 const { __resetStore } = await import('../dist/gate/store.js');
 
 const DISCOVER_THRESHOLD = { reCalls: RE_CALL_THRESHOLD, actions: 0 };

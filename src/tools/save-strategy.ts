@@ -15,9 +15,9 @@ import {
   saveStrategyAudit,
   extractAcksFromNotes,
   persistWarningsOnRuntimeMeta,
-} from '../audit/save-strategy';
+} from '../audit/lift/save-strategy';
 import { rejectionToErrorMessage } from '../audit';
-import { getRegisteredSaveConfirmationDecider } from '../audit/save-confirmation-decider';
+import { getRegisteredSaveConfirmationDecider } from '../audit/lift/save-confirmation-decider';
 import {
   recordParamObservation,
   getAllParamObservations,
@@ -462,7 +462,7 @@ export async function saveStrategyFromCapture(args: {
     }
   }
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const auditSaveStrategy = require('../audit/save-strategy') as typeof import('../audit/save-strategy'); // prettier-ignore
+  const auditSaveStrategy = require('../audit/lift/save-strategy') as typeof import('../audit/lift/save-strategy'); // prettier-ignore
   const { saveStrategyAudit } = auditSaveStrategy;
   const ctxForAudit = {
     sessionId: args.session_id,

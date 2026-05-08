@@ -24,7 +24,7 @@ import type { SaveWarning } from './save-warnings';
  * a DOM-poll-only verification).
  *
  * ackReason: 'required' — declared at the Detector wrapper site in
- * audit/save-strategy.ts, which also carries the validateAck
+ * audit/lift/save-strategy.ts, which also carries the validateAck
  * implementation that reads the context we emit here.
  *
  * See `runtime/.claude/memory/feedback_always_verify_mutating_actions.md`

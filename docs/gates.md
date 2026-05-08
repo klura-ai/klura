@@ -78,7 +78,7 @@ Detectors in `runtime/src/gate/save-warnings.ts` (consumed by the save-strategy 
 
 ## The Audit class — one machinery, all save-time concerns
 
-Every save-time concern lives inside ONE `Audit` instance: `runtime/src/audit/save-strategy.ts`. As of this writing, that instance composes 13 Detectors (literal provenance prerequisites, observed-property-keys, observed-literal-values, surface-triage-bound, URL observation, popup addressing, plus the seven structural save-warnings) and 4 Classifiers (literal_provenance, capability_name_justification, observed_siblings, user_confirmation). The class (`runtime/src/audit/index.ts`) absorbs the token mint + hash binding + rejection envelope; each concern is a small spec entry the class consumes.
+Every save-time concern lives inside ONE `Audit` instance: `runtime/src/audit/lift/save-strategy.ts`. As of this writing, that instance composes 13 Detectors (literal provenance prerequisites, observed-property-keys, observed-literal-values, surface-triage-bound, URL observation, popup addressing, plus the seven structural save-warnings) and 4 Classifiers (literal_provenance, capability_name_justification, observed_siblings, user_confirmation). The class (`runtime/src/audit/index.ts`) absorbs the token mint + hash binding + rejection envelope; each concern is a small spec entry the class consumes.
 
 Two spec shapes:
 
@@ -93,8 +93,8 @@ The audit emits ONE rejection envelope regardless of how many spec entries fired
 
 | Gate | Level | Where | Why |
 | --- | --- | --- | --- |
-| `save_strategy` audit | 2 + 3 | `runtime/src/audit/save-strategy.ts` | Single Audit instance composing 13 detectors + 4 classifiers. Wrong commit = silently-broken strategy every future caller runs. |
-| `end_drive` audit | 2 + 3 | `runtime/src/audit/end-drive.ts` | Second Audit instance — `capability_declaration_required` Detector (`ackReason: 'none'`) + `re_persistence` Classifier (token-gated). Same machinery as save-strategy audit, different lifecycle decision point. |
+| `save_strategy` audit | 2 + 3 | `runtime/src/audit/lift/save-strategy.ts` | Single Audit instance composing 13 detectors + 4 classifiers. Wrong commit = silently-broken strategy every future caller runs. |
+| `end_drive` audit | 2 + 3 | `runtime/src/audit/drive/end-drive.ts` | Second Audit instance — `capability_declaration_required` Detector (`ackReason: 'none'`) + `re_persistence` Classifier (token-gated). Same machinery as save-strategy audit, different lifecycle decision point. |
 | `trigger_reference_send` consent | 3 | `runtime/src/tools/trigger-reference-send.ts` | Re-fires a real submit on every call. Wrong commit = side-effect fired against a real service without user knowing. |
 
 **Centralization is non-negotiable.** All save-time concerns funnel through the `Audit` class — no roll-your-own gate factories, no roll-your-own rejection envelopes, no roll-your-own token threading. `buildTokenGate` is the underlying primitive; the `Audit` class wraps it with detector composition + ack handling for save-time gates, and standalone gates outside that envelope (`trigger_reference_send` consent, `checkpoint_ack`, `interruption_ack`) reuse `buildTokenGate` directly.

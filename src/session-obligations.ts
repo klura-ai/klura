@@ -107,7 +107,7 @@ export function computeSessionObligation(session: Session): SessionObligation | 
   // attempts, and no write-shaped actions is research, not RE — the agent
   // is navigating to look around. Forcing a fake capability declaration
   // here produces the surface_triage_missing → unobserved_url deadlock with
-  // no path out. Mirrors the parallel exemption in audit/end-drive.ts.
+  // no path out. Mirrors the parallel exemption in audit/drive/end-drive.ts.
   const declared = session.declaredCapabilities ?? [];
   const saveAttempts = session.saveAttemptCount ?? 0;
   const writeActionCount = mutations.filter((rec) => WRITE_ACTIONS.has(rec.action)).length;

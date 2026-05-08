@@ -2,12 +2,12 @@
 // Composes save-warning detectors + token-gated classifiers under one
 // rejection envelope. See runtime/src/audit/index.ts for the Audit class.
 
-import { Audit, type Detector, type ShapeCheck, type Issue, type AuditResult } from './index';
-import type { Strategy } from '../strategies/skills';
+import { Audit, type Detector, type ShapeCheck, type Issue, type AuditResult } from '../index';
+import type { Strategy } from '../../strategies/skills';
 import {
   loadStrategies as loadStrategiesForPlatformAndCapability,
   listPlatformSkills as listAllSkills,
-} from '../strategies/skills';
+} from '../../strategies/skills';
 import {
   validateStrategyShape,
   validateNoSynthesizedAuthHeaders,
@@ -15,11 +15,11 @@ import {
   validateNoOpaqueUserParams,
   validateCapabilityPrereqs,
   validateNoSelectorSelfReference,
-} from '../strategies/validate';
-import type { Session } from '../drivers/types/session';
-import { findUnobservedStrategyUrls, firstObservableUrl } from '../strategies/verify-observed';
-import { loadLogbook } from '../working-dir/logbook';
-import { lookupSurface, urlKey } from '../phases/surface-binding';
+} from '../../strategies/validate';
+import type { Session } from '../../drivers/types/session';
+import { findUnobservedStrategyUrls, firstObservableUrl } from '../../strategies/verify-observed';
+import { loadLogbook } from '../../working-dir/logbook';
+import { lookupSurface, urlKey } from '../../phases/surface-binding';
 import {
   detectSessionScopedIdExtraction,
   detectNameIdMismatch,
@@ -35,8 +35,11 @@ import {
   detectEnumValueInCapabilitySlug,
   detectUnreferencedPrereqBinding,
   type SaveWarning,
-} from '../gate/save-warnings';
-import { validateLookupPrereqsAreCapabilities, type ObservedSiblingItem } from '../gate/save-audit';
+} from '../../gate/save-warnings';
+import {
+  validateLookupPrereqsAreCapabilities,
+  type ObservedSiblingItem,
+} from '../../gate/save-audit';
 import {
   literalProvenanceClassifier,
   capabilityNameJustificationClassifier,
@@ -49,7 +52,7 @@ import {
   observedPropertyKeysClassifier,
   observedLiteralValuesClassifier,
 } from './save-strategy-warning-classifiers';
-import type { ParamObservation } from '../response/session-observations';
+import type { ParamObservation } from '../../response/session-observations';
 
 export interface SaveStrategyCtx {
   /** Session id of the discovery flow that produced this save. Several

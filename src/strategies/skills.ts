@@ -27,7 +27,7 @@ import {
   JS_EVAL_TIMEOUT_DEFAULT_MS,
 } from './validate';
 import { type AuditAnswers } from '../gate';
-// audit/save-strategy is lazy-required inside saveStrategy() below — see the
+// audit/lift/save-strategy is lazy-required inside saveStrategy() below — see the
 // load-time comment there. Pulling it eagerly creates a require cycle that
 // trips runtime-state's eager singletons (TokenCache / ListenerManager).
 export {
@@ -490,7 +490,7 @@ export function saveStrategy(
   // context. Lazy-require breaks the audit-chain require cycle.
   /* eslint-disable @typescript-eslint/no-require-imports */
   const auditSaveStrategy =
-    require('../audit/save-strategy') as typeof import('../audit/save-strategy');
+    require('../audit/lift/save-strategy') as typeof import('../audit/lift/save-strategy');
   /* eslint-enable @typescript-eslint/no-require-imports */
   const { saveStrategyAudit } = auditSaveStrategy;
   saveStrategyAudit.runShapeChecks(data, {
@@ -511,7 +511,7 @@ export function saveStrategy(
     /* eslint-disable @typescript-eslint/no-require-imports */
     const auditIndex = require('../audit') as typeof import('../audit');
     const auditDecider =
-      require('../audit/save-confirmation-decider') as typeof import('../audit/save-confirmation-decider');
+      require('../audit/lift/save-confirmation-decider') as typeof import('../audit/lift/save-confirmation-decider');
     /* eslint-enable @typescript-eslint/no-require-imports */
     const { extractAcksFromNotes, persistWarningsOnRuntimeMeta } = auditSaveStrategy;
     const { rejectionToErrorMessage } = auditIndex;
@@ -548,7 +548,7 @@ export function saveStrategy(
       // construction (capability slug, tier, target, anchor, warnings).
       /* eslint-disable @typescript-eslint/no-require-imports */
       const auditConfirmationPrompt =
-        require('../audit/save-confirmation-prompt') as typeof import('../audit/save-confirmation-prompt');
+        require('../audit/lift/save-confirmation-prompt') as typeof import('../audit/lift/save-confirmation-prompt');
       /* eslint-enable @typescript-eslint/no-require-imports */
       mergedAnswers = {
         ...agentAnswers,

@@ -16,7 +16,7 @@
 //    `ackReason: 'none'` — these are structural prereqs the agent must
 //    fix, no exception path.
 //  - `enum_value_baked_into_slug`: `ackReason: 'required'` — mirrors the
-//    save-time Detector severity (see audit/save-strategy.ts:367). The
+//    save-time Detector severity (see audit/lift/save-strategy.ts:367). The
 //    canonical noun-overlap case (`create_issue` whose param `context`
 //    enumerates `issue` among other labels) is a legitimate ack-with-reason
 //    path.
@@ -25,11 +25,11 @@
 // is the shared URL-vs-captured-URL primitive. Both this audit and the
 // save audit's `unobservedUrlDetector` consume it.
 
-import { Audit, type Detector, type Issue } from './index';
-import type { Session } from '../drivers/types/session';
-import type { DefenseSurface } from '../working-dir/schema';
-import { findObservedMatch } from '../strategies/verify-observed';
-import { urlKey } from '../phases/surface-binding';
+import { Audit, type Detector, type Issue } from '../index';
+import type { Session } from '../../drivers/types/session';
+import type { DefenseSurface } from '../../working-dir/schema';
+import { findObservedMatch } from '../../strategies/verify-observed';
+import { urlKey } from '../../phases/surface-binding';
 
 export interface TriagePlanPayload {
   surface_label: string;

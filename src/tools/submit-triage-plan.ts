@@ -35,8 +35,12 @@ import {
   composeSaveAuthoringContract,
   type SaveAuthoringContract,
 } from '../save-authoring-contract';
-import { triagePlanAudit, extractUrlToken, resolveAgainstOrigin } from '../audit/triage-plan';
-import { classifyTriageSurface } from '../audit/triage-surface-classifier';
+import {
+  triagePlanAudit,
+  extractUrlToken,
+  resolveAgainstOrigin,
+} from '../audit/triage/triage-plan';
+import { classifyTriageSurface } from '../audit/triage/triage-surface-classifier';
 import { rejectionToErrorMessage, type Issue } from '../audit/index';
 import { renderSaveStrategySchemaMarkdown, type StrategyTier } from '../strategies/schema-catalog';
 
@@ -66,7 +70,7 @@ function parseDefenseSurface(raw: unknown): DefenseSurface {
   const observed_origins = stringArray(obj.observed_origins, 'observed_origins');
   // Each observed_origins entry must be a parseable origin (scheme + host).
   // Bare hostnames like "x.com" are silently dropped downstream by
-  // `originOf()` (in audit/triage-plan.ts) because `new URL("x.com")`
+  // `originOf()` (in audit/triage/triage-plan.ts) because `new URL("x.com")`
   // throws — the agent then sees a "request_pattern not on observed_origin"
   // rejection without knowing why their entries weren't recognized. Reject
   // explicitly here so the message is "observed_origins[i] missing scheme,"
@@ -215,7 +219,7 @@ export async function submitTriagePlan(rawArgs: unknown): Promise<SubmitTriagePl
   // (Level-2 ackable; mirrors save-time `enum_value_baked_into_slug`).
   // The structured rejection envelope is identical in shape to
   // save_strategy's so the agent reads one error format across both gates.
-  // See `runtime/src/audit/triage-plan.ts`.
+  // See `runtime/src/audit/triage/triage-plan.ts`.
   const triageAuditResult = triagePlanAudit.process(
     {
       surface_label: args.surface_label,

@@ -12,11 +12,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { saveStrategyAudit } = await import('../dist/audit/save-strategy.js');
+const { saveStrategyAudit } = await import('../dist/audit/lift/save-strategy.js');
 const {
   registerSaveConfirmationDecider,
   unregisterSaveConfirmationDecider,
-} = await import('../dist/audit/save-confirmation-decider.js');
+} = await import('../dist/audit/lift/save-confirmation-decider.js');
 
 // Tests in this file exercise individual detectors / classifiers against
 // minimal fixtures that aren't always production-shape-valid. Bypass Stage 0
@@ -1002,7 +1002,7 @@ test('user_confirmation: composeUserPrompt covers recorded-path tier (forward-co
   // currently blocked at the LIFT layer, the prompt should still cover
   // recorded-path mechanically. When the LIFT block relaxes later, no
   // gate changes are needed.
-  const { composeUserPrompt } = await import('../dist/audit/save-confirmation-prompt.js');
+  const { composeUserPrompt } = await import('../dist/audit/lift/save-confirmation-prompt.js');
   const recordedPathStrategy = {
     strategy: 'recorded-path',
     steps: [

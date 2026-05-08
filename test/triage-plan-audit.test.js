@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 
 const { findObservedMatch } = await import('../dist/strategies/verify-observed.js');
 const { triagePlanAudit, extractUrlToken, resolveAgainstOrigin } = await import(
-  '../dist/audit/triage-plan.js'
+  '../dist/audit/triage/triage-plan.js'
 );
 
 // ---------- findObservedMatch ----------
