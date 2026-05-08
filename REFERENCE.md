@@ -703,17 +703,21 @@ Genuinely-parameterless capabilities exist (`logout`, `current_user_id`, `viewer
 
 Every `end_drive` call funnels through a single consolidated audit (`runtime/src/audit/end-drive.ts`) — sibling shape to the `save-strategy-audit`. It composes structural detectors and token-gated classifiers into ONE rejection envelope.
 
-**Detector — `capability_declaration_required` (no ack-through path).** Refuses close on attempts 1 and 2 when the session typed or submitted content but never declared a capability. Auto-save needs a capability slug to key under; without one, the session degrades to a keyless recorded-path that nobody can look up at warm execute. Fix is to call `declare_capability({session_id, capability, args})` before retrying. A third close attempt force-tears-down regardless — the orchestrator skips the audit on attempt 3.
+**Detector — `capability_declaration_required` (no ack-through path).** Refuses close on attempts 1 and 2 when the session typed or submitted content but never declared a capability. Auto-save needs a capability slug to key under; without one, the session degrades to a keyless recorded-path that nobody can look up at warm execute. Fix is to call `declare_capability({session_id, capability, args})` before retrying — OR call `abort_session(session_id, reason)` if the session shouldn't have started in the first place. A third close attempt force-tears-down regardless — the orchestrator skips the audit on attempt 3.
 
-**Classifier — `re_persistence` (token-gated).** Refuses close when the session made reverse-engineering tool calls without persisting any findings. Triggers when:
+**Detector — `save_attempted_none_landed` (no ack-through path).** Refuses close when the session called `save_strategy` at least once and zero saves landed. Stops the legacy-form-post failure mode where the agent gives up mid-recoverable-loop and end_drive papers over the silent failure with whatever stale strategy was on disk. Fix the most recent rejection (read its `audit_token` + `audit_answers` checklist), retry the save, OR call `abort_session(reason)` if the strategy is unsalvageable.
+
+**Detector — `re_persistence` (no ack-through path).** Refuses close when the session made reverse-engineering tool calls without persisting any findings. Triggers when:
 
 - Session made ≥ `RE_CALL_THRESHOLD` (currently `2`) RE tool calls. Counted: `js_eval`, `set_breakpoint`, `get_js_source`, `search_js_source`, `read_js_function`, `evaluate_on_frame`.
 - Zero persistence calls (`save_verified_expression`, `add_discovery_note`, `add_resume_pointer`).
 - Map-mode sessions also trigger when ≥ `ACTION_CALL_THRESHOLD` (currently `5`) `perform_actions` landed with zero persistence calls — surface-mapping work that isn't persisted is invisible to the next session.
 
-The token binds to `{sessionId, reCallCount, persistCallCount, actionCallCount, intent}` — minted per-payload so a canned string can't satisfy the gate.
+**Why the re_persistence gate exists.** The discovery artifact is the only channel for cross-session continuity. A session that probed a signer, walked a bundle, or stepped through a debugger but saved nothing forces the next session to redo that work from scratch — the RE toolkit is expensive enough that losing the findings is the single biggest cross-session waste mode. There is NO LLM-authored "no progress to save" verdict — klura is always-save-by-default. Either persist what you found, or call `abort_session` if the work was misguided.
 
-**Why the re_persistence gate exists.** The discovery artifact is the only channel for cross-session continuity. A session that probed a signer, walked a bundle, or stepped through a debugger but saved nothing forces the next session to redo that work from scratch — the RE toolkit is expensive enough that losing the findings is the single biggest cross-session waste mode.
+**Post-auto-synth — `silent_no_save` guard (no ack-through path).** After auto-synth runs, if the session declared a capability but neither a manual `save_strategy` nor an auto-synthesized fallback produced anything, close is rejected. This catches the post-hoc-declaration escape: agent declares retroactively to satisfy `capability_declaration_required`, never saves, auto-synth can't derive anything (the captures didn't carry templatable literals), and the session would otherwise close cleanly with zero strategies on disk. The third end_drive attempt force-tears-down regardless. Fix is to save manually OR call `abort_session(reason)`.
+
+**Classifier — `triage_acknowledgment` (token-gated).** Fires when end_drive would otherwise skip triage entirely (every declared capability already has a non-stale saved strategy). Agent must echo `audit_token` + `{triage_acknowledgment: {acknowledged: true, reason: "<own words ≥20 chars>"}}`. Token binds to `{sessionId, declaredCapabilityCount, saveSuccessCount, endDriveAttempts}`.
 
 **Rejection shape (first call):**
 
@@ -724,47 +728,22 @@ invalid_strategy: end_drive_rejected (pending)
   audit_token: aB12cD34
   warnings:
     - [capability_declaration_required] CANNOT CLOSE: this session typed or submitted content but no capability was declared…
-      hint: Call declare_capability({session_id, capability: "<slug>", args: {...}}) before closing…
-  items:
-    re_persistence: {
-      session_id, re_call_count, persist_call_count, intent,
-      prompt: "2 RE tool calls made but zero persistence calls…",
-      persist_via: ["save_verified_expression(...)", "add_discovery_note(...)", "add_resume_pointer(...)"],
-      acknowledge_shape: "{re_persistence: {acknowledge_no_progress: true}} — only when there is genuinely nothing to persist"
-    }
+      hint: Call declare_capability({session_id, capability: "<slug>", args: {...}}) before closing — OR call abort_session(session_id, reason) if the session was misguided.
+    - [re_persistence] CANNOT CLOSE: 2 RE tool calls made on session …, but zero persistence calls.
+      hint: Two valid next moves: (1) PERSIST: save_verified_expression / add_discovery_note / add_resume_pointer, then retry. (2) ABORT: abort_session(session_id, "<reason ≥20 chars>") for the honest exit.
   See klura://reference#end-drive-audit.
 ```
 
-**Escape path 1 — persist then retry (preferred when real findings exist):**
+**Escape paths.** All three Detectors above (no ack-through) require state-fix on retry:
 
-```
-// After RE work that confirmed the signer lives at window.__ls.encode:
-save_verified_expression({
-  expression: "window.__ls.encode(JSON.stringify(args))",
-  value_shape: "base64_string",
-  notes: "encode() called by send() at bundle.js:4821"
-})
-add_discovery_note({
-  body: "Send path: ui click → dispatchMessage → __ls.encode → ws.send.",
-})
-end_drive({session_id, platform})   // gate now passes — persistCallCount ≥ 1
-```
+- **Persist + retry** (re_persistence): call `save_verified_expression` / `add_discovery_note` / `add_resume_pointer` to land progress; gate clears once `persistCallCount > 0`.
+- **Save + retry** (save_attempted_none_landed, silent_no_save): land an actual `save_strategy` success.
+- **Declare + retry** (capability_declaration_required): call `declare_capability` before retrying end_drive.
+- **Abort** (any Detector above): call `abort_session(session_id, "<reason ≥20 chars>")`. This bypasses the audit entirely; reason logs to the platform's `abort_events` ledger for cross-session visibility. Legitimate reasons: existing capability covers the task, user explicitly said stop, site dead/blocked. NOT legitimate: "this is a one-off task" — that judgment isn't the agent's to make. klura is always-save-by-default.
 
-**Escape path 2 — acknowledge no progress (when the probing genuinely turned up nothing):**
+The Detector design (no audit_answers escape) is deliberate: prior history showed agents satisfying ack classifiers with canned answers once they learned the shape, defeating the gate. State-fix-or-abort closes that hole. See `memory/feedback_klura_always_save_default.md` and `memory/feedback_llm_self_gate_cheating.md`.
 
-```
-// Agent read the token from the first rejection body:
-end_drive({
-  session_id,
-  platform,
-  audit_token: "aB12cD34",
-  audit_answers: { re_persistence: { acknowledge_no_progress: true } }
-})
-```
-
-The token-bound + structural-answer shape defeats self-gate bypasses: because the token is bound to the payload hash AND the answer must say `acknowledge_no_progress: true`, the agent can't hard-code any constant string — it must actually read the rejection.
-
-**Module location.** `runtime/src/audit/end-drive.ts` (the Audit instance), `runtime/src/audit/index.ts` (the framework). See `runtime/docs/gates.md` for the Detector/Classifier shapes and `runtime/docs/principles.md` §pre-commit gates for the taxonomy.
+**Module location.** `runtime/src/audit/end-drive.ts` (the Audit instance), `runtime/src/end-drive/orchestrator.ts` (the silent_no_save guard), `runtime/src/audit/index.ts` (the framework). See `runtime/docs/gates.md` for the Detector/Classifier shapes and `runtime/docs/principles.md` §pre-commit gates for the taxonomy.
 
 ## js-eval
 
@@ -2022,7 +2001,7 @@ The 4-char nonce in `checkpoint_token` is just a "you read THIS prompt" handshak
 
 ### Re-persistence gate in map mode
 
-Map sessions don't expect RE; they do expect records. The re-persistence gate in map mode triggers on `end_drive` when `perform_action` count ≥ 5 AND `record_observed_capability` count = 0 AND no strategies saved — i.e. the agent clicked through the site but wrote nothing to the logbook. Escape the same way as the RE gate: call `record_observed_capability` at least once, or retry `end_drive({..., acknowledge_no_progress: "<token>"})` with the server-minted token from the rejection.
+Map sessions don't expect RE; they do expect records. The re-persistence gate in map mode triggers on `end_drive` when `perform_action` count ≥ 5 AND `record_observed_capability` count = 0 AND no strategies saved — i.e. the agent clicked through the site but wrote nothing to the logbook. Escape: call `record_observed_capability` at least once (gate clears once `persistCallCount > 0`), OR call `abort_session(session_id, reason)` for the honest exit when the map session was misguided.
 
 ## Network log — discovery workflow
 

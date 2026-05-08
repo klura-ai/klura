@@ -223,6 +223,20 @@ export interface PlatformLogbook {
       prior_sha: string;
       new_sha: string;
     }>;
+    /**
+     * Sessions the agent explicitly aborted via `abort_session`. Cross-session
+     * visibility — future agents starting on the same platform can read
+     * `recent_aborts` (capped server-side) to learn from prior wrong starts
+     * (e.g. "session N aborted because existing capability search_products
+     * covers this — use execute next time").
+     */
+    abort_events: Array<{
+      at: string;
+      session_id: string;
+      reason: string;
+      captured_actions_count: number;
+      phase_at_abort: string;
+    }>;
   };
   /**
    * Platform-level record of "sibling capabilities the agent saw across

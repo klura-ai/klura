@@ -11,15 +11,25 @@ import type { DaemonConfig } from '../../config/handler';
 import {
   DISCOVERY_ARTIFACT,
   DRIVE_ACTIVE,
+  ESCAPE_VALVE,
   LOGBOOK_WRITE,
   READ_ONLY_DIAGNOSTIC,
   unionSets,
 } from '../tool-catalog';
 
-const ALLOWED = unionSets(DRIVE_ACTIVE, READ_ONLY_DIAGNOSTIC, DISCOVERY_ARTIFACT, LOGBOOK_WRITE);
+const ALLOWED = unionSets(
+  DRIVE_ACTIVE,
+  READ_ONLY_DIAGNOSTIC,
+  DISCOVERY_ARTIFACT,
+  LOGBOOK_WRITE,
+  ESCAPE_VALVE,
+);
 
-/** When the budget is hit, the only accepted next call is the phase exit. */
-const ALLOWED_WHEN_EXHAUSTED: ReadonlySet<string> = new Set(['end_drive']);
+/** When the budget is hit, the only accepted next calls are the phase exits.
+ *  abort_session is a co-equal exit — when the session shouldn't have started
+ *  in the first place, the honest move is to abort, not to push through to
+ *  end_drive's audit. */
+const ALLOWED_WHEN_EXHAUSTED: ReadonlySet<string> = new Set(['end_drive', 'abort_session']);
 
 export const DRIVE_SPEC: PhaseSpec = {
   name: 'drive',

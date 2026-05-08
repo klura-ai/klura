@@ -162,6 +162,7 @@ export function computeSessionObligation(session: Session): SessionObligation | 
         `(this response's \`triage_authoring_contract\` field has the schema). ` +
         `Once approved you enter LIFT, where \`save_strategy\` unlocks. ` +
         `Calling \`save_strategy\` directly in TRIAGE is hard-blocked. ` +
+        `${ABORT_SESSION_HINT} ` +
         `Do not end your turn yet. ` +
         `See klura://reference#triage.`,
     };
@@ -180,6 +181,7 @@ export function computeSessionObligation(session: Session): SessionObligation | 
         `\`audit_answers\` for any open items — the rejection IS the iteration loop, not a stop signal. ` +
         `In unattended runs, retry with just \`audit_token\` and the embedder's decider auto-resolves user_confirmation. ` +
         `Expect 1-3 retries before the save lands — that's normal. ` +
+        `${ABORT_SESSION_HINT} ` +
         `Do not end your turn yet. ` +
         `See klura://reference#save-strategy-audit.`,
     };
@@ -197,7 +199,20 @@ export function computeSessionObligation(session: Session): SessionObligation | 
       `Before ending your turn, call \`end_drive\` — ` +
       `that opens LIFT, where you save a reusable strategy for the declared capability. ` +
       `end_drive will not terminate the session until save_strategy lands; repeat calls return the same handoff. ` +
+      `${ABORT_SESSION_HINT} ` +
       `Do not end your turn yet. Ending now leaks session ${session.id} and forfeits LIFT. ` +
       `See klura://reference#reverse-engineer-playbook.`,
   };
 }
+
+/** Honest-exit hint appended to every active obligation message. klura is
+ *  always-save-by-default; the LLM does NOT get to unilaterally decide
+ *  "this is one-off, no save needed" — that judgment isn't the agent's to
+ *  make. The legitimate non-save exit is `abort_session` with one of the
+ *  named reasons (existing capability covers this, user said stop, site
+ *  dead). See memory/feedback_klura_always_save_default.md. */
+const ABORT_SESSION_HINT =
+  `If this session shouldn't have started (existing saved capability covers the task — use ` +
+  `\`execute()\`; user explicitly said abort; site is blocked), call ` +
+  `\`abort_session(session_id, reason)\` — that's the honest exit. NOT for "I judged this as a ` +
+  `one-off" — klura is always for saving and that judgment isn't yours to make.`;

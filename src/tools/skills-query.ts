@@ -83,6 +83,40 @@ export function listPlatformSkills(): ListPlatformSkillsResult {
   return result;
 }
 
+/**
+ * Render a terse markdown summary of saved skills suitable for front-loading
+ * into the MCP server's `instructions` block at startup. One line per
+ * platform, slug-only — full schemas + discovery_artifacts come from
+ * `list_platform_skills`. Returns an empty string when no platform has saved
+ * capabilities (so the caller can skip appending an empty section).
+ *
+ * Loaded once at MCP server-init via `getSkillMd()`-adjacent assembly. The
+ * deliberate principle break is documented in
+ * memory/feedback_klura_always_save_default.md and the plan note: agents skip
+ * the documented "list_platform_skills first" step, so the catalog has to be
+ * visible at conversation-start, not behind a tool call. The trailing
+ * always-save sentence rides the same pre-load surface.
+ */
+export function getSavedSkillsSummaryMd(): string {
+  const list = skills.listPlatformSkills();
+  const rows: string[] = [];
+  for (const skill of list) {
+    if (skill.capabilities.length === 0) continue;
+    const caps = skill.capabilities.map((c) => c.name).join(', ');
+    rows.push(`${skill.platform}: ${caps}`);
+  }
+  if (rows.length === 0) return '';
+  return [
+    '## Currently saved skills',
+    '',
+    ...rows,
+    '',
+    'Klura is always for saving — if the user invoked klura, they want this saved. Default is save; the only non-save exit is `abort_session(reason)` for an explicit reason (existing capability covers this, user said no, site dead). "This is a one-off" is not a legitimate reason — it isn\'t your call.',
+    '',
+    'Call `list_platform_skills()` for full schemas, params, and discovery_artifacts before `start_session`.',
+  ].join('\n');
+}
+
 const STRATEGY_TIER_VALUES = ['fetch', 'page-script', 'recorded-path'] as const;
 type GetStrategyTier = (typeof STRATEGY_TIER_VALUES)[number];
 

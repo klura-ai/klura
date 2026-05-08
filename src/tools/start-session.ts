@@ -5,7 +5,7 @@ import type { ExecuteResult } from '../execution/types';
 import { pickProbeUrl, probeAuthState } from '../auth-probe';
 import { classifyAutoExecDiagnosis } from '../execution';
 import { invokeCheckpointAndGate } from '../checkpoints';
-import { loadLogbook as loadLogbookForPlatform } from '../working-dir/logbook';
+import { loadLogbook as loadLogbookForPlatform, readRecentAborts } from '../working-dir/logbook';
 import {
   loadCapabilityPolicy as loadCapabilityPolicyFull,
   loadPolicy,
@@ -39,6 +39,40 @@ import {
 import { checkCapabilityArgs } from '../well-known-capabilities';
 
 export const GRAPH_MODES = ['discover', 'map', 'execute'] as const;
+
+/** Cap on `recent_aborts` inlined into start_session responses. Tight by
+ *  design — the field is a teaser pointing at the platform_logbook for
+ *  full detail, not a primary surface. */
+const RECENT_ABORTS_BUDGET = 5;
+
+/** Populate the platform-keyed response fields (artifacts, platform_map,
+ *  recent_aborts) from the on-disk logbook. Inlined into start_session so
+ *  the agent sees prior-session handoffs at turn 0 without extra tool
+ *  calls. Each field is independent — a platform with only an
+ *  observed_capabilities entry but no saved artifacts still gets a
+ *  platform_map; a platform with only abort events still gets recent_aborts. */
+function populatePlatformResponseFields(result: StartSessionResult, platform: string): void {
+  const caps = listArtifactsForPlatform(platform);
+  if (caps.length > 0) {
+    const artifacts: NonNullable<StartSessionResult['artifacts']> = {};
+    for (const cap of caps) {
+      const a = readArtifactFromDisk(platform, cap);
+      if (a) {
+        artifacts[cap] = inlineArtifactForResponse(
+          platform,
+          cap,
+          a,
+          LIST_PLATFORM_SKILLS_ARTIFACT_BUDGET,
+        );
+      }
+    }
+    if (Object.keys(artifacts).length > 0) result.artifacts = artifacts;
+  }
+  const map = buildPlatformMapSummary(platform);
+  if (map) result.platform_map = map;
+  const aborts = readRecentAborts(platform, RECENT_ABORTS_BUDGET);
+  if (aborts.length > 0) result.recent_aborts = aborts;
+}
 
 /**
  * Validate + normalize the optional `identity` option. Returns:
@@ -97,6 +131,20 @@ export interface StartSessionResult {
    * full detail. Omitted when no logbook exists or the logbook is fully empty.
    */
   platform_map?: PlatformMapSummary;
+  /**
+   * Recent `abort_session` events for this platform, newest first, capped at
+   * `RECENT_ABORTS_BUDGET`. Cross-session learning surface — agents read this
+   * at session start to spot prior wrong starts (e.g. "session N aborted
+   * because existing capability X covers this — use execute"). Omitted when
+   * no abort_events have been logged for the platform.
+   */
+  recent_aborts?: Array<{
+    at: string;
+    session_id: string;
+    reason: string;
+    captured_actions_count: number;
+    phase_at_abort: string;
+  }>;
   /**
    * True when start_session auto-executed a matching saved strategy.
    * `execute_result` carries the executor's response. When executed is true the
@@ -1106,32 +1154,7 @@ export async function startSession(
     a11y_truncated: trimmed.truncated,
     url: currentUrl,
   };
-  // Inline prior-session discovery artifacts for this platform so the agent
-  // sees the handoff at turn 0 without an extra tool call.
-  if (opts.platform) {
-    const caps = listArtifactsForPlatform(opts.platform);
-    if (caps.length > 0) {
-      const artifacts: NonNullable<StartSessionResult['artifacts']> = {};
-      for (const cap of caps) {
-        const a = readArtifactFromDisk(opts.platform, cap);
-        if (a)
-          artifacts[cap] = inlineArtifactForResponse(
-            opts.platform,
-            cap,
-            a,
-            LIST_PLATFORM_SKILLS_ARTIFACT_BUDGET,
-          );
-      }
-      if (Object.keys(artifacts).length > 0) result.artifacts = artifacts;
-    }
-    // Cross-session surface map teaser. Reads the platform logbook and
-    // condenses observed_capabilities + url_graph + forms_seen counts into
-    // a compact pointer to `get_platform_logbook`. Independent of the
-    // discovery-artifact handoff above — observed-only platforms still get
-    // a summary even when no per-capability artifact exists.
-    const map = buildPlatformMapSummary(opts.platform);
-    if (map) result.platform_map = map;
-  }
+  if (opts.platform) populatePlatformResponseFields(result, opts.platform);
   result.graph = session.graph;
   // Mid-flow interruption behavior is plugin-orchestrated. Headless / CI
   // environments register priority-5 handlers (see

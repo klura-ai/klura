@@ -13,12 +13,13 @@
 //     gives up mid-recoverable-loop and end_drive papers over the silent
 //     failure with whatever stale strategy was on disk.
 //
-//   - re_persistence (Classifier, token-gated) — refuses end_drive when N RE
-//     tool calls have been made with zero persistence calls. Agent either
-//     persists progress (retry naturally clears the gate) or echoes the
-//     audit_token via answers.re_persistence: { acknowledge_no_progress: true }.
-//     Token binds to {sessionId, reCallCount, persistCallCount, intent} so
-//     the gate re-arms on subsequent end_drive attempts after fresh RE work.
+//   - re_persistence (Detector, ackReason: 'none') — refuses end_drive when N
+//     RE tool calls have been made with zero persistence calls. Agent either
+//     persists progress (retry clears the gate naturally — persistCallCount > 0)
+//     OR uses `abort_session(reason)` as the honest exit when the work was
+//     misguided in the first place. There is NO agent-authored ack escape:
+//     klura is always-save-by-default and "I judged this as nothing worth
+//     persisting" isn't the agent's verdict to make.
 //
 //   - triage_acknowledgment (Classifier, token-gated) — fires when end_drive
 //     would otherwise skip triage entirely (every declared capability already
@@ -203,83 +204,55 @@ const saveAttemptedNoneLandedDetector: Detector<EndDrivePayload, EndDriveCtx> = 
   },
 };
 
-// ---------- Classifier: re_persistence ----------
+// ---------- Detector: re_persistence ----------
+//
+// Refuses close when N RE tool calls have been made with zero persistence
+// calls. ackReason: 'none' — there is NO agent-authored escape. Two valid
+// next moves:
+//   1. Persist progress via save_verified_expression / add_discovery_note /
+//      add_resume_pointer; the gate clears naturally on retry
+//      (persistCallCount > 0 → detector returns no issues).
+//   2. Call `abort_session(session_id, reason)` — bypasses end_drive entirely.
+//      The legitimate use case for "no save" is "this session shouldn't have
+//      been driving in the first place"; abort_session is the honest exit.
+//      "I judged this as nothing worth persisting" is NOT a legitimate
+//      LLM-authored verdict — klura is always-save-by-default.
 
-const rePersistenceClassifier: Classifier<EndDrivePayload, EndDriveCtx, unknown> = {
+const rePersistenceDetector: Detector<EndDrivePayload, EndDriveCtx> = {
   kind: 're_persistence',
-  expectedAnswerShape:
-    're_persistence: {acknowledge_no_progress: true} (only when there is genuinely nothing to persist; otherwise call save_verified_expression / add_discovery_note / add_resume_pointer first and the gate clears naturally without an answer)',
-  buildItems: (p) => {
-    if (!shouldRunRePersistence(p)) return null;
+  ackReason: 'none',
+  detect: (p) => {
+    if (!shouldRunRePersistence(p)) return [];
     const actionLine =
       p.rePersistenceThreshold && p.rePersistenceThreshold.actions > 0
         ? `${p.actionCallCount} perform_actions and `
         : '';
-    return {
-      session_id: p.sessionId,
-      re_call_count: p.reCallCount,
-      persist_call_count: p.persistCallCount,
-      action_call_count: p.actionCallCount,
-      prompt:
-        `${actionLine}${p.reCallCount} RE tool calls made, but zero persistence calls. ` +
-        `Work that isn't persisted is invisible to the next session.`,
-      persist_via: [
-        'save_verified_expression({expression, value_shape, value?, notes?})',
-        'add_discovery_note({body, refs?})',
-        'add_resume_pointer({ref, note?})',
-      ],
-      acknowledge_shape:
-        '{re_persistence: {acknowledge_no_progress: true}} — only when there is genuinely nothing to persist',
-    };
+    return [
+      {
+        kind: 're_persistence',
+        message:
+          `CANNOT CLOSE: ${actionLine}${p.reCallCount} RE tool calls made on session ${p.sessionId}, ` +
+          `but zero persistence calls. Work that isn't persisted is invisible to the next session.`,
+        hint:
+          `Two valid next moves: ` +
+          `(1) PERSIST: call save_verified_expression({expression, returns, ...}) for confirmed encoder ` +
+          `expressions, add_discovery_note({body, kind?}) for prose breadcrumbs, or ` +
+          `add_resume_pointer({kind, ref, ...}) for typed pointers (file:line, frame_index, ws_hash). ` +
+          `Then retry end_drive — the gate clears naturally once persistCallCount > 0. ` +
+          `(2) ABORT: if this session shouldn't have been driving in the first place ` +
+          `(existing capability covers the task, user said abort, site dead), call ` +
+          `abort_session(session_id, "<reason ≥20 chars>") for the honest exit. ` +
+          `NOT legitimate: "I judged this as nothing worth saving" — klura is always-save-by-default ` +
+          `and that judgment isn't yours to make. See klura://reference#end-drive-audit.`,
+        context: {
+          session_id: p.sessionId,
+          re_call_count: p.reCallCount,
+          persist_call_count: p.persistCallCount,
+          action_call_count: p.actionCallCount,
+        },
+      },
+    ];
   },
-  validate: (_p, _ctx, answer) => {
-    if (typeof answer !== 'object' || answer === null) {
-      return [
-        `re_persistence answer must be an object — got ${typeof answer}. ` +
-          `Either persist progress and retry (no answer needed; gate clears once persistCallCount > 0), ` +
-          `or echo {acknowledge_no_progress: true} to ack no progress.`,
-      ];
-    }
-    if ((answer as { acknowledge_no_progress?: unknown }).acknowledge_no_progress !== true) {
-      return [
-        `re_persistence.acknowledge_no_progress must be \`true\` — only when there is genuinely ` +
-          `nothing to persist. Otherwise persist via save_verified_expression / add_discovery_note ` +
-          `/ add_resume_pointer and retry end_drive.`,
-      ];
-    }
-    return [];
-  },
-  hashFields: (p) => ({
-    sessionId: p.sessionId,
-    reCallCount: p.reCallCount,
-    persistCallCount: p.persistCallCount,
-    actionCallCount: p.actionCallCount,
-  }),
-  remedy: () => ({
-    kind: 'classification_options',
-    options: [
-      {
-        choice: 'save_verified_expression({expression, value_shape, value?, notes?})',
-        rationale:
-          'an RE finding the next session can replay verbatim — the JS expression you confirmed produces the right value, with its observed shape',
-      },
-      {
-        choice: 'add_discovery_note({body, refs?})',
-        rationale:
-          'free-form prose breadcrumbs (open questions, dead ends, leads worth chasing) the next session reads before driving',
-      },
-      {
-        choice: 'add_resume_pointer({ref, note?})',
-        rationale:
-          'a typed pointer (file:line, frame index, ws_hash) the next session can jump straight to without re-locating',
-      },
-      {
-        choice: '{re_persistence: {acknowledge_no_progress: true}}',
-        rationale:
-          'self-attest there is genuinely nothing to persist — only when the RE work yielded zero structural findings worth saving',
-      },
-    ],
-  }),
 };
 
 function shouldRunRePersistence(p: EndDrivePayload): boolean {
@@ -378,8 +351,8 @@ function shouldRunTriageAcknowledgment(p: EndDrivePayload): boolean {
 
 export const endDriveAudit = new Audit<EndDrivePayload, EndDriveCtx>({
   kind: 'end_drive',
-  detectors: [declarationRequiredDetector, saveAttemptedNoneLandedDetector],
-  classifiers: [rePersistenceClassifier, triageAcknowledgmentClassifier],
+  detectors: [declarationRequiredDetector, saveAttemptedNoneLandedDetector, rePersistenceDetector],
+  classifiers: [triageAcknowledgmentClassifier],
 });
 
 // ---------- Helpers for orchestrator-side payload assembly ----------

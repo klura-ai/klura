@@ -12,6 +12,7 @@ import type { Session } from '../../drivers/types/session';
 import type { DaemonConfig } from '../../config/handler';
 import {
   DISCOVERY_ARTIFACT,
+  ESCAPE_VALVE,
   LOGBOOK_WRITE,
   READ_ONLY_DIAGNOSTIC,
   TRIAGE_AND_LIFT_WRITE,
@@ -23,9 +24,13 @@ const ALLOWED = unionSets(
   TRIAGE_AND_LIFT_WRITE,
   DISCOVERY_ARTIFACT,
   LOGBOOK_WRITE,
+  ESCAPE_VALVE,
 );
 
-const ALLOWED_WHEN_EXHAUSTED: ReadonlySet<string> = new Set(['submit_triage_plan']);
+const ALLOWED_WHEN_EXHAUSTED: ReadonlySet<string> = new Set([
+  'submit_triage_plan',
+  'abort_session',
+]);
 
 /** Default triage round budget when the user hasn't set
  *  `triage.max_rounds`. Tight by design — deliberation is short, lift is

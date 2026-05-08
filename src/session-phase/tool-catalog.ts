@@ -102,6 +102,14 @@ export const DRIVE_ACTIVE: ReadonlySet<string> = new Set([
   'resume_execution',
 ]);
 
+/** Honest-exit primitive. Admissible in every non-closed phase (drive,
+ *  triage, lift) — when the agent realises the session shouldn't have started
+ *  (existing capability covers the task, user said stop, site dead) the
+ *  honest move is to abort cleanly, not satisfy the close-time audit with a
+ *  fabricated declaration. NOT in `closed` — calling abort on a closed
+ *  session is a phase rejection (and `pool.getSession` would already throw). */
+export const ESCAPE_VALVE: ReadonlySet<string> = new Set(['abort_session']);
+
 /** Active reverse-engineering tools. Lift-only. */
 export const LIFT_RE_ACTIVE: ReadonlySet<string> = new Set([
   'try_generator',

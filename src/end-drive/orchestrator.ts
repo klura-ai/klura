@@ -634,6 +634,53 @@ export async function endDrive(
     });
   }
 
+  // No-silent-close guard. klura is always-save-by-default
+  // (memory/feedback_klura_always_save_default.md). When a session declared a
+  // capability, manually saved nothing, and auto-synth couldn't derive a
+  // fallback either, the historical behaviour was to close cleanly with zero
+  // strategies on disk — a silent failure where the agent satisfied the
+  // declaration audit and then escaped without saving. Reject that path: the
+  // agent must either save manually, retry to give auto-synth more captures, or
+  // call `abort_session(reason)` for the honest exit. The third end_drive
+  // attempt force-tears-down regardless (preserving the existing escape hatch
+  // for genuinely stuck sessions).
+  const skipAutoSynthForGuard = graphConfig(session).skipAutoSynth;
+  const declaredCapabilityCount = (session.declaredCapabilities ?? []).length;
+  const saveSuccessCount = (session.savedCapabilities ?? []).length;
+  const endDriveAttemptsPreBump = session.endDriveAttempts ?? 1; // we bumped above
+  if (
+    !skipAutoSynthForGuard &&
+    declaredCapabilityCount > 0 &&
+    saveSuccessCount === 0 &&
+    autoSynthesized.length === 0 &&
+    endDriveAttemptsPreBump < 3
+  ) {
+    return {
+      ok: false,
+      phase: 'end_drive_audit',
+      session_id: sessionId,
+      message:
+        `invalid_strategy: end_drive_rejected (silent_no_save)\n` +
+        `  → CANNOT CLOSE: this session declared a capability but no strategy landed — neither a ` +
+        `manual \`save_strategy\` nor an auto-synthesized fallback (auto-synth produced 0 entries; ` +
+        `the captured traffic didn't carry the user's typed literals in a templatable shape, OR no ` +
+        `mutating action correlated to a request body).\n` +
+        `  → klura is always-save-by-default. Closing here would leave nothing on disk for the next ` +
+        `run. Two valid next moves:\n` +
+        `    1. SAVE manually: call \`save_strategy\` against the captured request you intended to ` +
+        `       lift (use \`get_network_log\` to find it, then submit_triage_plan + save_strategy ` +
+        `       in lift). The save-time audit will guide you through any rejections.\n` +
+        `    2. ABORT: if this session shouldn't have been driving in the first place ` +
+        `       (existing capability covers the task, user said abort, site dead), call ` +
+        `       \`abort_session(session_id, "<reason ≥20 chars>")\` for the honest exit.\n` +
+        `  → "I judged this as nothing worth saving" is NOT a legitimate verdict — that judgment ` +
+        `isn't yours to make. See klura://reference#end-drive-audit.`,
+      re_call_count: countReToolCalls(session),
+      persist_call_count: countPersistCalls(session),
+      end_drive_attempts: endDriveAttemptsPreBump,
+    };
+  }
+
   // Discovery-artifact flush: for every capability saved in this session (or
   // auto-synthesized just now), merge the session accumulator with any prior
   // on-disk artifact and write the result. Protocol-neutral — the runtime just

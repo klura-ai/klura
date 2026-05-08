@@ -31,6 +31,7 @@
 
 import type { ToolDef } from '../tool-types';
 
+import { TOOL_DEF as abortSession } from './abort_session';
 import { TOOL_DEF as startSession } from './start-session';
 import { TOOL_DEFS as performActionTools } from './perform-action';
 import { TOOL_DEFS as pageHelperTools } from './page-helpers';
@@ -53,6 +54,7 @@ import { TOOL_DEFS as configTools } from './config-tools';
 import { TOOL_DEFS as interruptionTools } from './interruption-tools';
 
 export const TOOL_REGISTRY: ToolDef[] = [
+  abortSession,
   startSession,
   ...performActionTools,
   ...pageHelperTools,

@@ -32,6 +32,7 @@
 /** Every MCP-exposed tool. Add a new entry here when registering a new tool;
  *  the registry parity test asserts every TOOL_DEF.name appears here. */
 export const TOOL_NAMES = {
+  abortSession: 'abort_session',
   ackCheckpoint: 'ack_checkpoint',
   addDiscoveryNote: 'add_discovery_note',
   addResumePointer: 'add_resume_pointer',
@@ -148,7 +149,6 @@ export type WarningKind = (typeof WARNING_KINDS)[keyof typeof WARNING_KINDS];
 export const DECISION_VALUES = {
   approve: 'approve',
   reject: 'reject',
-  acknowledgeNoProgress: 'acknowledge_no_progress',
   acknowledged: 'acknowledged',
 } as const;
 

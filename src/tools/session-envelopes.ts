@@ -107,12 +107,12 @@ export const TOOL_DEFS: ToolDef[] = [
         audit_token: {
           type: 'string',
           description:
-            'Echo the audit_token returned on the prior end_drive audit rejection (capability_declaration_required / save_attempted_none_landed Detectors, or re_persistence / triage_acknowledgment Classifiers). See klura://reference#end-drive-audit.',
+            'Echo the audit_token returned on the prior end_drive audit rejection (capability_declaration_required / save_attempted_none_landed / re_persistence Detectors, or triage_acknowledgment Classifier). See klura://reference#end-drive-audit.',
         },
         audit_answers: {
           type: 'object',
           description:
-            'Audit answers per the checklist from the prior rejection. Shape: {re_persistence?: {acknowledge_no_progress: true}, triage_acknowledgment?: {acknowledged: true, reason: "<own words ≥20 chars>"}}. For re_persistence: only pass acknowledge_no_progress when you genuinely have nothing worth persisting; preferred path is save_verified_expression / add_discovery_note / add_resume_pointer and retry. For triage_acknowledgment: only ack when you truly considered triage — explain in your own words why no triage round was warranted (e.g. "all caps fetch-tier saved, no graduation candidate observed in captures").',
+            'Audit answers per the checklist from the prior rejection. Shape: {triage_acknowledgment?: {acknowledged: true, reason: "<own words ≥20 chars>"}}. For triage_acknowledgment: only ack when you truly considered triage — explain in your own words why no triage round was warranted (e.g. "all caps fetch-tier saved, no graduation candidate observed in captures"). re_persistence is a Detector and has no audit_answers path: either persist progress (save_verified_expression / add_discovery_note / add_resume_pointer) and retry, or use abort_session(session_id, reason) to bail honestly.',
         },
       },
       required: ['session_id'],

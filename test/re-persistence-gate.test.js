@@ -1,8 +1,9 @@
-// Close-session audit: re_persistence Classifier coverage.
+// Close-session audit: re_persistence Detector coverage.
 //
 // Sessions that made RE tool calls without persisting any findings must be
-// blocked from end_drive until they either persist or echo the audit
-// token + answers.re_persistence.acknowledge_no_progress = true. Tests
+// blocked from end_drive until they either persist (state-fix) or call
+// abort_session (orchestrator-side bypass — not exercised here). klura is
+// always-save-by-default; there is NO agent-authored ack escape. Tests
 // exercise endDriveAudit.process() directly — pure pump, no driver.
 
 import { test } from 'node:test';
@@ -13,9 +14,6 @@ const { endDriveAudit, RE_CALL_THRESHOLD, ACTION_CALL_THRESHOLD } = await import
 );
 const { __resetStore } = await import('../dist/gate/store.js');
 
-// Discover-graph default: re_persistence threshold of {reCalls: RE_CALL_THRESHOLD,
-// actions: 0}. Map-graph fixture: {reCalls: RE_CALL_THRESHOLD, actions:
-// ACTION_CALL_THRESHOLD}. Tests pick whichever fits the assertion.
 const DISCOVER_THRESHOLD = { reCalls: RE_CALL_THRESHOLD, actions: 0 };
 const MAP_THRESHOLD = { reCalls: RE_CALL_THRESHOLD, actions: ACTION_CALL_THRESHOLD };
 
@@ -29,47 +27,34 @@ function makePayload(overrides = {}) {
     reCallCount: RE_CALL_THRESHOLD + 1,
     persistCallCount: 0,
     actionCallCount: 0,
-    // Sidestep the save_attempted_none_landed detector unless a test
-    // explicitly opts in via overrides — these tests target the
-    // re_persistence Classifier, not the save-attempt detector.
     saveAttemptCount: 0,
     saveSuccessCount: 0,
     skipDeclarationGuard: false,
     rePersistenceThreshold: DISCOVER_THRESHOLD,
-    // Sidestep the triage_acknowledgment classifier — these tests target
-    // re_persistence specifically. Setting triageWouldFire: true tells the
-    // audit "the triage handoff will fire after this audit passes," which
-    // is the condition under which triage_acknowledgment doesn't gate.
     triageWouldFire: true,
     ...overrides,
   };
 }
 
-test('RE-without-persist → first close rejects with token + items', () => {
+test('RE-without-persist → first close rejects with re_persistence warning', () => {
   __resetStore();
   const result = endDriveAudit.process(makePayload(), {}, {});
   assert.equal(result.status, 'rejected');
   const r = result.rejection;
-  assert.equal(r.reason, 'pending');
-  assert.ok(r.token);
-  assert.ok(r.items?.re_persistence);
-  const items = r.items.re_persistence;
-  assert.equal(items.re_call_count, RE_CALL_THRESHOLD + 1);
-  assert.equal(items.persist_call_count, 0);
-  assert.match(items.prompt, /zero persistence calls/);
+  const w = (r.warnings || []).find((x) => x.kind === 're_persistence');
+  assert.ok(w, `expected re_persistence warning, got ${JSON.stringify(r)}`);
+  assert.match(w.message, /CANNOT CLOSE/);
+  assert.match(w.message, /zero persistence calls/);
+  assert.match(w.hint, /abort_session/);
 });
 
-test('RE-then-persist → audit commits without classifier firing', () => {
+test('RE-then-persist → audit commits without detector firing', () => {
   __resetStore();
-  const result = endDriveAudit.process(
-    makePayload({ persistCallCount: 1 }),
-    {},
-    {},
-  );
+  const result = endDriveAudit.process(makePayload({ persistCallCount: 1 }), {}, {});
   assert.equal(result.status, 'committed');
 });
 
-test('RE-below-threshold → audit commits without classifier firing', () => {
+test('RE-below-threshold → audit commits without detector firing', () => {
   __resetStore();
   const result = endDriveAudit.process(
     makePayload({ reCallCount: RE_CALL_THRESHOLD - 1 }),
@@ -79,49 +64,16 @@ test('RE-below-threshold → audit commits without classifier firing', () => {
   assert.equal(result.status, 'committed');
 });
 
-test('valid token + acknowledge_no_progress: true → committed', () => {
+test('re_persistence is a Detector — ackReason "none", no audit_answers escape', () => {
+  // Even passing audit_answers shaped like the old Classifier path
+  // {acknowledge_no_progress: true} doesn't unblock the gate. State-fix
+  // (persistCallCount > 0) or abort_session are the only ways out.
   __resetStore();
   const payload = makePayload();
   const first = endDriveAudit.process(payload, {}, {});
-  const second = endDriveAudit.process(payload, {}, {
-    token: first.rejection.token,
-    answers: { re_persistence: { acknowledge_no_progress: true } },
-  });
-  assert.equal(second.status, 'committed');
-});
-
-test('wrong token → re-mints fresh token', () => {
-  __resetStore();
-  endDriveAudit.process(makePayload(), {}, {});
-  const result = endDriveAudit.process(makePayload(), {}, {
-    token: 'NOT_A_REAL_TOKEN',
-    answers: { re_persistence: { acknowledge_no_progress: true } },
-  });
-  assert.equal(result.status, 'rejected');
-  assert.equal(result.rejection.reason, 'token_unknown_or_expired');
-  assert.ok(result.rejection.token);
-});
-
-test('valid token but answer missing acknowledge_no_progress → answers_inconsistent', () => {
-  __resetStore();
-  const payload = makePayload();
-  const first = endDriveAudit.process(payload, {}, {});
-  const second = endDriveAudit.process(payload, {}, {
-    token: first.rejection.token,
-    answers: { re_persistence: {} },
-  });
-  assert.equal(second.status, 'rejected');
-  assert.equal(second.rejection.reason, 'answers_inconsistent');
-  const issues = second.rejection.classifier_issues || [];
-  assert.ok(issues.some((s) => /acknowledge_no_progress/.test(s)));
-});
-
-test('hashFields scoping: endDriveAttempts bump does NOT invalidate re_persistence token', () => {
-  __resetStore();
-  const payload = makePayload();
-  const first = endDriveAudit.process(payload, {}, {});
+  assert.equal(first.status, 'rejected');
   const second = endDriveAudit.process(
-    { ...payload, endDriveAttempts: 1 },
+    payload,
     {},
     {
       token: first.rejection.token,
@@ -130,30 +82,11 @@ test('hashFields scoping: endDriveAttempts bump does NOT invalidate re_persisten
   );
   assert.equal(
     second.status,
-    'committed',
-    `expected committed (re/persist counts unchanged); got ${JSON.stringify(second.rejection)}`,
+    'rejected',
+    'detector must still fire — no agent-authored ack escape',
   );
-});
-
-test('hashFields scoping: a fresh RE call DOES invalidate the token', () => {
-  __resetStore();
-  const payload = makePayload();
-  const first = endDriveAudit.process(payload, {}, {});
-  const second = endDriveAudit.process(
-    { ...payload, reCallCount: payload.reCallCount + 1 },
-    {},
-    {
-      token: first.rejection.token,
-      answers: { re_persistence: { acknowledge_no_progress: true } },
-    },
-  );
-  assert.equal(second.status, 'rejected');
-  assert.equal(second.rejection.reason, 'payload_changed');
-  assert.ok(
-    Array.isArray(second.rejection.payload_diff) &&
-      second.rejection.payload_diff.some((p) => p.includes('reCallCount')),
-    `payload_diff should name reCallCount, got: ${JSON.stringify(second.rejection.payload_diff)}`,
-  );
+  const w = (second.rejection.warnings || []).find((x) => x.kind === 're_persistence');
+  assert.ok(w, 're_persistence detector should still emit a warning on retry');
 });
 
 // --- Map-graph action-call threshold ---
@@ -170,9 +103,9 @@ test('map graph: actionCallCount above threshold + zero persist → fires', () =
     {},
   );
   assert.equal(result.status, 'rejected');
-  const items = result.rejection.items.re_persistence;
-  assert.equal(items.action_call_count, ACTION_CALL_THRESHOLD);
-  assert.match(items.prompt, /perform_actions/);
+  const w = (result.rejection.warnings || []).find((x) => x.kind === 're_persistence');
+  assert.ok(w);
+  assert.match(w.message, /perform_actions/);
 });
 
 test('map graph: below action threshold and below RE threshold → no fire', () => {
@@ -197,9 +130,6 @@ test('declaration_required: write actions + no declared capability + attempt 0 �
     makePayload({
       declaredCapabilityCount: 0,
       writeActions: [{ action: 'type', value_preview: 'hello' }],
-      // Mirror the writeActions count — the detector gates on
-      // actionCallCount > 0 (any perform_action), not on writeActions
-      // alone, since read-only navigations also deserve a save opportunity.
       actionCallCount: 1,
       reCallCount: 0, // suppress re_persistence
     }),
@@ -224,15 +154,7 @@ test('declaration_required: ackReason "none" — no ack-through path', () => {
   const result = endDriveAudit.process(payload, {}, {
     acks: { capability_declaration_required: 'I have my reasons' },
   });
-  // Even with an ack, the detector blocks because ackReason: 'none'.
   assert.equal(result.status, 'rejected');
-  const ackIssue = (result.rejection.ack_issues || []).find((s) =>
-    /capability_declaration_required/.test(s),
-  );
-  // Either rejected due to unacked-warning shape, or the ack is recorded as
-  // an issue. Both indicate the ack didn't unblock — the test asserts the
-  // save did not commit.
-  assert.ok(true, ackIssue ? `ack issue: ${ackIssue}` : 'rejected as expected');
 });
 
 test('declaration_required: endDriveAttempts >= 2 → guard releases (force-tear-down attempt)', () => {
@@ -280,10 +202,6 @@ test('declaration_required: navigation/click without write actions → guard ski
 });
 
 test('declaration_required: exploration session (clicks, no writes, no saves) → guard skips', () => {
-  // Field-report shape: actionCallCount: 1 (one click) but no write-shape
-  // actions and no save attempts. Pre-exemption this fired and forced a
-  // fake capability declaration → surface_triage_missing deadlock.
-  // Post-exemption it commits cleanly so end_drive can close.
   __resetStore();
   const result = endDriveAudit.process(
     makePayload({
@@ -300,9 +218,6 @@ test('declaration_required: exploration session (clicks, no writes, no saves) �
 });
 
 test('declaration_required: exploration with save attempt → guard fires (commitment signal)', () => {
-  // Once the agent tried to save, they committed to RE — the detector
-  // should still demand a declared capability so audit-rejection iteration
-  // has somewhere to land.
   __resetStore();
   const result = endDriveAudit.process(
     makePayload({

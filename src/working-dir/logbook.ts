@@ -36,6 +36,7 @@ function emptyLogbook(platform: string): PlatformLogbook {
     platform_wide: {
       signer_functions_seen: [],
       bundle_drift_events: [],
+      abort_events: [],
     },
     observed_capabilities: [],
     url_graph: { nodes: [], edges: [] },
@@ -273,6 +274,55 @@ export function recordObservedCapability(platform: string, input: ObservedCapabi
     sessionBumped?.add(input.name);
   }
   writeLogbook(logbook);
+}
+
+export interface AbortEventInput {
+  session_id: string;
+  reason: string;
+  captured_actions_count: number;
+  phase_at_abort: string;
+}
+
+/**
+ * Append an abort_session event to the platform-wide log. Cross-session
+ * visibility — the agent reads recent_aborts at session start to learn from
+ * prior wrong starts on this platform. Defensive-init: pre-existing logbooks
+ * (no abort_events field) are upgraded in place rather than discarded, same
+ * pattern as `observed_capabilities`.
+ */
+export function appendAbortEvent(platform: string, input: AbortEventInput): void {
+  const logbook = loadLogbook(platform);
+  const wide = logbook.platform_wide as PlatformLogbook['platform_wide'] & {
+    abort_events?: PlatformLogbook['platform_wide']['abort_events'];
+  };
+  if (!Array.isArray(wide.abort_events)) {
+    wide.abort_events = [];
+  }
+  wide.abort_events.push({
+    at: new Date().toISOString(),
+    session_id: input.session_id,
+    reason: input.reason,
+    captured_actions_count: input.captured_actions_count,
+    phase_at_abort: input.phase_at_abort,
+  });
+  writeLogbook(logbook);
+}
+
+/**
+ * Read the most recent abort events for a platform, newest first. Capped at
+ * `limit` (default 10) so the surface stays compact for agent reads.
+ */
+export function readRecentAborts(
+  platform: string,
+  limit = 10,
+): PlatformLogbook['platform_wide']['abort_events'] {
+  const logbook = loadLogbook(platform);
+  const wide = logbook.platform_wide as PlatformLogbook['platform_wide'] & {
+    abort_events?: PlatformLogbook['platform_wide']['abort_events'];
+  };
+  const events = Array.isArray(wide.abort_events) ? wide.abort_events : [];
+  // Defensive copy + reverse-chronological slice.
+  return [...events].sort((a, b) => b.at.localeCompare(a.at)).slice(0, Math.max(0, limit));
 }
 
 /**

@@ -17,6 +17,7 @@ import type { Session } from '../../drivers/types/session';
 import type { DaemonConfig } from '../../config/handler';
 import {
   DISCOVERY_ARTIFACT,
+  ESCAPE_VALVE,
   LOGBOOK_WRITE,
   READ_ONLY_DIAGNOSTIC,
   TRIAGE_AND_LIFT_WRITE,
@@ -29,12 +30,16 @@ import {
 // even point at end_drive as the abandon mechanism. Auto-synth still runs
 // at end_drive's own orchestrator, so a salvageable recorded-path can land
 // from drive history even when the agent couldn't compose a save manually.
+// `abort_session` is the honest exit when the work was misguided in the
+// first place; admitting it here means a misguided lift can be torn down
+// without the audit-loop dance.
 const ALLOWED = unionSets(
   READ_ONLY_DIAGNOSTIC,
   TRIAGE_AND_LIFT_WRITE,
   LIFT_RE_ACTIVE,
   DISCOVERY_ARTIFACT,
   LOGBOOK_WRITE,
+  ESCAPE_VALVE,
   new Set(['end_drive']),
 );
 
@@ -42,6 +47,7 @@ const ALLOWED_WHEN_EXHAUSTED: ReadonlySet<string> = new Set([
   'save_strategy',
   'submit_triage_plan',
   'end_drive',
+  'abort_session',
 ]);
 
 /** Default lift budget when the user hasn't set `lift.max_rounds`. `0` =

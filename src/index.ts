@@ -171,6 +171,9 @@ export type { ResolveInterruptionArgs } from './tools/interruption-tools';
 export { declareCapability } from './tools/declare-capability';
 export type { DeclareCapabilityArgs } from './tools/declare-capability';
 
+export { abortSession } from './tools/abort_session';
+export type { AbortSessionArgs, AbortSessionResult } from './tools/abort_session';
+
 export {
   addResumePointer,
   addDiscoveryNote,
@@ -195,6 +198,7 @@ export { status, startListener, stopListener, getEvents, listListeners } from '.
 
 export {
   listPlatformSkills,
+  getSavedSkillsSummaryMd,
   getStrategy,
   getPlatformLogbook,
   liftRate,
