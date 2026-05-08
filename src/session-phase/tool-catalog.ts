@@ -75,11 +75,18 @@ export const DISCOVERY_ARTIFACT: ReadonlySet<string> = new Set([
   'add_resume_pointer',
 ]);
 
-/** Plan-submission + strategy commit + map-mode logbook write.
- *  Allowed in triage and lift. */
+/** Cross-session platform_logbook write — flags a sibling capability the
+ *  agent observed but didn't lift. Semantically distinct from
+ *  DISCOVERY_ARTIFACT (per-session artifact accumulator) and from
+ *  TRIAGE_AND_LIFT_WRITE (plan/commit). Reachable from drive so map-mode
+ *  agents (whose graph has only a drive phase) can persist findings, and
+ *  from triage/lift so the discover-graph audit prose telling the agent to
+ *  call it during the audit loop actually works. */
+export const LOGBOOK_WRITE: ReadonlySet<string> = new Set(['record_observed_capability']);
+
+/** Plan-submission + strategy commit. Allowed in triage and lift. */
 export const TRIAGE_AND_LIFT_WRITE: ReadonlySet<string> = new Set([
   'save_strategy',
-  'record_observed_capability',
   'submit_triage_plan',
 ]);
 

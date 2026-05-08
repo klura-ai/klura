@@ -17,6 +17,7 @@ import type { Session } from '../../drivers/types/session';
 import type { DaemonConfig } from '../../config/handler';
 import {
   DISCOVERY_ARTIFACT,
+  LOGBOOK_WRITE,
   READ_ONLY_DIAGNOSTIC,
   TRIAGE_AND_LIFT_WRITE,
   LIFT_RE_ACTIVE,
@@ -33,6 +34,7 @@ const ALLOWED = unionSets(
   TRIAGE_AND_LIFT_WRITE,
   LIFT_RE_ACTIVE,
   DISCOVERY_ARTIFACT,
+  LOGBOOK_WRITE,
   new Set(['end_drive']),
 );
 

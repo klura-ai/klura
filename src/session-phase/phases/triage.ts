@@ -12,12 +12,18 @@ import type { Session } from '../../drivers/types/session';
 import type { DaemonConfig } from '../../config/handler';
 import {
   DISCOVERY_ARTIFACT,
+  LOGBOOK_WRITE,
   READ_ONLY_DIAGNOSTIC,
   TRIAGE_AND_LIFT_WRITE,
   unionSets,
 } from '../tool-catalog';
 
-const ALLOWED = unionSets(READ_ONLY_DIAGNOSTIC, TRIAGE_AND_LIFT_WRITE, DISCOVERY_ARTIFACT);
+const ALLOWED = unionSets(
+  READ_ONLY_DIAGNOSTIC,
+  TRIAGE_AND_LIFT_WRITE,
+  DISCOVERY_ARTIFACT,
+  LOGBOOK_WRITE,
+);
 
 const ALLOWED_WHEN_EXHAUSTED: ReadonlySet<string> = new Set(['submit_triage_plan']);
 

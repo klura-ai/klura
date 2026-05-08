@@ -8,9 +8,15 @@
 import type { PhaseSpec, AdmissibilityResult, PhaseEvent, GraphConfig } from '../types';
 import type { Session } from '../../drivers/types/session';
 import type { DaemonConfig } from '../../config/handler';
-import { DISCOVERY_ARTIFACT, DRIVE_ACTIVE, READ_ONLY_DIAGNOSTIC, unionSets } from '../tool-catalog';
+import {
+  DISCOVERY_ARTIFACT,
+  DRIVE_ACTIVE,
+  LOGBOOK_WRITE,
+  READ_ONLY_DIAGNOSTIC,
+  unionSets,
+} from '../tool-catalog';
 
-const ALLOWED = unionSets(DRIVE_ACTIVE, READ_ONLY_DIAGNOSTIC, DISCOVERY_ARTIFACT);
+const ALLOWED = unionSets(DRIVE_ACTIVE, READ_ONLY_DIAGNOSTIC, DISCOVERY_ARTIFACT, LOGBOOK_WRITE);
 
 /** When the budget is hit, the only accepted next call is the phase exit. */
 const ALLOWED_WHEN_EXHAUSTED: ReadonlySet<string> = new Set(['end_drive']);
