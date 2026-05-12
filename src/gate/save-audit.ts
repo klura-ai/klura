@@ -168,6 +168,54 @@ function fieldContainsPlaceholder(fieldValue: string, placeholderName: string): 
   return fieldValue.includes(`{{${placeholderName}}}`);
 }
 
+/**
+ * Return the wire-level param names a `{{placeholder}}` is templated as in the
+ * strategy. The runtime records `ParamObservation`s under the WIRE name
+ * (`category` in `/api/restaurants?category=italian`) but `notes.params` is
+ * keyed by the agent's chosen PLACEHOLDER name (`{{cuisine}}`). Without this
+ * resolution, audits that look up "observations for the placeholder" miss
+ * everything when the agent renames the placeholder away from the wire name —
+ * which is the common case for self-documenting strategy authoring.
+ *
+ * Covers query params (`?wire={{ph}}`) and JSON-body fields
+ * (`{wire: "{{ph}}"}`). Path-segment placeholders have no wire-param name
+ * (the URL path doesn't carry key→value structure), so they return [].
+ */
+export function wireParamNamesForPlaceholder(data: Strategy, placeholderName: string): string[] {
+  const found = new Set<string>();
+  const ph = `{{${placeholderName}}}`;
+
+  const endpoint = (data as { endpoint?: unknown }).endpoint;
+  if (typeof endpoint === 'string' && endpoint.includes(ph)) {
+    // Query-string scan: ?wire={{ph}} or &wire={{ph}}.
+    const re = new RegExp(`[?&]([^=&]+)=${ph.replace(/[{}]/g, '\\$&')}`, 'g');
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(endpoint)) !== null) {
+      const wire = m[1];
+      if (wire) found.add(decodeURIComponent(wire));
+    }
+  }
+
+  const body = (data as { body?: unknown }).body;
+  if (body && typeof body === 'object' && !Array.isArray(body)) {
+    walkJsonForKeyWithPlaceholder(body as Record<string, unknown>, ph, (k) => found.add(k));
+  }
+  return [...found];
+}
+
+function walkJsonForKeyWithPlaceholder(
+  obj: Record<string, unknown>,
+  ph: string,
+  emit: (key: string) => void,
+): void {
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v === 'string' && v.includes(ph)) emit(k);
+    else if (v && typeof v === 'object' && !Array.isArray(v)) {
+      walkJsonForKeyWithPlaceholder(v as Record<string, unknown>, ph, emit);
+    }
+  }
+}
+
 function notesParamExists(data: Strategy, name: string): boolean {
   const params = (data as { notes?: { params?: Record<string, unknown> } }).notes?.params;
   if (!params || typeof params !== 'object') return false;
@@ -791,7 +839,17 @@ export function validateCallerInputKindsAndEnums(
   for (const paramName of callerInputParams) {
     const declared = getDeclaredParam(data, paramName);
     if (!declared) continue; // notes.params-missing is handled by the existing literal check.
-    const observations = observedParamValues[paramName] ?? [];
+    // Observations are recorded under the WIRE-level param name (`category`
+    // for `?category=italian`), but the agent's notes.params is keyed by the
+    // PLACEHOLDER name (`{{cuisine}}`). Look up under both so a renamed
+    // placeholder doesn't silently drop the UI-click-observation signal that
+    // drives the must-be-enum / observed_values audit gates.
+    const observations = [
+      ...(observedParamValues[paramName] ?? []),
+      ...wireParamNamesForPlaceholder(data, paramName).flatMap(
+        (wire) => observedParamValues[wire] ?? [],
+      ),
+    ];
     issues.push(...validateCallerInputParamKind(paramName, declared, observations));
   }
   return issues;
