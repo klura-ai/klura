@@ -26,6 +26,7 @@ import {
   trimA11yTree,
   trimOversizedObjectBody,
   DEFAULT_A11Y_BUDGET,
+  MAX_TOOL_OUTPUT_CHARS,
 } from '../response/response-size';
 import type { Session, SessionOptions } from '../drivers/types/session';
 import { graphConfig } from '../phases/registry';
@@ -1161,6 +1162,49 @@ export async function startSession(
   // runtime/src/interruptions/) whose `continue` resolutions short-circuit
   // the runtime's ask-user / open-viewer defaults.
   await maybeAutoExecuteOnStart(session, opts, result);
+
+  // When auto-exec succeeded, the agent doesn't need the page UI — the data
+  // is in execute_result. The a11y tree + the result body together routinely
+  // exceed MAX_TOOL_OUTPUT_CHARS for non-trivial APIs (hackernews search
+  // returns ~38 KB of hits; messenger send returns the whole conversation
+  // page). Past the SDK's truncation threshold the harness sees a
+  // `<persisted-output>` marker instead of the structured result, so
+  // executed:true / execute_result.status are invisible to downstream
+  // consumers (scoreWarmExecute, execute-succeeded predicates) and the agent
+  // loses its primary signal. Drop the a11y tree first (recoverable via
+  // get_a11y_tree(session_id)); if still oversized, compact the body too.
+  // Aligns with principles.md §"Respect the MCP output budget".
+  if (result.executed === true) {
+    if (JSON.stringify(result).length > MAX_TOOL_OUTPUT_CHARS) {
+      const a11yChars = result.a11y_total_chars;
+      result.a11yTree =
+        `<dropped: auto-exec succeeded; the page UI isn't load-bearing here. ` +
+        `Fetch the full ${a11yChars}-char tree via get_a11y_tree({session_id: "${session.id}", page: 1}) if you need it.>`;
+      result.a11y_truncated = true;
+    }
+    if (JSON.stringify(result).length > MAX_TOOL_OUTPUT_CHARS && result.execute_result) {
+      // Body still over budget after the a11y drop — typically a big API
+      // response (search results, listings). Replace with a budget-bounded
+      // JSON preview + total-chars hint. The agent's primary signals
+      // (execute_result.status, body.ok, _hint) remain intact; the
+      // preview gives enough surface area to summarize to the user.
+      const er = result.execute_result as { body?: unknown; status?: number };
+      if (er.body && typeof er.body === 'object') {
+        const bodyStr = JSON.stringify(er.body);
+        if (bodyStr.length > MAX_TOOL_OUTPUT_CHARS / 2) {
+          const previewBudget = Math.floor(MAX_TOOL_OUTPUT_CHARS / 2);
+          (result.execute_result as unknown as Record<string, unknown>).body_preview =
+            bodyStr.slice(0, previewBudget);
+          (result.execute_result as unknown as Record<string, unknown>).body_total_chars =
+            bodyStr.length;
+          (result.execute_result as unknown as Record<string, unknown>).body_truncated = true;
+          (result.execute_result as unknown as Record<string, unknown>).body =
+            `<truncated: ${bodyStr.length} chars; first ${previewBudget} in body_preview. ` +
+            `For a structured view of subsets, re-run with the strategy directly via execute() and shape the body in the strategy itself.>`;
+        }
+      }
+    }
+  }
 
   // Unmissable top-level hint: callers that pass capability+args are asking the
   // runtime to DO the capability. When a saved strategy exists it auto-executes
