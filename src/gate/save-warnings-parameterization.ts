@@ -52,10 +52,9 @@ export function detectParameterizationDisclosureRequired(data: Strategy): SaveWa
         `value as {{<name>}} in the body/endpoint/headers. End-drive auto-derive populates this only from ` +
         `caller-typed literals — re-discover with start_session({args:{...}}) carrying the literals you want ` +
         `parameterized, OR fix the saved strategy by hand.\n\n` +
-        `Or ack inline: notes.save_warnings_acked: [{kind: "parameterization_disclosure_required", reason: ` +
-        `"<structural anchor + why parameterless>"}]. The reason must name a real element of the saved strategy ` +
-        `(a body field key, header key, endpoint path segment, prereq name). Bare prose like "no params apply" ` +
-        `is rejected. Examples:\n` +
+        `Or answer via audit_answers.parameterization_disclosure_required: "<structural anchor + why parameterless>". ` +
+        `The reason must name a real element of the saved strategy (a body field key, header key, endpoint path ` +
+        `segment, prereq name). Bare prose like "no params apply" is rejected. Examples:\n` +
         `  • "endpoint /api/me/logout: no path params, body absent, prereq csrf_token covers the only ` +
         `caller-invariant secret"\n` +
         `  • "viewer-scoped — endpoint /api/viewer/profile returns the calling user; no input axis"\n` +

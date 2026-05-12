@@ -92,7 +92,7 @@ export function detectMutatingStrategyVerificationApproach(data: Strategy): Save
         `it only proves the network call succeeded. The strategy must verify the side effect actually ` +
         `landed before returning ok:true.`,
       hint:
-        `Acknowledge inline: notes.save_warnings_acked: [{kind: "mutating_verification_required", reason: "<approach + structural anchor>"}]. ` +
+        `Answer via audit_answers.mutating_verification_required: "<approach + structural anchor>". ` +
         `The reason must name WHAT verifies success, by structural element of the saved strategy. ` +
         `Examples by shape:\n` +
         `  • transaction-shape (server returns confirmation): "transaction-shape: response.extract.message_id pulls the server-issued id"\n` +
