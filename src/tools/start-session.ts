@@ -678,147 +678,201 @@ function collectWarmPathAvailable(
   };
 }
 
+/**
+ * Read a saved strategy's `notes.params` and return the set of param names
+ * the agent must supply via `args` for warm-execute to succeed. A param is
+ * caller-supplied when it has no `source` field — `source: "capability:..."`
+ * or `source: "prereq:..."` indicates the runtime resolves it via a
+ * prerequisite at execute time, so the agent shouldn't pass it directly.
+ *
+ * Returns an empty set when the strategy has no `notes.params` (e.g. a
+ * parameterless `logout` capability, or a recorded-path with no declared
+ * placeholders).
+ */
+function expectedAgentArgNames(strategy: unknown): Set<string> {
+  const out = new Set<string>();
+  if (!strategy || typeof strategy !== 'object') return out;
+  const notes = (strategy as { notes?: unknown }).notes;
+  if (!notes || typeof notes !== 'object') return out;
+  const params = (notes as { params?: unknown }).params;
+  if (!params || typeof params !== 'object') return out;
+  for (const [name, info] of Object.entries(params as Record<string, unknown>)) {
+    if (info && typeof info === 'object') {
+      const source = (info as { source?: unknown }).source;
+      if (typeof source === 'string' && source.length > 0) continue;
+    }
+    out.add(name);
+  }
+  return out;
+}
+
 async function maybeAutoExecuteOnStart(
   session: Session,
   opts: StartSessionOptions,
   result: StartSessionResult,
 ): Promise<void> {
-  if (opts.platform && opts.capability && opts.args) {
-    const { platform, capability, args } = opts;
-    const saved = skills.loadStrategies(platform, capability);
-    if (saved.length === 0) {
+  if (!opts.platform || !opts.capability) return;
+
+  const { platform, capability } = opts;
+  const saved = skills.loadStrategies(platform, capability);
+  if (saved.length === 0) {
+    // Only surface "no saved strategy" when the agent demonstrated intent
+    // by passing args (the canonical warm-call shape). Otherwise the agent
+    // is just opening a discovery session and the absence of a saved
+    // strategy is expected, not informational.
+    if (opts.args) {
       result.executed = false;
       result.auto_execute_reason = 'no_complete_saved_strategy';
-      return;
+      dispatchExecuteGraphOutcome(session, opts, result);
     }
+    return;
+  }
 
-    const unregister = pool.registerSharedSession?.(session, platform) ?? (() => {});
-    try {
-      // Identity is already validated upstream and stamped on the session
-      // (`session.identity`); read from there so warm callers in
-      // executeStrategy resolve the right cookie jar.
-      const execResult = await executeStrategy(platform, capability, args, pool, tokenCache, {
-        identity: session.identity,
-        // Auto-execute on a recorded-path tier cold-spawns a fresh inner
-        // session. Threading the outer (agent-driving) id lets the inner
-        // pause register an alias so resume_execution / ack_checkpoint
-        // with the agent's session id (the only one the agent knows from
-        // start_session's response) resolve to the inner registry
-        // entries. See runtime/src/execution/auto-execute-alias.ts.
-        ownerSessionId: session.id,
-      });
-      result.executed = true;
-      result.execute_result = trimOversizedObjectBody(execResult, {
-        dropField: 'networkLog',
-        mode: 'force-compact',
-        availableHint: NETWORKLOG_TRIM_HINT,
-      });
-      // Track stale-strategy auto-executes so end_drive's LIFT handoff
-      // routes the agent to update the broken strategy. Without this,
-      // the existence of the broken strategy keeps `hasAny=true` in
-      // computeReverseEngineerHandoff and end_drive closes the session
-      // without ever offering a save surface — the agent loses the only
-      // path to override the stale shape.
-      const execStatus = (execResult as { status?: number }).status;
-      if (typeof execStatus === 'number' && execStatus >= 400) {
-        if (!session.staleStrategyCapabilities) {
-          session.staleStrategyCapabilities = new Set();
-        }
-        session.staleStrategyCapabilities.add(capability);
-      }
-      attachRevisitPrompt(platform, capability, saved, execResult, result);
-      // Promote the cascade-failure diagnosis to a top-level inline envelope.
-      // On auth-shaped failure (401/403), fire the auth-probe against
-      // notes.discovered_from_url (or baseUrl fallback) to disambiguate
-      // "rotating-token rejection" (stale_nonce — re-extract via prereq)
-      // from "session expired" (auth_failed — escalate to user re-auth).
-      // The disambiguation is crisp (HTTP status + final URL after
-      // redirect-follow) — see runtime/src/auth/probe.ts and principles.md
-      // §"Crisp vs fuzzy".
-      const body = (execResult as { body?: Record<string, unknown> }).body;
-      const status = (execResult as { status?: number }).status;
-      if (body && typeof body === 'object') {
-        if ((status === 401 || status === 403) && body.diagnosis) {
-          const probeStrategy = saved[0]?.strategy ?? null;
-          const probeUrl = pickProbeUrl(probeStrategy);
-          if (probeUrl) {
-            try {
-              const driver = pool.driverFor(session.id);
-              const probe = await probeAuthState(driver, session, probeUrl);
-              const errs = Array.isArray(body.details) ? (body.details as string[]) : [];
-              const lastFailedResult = {
-                status,
-                body: body.original_body,
-                finalUrl: typeof body.final_url === 'string' ? body.final_url : undefined,
-              };
-              const reclass = classifyAutoExecDiagnosis(
-                errs,
-                lastFailedResult as never,
-                probeStrategy as never,
-                probe,
-              );
-              body.diagnosis = reclass;
-            } catch {
-              // Probe failed for an infrastructural reason — keep the
-              // un-probed diagnosis. Don't let the probe failure cascade
-              // back as a different error to the agent.
-            }
-          }
-        }
-        if (body.diagnosis) {
-          (result as unknown as Record<string, unknown>)._auto_exec_diagnosis = body.diagnosis;
-          // Auth-failed diagnosis is the canonical session_expired signal —
-          // saved storage state is no longer valid against the live site.
-          // Emit the checkpoint so a registered handler decides whether to
-          // open the viewer for re-auth (default), continue silently
-          // (benchmark stub), or hand off via a custom plugin. Envelope, if
-          // any, attaches as `_checkpoint` on the start_session response so
-          // the agent gates the next tool call on `ack_checkpoint`.
-          const diagnosisKind = (body.diagnosis as { kind?: string }).kind;
-          if (diagnosisKind === 'auth_failed') {
-            try {
-              const { envelope } = await invokeCheckpointAndGate('session_expired', {
-                session_id: session.id,
-                context: {
-                  kind: 'session_expired',
-                  platform,
-                  capability,
-                  attempted_tier: (body.diagnosis as { attempted_tier?: string }).attempted_tier,
-                  attempted_endpoint: (body.diagnosis as { attempted_endpoint?: string })
-                    .attempted_endpoint,
-                  status,
-                },
-              });
-              if (envelope) {
-                (result as unknown as Record<string, unknown>)._checkpoint = envelope;
-              }
-            } catch {
-              // Checkpoint dispatch failure is non-fatal — diagnosis is still
-              // surfaced under _auto_exec_diagnosis. The agent can read kind:
-              // "auth_failed" and decide manually.
-            }
-          }
-        }
-      }
-    } catch (err) {
-      result.executed = false;
-      result.auto_execute_reason = `auto_execute_threw: ${err instanceof Error ? err.message : String(err)}`;
-      // Throw on auto-execute is a stale-strategy signal too — same
-      // routing rationale as the 4xx/5xx branch above.
-      if (!session.staleStrategyCapabilities) {
-        session.staleStrategyCapabilities = new Set();
-      }
-      session.staleStrategyCapabilities.add(capability);
-    } finally {
-      unregister();
-    }
+  // Saved strategy exists. Verify the agent passed enough args to satisfy
+  // its caller-input params before attempting auto-exec. Without this check
+  // the agent's `start_session({platform, capability})` with wrong/absent
+  // args silently falls through to "fresh discovery" — the agent re-drives
+  // the UI manually, burning rounds against a strategy that's already
+  // saved. Surface the expected arg shape so the agent can re-call cleanly.
+  const expected = expectedAgentArgNames(saved[0]);
+  const provided = opts.args ? new Set(Object.keys(opts.args)) : new Set<string>();
+  const missing = [...expected].filter((p) => !provided.has(p));
+  if (missing.length > 0) {
+    result.executed = false;
+    result.auto_execute_reason = 'args_required_to_auto_execute';
+    const expectedList = [...expected];
+    const expectedShape = expectedList.map((p) => `${p}: "<value>"`).join(', ');
+    result._hint =
+      `A saved ${(saved[0] as { strategy?: string }).strategy ?? 'fetch'} strategy for ` +
+      `${platform}/${capability} exists, but start_session args ` +
+      `${opts.args ? "don't cover" : 'were not provided for'} its declared params. ` +
+      `Missing: [${missing.join(', ')}]. Re-call with args: {${expectedShape}} to auto-execute ` +
+      `the saved strategy. ` +
+      `notes.params.<name>.description on the saved strategy has detail on each.`;
     dispatchExecuteGraphOutcome(session, opts, result);
     return;
   }
 
-  if (opts.capability && !opts.args) {
+  const args = (opts.args ?? {}) as Record<string, unknown>;
+  const unregister = pool.registerSharedSession?.(session, platform) ?? (() => {});
+  try {
+    // Identity is already validated upstream and stamped on the session
+    // (`session.identity`); read from there so warm callers in
+    // executeStrategy resolve the right cookie jar.
+    const execResult = await executeStrategy(platform, capability, args, pool, tokenCache, {
+      identity: session.identity,
+      // Auto-execute on a recorded-path tier cold-spawns a fresh inner
+      // session. Threading the outer (agent-driving) id lets the inner
+      // pause register an alias so resume_execution / ack_checkpoint
+      // with the agent's session id (the only one the agent knows from
+      // start_session's response) resolve to the inner registry
+      // entries. See runtime/src/execution/auto-execute-alias.ts.
+      ownerSessionId: session.id,
+    });
+    result.executed = true;
+    result.execute_result = trimOversizedObjectBody(execResult, {
+      dropField: 'networkLog',
+      mode: 'force-compact',
+      availableHint: NETWORKLOG_TRIM_HINT,
+    });
+    // Track stale-strategy auto-executes so end_drive's LIFT handoff
+    // routes the agent to update the broken strategy. Without this,
+    // the existence of the broken strategy keeps `hasAny=true` in
+    // computeReverseEngineerHandoff and end_drive closes the session
+    // without ever offering a save surface — the agent loses the only
+    // path to override the stale shape.
+    const execStatus = (execResult as { status?: number }).status;
+    if (typeof execStatus === 'number' && execStatus >= 400) {
+      if (!session.staleStrategyCapabilities) {
+        session.staleStrategyCapabilities = new Set();
+      }
+      session.staleStrategyCapabilities.add(capability);
+    }
+    attachRevisitPrompt(platform, capability, saved, execResult, result);
+    // Promote the cascade-failure diagnosis to a top-level inline envelope.
+    // On auth-shaped failure (401/403), fire the auth-probe against
+    // notes.discovered_from_url (or baseUrl fallback) to disambiguate
+    // "rotating-token rejection" (stale_nonce — re-extract via prereq)
+    // from "session expired" (auth_failed — escalate to user re-auth).
+    // The disambiguation is crisp (HTTP status + final URL after
+    // redirect-follow) — see runtime/src/auth/probe.ts and principles.md
+    // §"Crisp vs fuzzy".
+    const body = (execResult as { body?: Record<string, unknown> }).body;
+    const status = (execResult as { status?: number }).status;
+    if (body && typeof body === 'object') {
+      if ((status === 401 || status === 403) && body.diagnosis) {
+        const probeStrategy = saved[0]?.strategy ?? null;
+        const probeUrl = pickProbeUrl(probeStrategy);
+        if (probeUrl) {
+          try {
+            const driver = pool.driverFor(session.id);
+            const probe = await probeAuthState(driver, session, probeUrl);
+            const errs = Array.isArray(body.details) ? (body.details as string[]) : [];
+            const lastFailedResult = {
+              status,
+              body: body.original_body,
+              finalUrl: typeof body.final_url === 'string' ? body.final_url : undefined,
+            };
+            const reclass = classifyAutoExecDiagnosis(
+              errs,
+              lastFailedResult as never,
+              probeStrategy as never,
+              probe,
+            );
+            body.diagnosis = reclass;
+          } catch {
+            // Probe failed for an infrastructural reason — keep the
+            // un-probed diagnosis. Don't let the probe failure cascade
+            // back as a different error to the agent.
+          }
+        }
+      }
+      if (body.diagnosis) {
+        (result as unknown as Record<string, unknown>)._auto_exec_diagnosis = body.diagnosis;
+        // Auth-failed diagnosis is the canonical session_expired signal —
+        // saved storage state is no longer valid against the live site.
+        // Emit the checkpoint so a registered handler decides whether to
+        // open the viewer for re-auth (default), continue silently
+        // (benchmark stub), or hand off via a custom plugin. Envelope, if
+        // any, attaches as `_checkpoint` on the start_session response so
+        // the agent gates the next tool call on `ack_checkpoint`.
+        const diagnosisKind = (body.diagnosis as { kind?: string }).kind;
+        if (diagnosisKind === 'auth_failed') {
+          try {
+            const { envelope } = await invokeCheckpointAndGate('session_expired', {
+              session_id: session.id,
+              context: {
+                kind: 'session_expired',
+                platform,
+                capability,
+                attempted_tier: (body.diagnosis as { attempted_tier?: string }).attempted_tier,
+                attempted_endpoint: (body.diagnosis as { attempted_endpoint?: string })
+                  .attempted_endpoint,
+                status,
+              },
+            });
+            if (envelope) {
+              (result as unknown as Record<string, unknown>)._checkpoint = envelope;
+            }
+          } catch {
+            // Checkpoint dispatch failure is non-fatal — diagnosis is still
+            // surfaced under _auto_exec_diagnosis. The agent can read kind:
+            // "auth_failed" and decide manually.
+          }
+        }
+      }
+    }
+  } catch (err) {
     result.executed = false;
-    result.auto_execute_reason = 'args_required_to_auto_execute';
+    result.auto_execute_reason = `auto_execute_threw: ${err instanceof Error ? err.message : String(err)}`;
+    // Throw on auto-execute is a stale-strategy signal too — same
+    // routing rationale as the 4xx/5xx branch above.
+    if (!session.staleStrategyCapabilities) {
+      session.staleStrategyCapabilities = new Set();
+    }
+    session.staleStrategyCapabilities.add(capability);
+  } finally {
+    unregister();
   }
   dispatchExecuteGraphOutcome(session, opts, result);
 }
