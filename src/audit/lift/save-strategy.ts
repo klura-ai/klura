@@ -38,6 +38,7 @@ import {
   detectEnumParamListingUnfactored,
   detectEnumValueInCapabilitySlug,
   detectUnreferencedPrereqBinding,
+  detectCapabilitySourceMissingPrereq,
   type SaveWarning,
 } from '../../gate/save-warnings';
 import {
@@ -430,6 +431,17 @@ const enumParamListingUnfactoredDetector: Detector<Strategy, SaveStrategyCtx> = 
   ackReason: 'none',
 };
 
+// notes.params.<X>.source: "capability:Y" must be paired with a
+// prerequisites[].kind:"capability" entry targeting Y. Without the prereq
+// the source declaration is cosmetic and the listing never fetches at
+// warm-execute time. ackReason: 'none' — the declaration is either
+// load-bearing (needs the prereq) or it's not (drop the source).
+const capabilitySourcePrereqMismatchDetector: Detector<Strategy, SaveStrategyCtx> = {
+  kind: 'capability_source_missing_prereq',
+  detect: (data) => asIssues(detectCapabilitySourceMissingPrereq(data)),
+  ackReason: 'none',
+};
+
 const enumValueInCapabilitySlugDetector: Detector<Strategy, SaveStrategyCtx> = {
   kind: 'enum_value_baked_into_slug',
   detect: (data, ctx) => asIssues(detectEnumValueInCapabilitySlug(data, ctx.capability)),
@@ -722,6 +734,7 @@ export const saveStrategyAudit = new Audit<Strategy, SaveStrategyCtx>({
     recordedPathInlinesLookupDetector,
     ungroundedEnumPlaceholderDetector,
     enumParamListingUnfactoredDetector,
+    capabilitySourcePrereqMismatchDetector,
     enumValueInCapabilitySlugDetector,
     endpointCollidesWithSavedCapabilityDetector,
     unobservedUrlDetector,

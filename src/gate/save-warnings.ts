@@ -826,6 +826,74 @@ export function detectEnumParamListingUnfactored(
  * a multi-step disambiguation) can ack with a structural reason; default
  * is `ackReason: 'none'` to enforce factoring.
  */
+
+/**
+ * Pair-check: `notes.params.<X>.source: "capability:<Y>"` must be matched
+ * by a `prerequisites[]` entry of `{kind: "capability", capability: "<Y>",
+ * ...}`. The `source` declaration says "look up X's allowed values via
+ * capability Y"; without the paired prereq, the declaration is cosmetic —
+ * the runtime resolves prereqs by walking `prerequisites[]`, not by
+ * scanning `notes.params.*.source`. A save with the orphan declaration
+ * lands successfully but at warm-execute time the listing is never fetched
+ * and the enum-grounding promise is broken silently.
+ *
+ * Surfaced live in v4 llm-tests/dynamic-enum/fresh-discovery: agent saved
+ * `find_top_restaurants` with `notes.params.category.source: "capability:
+ * list_restaurant_categories"` (correct declaration) but no
+ * `prerequisites[]` entry pointing at that listing capability. Score
+ * function caught it: *"category param links to capability via
+ * notes.params, but find_top_restaurants is missing a matching
+ * prerequisites[].method:'capability' entry — without the prereq the
+ * runtime can't enforce the link."*
+ *
+ * `ackReason: 'none'` — there's no legitimate reason to leave a dangling
+ * declaration. Either add the prereq or drop the source.
+ */
+export function detectCapabilitySourceMissingPrereq(data: Strategy): SaveWarning[] {
+  const params = (data as { notes?: { params?: Record<string, unknown> } }).notes?.params;
+  if (!params || typeof params !== 'object') return [];
+  const prereqs = (data as Record<string, unknown>).prerequisites;
+  const prereqCapabilities = new Set<string>();
+  if (Array.isArray(prereqs)) {
+    for (const raw of prereqs) {
+      if (!raw || typeof raw !== 'object') continue;
+      const p = raw as Record<string, unknown>;
+      if (p.kind !== 'capability') continue;
+      if (typeof p.capability === 'string' && p.capability.length > 0) {
+        prereqCapabilities.add(p.capability);
+      }
+    }
+  }
+  const warnings: SaveWarning[] = [];
+  for (const [paramName, info] of Object.entries(params)) {
+    if (!info || typeof info !== 'object') continue;
+    const source = (info as { source?: unknown }).source;
+    if (typeof source !== 'string' || !source.startsWith('capability:')) continue;
+    const referencedCapability = source.slice('capability:'.length);
+    if (!referencedCapability) continue;
+    if (prereqCapabilities.has(referencedCapability)) continue;
+    warnings.push({
+      kind: 'capability_source_missing_prereq',
+      message:
+        `\`notes.params.${paramName}.source = "${source}"\` declares that ${paramName}'s allowed values ` +
+        `come from a saved sibling capability \`${referencedCapability}\`, but \`prerequisites[]\` has no ` +
+        `entry pointing at that capability — the source declaration is cosmetic. At warm-execute time ` +
+        `the runtime resolves prereqs from \`prerequisites[]\` only; without a paired \`{kind: "capability", ` +
+        `capability: "${referencedCapability}", args: {...}, vars: {...}}\` entry the listing is never fetched ` +
+        `and ${paramName}'s value-grounding promise breaks silently.`,
+      hint:
+        `Two fixes — pick the one that matches your intent: ` +
+        `(a) ADD the prereq: append \`{kind: "capability", capability: "${referencedCapability}", args: {...the ` +
+        `capability's required args, if any}, vars: {<binding>: "<dot.path>"}}\` to \`prerequisites[]\` and ` +
+        `reference \`{{<binding>}}\` (or use the binding via templating logic the capability supports) so the ` +
+        `runtime knows when to resolve. ` +
+        `(b) DROP the source: remove \`source\` from \`notes.params.${paramName}\` and bake values inline as ` +
+        `\`observed_values: [{value, label}, ...]\` grounded in this session's click→XHR captures.`,
+    });
+  }
+  return warnings;
+}
+
 export function detectRecordedPathInlinesLookup(
   data: Strategy,
   capturedEndpointPaths: Set<string>,
