@@ -44,6 +44,7 @@ import { TOOL_DEF as submitTriagePlan } from './submit-triage-plan';
 import { TOOL_DEFS as skillsQueryTools } from './skills-query';
 import { TOOL_DEF as getStrategyHealth } from './health';
 import { TOOL_DEF as declareCapability } from './declare-capability';
+import { TOOL_DEF as liftObservedCapability } from './lift-observed-capability';
 import { TOOL_DEFS as discoveryArtifactTools } from './discovery-artifact-tools';
 import { TOOL_DEFS as jsTools } from './js-tools';
 import { TOOL_DEFS as debuggerTools } from './debugger';
@@ -67,6 +68,7 @@ export const TOOL_REGISTRY: ToolDef[] = [
   ...skillsQueryTools,
   getStrategyHealth,
   declareCapability,
+  liftObservedCapability,
   ...discoveryArtifactTools,
   ...jsTools,
   ...debuggerTools,

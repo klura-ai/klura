@@ -20,14 +20,19 @@ test('discover graph: Mermaid dump contains expected nodes and transitions', () 
   assert.match(out, /lift -->\|"resolved_via_save"\| terminal_closed/);
 });
 
-test('map graph: only drive node + two terminal transitions', () => {
+test('map graph: drive ⇄ triage ⇄ lift with lift_observed_capability_invoked entry', () => {
   const out = dumpMermaid(GRAPHS.map);
   assert.match(out, /%% graph: map/);
   assert.match(out, /start\(\[entry\]\) --> drive/);
-  assert.match(out, /drive -->\|"resolved_via_save"\| terminal_closed/);
+  // Lift cycle entry edges.
+  assert.match(out, /drive -->\|"lift_observed_capability_invoked"\| triage/);
+  assert.match(out, /lift -->\|"lift_observed_capability_invoked"\| triage/);
+  // Triage → lift via the usual triage_plan checkpoint handoff.
+  assert.match(out, /triage -->\|"plan_handoff"\| lift/);
+  // Terminal closure from any phase.
   assert.match(out, /drive -->\|"end_drive_unresolved"\| terminal_closed/);
-  assert.doesNotMatch(out, /triage/);
-  assert.doesNotMatch(out, /lift/);
+  assert.match(out, /lift -->\|"end_drive_unresolved"\| terminal_closed/);
+  assert.match(out, /lift -->\|"resolved_via_save"\| terminal_closed/);
 });
 
 test('execute graph: guarded execute_failed renders [guarded] suffix', () => {

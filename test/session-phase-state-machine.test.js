@@ -169,17 +169,44 @@ test('admissibility: get_a11y_tree admitted in triage and lift too', () => {
   assert.ok(currentSpec(liftSession).checkAdmissibility('get_a11y_tree', liftSession).ok);
 });
 
-test('admissibility: map mode REJECTS save_strategy in drive — observation-only contract', async () => {
-  // Map is observation-only by design. Strategies are committed in
-  // 'discover' graph (which has triage + lift phases for surface
-  // classification and per-save audit). Map sessions persist findings via
-  // record_observed_capability / save_verified_expression / add_discovery_note
-  // / add_resume_pointer; a follow-up discover({capability}) session reads
-  // those priors at turn 0 and warm-starts the lift.
-  //
-  // The rejection text is the moment-of-mistake teaching surface: agent
-  // who reaches for save_strategy in map sees the four persistence tools
-  // and the discover handoff inline.
+test('admissibility: declare_capability admitted in drive, triage, AND lift', () => {
+  // Agents routinely realise mid-flow (in triage during plan composition,
+  // or in lift during save authoring) that the strategy they're saving
+  // needs a sibling capability declared (lookup_X chained as a prereq,
+  // list_Y as an enum source). Drive-only restriction forced agents to
+  // either inline those prereqs as fetch-extracts (which trip downstream
+  // audits) or bail out entirely — see the audit-completeness sprint
+  // findings. declare_capability has no phase-specific internal logic and
+  // mutates only append-only state, so admitting it in every non-closed
+  // phase is structurally safe.
+  const driveSession = fresh();
+  assert.ok(
+    currentSpec(driveSession).checkAdmissibility('declare_capability', driveSession).ok,
+    'declare_capability admitted in drive (unchanged behavior)',
+  );
+  const triageSession = fresh();
+  dispatch(triageSession, { kind: 'end_drive_unresolved' });
+  assert.ok(
+    currentSpec(triageSession).checkAdmissibility('declare_capability', triageSession).ok,
+    'declare_capability admitted in triage',
+  );
+  const liftSession = fresh();
+  dispatch(liftSession, { kind: 'end_drive_unresolved' });
+  dispatch(liftSession, { kind: 'plan_handoff' });
+  assert.ok(
+    currentSpec(liftSession).checkAdmissibility('declare_capability', liftSession).ok,
+    'declare_capability admitted in lift',
+  );
+});
+
+test('admissibility: map drive rejects save_strategy with lift_observed_capability handoff', async () => {
+  // Map's drive phase is for exploration; lift is reached via
+  // lift_observed_capability for any slug already on
+  // platform_logbook.observed_capabilities[]. save_strategy itself only
+  // runs in the resulting triage/lift phases. The rejection text is the
+  // moment-of-mistake teaching surface: agent who reaches for
+  // save_strategy in map-drive learns about the explore → record → lift
+  // chain inline.
   const { graphFor } = await import('../dist/graphs/index.js');
   const map = graphFor('map');
   const discover = graphFor('discover');
@@ -192,49 +219,45 @@ test('admissibility: map mode REJECTS save_strategy in drive — observation-onl
   );
   assert.equal(discoverReject.ok, false, 'discover drive rejects save_strategy');
   assert.match(discoverReject.reason, /hand over to triage/);
-  // Map graph: save_strategy ALSO rejects, with prose pointing at the
-  // four persistence tools + discover handoff.
+  // Map graph: save_strategy rejects with prose pointing at lift_observed_capability.
   const mapReject = currentSpec(session).checkAdmissibility(
     'save_strategy',
     session,
     map.config,
   );
-  assert.equal(mapReject.ok, false, 'map drive rejects save_strategy (observation-only)');
-  assert.match(mapReject.reason, /observation-only/);
-  for (const persistTool of [
-    'record_observed_capability',
-    'save_verified_expression',
-    'add_discovery_note',
-    'add_resume_pointer',
-  ]) {
-    assert.match(
-      mapReject.reason,
-      new RegExp(persistTool),
-      `map save_strategy rejection should name ${persistTool} as a persistence path`,
-    );
-  }
-  assert.match(mapReject.reason, /discover/, 'rejection should point at discover graph follow-up');
-  // Map rejection prose for an unrelated tool reflects map's exit (end_drive).
-  const mapRejectOther = currentSpec(session).checkAdmissibility(
+  assert.equal(mapReject.ok, false, 'map drive rejects save_strategy');
+  assert.match(mapReject.reason, /lift_observed_capability/);
+  assert.match(mapReject.reason, /record_observed_capability/);
+  // submit_triage_plan in map-drive: rejection points at lift_observed_capability too.
+  const mapRejectTriage = currentSpec(session).checkAdmissibility(
     'submit_triage_plan',
     session,
     map.config,
   );
-  assert.equal(mapRejectOther.ok, false);
-  assert.match(mapRejectOther.reason, /observation-only.*end_drive/s);
+  assert.equal(mapRejectTriage.ok, false);
+  assert.match(mapRejectTriage.reason, /lift_observed_capability/);
 });
 
-test('graph topology: map has no lift phase', async () => {
-  // Backstop for the orchestrator's lift-bookkeeping graph guard. The guard
-  // checks `currentGraph(session).nodes.has('lift')` before populating
-  // session.lift; if a future graph rev added 'lift' to map's node set
-  // without the matching state-machine transitions, the guard would
-  // incorrectly write bookkeeping for an unreachable phase.
+test('graph topology: map has triage + lift, reached via lift_observed_capability', async () => {
   const { graphFor } = await import('../dist/graphs/index.js');
   const map = graphFor('map');
-  assert.equal(map.nodes.has('lift'), false, 'map graph must not contain a lift phase');
-  assert.equal(map.nodes.has('triage'), false, 'map graph must not contain a triage phase');
-  // Sanity: discover and execute do contain lift.
+  assert.equal(map.nodes.has('drive'), true, 'map graph entry phase is drive');
+  assert.equal(map.nodes.has('triage'), true, 'map graph contains triage');
+  assert.equal(map.nodes.has('lift'), true, 'map graph contains lift');
+  // The drive → triage transition only fires on lift_observed_capability_invoked
+  // in map (discover uses end_drive_unresolved + surface_changed instead).
+  const driveToTriage = map.transitions.find(
+    (t) => t.from === 'drive' && t.on === 'lift_observed_capability_invoked',
+  );
+  assert.ok(driveToTriage, 'map graph wires drive → triage on lift_observed_capability_invoked');
+  assert.equal(driveToTriage.to, 'triage');
+  // lift → triage on the same event lets the agent declare a NEXT slug
+  // after a successful save without going back to drive first.
+  const liftToTriage = map.transitions.find(
+    (t) => t.from === 'lift' && t.on === 'lift_observed_capability_invoked',
+  );
+  assert.ok(liftToTriage, 'map graph wires lift → triage on lift_observed_capability_invoked');
+  // Sanity: discover and execute also contain lift.
   const discover = graphFor('discover');
   const execute = graphFor('execute');
   assert.equal(discover.nodes.has('lift'), true);

@@ -40,6 +40,7 @@ export type PhaseEventKind =
   | 'plan_handoff' // triage -> lift. Unconditional handoff via the triage_plan checkpoint; the agent classifies the user's ack reply downstream and either proceeds or calls submit_triage_plan again.
   | 'surface_changed' // lift -> triage; triage self-loop. Emitted by perform_action when navigation crosses to an un-triaged surface.
   | 'resolved_via_save' // drive | triage | lift -> terminal{closed}
+  | 'lift_observed_capability_invoked' // map graph: drive | lift -> triage. Emitted by lift_observed_capability when the agent decides to lift a logbook entry without ending the session.
   | 'execute_succeeded' // execute -> terminal{closed} (graph: 'execute' only)
   | 'execute_failed'; // execute -> triage (gate fires) | terminal{failed} (gate doesn't fire)
 

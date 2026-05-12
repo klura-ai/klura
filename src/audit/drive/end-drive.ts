@@ -312,6 +312,13 @@ const rePersistenceDetector: Detector<EndDrivePayload, EndDriveCtx> = {
  */
 function shouldRunRePersistence(p: EndDrivePayload): boolean {
   if (p.persistCallCount > 0) return false;
+  // A landed saved strategy is itself a persistence artifact — the most
+  // concrete one. In map-graph sessions that lift one capability and leave
+  // others observed-but-unlifted, the triage handoff would still fire on
+  // the unlifted slugs, so the older `!triageWouldFire` check below alone
+  // wouldn't clear this gate. But the agent shipped real work; demanding
+  // breadcrumbs on top is friction.
+  if (p.saveSuccessCount > 0) return false;
   const t = p.rePersistenceThreshold;
   if (!t) return false;
   if (p.declaredCapabilityCount > 0 && !p.triageWouldFire) return false;

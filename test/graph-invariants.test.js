@@ -69,12 +69,24 @@ test('discover graph: drive→lift requires passing through triage', () => {
   assert.ok(reach.has('lift'), 'drive reaches lift (via triage)');
 });
 
-test('map graph: only one node (drive); no triage, no lift', () => {
+test('map graph: drive + triage + lift, with lift_observed_capability entry from drive and lift', () => {
   const g = GRAPHS.map;
-  assert.equal(g.nodes.size, 1, 'map graph has exactly one node');
-  assert.ok(g.nodes.has('drive'), "map graph's only node is 'drive'");
-  assert.ok(!g.nodes.has('triage'), 'map graph has no triage node');
-  assert.ok(!g.nodes.has('lift'), 'map graph has no lift node');
+  assert.equal(g.nodes.size, 3, 'map graph has drive, triage, and lift');
+  assert.ok(g.nodes.has('drive'));
+  assert.ok(g.nodes.has('triage'));
+  assert.ok(g.nodes.has('lift'));
+  // The lift cycle entry transition is what distinguishes map's lift access
+  // from discover's monolithic drive → triage → lift path.
+  const driveLift = g.transitions.find(
+    (t) => t.from === 'drive' && t.on === 'lift_observed_capability_invoked',
+  );
+  assert.ok(driveLift, 'drive → triage on lift_observed_capability_invoked');
+  assert.equal(driveLift.to, 'triage');
+  const liftLift = g.transitions.find(
+    (t) => t.from === 'lift' && t.on === 'lift_observed_capability_invoked',
+  );
+  assert.ok(liftLift, 'lift → triage on lift_observed_capability_invoked (next slug after save)');
+  assert.equal(liftLift.to, 'triage');
 });
 
 test('execute graph: execute_failed has guarded + unguarded transitions in order', () => {

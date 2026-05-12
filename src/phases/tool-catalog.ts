@@ -90,6 +90,14 @@ export const TRIAGE_AND_LIFT_WRITE: ReadonlySet<string> = new Set([
   'submit_triage_plan',
 ]);
 
+/** Map-graph lift initiator. Opens a triage+lift cycle on an already-observed
+ *  capability without ending the map session. Admissible from drive (first
+ *  lift) and lift (subsequent capability after a save) — NOT triage (an
+ *  active plan should resolve before a new capability bumps it). The tool
+ *  itself rejects on non-map sessions so phase admissibility can stay
+ *  graph-agnostic. */
+export const MAP_LIFT_INITIATOR: ReadonlySet<string> = new Set(['lift_observed_capability']);
+
 /** UI-driving tools + the drive-phase exit. Drive-only. `start_session` is
  *  here for completeness; the middleware skips admissibility for tools
  *  called without a live session. */
@@ -97,10 +105,21 @@ export const DRIVE_ACTIVE: ReadonlySet<string> = new Set([
   'start_session',
   'perform_action',
   'end_drive',
-  'declare_capability',
   'execute',
   'resume_execution',
 ]);
+
+/** Capability declaration. Admissible in drive + triage + lift — agents
+ *  routinely realise mid-flow (during triage's plan composition or lift's
+ *  save authoring) that the strategy they're saving needs a sibling
+ *  capability declared (lookup_X chained as a prereq, list_Y as an enum
+ *  source). Drive-only restriction forced agents to either inline those
+ *  prereqs as fetch-extracts (which then trip the lookup_embedded_in_prereq
+ *  / capability_source_missing_prereq audits) or bail and re-discover.
+ *  declare_capability is append-only on session.declaredCapabilities and
+ *  has no phase-specific internal logic; admitting it in every non-closed
+ *  phase is structurally safe. */
+export const CAPABILITY_DECLARATION: ReadonlySet<string> = new Set(['declare_capability']);
 
 /** Honest-exit primitive. Admissible in every non-closed phase (drive,
  *  triage, lift) — when the agent realises the session shouldn't have started

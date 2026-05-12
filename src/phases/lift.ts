@@ -16,9 +16,11 @@ import type { PhaseSpec, AdmissibilityResult, PhaseEvent, GraphConfig } from './
 import type { Session } from '../drivers/types/session';
 import type { DaemonConfig } from '../config/handler';
 import {
+  CAPABILITY_DECLARATION,
   DISCOVERY_ARTIFACT,
   ESCAPE_VALVE,
   LOGBOOK_WRITE,
+  MAP_LIFT_INITIATOR,
   READ_ONLY_DIAGNOSTIC,
   TRIAGE_AND_LIFT_WRITE,
   LIFT_RE_ACTIVE,
@@ -36,9 +38,11 @@ import {
 const ALLOWED = unionSets(
   READ_ONLY_DIAGNOSTIC,
   TRIAGE_AND_LIFT_WRITE,
+  CAPABILITY_DECLARATION,
   LIFT_RE_ACTIVE,
   DISCOVERY_ARTIFACT,
   LOGBOOK_WRITE,
+  MAP_LIFT_INITIATOR,
   ESCAPE_VALVE,
   new Set(['end_drive']),
 );

@@ -63,6 +63,7 @@ export const TOOL_NAMES = {
   inspectWsFrame: 'inspect_ws_frame',
   installPageInitScript: 'install_page_init_script',
   jsEval: 'js_eval',
+  liftObservedCapability: 'lift_observed_capability',
   listBreakpoints: 'list_breakpoints',
   listInterruptionResolvers: 'list_interruption_resolvers',
   listLoadedScripts: 'list_loaded_scripts',
