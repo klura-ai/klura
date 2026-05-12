@@ -13,7 +13,7 @@ import {
   recordRawCapture,
   recordParamObservation,
 } from '../response/session-observations';
-import { correlateUiAction, CORRELATION_WINDOW_MS } from '../response/action-correlator';
+import { correlateUiAction } from '../response/action-correlator';
 import { asNonEmptyBoundedString, ValidationError } from '../validators';
 import { captureAndAppendForms, enumerateStringParams } from './_internals';
 import { graphConfig } from '../phases/registry';
@@ -871,9 +871,9 @@ export async function getNetworkLog(
       }
       if (ui) {
         // Caller-input suppression: when a param's value was typed by the
-        // agent into a field shortly before the click that fired this XHR,
-        // it's free-form input the user authored (text body of a message,
-        // form field) — NOT a value the click selected from a fixed set.
+        // agent into a field before the click that fired this XHR, it's
+        // free-form input the user authored (text body of a message, form
+        // field) — NOT a value the click selected from a fixed set.
         // Recording it as a `ui_click` observation forces the audit's enum-
         // grounding rule to refuse `kind: "text"` because every observation
         // appears to be a click-bound value, even though the click on
@@ -881,8 +881,18 @@ export async function getNetworkLog(
         // signal — typed value matches captured param value — is crisp
         // enough to act on without prose matching. See
         // docs/principles.md §"Crisp vs fuzzy".
+        //
+        // The lookback window is decoupled from CORRELATION_WINDOW_MS (3s,
+        // tuned for "did this XHR fire because of this click"): slower
+        // agents routinely take 5-30s per LLM turn, so a 3s typed-lookback
+        // misses the common type→other-reads→submit-click sequence. The
+        // value-match itself is the crisp signal; the time bound is just a
+        // hedge against ancient typed values that coincidentally match a
+        // much-later XHR param. Five minutes covers any realistic
+        // type→click delay within a single workflow while still bounding
+        // stale-typed-value false matches.
         const recentTypedValues = new Set<string>();
-        const TYPED_LOOKBACK_MS = CORRELATION_WINDOW_MS;
+        const TYPED_LOOKBACK_MS = 5 * 60 * 1000;
         for (const rec of session.performActionHistory ?? []) {
           if (rec.action !== 'type' && rec.action !== 'fill_editor') continue;
           if (typeof rec.value !== 'string' || rec.value.length === 0) continue;
