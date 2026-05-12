@@ -145,3 +145,29 @@ test('plain-text response that happens to contain the values is not treated as a
   );
   assert.equal(warnings.length, 0);
 });
+
+test('hint names the structural remedy without advertising an ack path that policy denies', () => {
+  // The detector at the audit layer has ackReason: 'none' (no ack-through —
+  // the listing belongs as its own capability, period). Earlier the hint
+  // ended with `ack via save_warnings_acked: [{...}]`, sending the agent
+  // off to construct an ack the audit would then refuse. Live trace (v7b
+  // llm-tests/search-enforcement/fresh-discovery): agent followed the hint,
+  // burned 20 rounds. The hint must name the structural remedy only.
+  const warnings = detectEnumParamListingUnfactored(
+    makeStrategy(),
+    { intercepted: [JSON_LISTING] },
+    'find_top_restaurants',
+    undefined,
+    undefined,
+  );
+  assert.equal(warnings.length, 1);
+  assert.doesNotMatch(warnings[0].hint, /save_warnings_acked/);
+  // No imperative ack instruction. The old hint ended with "ack via ..." or
+  // "ack this warning ..."; either form steers the agent at a slot the
+  // detector's ackReason: 'none' will then refuse.
+  assert.doesNotMatch(warnings[0].hint, /\back via\b/i);
+  assert.doesNotMatch(warnings[0].hint, /\back this warning\b/i);
+  assert.match(warnings[0].hint, /no ack path/);
+  // Real remedy still surfaced: "save listing as its own capability".
+  assert.match(warnings[0].hint, /save_strategy on .+ as its own capability/);
+});

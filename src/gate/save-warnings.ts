@@ -732,8 +732,9 @@ function checkCapabilitySource(
     hint:
       `Save \`save_strategy\` against the captured listing URL with a clean verb+noun slug ` +
       `(e.g. list_<entity>), then re-save this capability with the same source: capability:... reference. ` +
-      `If the source is intentional but the listing is auth-gated / paginated / partial-subset, ` +
-      `ack this warning with a one-sentence reason naming the structural difference.`,
+      `There is no ack path for this warning; the dangling source IS structurally broken at warm-execute. ` +
+      `If the listing has auth / pagination / partial-subset constraints, model them inside the sibling ` +
+      `capability (prereq for auth, args for pagination) — the source reference still resolves cleanly.`,
   };
 }
 
@@ -804,8 +805,11 @@ export function detectEnumParamListingUnfactored(
       hint:
         `Two-step: (1) save_strategy on ${listingUrl} as its own capability (e.g. \`list_<entity>\`), ` +
         `(2) re-save this capability with \`notes.params.${paramName} = {kind: "enum", source: "capability:<that-slug>"}\`. ` +
-        `If you have a structural reason to keep static observed_values (paginated listing, partial subset, listing ` +
-        `requires auth the use-site doesn't, etc.), ack via \`save_warnings_acked: [{kind: "enum_param_listing_unfactored", reason: "..."}]\`.`,
+        `If the listing has a structural reason it shouldn't be factored (paginated listing the use-site doesn't ` +
+        `paginate, partial subset that diverges from full enumeration, listing requires auth the use-site doesn't), ` +
+        `the right shape is still a separate capability — model the constraint inside that capability (e.g. ` +
+        `prerequisites: auth, args: {page_size: ...}). There is no ack path for this warning; the listing IS its own ` +
+        `capability.`,
     });
   }
   return warnings;
