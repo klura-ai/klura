@@ -335,11 +335,11 @@ Second run: direct execution.
 
 That is the whole point.
 
-|  | Hacker News search | GitHub create issue | Messenger send message |
+|  | Hacker News search | GitHub create issue[^github-re] | Messenger send message[^messenger-re] |
 | --- | --: | --: | --: |
 | Raw Playwright agent | 22.9s · 63k tok · $0.054 | 160s · 634k tok · $0.29 | 134s · 435k tok · $1.06 |
-| Klura cold — discovery + LIFT | 43.8s · 363k tok · $0.191 | 318s · 1.29M tok · $0.84 | 1469s · 1.78M tok · $1.56 |
-| Klura warm — runtime only | **0.33s · 0 tok · $0** | **1.23s · 0 tok · $0** | **5ms · 0 tok · $0** |
+| Klura cold — discovery + LIFT[^cold-includes-lift] | 43.8s · 363k tok · $0.191 | 318s · 1.29M tok · $0.84 | 1469s · 1.78M tok · $1.56 |
+| Klura warm — runtime only[^runtime-only] | **0.33s · 0 tok · $0** | **1.23s · 0 tok · $0** | **5ms · 0 tok · $0** |
 
 Cold includes the actual browser task plus one-time reverse-engineering work.
 
@@ -348,8 +348,6 @@ Warm is the runtime call itself, with no LLM in the loop.
 When klura is wrapped inside an agent SDK, MCP host, or conversational loop, the host may still spend extra LLM turns to decide to call the saved skill and report the result. The saved strategy execution itself is what the warm row measures.
 
 Benchmark suite will be released soon for reproducibility.
-
-### Notes
 
 [^cold-includes-lift]: Klura cold time includes discovery, triage, and LIFT. The agent first completes the user's task, then reverse-engineers the protocol and persists a runnable strategy. The actual sending or searching portion is roughly comparable to the raw Playwright row; the remainder is one-time work that amortizes across future runs.
 
