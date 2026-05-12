@@ -12,10 +12,11 @@ import {
   recordLookupCandidate,
   recordRawCapture,
   recordParamObservation,
+  deriveUiClickObservations,
 } from '../response/session-observations';
 import { correlateUiAction } from '../response/action-correlator';
 import { asNonEmptyBoundedString, ValidationError } from '../validators';
-import { captureAndAppendForms, enumerateStringParams } from './_internals';
+import { captureAndAppendForms } from './_internals';
 import { graphConfig } from '../phases/registry';
 import { maybeFireSurfaceChanged } from '../phases/surface-changed';
 import type { CheckpointEnvelope } from '../checkpoints';
@@ -870,45 +871,12 @@ export async function getNetworkLog(
         );
       }
       if (ui) {
-        // Caller-input suppression: when a param's value was typed by the
-        // agent into a field before the click that fired this XHR, it's
-        // free-form input the user authored (text body of a message, form
-        // field) — NOT a value the click selected from a fixed set.
-        // Recording it as a `ui_click` observation forces the audit's enum-
-        // grounding rule to refuse `kind: "text"` because every observation
-        // appears to be a click-bound value, even though the click on
-        // "Send" is a submit button, not a value selector. The structural
-        // signal — typed value matches captured param value — is crisp
-        // enough to act on without prose matching. See
-        // docs/principles.md §"Crisp vs fuzzy".
-        //
-        // The lookback window is decoupled from CORRELATION_WINDOW_MS (3s,
-        // tuned for "did this XHR fire because of this click"): slower
-        // agents routinely take 5-30s per LLM turn, so a 3s typed-lookback
-        // misses the common type→other-reads→submit-click sequence. The
-        // value-match itself is the crisp signal; the time bound is just a
-        // hedge against ancient typed values that coincidentally match a
-        // much-later XHR param. Five minutes covers any realistic
-        // type→click delay within a single workflow while still bounding
-        // stale-typed-value false matches.
-        const recentTypedValues = new Set<string>();
-        const TYPED_LOOKBACK_MS = 5 * 60 * 1000;
-        for (const rec of session.performActionHistory ?? []) {
-          if (rec.action !== 'type' && rec.action !== 'fill_editor') continue;
-          if (typeof rec.value !== 'string' || rec.value.length === 0) continue;
-          if (rec.at >= ui.request_at) continue;
-          if (ui.request_at - rec.at > TYPED_LOOKBACK_MS) continue;
-          recentTypedValues.add(rec.value);
-        }
-        for (const [paramName, paramValue] of enumerateStringParams(entry)) {
-          if (recentTypedValues.has(paramValue)) continue;
-          recordParamObservation(sessionId, {
-            param_name: paramName,
-            value: paramValue,
-            source: { kind: 'ui_click', label: ui.element_text, request_i: i },
-            observed_at: ui.request_at,
-          });
-        }
+        // Caller-input suppression + observation derivation lives in
+        // `deriveUiClickObservations` so the same filter is pure-testable
+        // (no pool, no driver, no live session needed). See its docstring
+        // for the rationale + the 5-min `TYPED_LOOKBACK_MS` budget.
+        const derived = deriveUiClickObservations(entry, history, ui, i);
+        for (const obs of derived) recordParamObservation(sessionId, obs);
       }
     } catch (e) {
       if (process.env.KLURA_DEBUG_PARAM_OBS)

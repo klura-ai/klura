@@ -19,6 +19,10 @@
 // end_drive via symmetric `clearForSession` helpers.
 
 import type { LookupCandidate } from './lookup-classifier';
+import type { InterceptedRequest } from '../drivers/types/network';
+import type { PerformActionRecord } from '../drivers/types/session';
+import { correlateUiAction, type UiSource } from './action-correlator';
+import { enumerateStringParams } from './param-enumeration';
 
 const PER_SESSION_CAP = 500;
 const _observations = new Map<string, LookupCandidate[]>();
@@ -258,6 +262,70 @@ export function harvestUrlVarianceObservations(
       }
     }
   }
+}
+
+/**
+ * Pure function: given a captured request, the session's action history, and a
+ * pre-computed UI correlation (the click/select that fired this request),
+ * return the list of `ParamObservation`s that should be recorded for this
+ * one entry. No I/O; no module state mutation. Callable from `getNetworkLog`
+ * (which wraps each derived observation in `recordParamObservation`) and
+ * directly from tests with synthetic session shapes.
+ *
+ * Caller-input suppression: when a param's value was typed into a field
+ * before the click that fired this XHR, it's free-form caller input — the
+ * agent supplied the literal, the click is just a submit affordance. The
+ * structural signal "value appears in a preceding type/fill_editor action's
+ * value" is crisp enough to filter without prose matching, per
+ * `runtime/docs/principles.md` §"Crisp vs fuzzy".
+ *
+ * Lookback window is decoupled from `CORRELATION_WINDOW_MS` (3s — tuned for
+ * "did this XHR fire because of this click"): slower agents routinely take
+ * 5–30s per LLM turn, so a 3s typed-lookback misses the common
+ * type→other-reads→submit-click sequence. The value-match itself is the
+ * crisp signal; the time bound just hedges against ancient typed values
+ * that coincidentally match a much-later XHR param.
+ */
+const TYPED_LOOKBACK_MS = 5 * 60 * 1000;
+
+export function deriveUiClickObservations(
+  entry: InterceptedRequest,
+  history: ReadonlyArray<PerformActionRecord>,
+  ui: UiSource,
+  requestIndex: number,
+): ParamObservation[] {
+  const recentTypedValues = new Set<string>();
+  for (const rec of history) {
+    if (rec.action !== 'type' && rec.action !== 'fill_editor') continue;
+    if (typeof rec.value !== 'string' || rec.value.length === 0) continue;
+    if (rec.at >= ui.request_at) continue;
+    if (ui.request_at - rec.at > TYPED_LOOKBACK_MS) continue;
+    recentTypedValues.add(rec.value);
+  }
+  const out: ParamObservation[] = [];
+  for (const [paramName, paramValue] of enumerateStringParams(entry)) {
+    if (recentTypedValues.has(paramValue)) continue;
+    out.push({
+      param_name: paramName,
+      value: paramValue,
+      source: { kind: 'ui_click', label: ui.element_text, request_i: requestIndex },
+      observed_at: ui.request_at,
+    });
+  }
+  return out;
+}
+
+/** Convenience wrapper that re-runs `correlateUiAction` and falls through to
+ *  `deriveUiClickObservations` when a UI source is found. Returns an empty
+ *  array when no preceding action correlates. */
+export function harvestUiClickObservationsForEntry(
+  entry: InterceptedRequest,
+  history: ReadonlyArray<PerformActionRecord>,
+  requestIndex: number,
+): ParamObservation[] {
+  const ui = correlateUiAction(entry, history);
+  if (!ui) return [];
+  return deriveUiClickObservations(entry, history, ui, requestIndex);
 }
 
 export function recordLookupCandidate(sessionId: string, candidate: LookupCandidate | null): void {
