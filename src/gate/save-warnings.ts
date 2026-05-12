@@ -660,6 +660,17 @@ function findListingUrlForValues(
     if (req.responseBody === undefined || req.responseBody === null) continue;
     const bodyStr = bodyAsString(req.responseBody);
     if (bodyStr === null) continue;
+    // Skip HTML responses. The substring check below matches "italian"
+    // inside `data-category="italian"` on a page just as readily as inside
+    // a real JSON listing — the homepage HTML would then be flagged as the
+    // listing endpoint and the agent gets told to save it as a sibling
+    // `list_<entity>` capability, which is nonsense (it's a UI page, not a
+    // data endpoint). A real listing endpoint returns a JSON object or
+    // array; the `bodyAsString` upstream already serializes object bodies
+    // via JSON.stringify, so the JSON-shape check is the right
+    // discriminator. Raw HTML strings start with `<`.
+    const trimmed = bodyStr.trimStart();
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) continue;
     const allPresent = values.every(
       (v) => bodyStr.includes(`"${v}"`) || bodyStr.includes(JSON.stringify(v)),
     );
