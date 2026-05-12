@@ -674,7 +674,10 @@ test('text_kind_justification: accepted when substantive AND references an obser
   );
 });
 
-test('static-on-click-observed: accepts templated endpoint with grounded observed_values', () => {
+test('static-on-click-observed: accepts templated endpoint with grounded observed_values (>=2 distinct)', () => {
+  // A real enum has multiple alternatives observed in capture. Validates
+  // the legitimate enum-grounding path: two distinct UI clicks → two
+  // observed_values → save commits with templated endpoint.
   const strategy = {
     strategy: 'fetch',
     baseUrl: 'https://example.test',
@@ -687,7 +690,65 @@ test('static-on-click-observed: accepts templated endpoint with grounded observe
           kind: 'enum',
           observed_values: [
             { value: 'rust', label: 'Memory-safe systems' },
+            { value: 'go', label: 'Concurrent and simple' },
           ],
+        },
+      },
+    },
+  };
+  const result = runAudit(
+    {
+      capability: 'list_repos_in_lang',
+      observedSiblings: [],
+      observedParamValues: {
+        lang: [
+          {
+            param_name: 'lang',
+            value: 'rust',
+            source: { kind: 'ui_click', label: 'Memory-safe systems' },
+            observed_at: 1,
+          },
+          {
+            param_name: 'lang',
+            value: 'go',
+            source: { kind: 'ui_click', label: 'Concurrent and simple' },
+            observed_at: 2,
+          },
+        ],
+      },
+      capturedEndpointPaths: new Set(['https://example.test/api/repos']),
+    },
+    strategy,
+    {
+      literal_provenance: { endpoint: { caller_input: 'lang' } },
+      observed_siblings: {},
+    },
+  );
+  assert.equal(
+    result.status,
+    'committed',
+    `expected committed; got ${JSON.stringify(result.rejection || result)}`,
+  );
+});
+
+test('enum-shape guard: single observed_value rejects with steer toward kind:"text" / capability source', () => {
+  // Defense-in-depth pair to the listing-detector ≥2 guard: at save time,
+  // a kind:"enum" param with <2 distinct observed_values is structurally
+  // indistinguishable from kind:"text" or a hardcoded constant. The
+  // rejection names the four legitimate alternative shapes (text / id /
+  // static / capability:source) and steers the agent toward the right
+  // one rather than letting a degenerate "enum" land.
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'https://example.test',
+    endpoint: '/api/repos?lang={{lang}}',
+    method: 'GET',
+    headers: {},
+    notes: {
+      params: {
+        lang: {
+          kind: 'enum',
+          observed_values: [{ value: 'rust', label: 'Memory-safe systems' }],
         },
       },
     },
@@ -714,11 +775,12 @@ test('static-on-click-observed: accepts templated endpoint with grounded observe
       observed_siblings: {},
     },
   );
-  assert.equal(
-    result.status,
-    'committed',
-    `expected committed; got ${JSON.stringify(result.rejection || result)}`,
-  );
+  assert.equal(result.status, 'rejected');
+  const msg = (result.rejection.classifier_issues ?? []).join('\n');
+  assert.match(msg, /requires at least 2 distinct observed_values/);
+  assert.match(msg, /kind: "text"/);
+  assert.match(msg, /kind: "id"/);
+  assert.match(msg, /capability:/);
 });
 
 // ----------------------------------------------------------------------

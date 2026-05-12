@@ -668,6 +668,33 @@ function validateEnumParam(
     );
     return issues;
   }
+  // Structural enum-shape guard: a real enum has multiple alternatives. A
+  // length-1 (or zero distinct) "enum" is structurally indistinguishable
+  // from `kind: "text"` or a hardcoded constant — there's no alternation,
+  // so warm-execute's fuzzy-match has nothing to discriminate between.
+  // Reject with a steer toward the right kind. Computed on distinct values
+  // (not raw array length) so duplicates don't game the gate.
+  const distinctDeclaredValues = new Set(
+    values
+      .map((v) => (v && typeof v === 'object' ? (v as { value?: unknown }).value : null))
+      .filter((v): v is string => typeof v === 'string' && v.length > 0),
+  );
+  if (distinctDeclaredValues.size < 2) {
+    const onlyValue =
+      distinctDeclaredValues.size === 1
+        ? `the single declared value ${JSON.stringify([...distinctDeclaredValues][0])} `
+        : '';
+    issues.push(
+      `notes.params.${paramName}.kind === "enum" requires at least 2 distinct observed_values — a real enum has alternatives that warm-execute can fuzzy-match between. ${onlyValue}is structurally indistinguishable from free-form text or a hardcoded constant.\n\n` +
+        `Pick the kind that fits the real shape:\n` +
+        `  • kind: "text" — if this is caller-supplied free-form input (a message body, a search query, a comment). The agent passed it via session.args; future callers will pass their own literal.\n` +
+        `  • kind: "id" — if this is a stable identifier produced by a prereq (member_id, doc_id, thread_id) and the strategy resolves it via prerequisites[].vars.\n` +
+        `  • hardcoded with static provenance — if the value is the same on every call regardless of caller (an API key, a fixed locale, a tenant slug).\n` +
+        `  • source: "capability:<list_slug>" — if there really IS an enum but only one value happened to be observed this session; save the listing capability and reference it dynamically.\n\n` +
+        `If you sincerely believe this is an enum but only one alternative was observed, re-do discovery to capture more values, OR use the capability:source path so warm-execute fetches the live list on every call.`,
+    );
+    return issues;
+  }
 
   // Build a fast lookup of observed (value, label) pairs for this param.
   const observedPairs = new Set(observations.map((o) => `${o.value}\x00${o.source.label}`));
