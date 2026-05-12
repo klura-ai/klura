@@ -15,7 +15,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { deriveUiClickObservations } = await import(
+const { deriveUiClickObservations, harvestUiClickObservationsForEntry } = await import(
   '../dist/response/session-observations.js'
 );
 
@@ -172,6 +172,43 @@ test('non-typed actions (key_press, navigate) do NOT contribute to the typed-val
   // action — the value field on the record is for selector contexts that
   // don't apply here.)
   assert.equal(obs.length, 1);
+});
+
+test('harvestUiClickObservationsForEntry: v7b shape returns empty (typed-value filter fires through the wrapper)', () => {
+  // save-strategy.ts re-runs the observation pipeline at save time (covering
+  // XHRs that fired after the last get_network_log call). Earlier it open-
+  // coded `correlateUiAction` + `enumerateStringParams` + `recordParam-
+  // Observation` directly, BYPASSING the typed-value filter — which is what
+  // produced v7b's false `ui_click` observation on the typed message body.
+  // Both save-strategy sites now route through this convenience wrapper so
+  // the same filter fires uniformly. Test that the wrapper preserves the
+  // filter under the v7b shape (the v7d debug trace's exact stamps).
+  const history = [
+    { at: 1778682282350, action: 'click', selector: 'b', locators: { name: 'Adam Search result' } },
+    {
+      at: 1778682286182,
+      action: 'type',
+      selector: 'textbox',
+      value: 'Hey Adam, long time no chat.',
+    },
+    { at: 1778682288650, action: 'click', selector: 'b', locators: { name: 'Send' } },
+  ];
+  const postEntry = {
+    method: 'POST',
+    url: 'http://127.0.0.1:61615/api/conversations/93210/messages',
+    headers: { 'Content-Type': 'application/json' },
+    postData: { text: 'Hey Adam, long time no chat.' },
+    status: 201,
+    responseBody: '{"ok":true}',
+    timestamp: 1778682288668,
+  };
+  const obs = harvestUiClickObservationsForEntry(postEntry, history, 4);
+  assert.deepEqual(
+    obs,
+    [],
+    `harvestUiClickObservationsForEntry must apply the typed-value filter; ` +
+      `got: ${JSON.stringify(obs)}`,
+  );
 });
 
 test('typed-then-suffix-edit: filter does NOT skip if the typed value differs from the body', () => {

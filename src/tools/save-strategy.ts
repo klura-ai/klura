@@ -22,9 +22,9 @@ import {
   recordParamObservation,
   getAllParamObservations,
   harvestUrlVarianceObservations,
+  harvestUiClickObservationsForEntry,
   type ParamObservation,
 } from '../response/session-observations';
-import { correlateUiAction } from '../response/action-correlator';
 import { enumerateStringParams, readCurrentUrl } from './_internals';
 import { collectScannedFields } from '../strategies/validate/helpers';
 import { rejectAgentEmittedRuntimeMeta } from '../strategies/validate/notes';
@@ -242,26 +242,22 @@ export async function saveStrategyFromCapture(args: {
   if (anchorId) runtimeMetaBlock.discovered_at_step_id = anchorId;
 
   // Pre-record param observations from the full session.intercepted history
-  // so the auto-lift below can read them. Same correlate-and-record loop the
-  // verbose saveStrategy() runs at save time; recordParamObservation dedupes
-  // on (value, label, source.kind), so running it again here is idempotent.
-  // Without this, save_strategy_from_capture would skip the click→XHR
-  // correlation that grounds enum params, and the lifted strategy would land
-  // with empty observed_values.
+  // so the auto-lift below can read them. Routes through
+  // `harvestUiClickObservationsForEntry` — same pure helper getNetworkLog
+  // calls — so the typed-value filter (caller-input suppression) fires here
+  // too. recordParamObservation dedupes on (value, label, source.kind), so
+  // running this at save time is idempotent with anything getNetworkLog
+  // already recorded during drive.
   for (let i = 0; i < session.intercepted.length; i += 1) {
     const entry = session.intercepted[i];
     if (!entry) continue;
     try {
-      const ui = correlateUiAction(entry, session.performActionHistory ?? []);
-      if (!ui) continue;
-      for (const [paramName, paramValue] of enumerateStringParams(entry)) {
-        recordParamObservation(args.session_id, {
-          param_name: paramName,
-          value: paramValue,
-          source: { kind: 'ui_click', label: ui.element_text, request_i: i },
-          observed_at: ui.request_at,
-        });
-      }
+      const derived = harvestUiClickObservationsForEntry(
+        entry,
+        session.performActionHistory ?? [],
+        i,
+      );
+      for (const obs of derived) recordParamObservation(args.session_id, obs);
     } catch {
       // best-effort; observation must not break saves
     }
@@ -611,17 +607,12 @@ export async function saveStrategy(
           // skip non-URL entries
         }
         try {
-          const ui = correlateUiAction(entry, session.performActionHistory ?? []);
-          if (ui) {
-            for (const [paramName, paramValue] of enumerateStringParams(entry)) {
-              recordParamObservation(sessionId, {
-                param_name: paramName,
-                value: paramValue,
-                source: { kind: 'ui_click', label: ui.element_text, request_i: i },
-                observed_at: ui.request_at,
-              });
-            }
-          }
+          const derived = harvestUiClickObservationsForEntry(
+            entry,
+            session.performActionHistory ?? [],
+            i,
+          );
+          for (const obs of derived) recordParamObservation(sessionId, obs);
         } catch {
           // best-effort; observation must not break saves
         }
