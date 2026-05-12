@@ -89,6 +89,12 @@ Adding a new save-time concern is one row: write the detector or classifier, reg
 
 The audit emits ONE rejection envelope regardless of how many spec entries fired — the agent sees a unified shape, not a stack of per-gate response shapes.
 
+## Known limitation — `user_confirmation` can't verify the quote
+
+The `user_confirmation` classifier asks the agent to compose a yes/no prompt, relay it to the user, and submit the user's reply as `user_quote`. The token binds the payload hash, so the agent can't audit version A and commit version B — but nothing stops the agent from _fabricating_ `user_quote` outright, or recycling the user's reply to an earlier turn (`triage_plan`, `surface_changed`). The runtime has no structural way to tell a real fresh reply from an invented one; the agent-facing prose says "freshness is on you," and that's the whole enforcement.
+
+This is intentional and we're fine with it. The gate's job here isn't cryptographic proof that a human approved — it's a **stop-gap**: a forced pause that makes the agent surface the save to the user before committing, and leaves a tamper-evident `user_quote` on the strategy for anyone reviewing later. An agent determined to skip the human can, just as it can fabricate any free-text field; the gate raises the cost and creates a paper trail, which is enough for the threat model klura actually has (a cooperating agent that occasionally cuts corners under context pressure, not an adversary). If this turns out to matter more later — e.g. a remote-orchestration mode where the human channel is structurally available — `user_confirmation` can grow a real out-of-band confirmation path (a `SaveConfirmationDecider` that round-trips an actual human, the way the test harness's stub does). Until then, don't pile heavier machinery onto this gate expecting it to become unfakeable; that's not what it's for.
+
 ## Current gates in the runtime
 
 | Gate | Level | Where | Why |
