@@ -39,6 +39,7 @@ import {
   detectEnumValueInCapabilitySlug,
   detectUnreferencedPrereqBinding,
   detectCapabilitySourceMissingPrereq,
+  detectLookupSiblingNotReferenced,
   type SaveWarning,
 } from '../../gate/save-warnings';
 import {
@@ -442,6 +443,30 @@ const capabilitySourcePrereqMismatchDetector: Detector<Strategy, SaveStrategyCtx
   ackReason: 'none',
 };
 
+// Slug has _by_X / _for_X / lookup_X segments + a saved sibling on the
+// platform looks lookup-shaped + this strategy has no capability prereq.
+// The agent saved the lookup separately but forgot to wire it; at
+// warm-execute the placeholder it would resolve stays unbound. Sibling
+// detector to `lookupEmbeddedInPrereqDetector` (which catches the inverse
+// shape: agent inlined the lookup as fetch-extract). ackReason:
+// 'required' — legitimate ack path is "caller does lookup externally."
+const lookupSiblingNotReferencedDetector: Detector<Strategy, SaveStrategyCtx> = {
+  kind: 'lookup_sibling_not_referenced',
+  detect: (data, ctx) => {
+    const platform = ctx.session?.platform;
+    const skill = platform ? listAllSkills().find((s) => s.platform === platform) : undefined;
+    const namesForPlatform = skill ? skill.capabilities.map((c) => c.name) : [];
+    return asIssues(
+      detectLookupSiblingNotReferenced(
+        data,
+        ctx.capability,
+        platform ? () => namesForPlatform : undefined,
+      ),
+    );
+  },
+  ackReason: 'required',
+};
+
 const enumValueInCapabilitySlugDetector: Detector<Strategy, SaveStrategyCtx> = {
   kind: 'enum_value_baked_into_slug',
   detect: (data, ctx) => asIssues(detectEnumValueInCapabilitySlug(data, ctx.capability)),
@@ -735,6 +760,7 @@ export const saveStrategyAudit = new Audit<Strategy, SaveStrategyCtx>({
     ungroundedEnumPlaceholderDetector,
     enumParamListingUnfactoredDetector,
     capabilitySourcePrereqMismatchDetector,
+    lookupSiblingNotReferencedDetector,
     enumValueInCapabilitySlugDetector,
     endpointCollidesWithSavedCapabilityDetector,
     unobservedUrlDetector,

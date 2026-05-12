@@ -38,6 +38,7 @@ import {
   collectParameterizationAnchors,
 } from './save-warnings-parameterization';
 import { detectUnreferencedPrereqBinding } from './save-warnings-unreferenced-binding';
+import { detectLookupSiblingNotReferenced } from './save-warnings-lookup-sibling';
 
 export {
   detectEnumValueInCapabilitySlug,
@@ -48,6 +49,7 @@ export {
   detectParameterizationDisclosureRequired,
   collectParameterizationAnchors,
   detectUnreferencedPrereqBinding,
+  detectLookupSiblingNotReferenced,
   VERIFICATION_SHAPE_TAGS,
   FIRE_AND_FORGET_JUSTIFYING_NOUNS,
   NON_DOM_VERIFICATION_MARKERS,
