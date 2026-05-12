@@ -707,13 +707,15 @@ Every `end_drive` call funnels through a single consolidated audit (`runtime/src
 
 **Detector — `save_attempted_none_landed` (no ack-through path).** Refuses close when the session called `save_strategy` at least once and zero saves landed. Stops the legacy-form-post failure mode where the agent gives up mid-recoverable-loop and end_drive papers over the silent failure with whatever stale strategy was on disk. Fix the most recent rejection (read its `audit_token` + `audit_answers` checklist), retry the save, OR call `abort_session(reason)` if the strategy is unsalvageable.
 
-**Detector — `re_persistence` (no ack-through path).** Refuses close when the session made reverse-engineering tool calls without persisting any findings. Triggers when:
+**Detector — `re_persistence` (no ack-through path).** Refuses close when the session did **heavy reverse-engineering work** that isn't reflected on disk and isn't being persisted. Triggers when ALL of:
 
-- Session made ≥ `RE_CALL_THRESHOLD` (currently `2`) RE tool calls. Counted: `js_eval`, `set_breakpoint`, `get_js_source`, `search_js_source`, `read_js_function`, `evaluate_on_frame`.
-- Zero persistence calls (`save_verified_expression`, `add_discovery_note`, `add_resume_pointer`).
-- Map-mode sessions also trigger when ≥ `ACTION_CALL_THRESHOLD` (currently `5`) `perform_actions` landed with zero persistence calls — surface-mapping work that isn't persisted is invisible to the next session.
+- **Heavy RE happened**: ≥ 1 (discover graph) call to `set_breakpoint`, `get_js_source`, `search_js_source`, `read_js_function`, `evaluate_on_frame`, or a full-body `get_network_log` (which returns inline `<script>` source — equivalent to `get_js_source`). `js_eval` does **not** count toward this trigger — it's the everyday "read a value off the page / parse a response body" tool, not an RE signal in isolation. (`js_eval` calls _are_ named in the rejection message alongside the heavy count, so you see the full picture, but they never trip the gate on their own — any RE flow worth persisting first has to _find_ the code, which is a heavy tool.)
+- **Zero persistence calls** (`save_verified_expression`, `add_discovery_note`, `add_resume_pointer`).
+- **The work isn't already on disk**: some declared capability is still unresolved, OR no capability was declared. If every declared capability resolved to a non-stale saved strategy, the RE work is baked into those strategies — nothing is orphaned, the gate skips (and `triage_acknowledgment` handles the "all saved, confirm no further triage" case instead).
 
-**Why the re_persistence gate exists.** The discovery artifact is the only channel for cross-session continuity. A session that probed a signer, walked a bundle, or stepped through a debugger but saved nothing forces the next session to redo that work from scratch — the RE toolkit is expensive enough that losing the findings is the single biggest cross-session waste mode. There is NO LLM-authored "no progress to save" verdict — klura is always-save-by-default. Either persist what you found, or call `abort_session` if the work was misguided.
+Map-mode sessions also trigger when ≥ `ACTION_CALL_THRESHOLD` (currently `5`) `perform_actions` landed with zero persistence calls — surface-mapping work that isn't persisted is invisible to the next session. (`reCalls` for map is `1` too, covering the rarer "did heavy RE while mapping but left no breadcrumb" case.)
+
+**Why the re_persistence gate exists.** The discovery artifact is the only channel for cross-session continuity. A session that probed a signer, walked a bundle, or stepped through a debugger but saved nothing — neither a strategy nor a breadcrumb — forces the next session to redo that work from scratch; the RE toolkit is expensive enough that losing the findings is the single biggest cross-session waste mode. There is NO LLM-authored "no progress to save" verdict — klura is always-save-by-default. Either persist what you found, or call `abort_session` if the work was misguided. (Known, accepted gap: speculative graduation RE done in a session that _also_ landed a recorded-path slips through — persist it voluntarily via `add_discovery_note` / `save_verified_expression`; the triage round is the place for it.)
 
 **Post-auto-synth — `silent_no_save` guard (no ack-through path).** After auto-synth runs, if the session declared a capability but neither a manual `save_strategy` nor an auto-synthesized fallback produced anything, close is rejected. This catches the post-hoc-declaration escape: agent declares retroactively to satisfy `capability_declaration_required`, never saves, auto-synth can't derive anything (the captures didn't carry templatable literals), and the session would otherwise close cleanly with zero strategies on disk. The third end_drive attempt force-tears-down regardless. Fix is to save manually OR call `abort_session(reason)`.
 
@@ -729,7 +731,7 @@ invalid_strategy: end_drive_rejected (pending)
   warnings:
     - [capability_declaration_required] CANNOT CLOSE: this session typed or submitted content but no capability was declared…
       hint: Call declare_capability({session_id, capability: "<slug>", args: {...}}) before closing — OR call abort_session(session_id, reason) if the session was misguided.
-    - [re_persistence] CANNOT CLOSE: 2 RE tool calls made on session …, but zero persistence calls.
+    - [re_persistence] CANNOT CLOSE: 2 code-inspection / breakpoint calls on session …, but zero persistence calls.
       hint: Two valid next moves: (1) PERSIST: save_verified_expression / add_discovery_note / add_resume_pointer, then retry. (2) ABORT: abort_session(session_id, "<reason ≥20 chars>") for the honest exit.
   See klura://reference#end-drive-audit.
 ```

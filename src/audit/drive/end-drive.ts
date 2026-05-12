@@ -13,13 +13,19 @@
 //     gives up mid-recoverable-loop and end_drive papers over the silent
 //     failure with whatever stale strategy was on disk.
 //
-//   - re_persistence (Detector, ackReason: 'none') — refuses end_drive when N
-//     RE tool calls have been made with zero persistence calls. Agent either
-//     persists progress (retry clears the gate naturally — persistCallCount > 0)
-//     OR uses `abort_session(reason)` as the honest exit when the work was
-//     misguided in the first place. There is NO agent-authored ack escape:
-//     klura is always-save-by-default and "I judged this as nothing worth
-//     persisting" isn't the agent's verdict to make.
+//   - re_persistence (Detector, ackReason: 'none') — refuses end_drive when the
+//     session did heavy reverse-engineering work (set_breakpoint / get_js_source /
+//     search_js_source / read_js_function / evaluate_on_frame / full-body
+//     get_network_log) with zero persistence calls AND that work isn't reflected
+//     on disk (some declared capability is still unresolved, or none was declared).
+//     `js_eval` alone never trips this — it's the everyday DOM-read / response-parse
+//     tool, not an RE signal in isolation (it folds into the rejection message when
+//     heavy RE is also present, but is not the trigger). Agent either persists
+//     progress (retry clears the gate naturally — persistCallCount > 0) OR uses
+//     `abort_session(reason)` as the honest exit when the work was misguided in the
+//     first place. There is NO agent-authored ack escape: klura is
+//     always-save-by-default and "I judged this as nothing worth persisting" isn't
+//     the agent's verdict to make.
 //
 //   - triage_acknowledgment (Classifier, token-gated) — fires when end_drive
 //     would otherwise skip triage entirely (every declared capability already
@@ -55,7 +61,14 @@ export interface EndDrivePayload {
   endDriveAttempts: number;
   declaredCapabilityCount: number;
   writeActions: ReadonlyArray<{ action: string; value_preview?: string }>;
-  reCallCount: number;
+  /** Heavy reverse-engineering tool calls (set_breakpoint, get_js_source,
+   *  search_js_source, read_js_function, evaluate_on_frame, full-body
+   *  get_network_log). The re_persistence Detector's trigger count. */
+  heavyReCallCount: number;
+  /** js_eval calls. Reported alongside heavyReCallCount in the re_persistence
+   *  rejection for context, but never the trigger on its own — js_eval is the
+   *  everyday DOM-read / response-parse tool, not an RE signal in isolation. */
+  jsEvalCallCount: number;
   persistCallCount: number;
   actionCallCount: number;
   /** Total save_strategy calls (success + thrown). Compared against
@@ -68,10 +81,14 @@ export interface EndDrivePayload {
    *  capability_declaration_required detector short-circuits — surface-mapping
    *  graphs are allowed to land without declaring a capability. */
   skipDeclarationGuard: boolean;
-  /** From the active graph's GraphConfig. When set, the re_persistence
-   *  classifier fires when EITHER `reCallCount >= reCalls` (positive) OR
-   *  `actionCallCount >= actions` (positive) AND `persistCallCount === 0`.
-   *  When undefined, the classifier never fires. */
+  /** From the active graph's GraphConfig. The re_persistence Detector fires
+   *  when `persistCallCount === 0`, not every declared capability has resolved
+   *  (`declaredCapabilityCount === 0 || triageWouldFire`), AND EITHER
+   *  `heavyReCallCount >= reCalls` (positive `reCalls`) OR
+   *  `actionCallCount >= actions` (positive `actions` — the map-graph
+   *  "mapped without persisting" trigger). Always set after
+   *  buildEndDrivePayload (it supplies a fallback); the `undefined` branch in
+   *  shouldRunRePersistence is defensive. */
   rePersistenceThreshold: { reCalls: number; actions: number } | undefined;
   /** Caller-computed: would the post-audit reverse-engineer handoff produce
    *  a non-null triage handoff? When false AND declaredCapabilityCount > 0,
@@ -223,16 +240,29 @@ const rePersistenceDetector: Detector<EndDrivePayload, EndDriveCtx> = {
   ackReason: 'none',
   detect: (p) => {
     if (!shouldRunRePersistence(p)) return [];
-    const actionLine =
-      p.rePersistenceThreshold && p.rePersistenceThreshold.actions > 0
-        ? `${p.actionCallCount} perform_actions and `
-        : '';
+    const t = p.rePersistenceThreshold;
+    const firedOnActions = !!t && t.actions > 0 && p.actionCallCount >= t.actions;
+    const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
+    const segments: string[] = [];
+    if (firedOnActions) segments.push(plural(p.actionCallCount, 'perform_action call'));
+    if (p.heavyReCallCount > 0) {
+      const heavy = plural(p.heavyReCallCount, 'code-inspection / breakpoint call');
+      segments.push(
+        p.jsEvalCallCount > 0
+          ? `${heavy} (plus ${plural(p.jsEvalCallCount, 'js_eval call')})`
+          : heavy,
+      );
+    } else if (p.jsEvalCallCount > 0) {
+      // Reached only via the actions branch — js_eval is context, not the trigger.
+      segments.push(plural(p.jsEvalCallCount, 'js_eval call'));
+    }
+    const what = segments.join(' and ');
     return [
       {
         kind: 're_persistence',
         message:
-          `CANNOT CLOSE: ${actionLine}${p.reCallCount} RE tool calls made on session ${p.sessionId}, ` +
-          `but zero persistence calls. Work that isn't persisted is invisible to the next session.`,
+          `CANNOT CLOSE: ${what} on session ${p.sessionId}, but zero persistence calls. ` +
+          `Work that isn't persisted is invisible to the next session.`,
         hint:
           `Two valid next moves: ` +
           `(1) PERSIST: call save_verified_expression({expression, returns, ...}) for confirmed encoder ` +
@@ -246,7 +276,9 @@ const rePersistenceDetector: Detector<EndDrivePayload, EndDriveCtx> = {
           `and that judgment isn't yours to make. See klura://reference#end-drive-audit.`,
         context: {
           session_id: p.sessionId,
-          re_call_count: p.reCallCount,
+          heavy_re_call_count: p.heavyReCallCount,
+          js_eval_call_count: p.jsEvalCallCount,
+          re_call_count: p.heavyReCallCount + p.jsEvalCallCount,
           persist_call_count: p.persistCallCount,
           action_call_count: p.actionCallCount,
         },
@@ -255,11 +287,35 @@ const rePersistenceDetector: Detector<EndDrivePayload, EndDriveCtx> = {
   },
 };
 
+/**
+ * The re_persistence Detector fires when this session did reverse-engineering
+ * work that isn't reflected on disk and isn't being persisted on close.
+ *
+ * "Reflected on disk" = a saved strategy. When every declared capability
+ * resolved to a non-stale saved strategy the runtime would skip the triage
+ * handoff (`triageWouldFire === false`), so the session's RE work is baked
+ * into those strategies — nothing is orphaned. (Same predicate the
+ * triage_acknowledgment classifier reads for the "all saved" case. Known,
+ * accepted gap: speculative graduation RE done in a session that *also*
+ * landed a recorded-path slips through — that work should be persisted
+ * voluntarily via add_discovery_note / save_verified_expression, and the
+ * triage round is the place for it.) A session with NO declared capability
+ * (pure exploration / lookup) is NOT exempted: poking the bundle and bailing
+ * still owes a breadcrumb.
+ *
+ * The trigger count is `heavyReCallCount` — code-inspection / breakpoint /
+ * frame-eval / full-network-read calls. `js_eval` alone never trips this:
+ * it's the everyday DOM-read / response-parse tool, and any RE flow worth
+ * persisting first has to *find* the code (a heavy tool). The map graph's
+ * `actions` threshold is independent — a mapping session that touched N pages
+ * without persisting fires regardless of RE calls.
+ */
 function shouldRunRePersistence(p: EndDrivePayload): boolean {
   if (p.persistCallCount > 0) return false;
   const t = p.rePersistenceThreshold;
   if (!t) return false;
-  if (t.reCalls > 0 && p.reCallCount >= t.reCalls) return true;
+  if (p.declaredCapabilityCount > 0 && !p.triageWouldFire) return false;
+  if (t.reCalls > 0 && p.heavyReCallCount >= t.reCalls) return true;
   if (t.actions > 0 && p.actionCallCount >= t.actions) return true;
   return false;
 }
@@ -393,17 +449,24 @@ export function collectWriteActions(
 
 /**
  * Build the end-drive audit payload from a Session + caller-supplied
- * counts (reCallCount, persistCallCount, actionCallCount). Pure, testable;
- * no side effects.
+ * counts (heavyReCallCount, jsEvalCallCount, persistCallCount,
+ * actionCallCount). Pure, testable; no side effects.
  *
  * `triageWouldFire` is computed by the orchestrator just before this call
  * (see `wouldReverseEngineerHandoffFire` in end-drive/re-handoff.ts) — the
  * triage_acknowledgment classifier reads it to decide whether to require an
- * explicit ack token from the agent.
+ * explicit ack token from the agent, and the re_persistence detector reads it
+ * to decide whether the session's RE work is already reflected in saved
+ * strategies.
  */
 export function buildEndDrivePayload(
   session: SessionLike,
-  counts: { reCallCount: number; persistCallCount: number; actionCallCount: number },
+  counts: {
+    heavyReCallCount: number;
+    jsEvalCallCount: number;
+    persistCallCount: number;
+    actionCallCount: number;
+  },
   opts: { platform?: string; triageWouldFire: boolean },
 ): EndDrivePayload {
   // Resolve graph config locally so the payload stays self-contained — the
@@ -417,15 +480,16 @@ export function buildEndDrivePayload(
     endDriveAttempts: session.endDriveAttempts ?? 0,
     declaredCapabilityCount: (session.declaredCapabilities ?? []).length,
     writeActions: collectWriteActions(session),
-    reCallCount: counts.reCallCount,
+    heavyReCallCount: counts.heavyReCallCount,
+    jsEvalCallCount: counts.jsEvalCallCount,
     persistCallCount: counts.persistCallCount,
     actionCallCount: counts.actionCallCount,
     saveAttemptCount: session.saveAttemptCount ?? 0,
     saveSuccessCount: (session.savedCapabilities ?? []).length,
     skipDeclarationGuard: cfg.skipDeclarationGuard === true,
-    // Default discover graph keeps the legacy reCalls=3 threshold even though
-    // the graph definition doesn't set it; assemble a default here so detectors
-    // see a consistent payload shape regardless of graph.
+    // Fallback for graphs that don't set rePersistenceThreshold; both shipped
+    // graphs (discover, map) override it. Assembled here so detectors see a
+    // consistent payload shape regardless of graph.
     rePersistenceThreshold: cfg.rePersistenceThreshold ?? {
       reCalls: RE_CALL_THRESHOLD,
       actions: 0,

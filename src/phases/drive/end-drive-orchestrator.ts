@@ -332,32 +332,29 @@ async function maybeDumpCapturedLogs(
   }
 }
 
-/**
- * Count RE-tool calls made this session. Drives the re-persistence gate
- * trigger: a session that probed the page via js_eval / set_breakpoint /
- * get_js_source / search_js_source / read_js_function / evaluate_on_frame
- * has done reverse-engineering work that MUST leave a trace in the artifact
- * accumulator before the session boundary, or the next session picks up
- * nothing.
- */
-function countReToolCalls(session: ReturnType<typeof pool.getSession>): number {
+/** "Heavy" reverse-engineering tool calls — the trigger count for the
+ *  end_drive re_persistence Detector (full rationale: shouldRunRePersistence
+ *  in audit/drive/end-drive.ts). Code-inspection / breakpoint / frame-eval
+ *  tools + full-body get_network_log (inline `<script>` source ≈ get_js_source);
+ *  filter-only network reads don't count. `js_eval` is counted separately
+ *  (countJsEvalCalls) — the everyday DOM-read tool, not an RE signal alone. */
+function countHeavyReToolCalls(session: ReturnType<typeof pool.getSession>): number {
   const acc = session.artifactAccumulator;
   if (!acc) return 0;
-  // get_network_log({full: true}) returns the full response body, including
-  // inline `<script>` source and JS file contents — functionally equivalent
-  // to get_js_source for sites that ship their signer inline. Filter-only
-  // network-log reads (the default `full: false`) are observability and
-  // don't count.
-  const fullNetworkReads = acc.getNetworkLogCalls.filter((c) => c.full).length;
   return (
-    acc.jsEvalCalls.length +
     acc.setBreakpointCalls.length +
     acc.getJsSourceCalls.length +
     acc.searchJsSourceCalls.length +
     acc.readJsFunctionCalls.length +
     acc.evaluateOnFrameCalls.length +
-    fullNetworkReads
+    acc.getNetworkLogCalls.filter((c) => c.full).length
   );
+}
+
+/** js_eval calls this session — named alongside the heavy-RE count in the
+ *  re_persistence rejection for context, but never the trigger on its own. */
+function countJsEvalCalls(session: ReturnType<typeof pool.getSession>): number {
+  return session.artifactAccumulator?.jsEvalCalls.length ?? 0;
 }
 
 /**
@@ -431,7 +428,7 @@ export async function endDrive(
     throw new Error(
       `invalid_args: end_drive received audit_token: ${JSON.stringify(opts.auditToken)} — ` +
         `that is not a valid token. Audit tokens are minted ONLY by a prior end_drive audit ` +
-        `rejection (capability_declaration_required Detector or re_persistence Classifier). If no ` +
+        `rejection (the triage_acknowledgment Classifier). If no ` +
         `prior call returned a token, drop the audit_token field entirely. end_drive is gated ` +
         `on save_strategy success, not on audit answers — fabricating an audit token will not ` +
         `unblock the LIFT handoff.`,
@@ -463,12 +460,12 @@ export async function endDrive(
   }
 
   progress({ stage: 'running end-drive audit' });
-  // Close-session audit (Detector + Classifier) runs BEFORE any state
-  // mutation (including endDriveAttempts bump). One Audit instance covers both
-  // the declaration-required check (Detector, ackReason: 'none') and the
-  // re-persistence check (Classifier, token-gated). Either fires → unified
-  // rejection envelope, agent fixes / declares / acks, retries.
-  const reCallCount = countReToolCalls(session);
+  // Close-session audit runs BEFORE any state mutation (incl. the
+  // endDriveAttempts bump). One Audit instance: three Detectors
+  // (declaration-required, save-attempted-none-landed, re-persistence) + the
+  // triage_acknowledgment Classifier. Any fires → unified rejection envelope.
+  const heavyReCallCount = countHeavyReToolCalls(session);
+  const jsEvalCallCount = countJsEvalCalls(session);
   const persistCallCount = countPersistCalls(session);
   const actionCallCount = (session.performActionHistory ?? []).length;
   // Pre-compute whether the post-audit triage handoff would fire. The
@@ -479,7 +476,7 @@ export async function endDrive(
   const triageWouldFire = platform ? wouldReverseEngineerHandoffFire(session, platform) : false;
   const auditPayload = buildEndDrivePayload(
     session,
-    { reCallCount, persistCallCount, actionCallCount },
+    { heavyReCallCount, jsEvalCallCount, persistCallCount, actionCallCount },
     { platform, triageWouldFire },
   );
   const auditResult = endDriveAudit.process(
@@ -499,7 +496,7 @@ export async function endDrive(
         toolName: 'end_drive',
         referenceUrl: 'klura://reference#end-drive-audit',
       }),
-      re_call_count: reCallCount,
+      re_call_count: heavyReCallCount + jsEvalCallCount,
       persist_call_count: persistCallCount,
       end_drive_attempts: session.endDriveAttempts ?? 0,
     };
@@ -684,7 +681,7 @@ export async function endDrive(
         `       \`abort_session(session_id, "<reason ≥20 chars>")\` for the honest exit.\n` +
         `  → "I judged this as nothing worth saving" is NOT a legitimate verdict — that judgment ` +
         `isn't yours to make. See klura://reference#end-drive-audit.`,
-      re_call_count: countReToolCalls(session),
+      re_call_count: countHeavyReToolCalls(session) + countJsEvalCalls(session),
       persist_call_count: countPersistCalls(session),
       end_drive_attempts: endDriveAttemptsPreBump,
     };

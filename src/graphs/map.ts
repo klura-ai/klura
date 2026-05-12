@@ -19,6 +19,9 @@ export const MAP_GRAPH: Graph = {
     skipAutoSynth: true,
     inferObservedCapabilitiesAtClose: true,
     skipDeclarationGuard: true,
+    // actions=5: a mapping session that touched 5+ pages without persisting any
+    // findings fires the gate. reCalls=1 covers the rarer "did heavy RE while
+    // mapping but left no breadcrumb" case (js_eval alone doesn't count).
     rePersistenceThreshold: { reCalls: 1, actions: 5 },
     obligationStyle: 'flush_reminder',
     startSessionHint:

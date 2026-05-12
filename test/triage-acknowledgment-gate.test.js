@@ -22,7 +22,8 @@ function makePayload(overrides = {}) {
     declaredCapabilityCount: 1,
     writeActions: [],
     // Sidestep re_persistence by not having any RE calls.
-    reCallCount: 0,
+    heavyReCallCount: 0,
+    jsEvalCallCount: 0,
     persistCallCount: 0,
     actionCallCount: 0,
     saveAttemptCount: 0,

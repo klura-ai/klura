@@ -65,10 +65,10 @@ export const READ_ONLY_DIAGNOSTIC: ReadonlySet<string> = new Set([
 ]);
 
 /** Discovery-artifact persistence. Allowed in drive, triage, and lift —
- *  the end_drive re_persistence Classifier demands at least one of these
- *  calls when the agent did RE work, so they must be reachable from drive
- *  (where end_drive fires the audit). countPersistCalls in
- *  end-drive/orchestrator.ts sums against the same three. */
+ *  the end_drive re_persistence Detector demands at least one of these
+ *  calls when the agent did heavy RE work it can't show a saved strategy
+ *  for, so they must be reachable from drive (where end_drive fires the
+ *  audit). countPersistCalls in end-drive-orchestrator.ts sums the same three. */
 export const DISCOVERY_ARTIFACT: ReadonlySet<string> = new Set([
   'save_verified_expression',
   'add_discovery_note',
