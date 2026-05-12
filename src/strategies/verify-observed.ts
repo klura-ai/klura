@@ -456,6 +456,95 @@ export function findUnobservedStrategyUrls(
   return out;
 }
 
+export interface MissingCapturedQueryParam {
+  /** Wire-level query-param name observed in the capture but missing from
+   *  the saved strategy's endpoint template. */
+  param: string;
+  /** A representative observed value, useful for the agent to template
+   *  against (`?param={{example}}`) or hardcode (`?param=<value>`). */
+  observed_value: string;
+  /** The captured URL the missing param came from — quoted in the rejection
+   *  so the agent can verify what the server saw at discovery time. */
+  observed_url: string;
+  /** The saved strategy's endpoint URL — quoted for direct comparison. */
+  strategy_url: string;
+}
+
+/**
+ * Find query params present in the captured request(s) that match the
+ * strategy's endpoint, but absent from the saved strategy's URL template.
+ *
+ * Catches the "captured-but-not-templated" failure mode where the agent
+ * saved a strategy that worked at discovery time (when the browser
+ * included the param) but breaks at warm-execute because the server
+ * actually required it (Stack Exchange `/2.3/search/advanced` requires
+ * `site=stackoverflow`; Algolia search requires `tags=story` to scope; …).
+ *
+ * Match is canonical (origin + pathname). Multiple captures with the same
+ * canonical URL dedupe by param name — the first observed value wins as
+ * the representative. Body params (POST) are not checked here; that's a
+ * separate completeness axis.
+ *
+ * Returns an empty list when the strategy has no observable URL (e.g. a
+ * recorded-path with no navigates) or when no captured URLs match the
+ * endpoint canonical form (the unobserved-url detector catches that case
+ * with a different rejection).
+ */
+export function findMissingCapturedQueryParams(
+  data: Record<string, unknown>,
+  observedUrls: readonly string[],
+): MissingCapturedQueryParam[] {
+  // Build the strategy URL directly from baseUrl + endpoint without resolving
+  // {{placeholder}} templates — this check operates on the AUTHORED shape,
+  // not the example-resolved one. `firstObservableUrl` would skip strategies
+  // whose templates lack `notes.params[*].example`, missing the very case
+  // this detector is designed to catch (the agent dropped a captured wire
+  // param entirely, so there's no notes.params entry for it).
+  const tier = typeof data.strategy === 'string' ? data.strategy : '';
+  if (tier !== 'fetch' && tier !== 'page-script') return [];
+  const baseUrl = typeof data.baseUrl === 'string' ? data.baseUrl : '';
+  const endpointRaw = typeof data.endpoint === 'string' ? data.endpoint : '';
+  if (!baseUrl || !endpointRaw) return [];
+  const endpointPath = endpointRaw.includes(' ')
+    ? endpointRaw.split(' ').slice(1).join(' ')
+    : endpointRaw;
+
+  let strategyUrl: string;
+  let strategyParams: Set<string>;
+  try {
+    const u = new URL(endpointPath, baseUrl);
+    strategyUrl = u.toString();
+    strategyParams = new Set(u.searchParams.keys());
+  } catch {
+    return [];
+  }
+  const strategyCanon = normalizeUrlForObservation(strategyUrl);
+  if (!strategyCanon) return [];
+
+  const missing = new Map<string, MissingCapturedQueryParam>();
+  for (const observed of observedUrls) {
+    const oCanon = normalizeUrlForObservation(observed);
+    if (oCanon !== strategyCanon) continue;
+    let oUrl: URL;
+    try {
+      oUrl = new URL(observed);
+    } catch {
+      continue;
+    }
+    for (const [name, value] of oUrl.searchParams.entries()) {
+      if (strategyParams.has(name)) continue;
+      if (missing.has(name)) continue;
+      missing.set(name, {
+        param: name,
+        observed_value: value,
+        observed_url: observed,
+        strategy_url: strategyUrl,
+      });
+    }
+  }
+  return [...missing.values()];
+}
+
 /**
  * Recorded-path-over-binary-WS save guard. Re-runs the binary-WS detector over
  * the discovery session's captured wsFrames + HTTP entries using the caller-arg

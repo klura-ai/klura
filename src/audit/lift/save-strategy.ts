@@ -17,7 +17,11 @@ import {
   validateNoSelectorSelfReference,
 } from '../../strategies/validate';
 import type { Session } from '../../drivers/types/session';
-import { findUnobservedStrategyUrls, firstObservableUrl } from '../../strategies/verify-observed';
+import {
+  findMissingCapturedQueryParams,
+  findUnobservedStrategyUrls,
+  firstObservableUrl,
+} from '../../strategies/verify-observed';
 import { loadLogbook } from '../../working-dir/logbook';
 import { lookupSurface, urlKey } from '../../phases/surface-binding';
 import {
@@ -513,6 +517,41 @@ const unobservedUrlDetector: Detector<Strategy, SaveStrategyCtx> = {
   ackReason: 'none',
 };
 
+// Query-param completeness: every query param that appeared in the captured
+// request must appear in the saved strategy template too, either templated
+// as {{X}} or hardcoded with static provenance. The "captured but dropped"
+// shape is the canonical save-quality regression behind HTTP 4xx at warm
+// time — Stack Exchange requires `site=stackoverflow` on every call, and a
+// strategy that dropped it returns HTTP 400. ackReason: 'required' — agents
+// can ack tracking-only params (`utm_*`, `gclid`, etc.) or server-tolerated
+// optional params with a one-sentence justification.
+const urlParamCompletenessDetector: Detector<Strategy, SaveStrategyCtx> = {
+  kind: 'captured_query_param_missing_from_strategy',
+  detect: (data, ctx) => {
+    if (ctx.observedUrls === undefined) return [];
+    const missing = findMissingCapturedQueryParams(
+      data as unknown as Record<string, unknown>,
+      ctx.observedUrls,
+    );
+    return missing.map((m) => ({
+      kind: 'captured_query_param_missing_from_strategy',
+      message:
+        `The captured request URL included \`?${m.param}=${m.observed_value}\` but the saved ` +
+        `strategy endpoint doesn't reference \`${m.param}\` anywhere. Saved strategies that drop a ` +
+        `captured query param commonly fail at warm-execute time with 4xx — the server received the ` +
+        `param at discovery and may require it. Fix one of: ` +
+        `(a) hardcode \`?${m.param}=${m.observed_value}\` in the endpoint when the value doesn't vary per caller; ` +
+        `(b) template as \`?${m.param}={{${m.param}}}\` with \`notes.params.${m.param}\` declared when callers should supply it; ` +
+        `(c) ack with a one-sentence reason why it's safe to drop (tracking-only, server-tolerated optional, etc).`,
+      hint:
+        `Observed URL: ${m.observed_url}\nSaved URL: ${m.strategy_url}\nAck shape if dropping legitimately: ` +
+        `audit_answers: {captured_query_param_missing_from_strategy: {"${m.param}": "<one-sentence reason>"}}`,
+      context: { param: m.param, observed_value: m.observed_value },
+    }));
+  },
+  ackReason: 'required',
+};
+
 // Lookup-shaped slug + inline lookup-shaped prereq → must be split into a
 // sibling capability prereq. No legitimate ack path: the issue is "your
 // lookup is duplicated inline; split it." Per principles.md §"Observe, not
@@ -686,6 +725,7 @@ export const saveStrategyAudit = new Audit<Strategy, SaveStrategyCtx>({
     enumValueInCapabilitySlugDetector,
     endpointCollidesWithSavedCapabilityDetector,
     unobservedUrlDetector,
+    urlParamCompletenessDetector,
     lookupPrereqMustBeCapabilityDetector,
     popupAddressingWithoutTriggerDetector,
   ],
