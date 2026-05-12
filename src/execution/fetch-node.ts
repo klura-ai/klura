@@ -473,9 +473,9 @@ async function fetchPrereqFromNode(
 
 // --- fetch executor (Node transport) --- Runs prerequisites and the final
 // request from Node. Supports cached, fetch-extract, and page-extract prereqs
-// (the latter via cheerio). When a prereq needs a live page (kind:"browser" /
-// "js-eval"), this path throws TransportFailureError and the dispatcher retries
-// in the browser via executeFetchInBrowser.
+// (the latter via cheerio). Browser-bound prereq kinds (js-eval, browser) are
+// rejected at save time by validateFetchPrereqKinds — fetch tier strategies
+// never carry them.
 export async function executeFetchNode(
   strategy: FetchStrategy,
   args: Record<string, unknown>,
@@ -599,13 +599,6 @@ export async function resolveNodeCompatiblePrereqs(
         for (const [k, v] of Object.entries(bound)) tokens[k] = stringifyScope(v);
       }
       continue;
-    }
-    if (prereq.kind === 'browser' || prereq.kind === 'js-eval') {
-      throw new TransportFailureError(
-        'browser_prereq_required',
-        `prereq "${prereq.name}" uses kind: "${prereq.kind}" which requires DOM interaction. ` +
-          `This strategy must execute in the browser; retry via page-script.`,
-      );
     }
     if (prereq.kind === 'fetch-extract') {
       const cached = tokenCache?.get(platform, prereq.name);

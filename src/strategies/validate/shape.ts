@@ -23,6 +23,7 @@ import { validateGeneratedShape } from './generated';
 import { validateNotesParamsShape, validateBaseUrlScheme, validateNotesAllowlist } from './notes';
 import { validateCacheShape } from './cache';
 import { validateProvidesShape } from './provides';
+import { validateFetchPrereqKinds } from './fetch-prereq-kinds';
 
 export function validateStrategyShape(data: unknown): asserts data is Strategy {
   if (!isPlainObject(data)) {
@@ -183,6 +184,9 @@ export function validateStrategyShape(data: unknown): asserts data is Strategy {
   });
   runDeep(() => {
     validateProvidesShape(data);
+  });
+  runDeep(() => {
+    validateFetchPrereqKinds(data, tier);
   });
   const [firstErr, ...rest] = deepErrors;
   if (firstErr && rest.length === 0) {

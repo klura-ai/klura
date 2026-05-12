@@ -283,30 +283,3 @@ test('fetch + ws + node: unreachable server → TransportFailureError → no poo
   );
 });
 
-test('fetch + ws + node: rejects browser-method prereq via TransportFailureError', async () => {
-  const srv = await startEchoServer({ reply: 'ack' });
-  try {
-    saveStrategy('test-ws', 'needs_browser_prereq', {
-      strategy: 'fetch',
-      protocol: 'websocket',
-      origin: 'http://127.0.0.1',
-      wsUrl: srv.url,
-      frame: 'body',
-      ackMatch: 'upsertMessage',
-      prerequisites: [
-        {
-          name: 'csrf',
-          kind: 'browser',
-          steps: [{ action: 'navigate', url: 'http://127.0.0.1' }],
-        },
-      ],
-    });
-    const result = await execute('test-ws', 'needs_browser_prereq', {});
-    // No pool → TransportFailureError can't be recovered → surfaced in errors.
-    assert.strictEqual(result.status, 0);
-    const txt = JSON.stringify(result.body);
-    assert.match(txt, /browser_prereq_required|no pool|all_strategies_failed/);
-  } finally {
-    await srv.close();
-  }
-});

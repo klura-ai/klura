@@ -220,7 +220,7 @@ test('JSON descent: stringified-JSON body field exposes inner literals', () => {
 
 test('JSON descent: headers keys surface as literal_provenance items', () => {
   const strategy = {
-    strategy: 'fetch',
+    strategy: 'page-script',
     baseUrl: 'http://127.0.0.1:3315',
     endpoint: '/api/x',
     method: 'GET',

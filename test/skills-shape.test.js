@@ -376,7 +376,7 @@ test('fetch-extract rejects headers_map with non-string values', () => {
 // ---- js-eval prereq ----
 
 const baseJsEval = () => ({
-  strategy: 'fetch',
+  strategy: 'page-script',
   baseUrl: 'https://www.example.com',
   endpoint: '/api/submit',
   prerequisites: [
@@ -391,8 +391,47 @@ const baseJsEval = () => ({
   ],
 });
 
-test('fetch with js-eval prereq passes', () => {
+test('page-script with js-eval prereq passes', () => {
   validateStrategyShape(baseJsEval());
+});
+
+test('fetch with js-eval prereq is rejected (Node-only tier)', () => {
+  expectReject(
+    {
+      strategy: 'fetch',
+      baseUrl: 'https://www.example.com',
+      endpoint: '/api/submit',
+      prerequisites: [
+        {
+          name: 'mintToken',
+          kind: 'js-eval',
+          url: 'https://www.example.com/new',
+          expression: 'await window.x.mint()',
+          binds: 'tok',
+          return_shape: { kind: 'string' },
+        },
+      ],
+    },
+    /fetch tier is Node-only.*kind "js-eval"/s,
+  );
+});
+
+test('fetch with browser prereq is rejected (Node-only tier)', () => {
+  expectReject(
+    {
+      strategy: 'fetch',
+      baseUrl: 'https://www.example.com',
+      endpoint: '/api/submit',
+      prerequisites: [
+        {
+          name: 'login',
+          kind: 'browser',
+          steps: [{ action: 'navigate', url: 'https://www.example.com' }],
+        },
+      ],
+    },
+    /fetch tier is Node-only.*kind: "browser"/s,
+  );
 });
 
 test('prereq: "type" is silently aliased to "kind" (LLM drift convenience)', () => {
@@ -401,7 +440,7 @@ test('prereq: "type" is silently aliased to "kind" (LLM drift convenience)', () 
   // making the same mistake, the runtime is wrong," accept the term the
   // LLM reaches for rather than reject + force a rename round-trip.
   const s = {
-    strategy: 'fetch',
+    strategy: 'page-script',
     baseUrl: 'https://www.example.com',
     endpoint: '/api/submit',
     prerequisites: [
@@ -423,7 +462,7 @@ test('prereq: "type" alias does not override an explicit "kind"', () => {
   // kind for a stray `type` would be worse than either rejecting or
   // keeping kind as-authored.
   const s = {
-    strategy: 'fetch',
+    strategy: 'page-script',
     baseUrl: 'https://www.example.com',
     endpoint: '/api/submit',
     prerequisites: [
@@ -609,7 +648,7 @@ test('js-eval rejects required_keys on non-object kind', () => {
 
 test('js-eval accepts object return_shape with required_keys', () => {
   validateStrategyShape({
-    strategy: 'fetch',
+    strategy: 'page-script',
     baseUrl: 'https://www.example.com',
     endpoint: '/x',
     prerequisites: [
@@ -627,7 +666,7 @@ test('js-eval accepts object return_shape with required_keys', () => {
 
 test('js-eval accepts refresh options', () => {
   validateStrategyShape({
-    strategy: 'fetch',
+    strategy: 'page-script',
     baseUrl: 'https://www.example.com',
     endpoint: '/x',
     prerequisites: [
@@ -711,7 +750,7 @@ test('js-eval over 8KB expression is rejected', () => {
 
 test('js-eval accepts args_template (per-call signer mode)', () => {
   validateStrategyShape({
-    strategy: 'fetch',
+    strategy: 'page-script',
     baseUrl: 'https://www.example.com',
     endpoint: '/api/submit',
     body: { input: '{{text}}' },
@@ -753,7 +792,7 @@ test('js-eval rejects non-object args_template', () => {
 
 test('js-eval accepts frame selector (iframe-scoped expression)', () => {
   validateStrategyShape({
-    strategy: 'fetch',
+    strategy: 'page-script',
     baseUrl: 'https://www.example.com',
     endpoint: '/x',
     prerequisites: [
@@ -825,7 +864,7 @@ test('js-eval allows args_template with refresh.enabled:false (no-op)', () => {
   // collides with per-call mode. An incidentally-present refresh block with
   // enabled:false should not block a per-call signer.
   validateStrategyShape({
-    strategy: 'fetch',
+    strategy: 'page-script',
     baseUrl: 'https://www.example.com',
     endpoint: '/x',
     prerequisites: [

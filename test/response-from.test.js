@@ -47,12 +47,17 @@ test('page-script with response.from + js-eval prereq passes without endpoint', 
   });
 });
 
-test('fetch with response.from + js-eval prereq passes without endpoint', () => {
-  validateStrategyShape({
-    strategy: 'fetch',
-    prerequisites: [validJsEvalPrereq()],
-    response: { from: 'threads', format: 'json' },
-  });
+test('fetch with response.from + js-eval prereq is rejected (Node-only tier)', () => {
+  // js-eval prereqs require browser context; fetch tier is Node-only.
+  // Use page-script for the response.from + js-eval pattern.
+  expectReject(
+    {
+      strategy: 'fetch',
+      prerequisites: [validJsEvalPrereq()],
+      response: { from: 'threads', format: 'json' },
+    },
+    /fetch tier is Node-only.*kind "js-eval"/s,
+  );
 });
 
 test('response.from with no matching prereq is rejected naming the prereq', () => {

@@ -11,7 +11,7 @@ export const ANCHOR_TYPES = ['module', 'protocol', 'dom', 'unknown'] as const;
 const STRATEGY_TIER_DESCRIPTIONS: ReadonlyArray<{ key: string; hint: string }> = [
   {
     key: 'fetch',
-    hint: '(OPTIMAL WHEN ACHIEVABLE) — templated HTTP or WebSocket request. Fires from Node, no browser — fastest, stateless, parallelizable. Works cleanly on simple / legacy sites with unsigned APIs. Body or frame can be a string template with {{placeholders}}, a Node-VM generator (generated.frame — for binary envelopes you byte-spliced against a captured reference), or derived via a prereq chain. Auto-demotes to browser transport when a prereq needs page context or the Node dial trips a TLS/bot fingerprint.',
+    hint: '(OPTIMAL WHEN ACHIEVABLE) — templated HTTP or WebSocket request. Fires from Node, no browser — fastest, stateless, parallelizable. Works cleanly on simple / legacy sites with unsigned APIs. Body or frame can be a string template with {{placeholders}}, a Node-VM generator (generated.frame — for binary envelopes you byte-spliced against a captured reference), or derived via a prereq chain (cached / fetch-extract / page-extract / capability / tag). For js-eval or browser prereqs, save as page-script — those require a live page and are rejected on fetch.',
   },
   {
     key: 'page-script',
