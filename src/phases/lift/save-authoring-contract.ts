@@ -81,6 +81,14 @@ export type SaveConstraint =
       observed_value_count: number;
       observed_via: 'ui_click' | 'url_variance' | 'mixed';
       listing_capture_index?: number;
+      /** Captured (label, value) pairs from UI-click observations on this
+       *  param. When the agent declares notes.params.<placeholder>.kind:
+       *  "enum" with observed_values, they can paste these directly —
+       *  pre-grounded by the runtime's click→XHR correlator so the save-
+       *  time `ungrounded_enum_placeholder` audit accepts them without a
+       *  rejection round-trip. Empty when observations are url_variance
+       *  only (no UI labels). */
+      ui_label_examples?: ReadonlyArray<{ label: string; value: string }>;
       detector_kind: 'ungrounded_enum_placeholder';
     }
   | {
@@ -91,6 +99,22 @@ export type SaveConstraint =
       url_param_consumed_in: string;
       link_via_shape: string;
       detector_kind: 'enum_param_listing_unfactored';
+    }
+  | {
+      kind: 'required_query_params_in_template';
+      rule: string;
+      /** The captured data-load URL these params live on (index into
+       *  detected_patterns.data_loads). Multiple captured query params on
+       *  the same URL collapse into one constraint with a list. */
+      data_load_index: number;
+      data_load_url: string;
+      params: ReadonlyArray<{ name: string; observed_value: string }>;
+      detector_kind: 'captured_query_param_missing_from_strategy';
+    }
+  | {
+      kind: 'param_source_capability_requires_prereq';
+      rule: string;
+      detector_kind: 'capability_source_missing_prereq';
     }
   | {
       kind: 'auth_gated_chain_auth_prereq';
@@ -217,6 +241,55 @@ export function composeSaveAuthoringContract(
       url_param_consumed_in: listing.used_as.url_param,
       link_via_shape: `notes.params.<placeholder>.source = "capability:<your-listing-slug>"`,
       detector_kind: 'enum_param_listing_unfactored',
+    });
+  }
+
+  // 5b. Whenever a listing is suggested, also surface the standing pairing
+  // rule: `notes.params.<X>.source: "capability:Y"` is dead code without a
+  // matching `prerequisites[]` entry. Mirrors the
+  // `capability_source_missing_prereq` audit (ackReason: 'none'). One
+  // entry is enough — applies uniformly to every source: capability:...
+  // declaration.
+  if (listings.length > 0) {
+    constraints.push({
+      kind: 'param_source_capability_requires_prereq',
+      rule: `Every \`notes.params.<X>.source: "capability:<Y>"\` declaration MUST be paired with a matching \`prerequisites[{kind: "capability", capability: "<Y>", args: {...}, vars: {...}}]\` entry. The runtime resolves prereqs by walking \`prerequisites[]\` only; without the pair the source declaration is cosmetic and the listing never fetches at warm-execute time. ackReason: 'none' on the audit side — either add the prereq or drop the source.`,
+      detector_kind: 'capability_source_missing_prereq',
+    });
+  }
+
+  // 5c. Required-query-params-in-template: every query param on the primary
+  // data-load URL must appear in the saved fetch / page-script template,
+  // either templated as {{X}} or hardcoded with static provenance. Dropping
+  // a captured param commonly returns 4xx at warm-execute (the server
+  // received it at discovery and may require it — Stack Exchange
+  // `site=stackoverflow` is the canonical example). Audit is
+  // `captured_query_param_missing_from_strategy` (ackReason: 'required'
+  // for tracking-only / server-tolerated optionals).
+  for (let i = 0; i < dataLoads.length; i += 1) {
+    const dl = dataLoads[i];
+    if (!dl) continue;
+    let parsed: URL;
+    try {
+      parsed = new URL(dl.url);
+    } catch {
+      continue;
+    }
+    const params: Array<{ name: string; observed_value: string }> = [];
+    const seenNames = new Set<string>();
+    for (const [name, value] of parsed.searchParams) {
+      if (seenNames.has(name)) continue;
+      seenNames.add(name);
+      params.push({ name, observed_value: value });
+    }
+    if (params.length === 0) continue;
+    constraints.push({
+      kind: 'required_query_params_in_template',
+      rule: `Captured data-load #${i} (${dl.url}) has ${params.length} query param(s). Every one MUST appear in the saved template — either templated as ?<name>={{<placeholder>}} with notes.params.<placeholder> declared, or hardcoded with literal_provenance:"static". Tracking-only / server-tolerated optionals can be ack'd with a one-sentence justification; the audit demands the agent decide explicitly per param instead of silently dropping.`,
+      data_load_index: i,
+      data_load_url: dl.url,
+      params,
+      detector_kind: 'captured_query_param_missing_from_strategy',
     });
   }
 
@@ -394,12 +467,17 @@ function composeEnumParamConstraints(
     for (const [paramName] of parsed.searchParams) {
       if (seen.has(paramName)) continue;
       const obsList = observedParamValues[paramName] as
-        | ReadonlyArray<{ value?: unknown; source?: { kind?: unknown } }>
+        | ReadonlyArray<{ value?: unknown; source?: { kind?: unknown; label?: unknown } }>
         | undefined;
       if (!obsList || obsList.length === 0) continue;
       const seenValues = new Set<string>();
       let clickCount = 0;
       let varianceCount = 0;
+      // Collect (label, value) pairs from UI clicks so the agent can paste
+      // them into `notes.params.<placeholder>.observed_values` directly.
+      // Dedup by value (first label wins — multiple clicks on the same
+      // tile shouldn't repeat).
+      const labelPairs: Array<{ label: string; value: string }> = [];
       for (const o of obsList) {
         if (typeof o !== 'object') continue;
         const k = o.source?.kind;
@@ -407,8 +485,13 @@ function composeEnumParamConstraints(
         const v = o.value;
         if (typeof v !== 'string' || seenValues.has(v)) continue;
         seenValues.add(v);
-        if (k === 'ui_click') clickCount += 1;
-        else varianceCount += 1;
+        if (k === 'ui_click') {
+          clickCount += 1;
+          const label = typeof o.source?.label === 'string' ? o.source.label : '';
+          if (label) labelPairs.push({ label, value: v });
+        } else {
+          varianceCount += 1;
+        }
       }
       if (seenValues.size === 0) continue;
       seen.add(paramName);
@@ -437,6 +520,7 @@ function composeEnumParamConstraints(
         observed_value_count: seenValues.size,
         observed_via: observedVia,
         listing_capture_index: listingCaptureIndex,
+        ui_label_examples: labelPairs.length > 0 ? labelPairs : undefined,
         detector_kind: 'ungrounded_enum_placeholder',
       });
     }
