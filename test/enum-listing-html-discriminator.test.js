@@ -146,6 +146,115 @@ test('plain-text response that happens to contain the values is not treated as a
   assert.equal(warnings.length, 0);
 });
 
+test('C1: single-value enum does NOT fire — a real enum needs ≥2 distinct observed values', () => {
+  // The repro from llm-tests/search-enforcement v7b: agent classified the
+  // message body param as kind:"enum" with a single observed value (the
+  // user-typed text). Pre-C1, the listing detector then matched that single
+  // value against ANY captured response containing the substring (including
+  // the chat-history endpoint that echoes the just-sent message), producing
+  // a false listing flag. The structural fix: a listing factor needs ≥2
+  // distinct values; on length 1 the detector can't tell "real enum
+  // candidate" from "free-form text that happens to be observable in some
+  // response."
+  const strategy = makeStrategy();
+  strategy.notes.params.cuisine.observed_values = [{ value: 'italian', label: 'Italian' }];
+  const warnings = detectEnumParamListingUnfactored(
+    strategy,
+    { intercepted: [JSON_LISTING] },
+    'find_top_restaurants',
+    undefined,
+    undefined,
+  );
+  assert.deepEqual(
+    warnings,
+    [],
+    'single-value enum must not trigger the listing detector — got: ' + JSON.stringify(warnings),
+  );
+});
+
+test('C2: caller-declared arg value filtered before counting (would otherwise be ≥2 → fires)', () => {
+  // The 2-value edge case C2 closes: agent typed "pizza" as a recipe filter
+  // AND clicked "italian" on the cuisine tile. observed_values gets both
+  // entries. C1 alone would count 2 → fire (listing detected, "italian" is
+  // in the response, "pizza" is — coincidentally — also in the response
+  // because the listing names some pizza variant). Caller-typed "pizza" must
+  // be dropped before the listing match runs, leaving only ["italian"] —
+  // length 1, C1 skips. The agent's `declaredCapabilities.args.cuisine =
+  // "pizza"` carries that signal: the value originated in the caller, not
+  // from a server enumeration.
+  const strategy = makeStrategy();
+  strategy.notes.params.cuisine.observed_values = [
+    { value: 'italian', label: 'Italian' },
+    { value: 'pizza', label: 'Pizza' }, // caller-typed
+  ];
+  const sessionWithCallerArg = {
+    intercepted: [
+      {
+        method: 'GET',
+        url: 'http://example.test/api/categories',
+        responseBody: {
+          // The listing happens to contain both values — pre-C2 this would
+          // fire; C2 drops "pizza" first because the caller declared it.
+          categories: [
+            { value: 'italian', label: 'Italian' },
+            { value: 'pizza', label: 'Pizza' },
+          ],
+        },
+      },
+    ],
+    declaredCapabilities: [
+      {
+        capability: 'find_top_restaurants',
+        args: { cuisine: 'pizza' },
+        declared_at: 1_000_000,
+      },
+    ],
+  };
+  const warnings = detectEnumParamListingUnfactored(
+    strategy,
+    sessionWithCallerArg,
+    'find_top_restaurants',
+    undefined,
+    undefined,
+  );
+  assert.deepEqual(
+    warnings,
+    [],
+    'caller-declared value must be filtered before the C1 ≥2 count — got: ' +
+      JSON.stringify(warnings),
+  );
+});
+
+test('C2: real 2-value enum (neither caller-declared) still fires', () => {
+  // Negative case: when both observed values come from real clicks and
+  // neither matches a caller arg, the detector fires as before. This pins
+  // that C2 doesn't break the legitimate listing-factor signal.
+  const strategy = makeStrategy();
+  strategy.notes.params.cuisine.observed_values = [
+    { value: 'italian', label: 'Italian' },
+    { value: 'sushi', label: 'Sushi' },
+  ];
+  const session = {
+    intercepted: [JSON_LISTING],
+    declaredCapabilities: [
+      {
+        capability: 'find_top_restaurants',
+        args: { other_arg: 'mexican' }, // declared, but for a different param
+        declared_at: 1_000_000,
+      },
+    ],
+  };
+  const warnings = detectEnumParamListingUnfactored(
+    strategy,
+    session,
+    'find_top_restaurants',
+    undefined,
+    undefined,
+  );
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0].message, /api\/categories/);
+});
+
 test('hint names the structural remedy without advertising an ack path that policy denies', () => {
   // The detector at the audit layer has ackReason: 'none' (no ack-through —
   // the listing belongs as its own capability, period). Earlier the hint

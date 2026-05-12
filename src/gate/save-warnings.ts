@@ -608,6 +608,16 @@ interface SessionLite {
     url: string;
     responseBody?: unknown;
   }>;
+  /** Caller-declared capability bundles. The agent passed each `{capability,
+   *  args}` pair via `start_session` or `declare_capability`. Their string
+   *  arg values are caller-input by construction — if one shows up as an
+   *  `observed_value` on a saved param, that's a misclassification (the
+   *  agent typed it; it's not an enumerable option). */
+  declaredCapabilities?: ReadonlyArray<{
+    capability: string;
+    args: Record<string, string>;
+    declared_at: number;
+  }>;
 }
 
 /**
@@ -631,6 +641,25 @@ interface SessionLite {
  * with a one-sentence reason naming the structural difference.
  */
 type InterceptedRequest = NonNullable<SessionLite['intercepted']>[number];
+
+/**
+ * Collect every string value the caller declared in `start_session({args})`
+ * or `declare_capability({args})` for this session. Returns a Set for
+ * `has(value)` lookup. Empty when the session has no declarations (e.g.
+ * programmatic save shapes that bypass the start_session contract).
+ */
+function collectCallerArgStrings(session: SessionLite | null | undefined): Set<string> {
+  const out = new Set<string>();
+  const decls = session?.declaredCapabilities;
+  if (!decls || decls.length === 0) return out;
+  for (const d of decls) {
+    const args = d.args;
+    for (const v of Object.values(args)) {
+      if (typeof v === 'string' && v.length > 0) out.add(v);
+    }
+  }
+  return out;
+}
 
 function bodyAsString(body: unknown): string | null {
   if (typeof body === 'string') return body;
@@ -767,10 +796,30 @@ export function detectEnumParamListingUnfactored(
       continue;
     }
     if (!Array.isArray(i.observed_values) || i.observed_values.length === 0) continue;
-    const values = i.observed_values
+    const rawValues = i.observed_values
       .map((v) => (v && typeof v === 'object' ? (v as { value?: unknown }).value : null))
       .filter((v): v is string => typeof v === 'string' && v.length > 0);
+    if (rawValues.length === 0) continue;
+    // C2 filter: drop entries that match a string the caller declared in
+    // their session args. Those are caller-input by construction (the agent
+    // typed them); a real enum is enumerable on the site, not authored by
+    // the caller. With the typed-value filter in the observation pipeline
+    // now uniform across getNetworkLog + save-strategy (commit 1f19421),
+    // caller-input values shouldn't reach observed_values at all, but this
+    // layer is a structural guard against future regressions.
+    const callerArgValues = collectCallerArgStrings(session);
+    const values = rawValues.filter((v) => !callerArgValues.has(v));
     if (values.length === 0) continue;
+    // C1 guard: a real enum has multiple alternatives observed. A single
+    // observed value matches "any captured response that contains the
+    // substring" — which surfaces transient artifacts (a chat-history
+    // endpoint whose body echoes the just-sent message) rather than a real
+    // listing. The listing-factor signal needs ≥2 distinct values to be
+    // load-bearing. The upstream save-time enum-guard rejects kind:"enum"
+    // with <2 observed_values, so reaching this branch is the belt-and-
+    // suspenders case where the guard missed (e.g. legacy saves, programmatic
+    // save shapes). See klura://reference#save-strategy-audit.
+    if (new Set(values).size < 2) continue;
 
     const listingUrl = findListingUrlForValues(intercepted, values, myEndpoint);
     if (!listingUrl) continue;
