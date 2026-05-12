@@ -445,3 +445,35 @@ test('rejectionToErrorMessage: end_drive keeps top-level acks shape', () => {
   assert.match(msg, /\{<warning_kind>: "<one-sentence reason>"\}/);
   assert.doesNotMatch(msg, /notes\.save_warnings_acked/);
 });
+
+test('rejectionToErrorMessage: envelope explicitly warns against pausing for user approval before retry', () => {
+  // Live trace (llm-tests/search-enforcement/fresh-discovery v6): agent reached
+  // `mutating_verification_required` + `literal_provenance` rejection one
+  // retry from committing, then ended its turn with prose ("Before I commit
+  // the save, I need your approval: I'm about to save..."). The existing
+  // "DO NOT end your turn" clause didn't dissuade it because the agent
+  // interpreted that as "don't silently stop" — and reading the user a
+  // status update felt like progress. The envelope must name the specific
+  // failure mode (asking for user approval before retry) and the structural
+  // reason it doesn't apply: the mutation already happened during drive;
+  // save_strategy is internal bookkeeping.
+  const audit = new Audit({
+    kind: 'save_strategy',
+    detectors: [
+      { kind: 'flagger', detect: () => [{ kind: 'flagger', message: 'flagged', hint: 'do X' }], ackReason: 'required' },
+    ],
+    classifiers: [
+      { kind: 'classify', buildItems: () => ['itemA'], validate: () => [], remedy: NO_REMEDY, expectedAnswerShape: TEST_SHAPE },
+    ],
+  });
+  const r = audit.process({}, {}, { acks: { flagger: 'intentional' } });
+  const msg = rejectionToErrorMessage('save_strategy', r.rejection, { toolName: 'save_strategy' });
+  assert.match(msg, /Do NOT pause to ask the user for approval/);
+  assert.match(msg, /already happened during drive/);
+  assert.match(msg, /internal bookkeeping/);
+  // The tool name is interpolated — anti-pause clause must fire for end_drive
+  // and submit_triage_plan as well (same envelope, same pause failure mode).
+  const endDriveMsg = rejectionToErrorMessage('end_drive', r.rejection, { toolName: 'end_drive' });
+  assert.match(endDriveMsg, /Do NOT pause to ask the user for approval/);
+  assert.match(endDriveMsg, /end_drive is internal bookkeeping/);
+});

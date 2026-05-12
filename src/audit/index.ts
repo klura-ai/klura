@@ -787,6 +787,9 @@ export function rejectionToErrorMessage(
     `  → DO NOT end your turn after this rejection — the rejection IS the iteration loop, not a stop signal. Expect 1-3 retries before the save lands.`,
   );
   lines.push(
+    `  → Do NOT pause to ask the user for approval before retrying. Any real-world mutation (the message you sent, the form you submitted) already happened during drive — ${toolName} is internal bookkeeping for klura to persist the recipe. The audit_answers IS the commit; retry with {audit_token, audit_answers} immediately, don't send the user a "ready to save?" message in between.`,
+  );
+  lines.push(
     `  → In unattended runs (no human present), retry with just {audit_token} and the embedder's registered decider auto-resolves user_confirmation. You still owe answers for any literal_provenance / capability_name_justification / observed_siblings items in the rejection.`,
   );
   if (toolName !== 'end_drive') {
