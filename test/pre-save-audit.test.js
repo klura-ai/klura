@@ -493,6 +493,154 @@ test('hash scoping: adding notes.save_warnings_acked keeps the audit token valid
   );
 });
 
+test('enum-shape marker kind (slug) on caller_input without source:capability → rejected', () => {
+  // Repro: v9 llm-tests/enum-grounding. Agent navigated to
+  // /top-restaurants?category=italian directly (no UI clicks, zero
+  // observations), then saved a strategy with cuisine: {kind: "slug"}.
+  // The kind:"enum" ae3a7fa guard didn't fire (kind isn't "enum"), the
+  // ui_click branch didn't fire (no observations), and the save committed.
+  // Warm-time fuzzy-match against "pizza" had no labels — call failed.
+  //
+  // The new branch refuses kind:"slug" (and similar marker kinds) without
+  // either observed_values or source:"capability:<list>". ackReason: none
+  // — agent must restructure.
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'http://example.test',
+    endpoint: '/api/restaurants?category={{cuisine}}',
+    method: 'GET',
+    response: { format: 'json' },
+    notes: {
+      params: {
+        cuisine: {
+          description: 'Cuisine category slug',
+          kind: 'slug',
+        },
+      },
+    },
+  };
+  const result = runAudit(
+    {
+      capability: 'find_top_restaurants_by_cuisine',
+      observedSiblings: [],
+      observedParamValues: {}, // empty — agent didn't UI-click
+      capturedEndpointPaths: new Set(['http://example.test/api/restaurants']),
+    },
+    strategy,
+    {
+      literal_provenance: {
+        endpoint: { caller_input: 'cuisine' },
+      },
+      observed_siblings: {},
+    },
+  );
+  assert.equal(result.status, 'rejected');
+  const issues = result.rejection.classifier_issues || [];
+  const hit = issues.find((i) => /"slug".*caller_input param/.test(i));
+  assert.ok(
+    hit,
+    `expected slug-marker-kind rejection; got: ${JSON.stringify(issues).slice(0, 400)}`,
+  );
+  // Hint redirects to the right shapes; no ack path advertised.
+  assert.match(hit, /kind: "enum" with observed_values/);
+  assert.match(hit, /source: "capability:list_<entity>"/);
+  assert.match(hit, /no ack path/);
+});
+
+test('enum-shape marker kind (slug) WITH source:capability + matching prereq → marker-kind silent', () => {
+  // The escape valve: declaring source:"capability:list_<entity>" defers
+  // value resolution to a sibling list capability that fetches fresh
+  // values at warm-execute. The capability_source_missing_prereq detector
+  // (from earlier sprint) also requires a matching {kind:"capability"}
+  // prerequisite — these two checks compose.
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'http://example.test',
+    endpoint: '/api/restaurants?category={{cuisine}}',
+    method: 'GET',
+    response: { format: 'json' },
+    prerequisites: [
+      {
+        name: 'categories',
+        kind: 'capability',
+        capability: 'list_restaurant_categories',
+        vars: { cuisine: 'categories[0].value' },
+      },
+    ],
+    notes: {
+      params: {
+        cuisine: {
+          description: 'Cuisine category slug',
+          kind: 'slug',
+          source: 'capability:list_restaurant_categories',
+        },
+      },
+    },
+  };
+  // Call the audit directly (bypassing runAudit's two-stage assumption)
+  // so we can inspect the Stage-1 warnings and confirm marker-kind is silent.
+  const first = saveStrategyAudit.process(
+    strategy,
+    {
+      capability: 'find_top_restaurants_by_cuisine',
+      observedSiblings: [],
+      observedParamValues: {},
+      capturedEndpointPaths: new Set(['http://example.test/api/restaurants']),
+    },
+    { acks: {} },
+  );
+  // The save likely rejects on some unrelated dimension; the test only
+  // pins that the slug-marker rejection itself does NOT fire.
+  const classifierIssues = first.rejection?.classifier_issues || [];
+  const warningKinds = (first.rejection?.warnings ?? []).map((w) => w.kind);
+  const slugMarkerInIssues = classifierIssues.some((i) =>
+    /"slug".*caller_input param/.test(i),
+  );
+  assert.equal(
+    slugMarkerInIssues,
+    false,
+    `slug-marker rejection should NOT fire when source:capability is declared with matching prereq; got: ${JSON.stringify(classifierIssues)} warnings=${JSON.stringify(warningKinds)}`,
+  );
+});
+
+test('kind:"text" on caller_input without observations → accepted (free-form is the escape)', () => {
+  // kind:"text" is genuinely free-form caller input (search queries,
+  // message bodies). The slug-marker rejection must NOT fire on text.
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'http://example.test',
+    endpoint: '/api/search?q={{query}}',
+    method: 'GET',
+    response: { format: 'json' },
+    notes: {
+      params: {
+        query: {
+          description: 'Free-form search query',
+          kind: 'text',
+        },
+      },
+    },
+  };
+  const result = runAudit(
+    {
+      capability: 'search_items',
+      observedSiblings: [],
+      observedParamValues: {},
+      capturedEndpointPaths: new Set(['http://example.test/api/search']),
+    },
+    strategy,
+    {
+      literal_provenance: { endpoint: { caller_input: 'query' } },
+      observed_siblings: {},
+    },
+  );
+  // kind:"text" passes the marker-kind check; any other rejection is
+  // out of scope for this test.
+  const issues = result.rejection?.classifier_issues || [];
+  const slugHit = issues.find((i) => /"text".*caller_input param/.test(i));
+  assert.equal(slugHit, undefined, 'kind:"text" must not trigger the marker-kind rejection');
+});
+
 // Static-on-click-observed: when a literal scanned-field value contains a
 // substring that matches a ParamObservation with source.kind="ui_click", the
 // agent cannot escape grounding by classifying the literal as "static". Forces

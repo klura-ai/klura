@@ -772,6 +772,51 @@ function validateCallerInputParamKind(
     issues.push(...validateEnumParam(paramName, declared, observations));
     return issues;
   }
+  // Enum-shape "marker" kinds (slug, email, url, uuid) imply value-from-a-
+  // known-set without carrying the observed_values metadata that enum
+  // requires. Agents pivot to these kinds to escape the kind:"enum"
+  // ≥2-observed-values guard (`ae3a7fa`) — same caller-pick semantics, no
+  // grounding requirement. Repro: v9 llm-tests/enum-grounding — agent
+  // declared `kind: "slug"` on cuisine after navigating directly by URL
+  // (zero ui_click observations); warm-time fuzzy-match against "pizza"
+  // failed because no observed labels existed.
+  //
+  // Refuse without source:"capability:<list_slug>" OR a substantive
+  // structural justification. The agent's two valid moves:
+  //   (1) reclassify as kind:"enum" with observed_values from captures,
+  //   (2) save a sibling list_X capability and declare
+  //       source:"capability:list_X" on this param,
+  //   (3) downgrade to kind:"text" if the param genuinely accepts free-form
+  //       input (search queries, message bodies).
+  // kind:"id" is exempted because id-shaped values are typically
+  // resolved by prereq output (lookup_X_by_Y), not by direct caller pick;
+  // the lookup_sibling_not_referenced and lookup_embedded_in_prereq
+  // detectors already cover that case.
+  const ENUM_SHAPE_MARKER_KINDS: ReadonlyArray<string> = ['slug', 'email', 'url', 'uuid'];
+  if (ENUM_SHAPE_MARKER_KINDS.includes(kind)) {
+    const sourceVal = declared.source;
+    const hasCapabilitySource =
+      typeof sourceVal === 'string' && sourceVal.startsWith('capability:');
+    if (!hasCapabilitySource) {
+      issues.push(
+        `notes.params.${paramName}.kind = ${JSON.stringify(kind)} on a caller_input param implies ` +
+          `"value picked from a known set" — but you declared no source:"capability:<list>" to ` +
+          `enumerate that set, and the schema's observed_values is only valid on kind:"enum". ` +
+          `Warm-execute fuzzy-matches the caller's natural-language intent ("pizza") against ` +
+          `captured labels ("Italian", "Taste the pride of Napoli", etc.) to pick the right value; ` +
+          `without either observed_values or a capability source, the caller's literal goes straight ` +
+          `to the API and the call fails on any rephrasing.\n\n` +
+          `Pick the right shape:\n` +
+          `  • kind: "enum" with observed_values: [{value, label}, ...] grounded in captured (value, label) pairs from UI clicks. If you only saw one option this session, re-do discovery to capture more — kind:"enum" requires ≥2 distinct values.\n` +
+          `  • kind: "enum" with source: "capability:list_<entity>" — save the listing endpoint as its own sibling capability (e.g. list_restaurant_categories), then reference it here. Warm execute fetches fresh values on every call.\n` +
+          `  • kind: "text" — ONLY if this param genuinely accepts free-form input (a search query, a message body, a comment). If you're tempted to pick "text" because "the values look like slugs", that's wrong — the right shape is kind:"enum" with grounding.\n\n` +
+          `Reclassify and re-save. There is no ack path for this rejection: the structural reality is ` +
+          `that "${kind}" without grounding produces a strategy that fails warm-time on any caller ` +
+          `phrasing that doesn't match the example verbatim.`,
+      );
+      return issues;
+    }
+  }
   // Non-enum kind with UI-click observations is suspicious — clicks don't
   // fire for free-text params, they fire for selectable options. Three-layer
   // gate to stop "I'll just classify it as text and move on" canned escapes:
