@@ -11,6 +11,7 @@ import { verifyWsUrlObserved, verifyRecordedPathOverBinaryWs } from '../strategi
 import * as skills from '../strategies/skills';
 import type { Strategy, AuditAnswers } from '../strategies/skills';
 import { commitValidatedStrategy } from '../strategies/skills';
+import { ensureAccumulator } from '../strategies/discovery-artifact';
 import {
   saveStrategyAudit,
   extractAcksFromNotes,
@@ -890,6 +891,48 @@ export async function saveStrategy(
     ? (notes.save_warnings_acked as Array<{ kind: string; reason: string }>)
     : [];
 
+  // Cross-session-resume hint: when the strategy includes a non-trivial
+  // js-eval prereq (the agent reverse-engineered something — chained crypto,
+  // signing routine, request-builder walk) AND the session hasn't dropped a
+  // single artifact breadcrumb yet (no verified_expression, no discovery_note,
+  // no resume_pointer), surface a one-line nudge to ALSO persist the
+  // expression via save_verified_expression. The strategy file is the
+  // runtime; the artifact is the breadcrumb trail that lets graduation,
+  // resume, and cross-session re-derivation skip the discovery work entirely.
+  // Without this nudge the agent commonly ships a strategy with the RE
+  // baked into the prereq and leaves the artifact empty — same content, but
+  // only retrievable by `get_strategy`, not by `list_platform_skills.
+  // discovery_artifact`. Fires only when *all three* artifact channels are
+  // empty for this capability (we don't second-guess an agent who's already
+  // breadcrumbing).
+  const substantiveJsEvalExpr = findSubstantiveJsEvalPrereqExpression(data);
+  let artifactBreadcrumbHint: string | undefined;
+  if (substantiveJsEvalExpr && sessionId) {
+    try {
+      const session = pool.getSession(sessionId);
+      const acc = ensureAccumulator(session);
+      const hasVerified =
+        Array.isArray(acc.verifiedExpressions[capability]) &&
+        acc.verifiedExpressions[capability].length > 0;
+      const hasNotes = Array.isArray(acc.notes[capability]) && acc.notes[capability].length > 0;
+      const hasPointers =
+        Array.isArray(acc.agentResumePointers[capability]) &&
+        acc.agentResumePointers[capability].length > 0;
+      if (!hasVerified && !hasNotes && !hasPointers) {
+        const exprPreview = substantiveJsEvalExpr.slice(0, 60).replace(/\s+/g, ' ');
+        artifactBreadcrumbHint =
+          `Saved strategy includes a substantive js-eval prereq (~${substantiveJsEvalExpr.length} chars: "${exprPreview}…"). ` +
+          `Also call \`save_verified_expression({session_id, capability: "${capability}", expression, returns, binds_args})\` ` +
+          `so the RE work is independently queryable via the discovery artifact — future sessions read it from ` +
+          `\`list_platform_skills().discovery_artifact.verified_expressions\` and can skip re-deriving when graduating ` +
+          `the strategy or resuming partway through. The strategy file is the runtime; the artifact is the breadcrumb trail.`;
+      }
+    } catch {
+      // Session may already be torn down (programmatic save from a test);
+      // hint is best-effort.
+    }
+  }
+
   timings.total_ms = Date.now() - t0;
 
   return {
@@ -909,8 +952,32 @@ export async function saveStrategy(
           },
         }
       : {}),
+    ...(artifactBreadcrumbHint ? { _hint: artifactBreadcrumbHint } : {}),
     timings: { ...timings },
   };
+}
+
+/**
+ * Detect whether the saved strategy carries a `js-eval` prereq whose
+ * `expression` is substantive — i.e. long enough to suggest the agent did
+ * non-trivial RE work to produce it. The 120-char threshold catches multi-
+ * line crypto / signing / decoder routines while skipping one-liner DOM
+ * reads (e.g. `document.cookie`, `window.X.id`). Returns the first matching
+ * expression so the hint can quote a preview.
+ */
+const SUBSTANTIVE_JS_EVAL_MIN_CHARS = 120;
+function findSubstantiveJsEvalPrereqExpression(data: Strategy): string | null {
+  const prereqs = (data as { prerequisites?: unknown }).prerequisites;
+  if (!Array.isArray(prereqs)) return null;
+  for (const p of prereqs) {
+    if (!p || typeof p !== 'object') continue;
+    const pr = p as { kind?: unknown; expression?: unknown };
+    if (pr.kind !== 'js-eval') continue;
+    if (typeof pr.expression !== 'string') continue;
+    if (pr.expression.length < SUBSTANTIVE_JS_EVAL_MIN_CHARS) continue;
+    return pr.expression;
+  }
+  return null;
 }
 
 /**
