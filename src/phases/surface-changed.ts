@@ -14,7 +14,7 @@
 
 import type { Session } from '../drivers/types/session';
 import { isPathDistinct, lookupSurface } from './surface-binding';
-import { currentPhase } from './registry';
+import { currentPhase, currentGraph } from './registry';
 import { dispatch } from './state-machine';
 import { invokeCheckpointAndGate, type CheckpointEnvelope } from '../checkpoints';
 import { composeTriageAuthoringContract } from './triage/triage-authoring-contract';
@@ -25,16 +25,32 @@ export async function maybeFireSurfaceChanged(
   currentUrl: string,
 ): Promise<CheckpointEnvelope | undefined> {
   if (!currentUrl) return undefined;
-  if (!('phase' in session)) {
-    session.lastSurfaceUrl = currentUrl;
-    return undefined;
-  }
+  // `session.phase` is lazy: start_session creates the Session without
+  // stamping `.phase`, and the state machine sets it on first dispatch.
+  // `currentPhase()` already handles the undefined case (resolves to the
+  // active graph's entryPhase), so checking `'phase' in session` here was
+  // overly cautious AND wrong — it false-returned on every fresh session,
+  // suppressing surface_changed across the entire DRIVE phase. Repro: v8
+  // and v10 llm-tests/multi-surface-triage — agent crossed /search →
+  // /checkout, no checkpoint fired, scenario flagged `surfaces_triaged: 1`.
+  // The guard's intent (don't fire on non-session-shaped inputs) is
+  // covered by the callers — both `perform_action` and `js_eval` only
+  // invoke with a real Session from `pool.getSession`.
   const phase = currentPhase(session);
   // From DRIVE, fire only when the agent did real mutating work on the
-  // surface they're leaving — multi-surface flows (search → checkout) need
-  // each side triaged separately, but landing→link nav journeys shouldn't
-  // get spammed with TRIAGE re-entry.
-  const fireFromDrive = phase === 'drive' && !!session.priorSurfaceHadMutation;
+  // surface they're leaving AND the active graph permits the
+  // drive→surface_changed transition. `discover` does; `map` does not
+  // (map's drive is for free exploration; surface_changed only fires from
+  // map's triage/lift). Multi-surface flows (search → checkout) need each
+  // side triaged separately, but landing→link nav journeys shouldn't get
+  // spammed with TRIAGE re-entry, and map shouldn't dispatch an
+  // illegal-transition exception.
+  const graph = currentGraph(session);
+  const graphAllowsDriveSurfaceChange = graph.transitions.some(
+    (t) => t.from === 'drive' && t.on === 'surface_changed',
+  );
+  const fireFromDrive =
+    phase === 'drive' && !!session.priorSurfaceHadMutation && graphAllowsDriveSurfaceChange;
   if (phase !== 'lift' && phase !== 'triage' && !fireFromDrive) {
     session.lastSurfaceUrl = currentUrl;
     return undefined;

@@ -98,7 +98,11 @@ function deriveCapturedUrlSample(session: ContractSession): {
   const seenKeys = new Set<string>();
   const sample: string[] = [];
   const originSet = new Set<string>();
-  for (const req of session.intercepted) {
+  // Defensive: `session.intercepted` is always populated in production
+  // sessions (the driver inits it at session-create), but partial mocks
+  // used in unit tests may omit it. Treat missing as empty.
+  const intercepted = Array.isArray(session.intercepted) ? session.intercepted : [];
+  for (const req of intercepted) {
     if (typeof req.url !== 'string' || req.url.length === 0) continue;
     let parsed: URL;
     try {
@@ -120,7 +124,8 @@ function deriveCapturedUrlSample(session: ContractSession): {
 
 function deriveCiteableArtifactsSample(session: ContractSession): string[] {
   const out = new Set<string>();
-  for (const req of session.intercepted) {
+  const intercepted = Array.isArray(session.intercepted) ? session.intercepted : [];
+  for (const req of intercepted) {
     if (typeof req.url !== 'string' || req.url.length === 0) continue;
     let parsed: URL;
     try {
