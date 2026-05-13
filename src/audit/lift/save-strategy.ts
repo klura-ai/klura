@@ -42,6 +42,7 @@ import {
   detectLookupSiblingNotReferenced,
   type SaveWarning,
 } from '../../gate/save-warnings';
+import { detectSensitiveActionShape } from '../../gate/save-warnings-sensitive-shape';
 import {
   validateLookupPrereqsAreCapabilities,
   type ObservedSiblingItem,
@@ -467,6 +468,25 @@ const lookupSiblingNotReferencedDetector: Detector<Strategy, SaveStrategyCtx> = 
   ackReason: 'required',
 };
 
+// Refuses save when strategy body or notes.params surface sensitive-shape
+// field names (card_number, cvv, ssn, bank_account, password in body,
+// etc.). The right tool for capturing those endpoints is
+// `record_observed_capability` — save_strategy persists a runnable
+// strategy the runtime fires on every warm execute, which for payment /
+// identity / credential surfaces means firing the real action.
+//
+// `ackReason: 'none'` — the registered save-confirmation decider auto-
+// resolves the user_confirmation Classifier, not Detectors. Bench
+// harnesses that auto-approve safe saves still get that behavior; saves
+// targeting irreversible / PII-bearing endpoints stay refused at the
+// audit layer, before commit. Repro: v8 platform-map/map-lift-safe —
+// agent saved `place_order` with body {address, card_number, exp, cvv}.
+const sensitiveActionShapeDetector: Detector<Strategy, SaveStrategyCtx> = {
+  kind: 'sensitive_action_must_be_recorded_not_saved',
+  detect: (data) => asIssues(detectSensitiveActionShape(data)),
+  ackReason: 'none',
+};
+
 const enumValueInCapabilitySlugDetector: Detector<Strategy, SaveStrategyCtx> = {
   kind: 'enum_value_baked_into_slug',
   detect: (data, ctx) => asIssues(detectEnumValueInCapabilitySlug(data, ctx.capability)),
@@ -761,6 +781,7 @@ export const saveStrategyAudit = new Audit<Strategy, SaveStrategyCtx>({
     enumParamListingUnfactoredDetector,
     capabilitySourcePrereqMismatchDetector,
     lookupSiblingNotReferencedDetector,
+    sensitiveActionShapeDetector,
     enumValueInCapabilitySlugDetector,
     endpointCollidesWithSavedCapabilityDetector,
     unobservedUrlDetector,
