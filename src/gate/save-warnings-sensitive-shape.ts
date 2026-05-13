@@ -102,6 +102,21 @@ function collectKeyNames(value: unknown, out: Set<string>): void {
  */
 export function detectSensitiveActionShape(data: Strategy): SaveWarning[] {
   const d = data as Record<string, unknown>;
+  // Login / auth-establishing capabilities legitimately carry `password`
+  // (and sometimes `pin`) in their body — that's what an authenticate-with-
+  // credentials submission IS. The canonical klura pattern is a login
+  // capability declaring `provides: ["auth"]` so sibling capabilities chain
+  // through `prerequisites: [{kind: "tag", tag: "auth"}]`. When `provides`
+  // names `"auth"`, the agent has explicitly owned the auth flow and the
+  // credential-submit shape is the contract, not a leak. Repro: v9
+  // llm-tests/login-sharing — the detector blocked the login save, the
+  // agent pivoted to `record_observed_capability`, and downstream list /
+  // create capabilities lost their auth-prereq chain. False positive
+  // closes here.
+  const provides = d.provides;
+  if (Array.isArray(provides) && provides.some((p) => p === 'auth')) {
+    return [];
+  }
   const keys = new Set<string>();
   collectKeyNames(d.body, keys);
   collectKeyNames(d.notes, keys);

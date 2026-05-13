@@ -169,3 +169,45 @@ test('no body, no params → no fire (sanity check on bare-shell strategies)', (
   const strategy = { strategy: 'fetch', method: 'GET', endpoint: '/api/x' };
   assert.deepEqual(detectSensitiveActionShape(strategy), []);
 });
+
+test('provides: ["auth"] suppresses the detector (login capability is the canonical credential-submit)', () => {
+  // The login capability HAS to carry username + password in body — that's
+  // the shape of an authenticate-with-credentials submission. Declaring
+  // `provides: ["auth"]` is the agent's explicit ownership of the auth
+  // flow; sibling capabilities chain through {kind: "tag", tag: "auth"}.
+  // The detector must skip this case or it blocks the canonical pattern.
+  // Repro from v9 login-sharing: detector fired on a legit login save,
+  // agent pivoted to record_observed_capability, downstream list/create
+  // strategies lost their auth-prereq chain.
+  const strategy = {
+    strategy: 'fetch',
+    method: 'POST',
+    baseUrl: 'http://example.test',
+    endpoint: '/login',
+    contentType: 'form',
+    body: {
+      username: '{{username}}',
+      password: '{{password}}',
+    },
+    provides: ['auth'],
+  };
+  assert.deepEqual(
+    detectSensitiveActionShape(strategy),
+    [],
+    'provides: ["auth"] must suppress the credential-submit warning',
+  );
+});
+
+test('provides: ["something-else"] still fires (only "auth" gets the escape)', () => {
+  // The auth escape is specific to declared auth-providing capabilities.
+  // A strategy declaring some other `provides:` value (e.g. for a
+  // hypothetical typed prereq tag) doesn't get the credential-submit pass.
+  const strategy = {
+    strategy: 'fetch',
+    method: 'POST',
+    body: { card_number: '{{cn}}', cvv: '{{cvv}}' },
+    provides: ['payment'], // not an existing klura tag; treated as not "auth"
+  };
+  const w = detectSensitiveActionShape(strategy);
+  assert.equal(w.length, 1);
+});
