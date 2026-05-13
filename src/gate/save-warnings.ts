@@ -451,7 +451,9 @@ export function detectLookupEmbeddedInPrereq(data: Strategy, capability?: string
         `search have to re-write the same expression. See klura://reference#capability-prereq.`,
       hint:
         `Save GET ${url} as its own capability first (lookup_${entityGuess}_by_<key>), then reference it ` +
-        `as a capability: prereq here. If you have a reason to keep it inline, ack with a one-sentence reason.`,
+        `as a capability: prereq here. There is no ack path for this warning — even when this is the only ` +
+        `known caller today, factoring the lookup as a sibling capability is the structural shape klura ` +
+        `composes around (\`{kind: "capability"}\` prereqs read it back at warm execute).`,
     });
   };
 

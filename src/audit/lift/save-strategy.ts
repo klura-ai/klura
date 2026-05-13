@@ -362,10 +362,22 @@ const prereqBindKeyMismatchDetector: Detector<Strategy, SaveStrategyCtx> = {
   ackReason: 'required',
 };
 
+// ackReason: 'none'. The agent's escape on this warning was an easy
+// rationalization slot — "this search is integral to the flow", "the
+// lookup is special-purpose", etc. — none of which are structural reasons
+// to inline. Repro: llm-tests/multi-surface-triage/two-surface-flow v8.
+// Agent saved a `complete_checkout` strategy with an inline `/api/search`
+// fetch-extract prereq and acked the warning with "Search is an integral
+// step of the checkout flow per user specification, not a standalone
+// reusable lookup." The save landed; the scenario flagged it broken
+// because the search surface wasn't triaged or saved separately. The
+// right shape is always to factor the lookup into its own sibling
+// capability — even when the use-site is the only known caller today, the
+// runtime composes via `{kind: "capability"}` prereqs.
 const lookupEmbeddedInPrereqDetector: Detector<Strategy, SaveStrategyCtx> = {
   kind: 'lookup_embedded_in_prereq',
   detect: (data, ctx) => asIssues(detectLookupEmbeddedInPrereq(data, ctx.capability)),
-  ackReason: 'required',
+  ackReason: 'none',
 };
 
 const authGatedWithoutAuthPrereqDetector: Detector<Strategy, SaveStrategyCtx> = {

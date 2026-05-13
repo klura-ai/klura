@@ -108,7 +108,14 @@ function runAudit(partialCtx, strategy, answers) {
   return saveStrategyAudit.process(strategy, ctx, { token, answers: mergedAnswers, acks });
 }
 
-test('harden: justification rejected when slug has _by_ AND js-eval prereq fetches /search', () => {
+test('inline lookup in js-eval prereq → unacked_warnings rejection (ackReason: none)', () => {
+  // Inline /search lookups must be factored into sibling capabilities. The
+  // capability_name_justification harden was a softer Layer-2 ack-validator
+  // that this Detector now supersedes: lookup_embedded_in_prereq is
+  // ackReason: 'none' (live-repro source: llm-tests/multi-surface-triage
+  // v8, agent acked through with rationalization prose). The strategy
+  // never reaches the classifier_issues stage — the audit rejects at the
+  // Stage-1 unacked_warnings layer.
   const strategy = {
     strategy: 'page-script',
     baseUrl: 'https://site.example.com',
@@ -135,28 +142,26 @@ test('harden: justification rejected when slug has _by_ AND js-eval prereq fetch
       },
     },
   };
-  const result = runAudit(
+  const first = saveStrategyAudit.process(
+    strategy,
     {
       capability: 'send_message_by_name',
       observedSiblings: [],
       observedParamValues: {},
       capturedEndpointPaths: new Set(),
     },
-    strategy,
-    {
-      literal_provenance: {
-        'endpoint': 'static',
-      },
-      capability_name_justification: 'the name describes send-by-recipient',
-      observed_siblings: {},
-    },
+    { acks: {} },
   );
-  assert.equal(result.status, 'rejected');
-  const issues = result.rejection.classifier_issues || [];
-  const hit = issues.find((i) => /Justification is not accepted/.test(i));
-  assert.ok(hit, `expected harden reject, got: ${JSON.stringify(issues)}`);
-  assert.match(hit, /send_message_by_name/);
-  assert.match(hit, /\/api\/members\/search/);
+  assert.equal(first.status, 'rejected');
+  assert.equal(first.rejection.reason, 'unacked_warnings');
+  const kinds = (first.rejection.warnings ?? []).map((w) => w.kind);
+  assert.ok(
+    kinds.includes('lookup_embedded_in_prereq'),
+    `expected lookup_embedded_in_prereq warning, got: ${JSON.stringify(kinds)}`,
+  );
+  // Hint redirects to the factored shape; no ack path advertised.
+  const warning = first.rejection.warnings.find((w) => w.kind === 'lookup_embedded_in_prereq');
+  assert.match(warning.hint, /no ack path/);
 });
 
 test('harden: justification accepted when slug has _by_ but prereq URL is not a lookup', () => {
@@ -209,7 +214,11 @@ test('harden: justification accepted when slug has _by_ but prereq URL is not a 
   assert.equal(hardenHit, undefined, `harden should NOT fire; got: ${JSON.stringify(issues)}`);
 });
 
-test('harden: justification rejected when slug has _by_ AND page-script.script body fetches /search', () => {
+test('inline lookup in page-script body → unacked_warnings rejection (ackReason: none)', () => {
+  // Same gate as the js-eval-prereq case above, but the inline lookup
+  // lives in `script` (the page-script body itself) instead of a prereq.
+  // collectExecutableJsStrings walks all JS-body surfaces uniformly, so
+  // the detector fires identically and ackReason: 'none' blocks commit.
   const strategy = {
     strategy: 'page-script',
     baseUrl: 'https://site.example.com',
@@ -217,7 +226,6 @@ test('harden: justification rejected when slug has _by_ AND page-script.script b
     method: 'POST',
     headers: {},
     body: { text: '{{text}}' },
-    // No prereq declared — the lookup is inlined in the page-script body.
     script:
       "(async()=>{ const r = await fetch('/api/members/search?q=' + args.name); const j = await r.json(); return j.results[0].id; })()",
     notes: {
@@ -227,28 +235,23 @@ test('harden: justification rejected when slug has _by_ AND page-script.script b
       },
     },
   };
-  const result = runAudit(
+  const first = saveStrategyAudit.process(
+    strategy,
     {
       capability: 'send_message_by_name',
       observedSiblings: [],
       observedParamValues: {},
       capturedEndpointPaths: new Set(),
     },
-    strategy,
-    {
-      literal_provenance: {
-        'endpoint': 'static',
-      },
-      capability_name_justification: 'the name describes send-by-recipient',
-      observed_siblings: {},
-    },
+    { acks: {} },
   );
-  assert.equal(result.status, 'rejected');
-  const issues = result.rejection.classifier_issues || [];
-  const hit = issues.find((i) => /Justification is not accepted/.test(i));
-  assert.ok(hit, `expected harden reject for inline script body, got: ${JSON.stringify(issues)}`);
-  assert.match(hit, /send_message_by_name/);
-  assert.match(hit, /\/api\/members\/search/);
+  assert.equal(first.status, 'rejected');
+  assert.equal(first.rejection.reason, 'unacked_warnings');
+  const kinds = (first.rejection.warnings ?? []).map((w) => w.kind);
+  assert.ok(
+    kinds.includes('lookup_embedded_in_prereq'),
+    `expected lookup_embedded_in_prereq warning, got: ${JSON.stringify(kinds)}`,
+  );
 });
 
 test('harden path: capability-method prereq (proper split) — no justification needed, commit passes', () => {
