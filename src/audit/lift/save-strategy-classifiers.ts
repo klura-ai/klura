@@ -139,11 +139,20 @@ export const literalProvenanceClassifier: Classifier<Strategy, SaveStrategyCtx, 
         );
       }
     }
+    // Roll up the session's mutating perform_action count for the URL-
+    // bypass detector inside validateCallerInputKindsAndEnums. Mutating =
+    // click / type / fill_editor / select / key_press; navigate doesn't
+    // count (the v10 enum-grounding bypass was a single navigate with no
+    // real interaction). Omitting the count falls back to a broader check.
+    const MUTATING_ACTIONS = new Set(['click', 'type', 'fill_editor', 'select', 'key_press']);
+    const history = ctx.session?.performActionHistory ?? [];
+    const mutatingActionCount = history.filter((h) => MUTATING_ACTIONS.has(h.action)).length;
     issues.push(
       ...validateCallerInputKindsAndEnums(
         data,
         effective as Record<string, AuditAnswers['literal_provenance'][string]>,
         ctx.observedParamValues,
+        mutatingActionCount,
       ),
     );
     return issues;

@@ -603,6 +603,150 @@ test('enum-shape marker kind (slug) WITH source:capability + matching prereq →
   );
 });
 
+test('kind:"text" URL-query-value with example in discovered_from_url + 0 mutating actions → rejected', () => {
+  // v10 enum-grounding repro: agent navigated directly to
+  // /top-restaurants?category=italian (one navigate action, no clicks),
+  // then saved cuisine: {kind:"text", example:"italian"}. The new branch
+  // catches this by combining (a) kind:text/id on URL query value, (b)
+  // zero observations, (c) example appears verbatim in
+  // runtime_meta.discovered_from_url, (d) zero mutating perform_actions.
+  // All four conjuncts together separate this from a legitimate search-
+  // endpoint save.
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'http://example.test',
+    endpoint: '/api/restaurants?category={{cuisine}}',
+    method: 'GET',
+    response: { format: 'json' },
+    notes: {
+      params: {
+        cuisine: {
+          description: 'Cuisine category',
+          kind: 'text',
+          example: 'italian',
+        },
+      },
+    },
+    runtime_meta: {
+      discovered_from_url: 'http://example.test/top-restaurants?category=italian',
+    },
+  };
+  const first = saveStrategyAudit.process(
+    strategy,
+    {
+      capability: 'find_top_restaurants_by_cuisine',
+      observedSiblings: [],
+      observedParamValues: {},
+      capturedEndpointPaths: new Set(['http://example.test/api/restaurants']),
+      session: {
+        performActionHistory: [
+          { at: 1, action: 'navigate', url: 'http://example.test/top-restaurants?category=italian' },
+        ],
+      },
+    },
+    { acks: {} },
+  );
+  // The rejection fires AFTER the audit token mints — the agent must answer
+  // literal_provenance first, then the second pass surfaces the kind-text
+  // url-bypass rejection. Walk to the rejection with answers.
+  const second = saveStrategyAudit.process(
+    strategy,
+    {
+      capability: 'find_top_restaurants_by_cuisine',
+      observedSiblings: [],
+      observedParamValues: {},
+      capturedEndpointPaths: new Set(['http://example.test/api/restaurants']),
+      session: {
+        performActionHistory: [
+          { at: 1, action: 'navigate', url: 'http://example.test/top-restaurants?category=italian' },
+        ],
+      },
+    },
+    {
+      token: first.rejection.token,
+      answers: {
+        literal_provenance: { endpoint: { caller_input: 'cuisine' } },
+        observed_siblings: {},
+      },
+    },
+  );
+  assert.equal(second.status, 'rejected');
+  const issues = second.rejection.classifier_issues || [];
+  const hit = issues.find((i) => /baked the landing-URL value into the save|appears verbatim in runtime_meta\.discovered_from_url/.test(i));
+  assert.ok(hit, `expected url-bypass rejection; got: ${JSON.stringify(issues).slice(0, 400)}`);
+  assert.match(hit, /no ack path/);
+});
+
+test('kind:"text" search endpoint with ≥1 mutating action → accepted (search-flow gate)', () => {
+  // Negative case: legitimate search endpoint. Agent typed "thai" + clicked
+  // Search button (2 mutating actions). The discovered_from_url HAPPENS to
+  // contain the search literal too — same example-in-url match as the v10
+  // bypass shape — but the mutatingActionCount > 0 separates them. Save
+  // commits (modulo unrelated audit dimensions).
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'http://example.test',
+    endpoint: '/search?q={{query}}',
+    method: 'GET',
+    response: { format: 'html', extract: { items: { selector: 'a', multiple: true } } },
+    notes: {
+      params: {
+        query: { kind: 'text', example: 'thai' },
+      },
+    },
+    runtime_meta: {
+      discovered_from_url: 'http://example.test/search?q=thai',
+    },
+  };
+  const first = saveStrategyAudit.process(
+    strategy,
+    {
+      capability: 'search_items',
+      observedSiblings: [],
+      observedParamValues: {},
+      capturedEndpointPaths: new Set(['http://example.test/search']),
+      session: {
+        performActionHistory: [
+          { at: 1, action: 'type', selector: 'searchbox', value: 'thai' },
+          { at: 2, action: 'click', selector: 'button "Search"' },
+        ],
+      },
+    },
+    { acks: {} },
+  );
+  const second = saveStrategyAudit.process(
+    strategy,
+    {
+      capability: 'search_items',
+      observedSiblings: [],
+      observedParamValues: {},
+      capturedEndpointPaths: new Set(['http://example.test/search']),
+      session: {
+        performActionHistory: [
+          { at: 1, action: 'type', selector: 'searchbox', value: 'thai' },
+          { at: 2, action: 'click', selector: 'button "Search"' },
+        ],
+      },
+    },
+    {
+      token: first.rejection.token,
+      answers: {
+        literal_provenance: { endpoint: { caller_input: 'query' } },
+        observed_siblings: {},
+      },
+    },
+  );
+  const issues = second.rejection?.classifier_issues || [];
+  const bypassHit = issues.find((i) =>
+    /baked the landing-URL value into the save|appears verbatim in runtime_meta\.discovered_from_url/.test(i),
+  );
+  assert.equal(
+    bypassHit,
+    undefined,
+    `url-bypass rejection must NOT fire on search flow with ≥1 mutating action; got: ${JSON.stringify(issues).slice(0, 400)}`,
+  );
+});
+
 test('kind:"text" on caller_input without observations → accepted (free-form is the escape)', () => {
   // kind:"text" is genuinely free-form caller input (search queries,
   // message bodies). The slug-marker rejection must NOT fire on text.

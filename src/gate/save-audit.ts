@@ -12,6 +12,7 @@
 // validateCallerInputKindsAndEnums, validateLookupPrereqsAreCapabilities.
 
 import { collectExecutableJsStrings } from './save-warnings';
+import { detectUrlBypassedFilter } from './save-warnings-url-bypass';
 import type { Strategy } from '../strategies/skills';
 import type { ParamObservation } from '../response/session-observations';
 import { closestAllowedCandidates, formatCandidateList } from '../validators';
@@ -900,6 +901,17 @@ export function validateCallerInputKindsAndEnums(
   data: Strategy,
   provenance: Record<string, LiteralClassification>,
   observedParamValues: Record<string, ParamObservation[]>,
+  /** Per-session mutating-action count. Optional; when supplied, the
+   *  discovered-URL-bypass detector below ALSO checks that the session has
+   *  zero mutating perform_actions before firing. The full discriminator
+   *  separates the v10 enum-grounding shape (0 clicks/types, agent
+   *  navigated directly to a pre-filtered URL) from a legitimate search
+   *  endpoint (agent typed into a search box, clicked the search button —
+   *  2+ mutating actions). When omitted, the detector skips the
+   *  mutating-action gate and relies solely on the discovered_from_url
+   *  example-match — broader, but still narrowly scoped to the verbatim-
+   *  match shape. */
+  mutatingActionCount?: number,
 ): string[] {
   const callerInputParams = new Set<string>();
   for (const classification of Object.values(provenance)) {
@@ -923,6 +935,21 @@ export function validateCallerInputKindsAndEnums(
       ),
     ];
     issues.push(...validateCallerInputParamKind(paramName, declared, observations));
+
+    // URL-bypass detector lives in save-warnings-url-bypass.ts (extracted
+    // for file-size; the conjunction is narrow enough that the rejection
+    // string is the load-bearing surface). Catches the v10 enum-grounding
+    // shape: agent declared kind:"text"/"id" on a URL-query-value param
+    // whose example value appears verbatim in discovered_from_url, with
+    // zero observations and zero mutating perform_actions.
+    const bypassIssue = detectUrlBypassedFilter(
+      data,
+      paramName,
+      declared,
+      observations.length,
+      mutatingActionCount,
+    );
+    if (bypassIssue !== null) issues.push(bypassIssue);
   }
   return issues;
 }
