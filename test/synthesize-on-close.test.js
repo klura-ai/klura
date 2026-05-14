@@ -281,6 +281,73 @@ test('synth_fetch saves body as object + contentType:"form" for form-urlencoded 
   assert.deepEqual(saved.body, { text: '{{text}}', id: '42' });
 });
 
+test('synth_fetch skips auto-save with sensitive_action_shape diagnostic when body has card/cvv/ssn fields', async () => {
+  // Repro: v11 llm-tests/platform-map/map-lift-safe. Agent declared
+  // address/card_number/exp/cvv args without typing the values; end_drive
+  // name-affinity-matched the captured POST /api/checkout to place_order
+  // and synthesized a runnable strategy templating those four sensitive
+  // fields. The saveStrategyAudit's sensitive_action_must_be_recorded_-
+  // not_saved Detector catches explicit saves, but auto-synth bypasses
+  // the audit. Same structural check fires here at the synth layer:
+  // sensitive-shape body → skip the auto-save, diagnostic notes the
+  // matched labels, no strategy file lands on disk.
+  const session = mkSession({
+    declaredCapabilities: [
+      {
+        capability: 'place_order',
+        args: {
+          address: '123 Main St',
+          card_number: '4111111111111111',
+          exp: '12/28',
+          cvv: '123',
+        },
+      },
+    ],
+    performActionHistory: [
+      { at: Date.now() - 1000, action: 'type', selector: 'input', value: '4111111111111111' },
+      { at: Date.now() - 500, action: 'click', selector: 'button "Pay"' },
+    ],
+    intercepted: [
+      mkPostReq({
+        url: 'https://api.example.com/api/checkout',
+        postData: JSON.stringify({
+          address: '123 Main St',
+          card_number: '4111111111111111',
+          exp: '12/28',
+          cvv: '123',
+        }),
+      }),
+    ],
+  });
+  session.platform = 'test-synth-fetch-sensitive';
+
+  const diag = [];
+  const out = await synthesizeFallbacksOnClose(session, session.platform, null, diag);
+
+  // No strategy file should land on disk for this capability.
+  const placeOrderSaves = out.filter((r) => /place_order\.json$/.test(r.path));
+  assert.equal(
+    placeOrderSaves.length,
+    0,
+    `place_order auto-save must NOT land; got: ${JSON.stringify(out)}`,
+  );
+
+  const skipped = diag.filter(
+    (d) => d.pass === 'synth_fetch' && d.outcome === 'sensitive_action_shape',
+  );
+  assert.equal(
+    skipped.length,
+    1,
+    `expected one sensitive_action_shape diagnostic, got: ${JSON.stringify(diag)}`,
+  );
+  const detail = skipped[0]?.detail ?? {};
+  // The matched labels include the categories the body fields trigger.
+  assert.ok(
+    Array.isArray(detail.matched_labels) && detail.matched_labels.length > 0,
+    `expected matched_labels in diagnostic; got: ${JSON.stringify(skipped[0])}`,
+  );
+});
+
 test('synth_fetch skips auto-save with body_unparseable diagnostic when body is neither JSON nor form', async () => {
   // Templating the literal into a non-string JSON position breaks the JSON
   // shape: `{"id":12345}` + literal `12345` becomes `{"id":{{id}}}` which

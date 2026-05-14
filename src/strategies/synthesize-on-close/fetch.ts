@@ -21,6 +21,7 @@ import {
   type LiteralMatch,
 } from './literals';
 import { detectParameterizationDisclosureRequired } from '../../gate/save-warnings-parameterization';
+import { detectSensitiveActionShape } from '../../gate/save-warnings-sensitive-shape';
 import { buildStepsFromHistory } from './recorded-path';
 import type { AutoSynthResult, SaveMarker, SynthDiagnosticEntry } from './types';
 import { templateRequestFromVEs, type EvaluatedVE } from './verified-expressions';
@@ -475,6 +476,40 @@ export function synthesizeFetchFromCaptures(
       strategy,
       detectParameterizationDisclosureRequired(strategy as never),
     );
+
+    // Sensitive-shape gate: when the auto-synthesized strategy's body /
+    // notes.params surface payment-instrument, identity, banking, or
+    // credential-submit field names (card_number, cvv, ssn, etc.) the
+    // strategy must NOT be persisted as a runnable strategy — the
+    // canonical klura shape for those endpoints is record_observed_-
+    // capability, which captures the structural fact without producing a
+    // runtime that fires the real action on every warm execute. The
+    // saveStrategyAudit's sensitive_action_must_be_recorded_not_saved
+    // Detector covers explicit save_strategy calls; auto-synth bypasses
+    // that audit (no sessionId passed), so the same structural check
+    // must fire here. Repro: v11 llm-tests/platform-map/map-lift-safe
+    // — agent declared address/card_number/exp/cvv args, never typed
+    // them; end_drive name-affinity-matched the captured POST
+    // /api/checkout to place_order and synthesized a runnable strategy
+    // templating the four sensitive fields.
+    const sensitiveWarnings = detectSensitiveActionShape(strategy as never);
+    const firstSensitive = sensitiveWarnings[0];
+    if (firstSensitive) {
+      const ctx = firstSensitive.context as { matched_labels?: unknown } | undefined;
+      diag.push({
+        pass: 'synth_fetch',
+        capability: save.capability,
+        phase: 'skip',
+        outcome: 'sensitive_action_shape',
+        detail: {
+          baseUrl,
+          endpoint,
+          method: req.method,
+          matched_labels: Array.isArray(ctx?.matched_labels) ? ctx.matched_labels : [],
+        },
+      });
+      continue;
+    }
 
     try {
       const path = skills.saveStrategy(platform, save.capability, strategy as never);
