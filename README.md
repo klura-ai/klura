@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<p align="center"><strong>Run a browser task once. Skip the UI forever.</strong></p>
+<p align="center"><strong>Your agent learns a website once. Every run after is a direct API call — zero tokens, no browser.</strong></p>
 
 <p align="center">
   <a href="https://discord.gg/YJQ2zZYJ"><img alt="Discord" src="https://img.shields.io/discord/1496415213765791774?color=5865F2&label=Discord&logo=discord&logoColor=white&style=flat-square"></a>
@@ -32,6 +32,15 @@ Later:
   direct saved strategy → ~0.3s · 0 tokens
 ```
 
+Browser agents pay for the UI on every run. Klura pays once.
+
+|  | Hacker News search | GitHub create issue | Messenger send message |
+| --- | --: | --: | --: |
+| Plain browser agent — every run | 22.9s · 63k tok · $0.05 | 160s · 634k tok · $0.29 | 134s · 435k tok · $1.06 |
+| **Klura, warm — no LLM in the loop** | **0.33s · 0 tok · $0** | **1.23s · 0 tok · $0** | **5ms · 0 tok · $0** |
+
+<sub>The first klura run costs a normal browser-agent run plus one-time reverse-engineering — full table and method in <a href="#benchmarks">Benchmarks</a>.</sub>
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="hero-dark.gif">
@@ -55,7 +64,8 @@ The next time your agent needs the same task, it does not rediscover the page. I
   <a href="#under-the-hood">Under the Hood</a> &nbsp;·&nbsp;
   <a href="#use-cases">Use Cases</a> &nbsp;·&nbsp;
   <a href="#legal--tos">Legal &amp; ToS</a> &nbsp;·&nbsp;
-  <a href="#docs">Docs</a>
+  <a href="#docs">Docs</a> &nbsp;·&nbsp;
+  <a href="#get-involved">Get Involved</a>
 </sub></p>
 
 ---
@@ -327,27 +337,21 @@ The agent stays in the loop when judgment is needed. The runtime takes over when
 
 ## Benchmarks
 
-The point of LIFT is that the second run looks nothing like the first.
-
-First run: slow, like any browser agent.
-
-Second run: direct execution.
-
-That is the whole point.
+Same task, same Claude model, same agent loop on both sides — the only difference is whether klura has seen the task before.
 
 |  | Hacker News search | GitHub create issue[^github-re] | Messenger send message[^messenger-re] |
 | --- | --: | --: | --: |
-| Raw Playwright agent | 22.9s · 63k tok · $0.054 | 160s · 634k tok · $0.29 | 134s · 435k tok · $1.06 |
-| Klura cold — discovery + LIFT[^cold-includes-lift] | 43.8s · 363k tok · $0.191 | 318s · 1.29M tok · $0.84 | 1469s · 1.78M tok · $1.56 |
-| Klura warm — runtime only[^runtime-only] | **0.33s · 0 tok · $0** | **1.23s · 0 tok · $0** | **5ms · 0 tok · $0** |
+| Plain browser agent — paid every run | 22.9s · 63k tok · $0.054 | 160s · 634k tok · $0.29 | 134s · 435k tok · $1.06 |
+| **Klura warm — runtime only**[^runtime-only] | **0.33s · 0 tok · $0** | **1.23s · 0 tok · $0** | **5ms · 0 tok · $0** |
+| Klura cold — first run only[^cold-includes-lift] | 43.8s · 363k tok · $0.191 | 318s · 1.29M tok · $0.84 | 1469s · 1.78M tok · $1.56 |
 
-Cold includes the actual browser task plus one-time reverse-engineering work.
+**Warm** is the runtime call itself — no LLM in the loop, deterministic replay. This is what every run after the first costs: usually one request.
 
-Warm is the runtime call itself, with no LLM in the loop.
+**Cold** is the one-time tax. The agent first completes the task like any browser agent (roughly the "plain browser agent" row), then reverse-engineers the protocol and saves a runnable strategy. Hard sites cost more here — Messenger's send path is a binary MQTT frame with snowflake IDs and an in-page codec, so cold is ~24 minutes of work that the next thousand sends never pay again.
 
-When klura is wrapped inside an agent SDK, MCP host, or conversational loop, the host may still spend extra LLM turns to decide to call the saved skill and report the result. The saved strategy execution itself is what the warm row measures.
+When klura runs inside an agent SDK, MCP host, or conversational loop, the host may still spend a couple of LLM turns deciding to call the saved skill and reporting the result. The warm row measures the saved-strategy execution itself.
 
-Benchmark suite will be released soon for reproducibility.
+The benchmark harness runs both columns through the same Claude model and the same Agent SDK loop against live public sites — built so the numbers aren't a self-report. Full method and reproducible results are published alongside the runtime.
 
 [^cold-includes-lift]: Klura cold time includes discovery, triage, and LIFT. The agent first completes the user's task, then reverse-engineers the protocol and persists a runnable strategy. The actual sending or searching portion is roughly comparable to the raw Playwright row; the remainder is one-time work that amortizes across future runs.
 
@@ -602,6 +606,19 @@ Start here:
 - [docs/trust.md](docs/trust.md) — trust model and operational guidance
 - [docs/remote.md](docs/remote.md) — live viewer and human handoff
 - [docs/interruptions.md](docs/interruptions.md) — CAPTCHA, 2FA, passwords, and blockers
+
+---
+
+## Get Involved
+
+Klura is new and moving fast. If the idea resonates:
+
+- ⭐ **Star the repo** to follow along.
+- 💬 **Join the [Discord](https://discord.gg/YJQ2zZYJ)** — discovery walkthroughs, what's breaking, what's next.
+- 🐛 **Open an issue** naming a site you wish your agent could just _use_. Real workflows drive what gets built.
+- 🔧 **Contribute** a driver, transport, prerequisite method, or benchmark site — see [Contributing](#contributing).
+
+The single most useful thing you can do: point klura at the most annoying internal tool you have, watch run 1 versus run 2, and tell us what broke.
 
 ---
 
