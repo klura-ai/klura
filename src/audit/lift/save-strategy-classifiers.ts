@@ -278,10 +278,24 @@ export const observedSiblingsClassifier: Classifier<Strategy, SaveStrategyCtx, u
 // fall through to the prompt path so the agent sees the rejection and
 // can surface it to the user via the existing flow.
 //
-// hashFields is intentionally omitted (binds to the whole strategy). Every
-// distinct save shape needs its own user approval — changing any field
-// (tier, anchor_type, prereqs, headers, body, even notes) invalidates the
-// approval and forces a fresh ask.
+// hashFields binds to strategy-IDENTITY (see extractUserConfirmationSlice
+// below): capability slug, tier, target, anchor_type (page-script), prereq
+// names + kinds + bind-keys, request shape (body/header KEYS only,
+// response.extract KEYS only), recorded-path step count + action histogram
+// + locator-mix discriminator, and warning kinds (emitted + acked).
+// DELIBERATELY OUT: prereq url / expression / vars selectors / args;
+// body / header / step VALUES; response.extract selectors; warning
+// message/hint prose. The principle: invalidate the user's approval iff
+// the strategy's mental-model shape changed, not when the agent rewrote a
+// selector during probe recovery.
+//
+// Smuggling surface accepted: an agent could swap a page-extract selector
+// to scrape a different DOM cell while preserving the prereq's output
+// name (e.g. user approved "delivery_date" but extraction now reads
+// price). literal_provenance + unobserved_url Detector + save-time probe
+// + the downstream caller's own param validation constrain the gaming.
+// The selector-swap-during-probe-recovery loop motivated this slice —
+// paying that imprecision is the explicit trade.
 
 interface RequiredFacts {
   capability: string;
@@ -333,6 +347,160 @@ function extractRequiredFacts(data: Strategy, ctx: SaveStrategyCtx): RequiredFac
     target,
     anchor_type,
     warning_kinds,
+  };
+}
+
+interface UserConfirmationSlice extends RequiredFacts {
+  request_shape: {
+    method: string | null;
+    body_keys: string[];
+    header_keys: string[];
+    response_extract_keys: string[];
+    response_from: string | null;
+    protocol: string | null;
+  } | null;
+  prereq_identity: Array<{
+    name: string;
+    kind: string;
+    binds: string | null;
+    bind_keys: string[];
+    capability_target: string | null;
+    tag_target: string | null;
+  }> | null;
+  recorded_path_shape: {
+    step_count: number;
+    actions: Array<{ action: string; count: number }>;
+    locator_mix: 'a11y' | 'css' | 'none';
+  } | null;
+  acked_warning_kinds: string[];
+}
+
+function extractAckedWarningKinds(data: Strategy): string[] {
+  const s = data as Record<string, unknown>;
+  const notes =
+    s.notes && typeof s.notes === 'object' ? (s.notes as Record<string, unknown>) : undefined;
+  const acked = Array.isArray(notes?.save_warnings_acked)
+    ? (notes.save_warnings_acked as unknown[])
+    : [];
+  const kinds = new Set<string>();
+  for (const a of acked) {
+    if (a && typeof a === 'object') {
+      const k = (a as { kind?: unknown }).kind;
+      if (typeof k === 'string') kinds.add(k);
+    }
+  }
+  return Array.from(kinds).sort((a, b) => a.localeCompare(b));
+}
+
+function extractRequestShape(data: Strategy): UserConfirmationSlice['request_shape'] {
+  const s = data as Record<string, unknown>;
+  const tier = typeof s.strategy === 'string' ? s.strategy : 'unknown';
+  if (tier !== 'fetch' && tier !== 'page-script') return null;
+  const method = typeof s.method === 'string' ? s.method : null;
+  const body =
+    s.body && typeof s.body === 'object' && !Array.isArray(s.body)
+      ? (s.body as Record<string, unknown>)
+      : null;
+  const body_keys = body ? Object.keys(body).sort((a, b) => a.localeCompare(b)) : [];
+  const headers =
+    s.headers && typeof s.headers === 'object' && !Array.isArray(s.headers)
+      ? (s.headers as Record<string, unknown>)
+      : null;
+  const header_keys = headers
+    ? Object.keys(headers)
+        .map((k) => k.toLowerCase())
+        .sort((a, b) => a.localeCompare(b))
+    : [];
+  const response =
+    s.response && typeof s.response === 'object'
+      ? (s.response as Record<string, unknown>)
+      : undefined;
+  const extract =
+    response &&
+    response.extract &&
+    typeof response.extract === 'object' &&
+    !Array.isArray(response.extract)
+      ? (response.extract as Record<string, unknown>)
+      : null;
+  const response_extract_keys = extract
+    ? Object.keys(extract).sort((a, b) => a.localeCompare(b))
+    : [];
+  const response_from = response && typeof response.from === 'string' ? response.from : null;
+  const protocol = typeof s.protocol === 'string' ? s.protocol : null;
+  return {
+    method,
+    body_keys,
+    header_keys,
+    response_extract_keys,
+    response_from,
+    protocol,
+  };
+}
+
+function extractPrereqIdentity(data: Strategy): UserConfirmationSlice['prereq_identity'] {
+  const s = data as Record<string, unknown>;
+  const prereqs = Array.isArray(s.prerequisites) ? (s.prerequisites as unknown[]) : [];
+  if (prereqs.length === 0) return null;
+  const out = prereqs.map((raw) => {
+    const p = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+    const name = typeof p.name === 'string' ? p.name : '';
+    const kind = typeof p.kind === 'string' ? p.kind : 'unknown';
+    const binds = typeof p.binds === 'string' ? p.binds : null;
+    const vars =
+      p.vars && typeof p.vars === 'object' && !Array.isArray(p.vars)
+        ? (p.vars as Record<string, unknown>)
+        : null;
+    const bind_keys = vars ? Object.keys(vars).sort((a, b) => a.localeCompare(b)) : [];
+    const capability_target = typeof p.capability === 'string' ? p.capability : null;
+    const tag_target = typeof p.tag === 'string' ? p.tag : null;
+    return { name, kind, binds, bind_keys, capability_target, tag_target };
+  });
+  out.sort((a, b) => a.name.localeCompare(b.name));
+  return out;
+}
+
+function extractRecordedPathShape(data: Strategy): UserConfirmationSlice['recorded_path_shape'] {
+  const s = data as Record<string, unknown>;
+  const tier = typeof s.strategy === 'string' ? s.strategy : 'unknown';
+  if (tier !== 'recorded-path') return null;
+  const steps = Array.isArray(s.steps) ? (s.steps as unknown[]) : [];
+  const counts = new Map<string, number>();
+  let a11yLocators = 0;
+  let cssOnlyLocators = 0;
+  for (const raw of steps) {
+    if (!raw || typeof raw !== 'object') continue;
+    const step = raw as { action?: unknown; locators?: unknown };
+    const action = typeof step.action === 'string' ? step.action : 'unknown';
+    counts.set(action, (counts.get(action) ?? 0) + 1);
+    if (step.locators && typeof step.locators === 'object') {
+      const locs = step.locators as Record<string, unknown>;
+      if (locs.a11y) a11yLocators += 1;
+      else if (locs.css) cssOnlyLocators += 1;
+    }
+  }
+  const actions = Array.from(counts, ([action, count]) => ({ action, count })).sort((a, b) =>
+    a.action.localeCompare(b.action),
+  );
+  let locator_mix: 'a11y' | 'css' | 'none';
+  if (a11yLocators > cssOnlyLocators) locator_mix = 'a11y';
+  else if (cssOnlyLocators > 0) locator_mix = 'css';
+  else locator_mix = 'none';
+  return { step_count: steps.length, actions, locator_mix };
+}
+
+// The user_confirmation slice: a derived shape representing the strategy's
+// IDENTITY — what the user is actually approving when they read agent_prompt
+// and quote yes. See the design comment above userConfirmationClassifier.
+export function extractUserConfirmationSlice(
+  data: Strategy,
+  ctx: SaveStrategyCtx,
+): UserConfirmationSlice {
+  return {
+    ...extractRequiredFacts(data, ctx),
+    request_shape: extractRequestShape(data),
+    prereq_identity: extractPrereqIdentity(data),
+    recorded_path_shape: extractRecordedPathShape(data),
+    acked_warning_kinds: extractAckedWarningKinds(data),
   };
 }
 
@@ -433,6 +601,7 @@ export const userConfirmationClassifier: Classifier<Strategy, SaveStrategyCtx, u
       debug_prompt: composeUserPrompt(data, ctx),
     };
   },
+  hashFields: (data, ctx) => extractUserConfirmationSlice(data, ctx),
   validate: (data, ctx, answer) => {
     if (answer === undefined || answer === null) {
       const d = getRegisteredSaveConfirmationDecider();

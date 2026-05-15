@@ -1375,7 +1375,11 @@ test('user_confirmation: composeUserPrompt covers recorded-path tier (forward-co
   assert.match(prompt, /Save this strategy/);
 });
 
-test('user_confirmation: hash binds to whole strategy — mutation invalidates token', () => {
+test('user_confirmation: hash invalidates on anchor_type change (page-script durability shifted)', () => {
+  // anchor_type is in the strategy-identity slice — page-script durability
+  // is load-bearing for the user's approval, so flipping it from 'dom' to
+  // 'module' invalidates the token. The narrower selector-swap-preserves
+  // case is covered in the `user_confirmation hash scoping` block below.
   unregisterSaveConfirmationDecider('pre-save-audit-test-default-approve');
   try {
     const ctx = minimalCtx();
@@ -1401,6 +1405,293 @@ test('user_confirmation: hash binds to whole strategy — mutation invalidates t
   } finally {
     reRegisterDefaultApprove();
   }
+});
+
+// ----------------------------------------------------------------------
+// user_confirmation hash scoping — the slice binds to strategy-identity,
+// not the whole payload. Mutations to identity fields (capability slug,
+// tier, prereq names/kinds/bind-keys, body/header KEYS, response.extract
+// KEYS, acked warning kinds, etc.) MUST surface as (user_confirmation)
+// entries in payload_diff. Mutations to mechanics (prereq url / expression
+// / vars selectors, body values, response.extract selectors) MUST NOT —
+// the prior user_confirmation answer can be carried forward when its
+// slice is unchanged.
+// ----------------------------------------------------------------------
+
+function uchsRunMutation(strategy, ctx, mutate, mutatedCtx, opts) {
+  const firstAcks = opts && opts.firstAcks ? { acks: opts.firstAcks } : {};
+  const secondAcks = opts && opts.secondAcks ? { acks: opts.secondAcks } : {};
+  unregisterSaveConfirmationDecider('pre-save-audit-test-default-approve');
+  try {
+    const first = saveStrategyAudit.process(strategy, ctx, firstAcks);
+    const token = first.rejection.token;
+    const mutated = mutate(JSON.parse(JSON.stringify(strategy)));
+    return saveStrategyAudit.process(mutated, mutatedCtx ?? ctx, { token, ...secondAcks });
+  } finally {
+    reRegisterDefaultApprove();
+  }
+}
+
+function uchsAssertDiff(result, expectUserConfChange, label) {
+  assert.equal(result.status, 'rejected', `${label}: expected rejected, got ${result.status}`);
+  assert.equal(
+    result.rejection.reason,
+    'payload_changed',
+    `${label}: expected payload_changed, got ${result.rejection.reason}`,
+  );
+  const diff = result.rejection.payload_diff ?? [];
+  const ucEntries = diff.filter((p) => p.startsWith('(user_confirmation)'));
+  if (expectUserConfChange) {
+    assert.ok(
+      ucEntries.length > 0,
+      `${label}: expected (user_confirmation) entries in payload_diff, got: ${JSON.stringify(diff)}`,
+    );
+  } else {
+    assert.equal(
+      ucEntries.length,
+      0,
+      `${label}: expected NO (user_confirmation) entries in payload_diff, got: ${JSON.stringify(ucEntries)}`,
+    );
+  }
+  return diff;
+}
+
+function uchsCtxWithUrls(...extra) {
+  const c = minimalCtx();
+  c.observedUrls = [...c.observedUrls, ...extra];
+  return c;
+}
+
+test('user_confirmation hash scoping (a): page-extract selector swap does NOT change user_confirmation slice', () => {
+  const strategy = {
+    ...minimalStrategy(),
+    prerequisites: [
+      {
+        name: 'mid',
+        kind: 'page-extract',
+        url: 'https://site.example.com/me',
+        vars: { member_id: { selector: '.profile #mid' } },
+      },
+    ],
+  };
+  const result = uchsRunMutation(
+    strategy,
+    uchsCtxWithUrls('https://site.example.com/me'),
+    (s) => {
+      s.prerequisites[0].vars.member_id.selector = '.profile-v2 [data-mid]';
+      return s;
+    },
+  );
+  uchsAssertDiff(result, false, '(a) selector swap');
+});
+
+test('user_confirmation hash scoping (b): capability slug change invalidates user_confirmation slice', () => {
+  const ctx = minimalCtx();
+  const mutatedCtx = { ...minimalCtx(), capability: 'delete_items' };
+  const result = uchsRunMutation(minimalStrategy(), ctx, (s) => s, mutatedCtx);
+  const diff = uchsAssertDiff(result, true, '(b) slug change');
+  assert.ok(
+    diff.some((p) => p.startsWith('(user_confirmation)') && p.includes('capability')),
+    `(b): payload_diff should mention capability, got: ${JSON.stringify(diff)}`,
+  );
+});
+
+test('user_confirmation hash scoping (c): body-key addition invalidates user_confirmation slice', () => {
+  const strategy = {
+    ...minimalStrategy(),
+    method: 'GET',
+    body: { text: '{{text}}' },
+    notes: {
+      ...minimalStrategy().notes,
+      params: { text: { description: 'body', kind: 'text', example: 'hi' } },
+    },
+  };
+  const result = uchsRunMutation(strategy, minimalCtx(), (s) => {
+    s.body.cc = '{{cc}}';
+    return s;
+  });
+  const diff = uchsAssertDiff(result, true, '(c) body-key addition');
+  assert.ok(
+    diff.some((p) => p.startsWith('(user_confirmation)') && p.includes('body_keys')),
+    `(c): payload_diff should mention body_keys, got: ${JSON.stringify(diff)}`,
+  );
+});
+
+test('user_confirmation hash scoping (d): acked warning kind addition invalidates user_confirmation slice', () => {
+  const result = uchsRunMutation(minimalStrategy(), minimalCtx(), (s) => {
+    s.notes.save_warnings_acked = [
+      { kind: 'popup_addressing_without_trigger', reason: 'opened via extension' },
+    ];
+    return s;
+  });
+  const diff = uchsAssertDiff(result, true, '(d) acked warning addition');
+  assert.ok(
+    diff.some((p) => p.startsWith('(user_confirmation)') && p.includes('acked_warning_kinds')),
+    `(d): payload_diff should mention acked_warning_kinds, got: ${JSON.stringify(diff)}`,
+  );
+});
+
+test('user_confirmation hash scoping (e): prereq removal invalidates user_confirmation slice', () => {
+  const strategy = {
+    ...minimalStrategy(),
+    prerequisites: [
+      {
+        name: 'a',
+        kind: 'js-eval',
+        url: 'https://site.example.com/',
+        expression: 'window.a',
+        binds: 'a',
+        return_shape: { kind: 'string' },
+      },
+      {
+        name: 'b',
+        kind: 'js-eval',
+        url: 'https://site.example.com/',
+        expression: 'window.b',
+        binds: 'b',
+        return_shape: { kind: 'string' },
+      },
+    ],
+  };
+  const result = uchsRunMutation(
+    strategy,
+    uchsCtxWithUrls('https://site.example.com/'),
+    (s) => {
+      s.prerequisites = [s.prerequisites[0]];
+      return s;
+    },
+    undefined,
+    {
+      firstAcks: { unreferenced_prereq_binding: 'test fixture — bindings a and b unused by design' },
+      secondAcks: { unreferenced_prereq_binding: 'test fixture — binding a unused by design' },
+    },
+  );
+  const diff = uchsAssertDiff(result, true, '(e) prereq removal');
+  assert.ok(
+    diff.some((p) => p.startsWith('(user_confirmation)') && p.includes('prereq_identity')),
+    `(e): payload_diff should mention prereq_identity, got: ${JSON.stringify(diff)}`,
+  );
+});
+
+test('user_confirmation hash scoping (f): prereq.kind change for same-name prereq invalidates user_confirmation slice', () => {
+  const strategy = {
+    ...minimalStrategy(),
+    prerequisites: [
+      {
+        name: 'member_id',
+        kind: 'capability',
+        capability: 'lookup_member_by_name',
+        vars: { member_id: 'results[0].id' },
+      },
+    ],
+  };
+  const result = uchsRunMutation(
+    strategy,
+    uchsCtxWithUrls('https://site.example.com/'),
+    (s) => {
+      s.prerequisites[0] = {
+        name: 'member_id',
+        kind: 'js-eval',
+        url: 'https://site.example.com/',
+        expression: 'window.__app.me.id',
+        binds: 'member_id',
+        return_shape: { kind: 'string' },
+      };
+      return s;
+    },
+    undefined,
+    {
+      secondAcks: { unreferenced_prereq_binding: 'test fixture — member_id binding unused by design' },
+    },
+  );
+  const diff = uchsAssertDiff(result, true, '(f) prereq.kind change');
+  assert.ok(
+    diff.some((p) => p.startsWith('(user_confirmation)') && p.includes('prereq_identity')),
+    `(f): payload_diff should mention prereq_identity, got: ${JSON.stringify(diff)}`,
+  );
+});
+
+test('user_confirmation hash scoping (g): body VALUE change does NOT change user_confirmation slice', () => {
+  const strategy = {
+    ...minimalStrategy(),
+    body: { text: '{{text}}' },
+    notes: {
+      ...minimalStrategy().notes,
+      params: { text: { description: 'body', kind: 'text', example: 'hi' } },
+    },
+  };
+  const result = uchsRunMutation(strategy, minimalCtx(), (s) => {
+    s.body.text = '{{cursor}}';
+    return s;
+  });
+  uchsAssertDiff(result, false, '(g) body value change');
+});
+
+test('user_confirmation hash scoping (h): prereq.url swap does NOT change user_confirmation slice', () => {
+  const strategy = {
+    ...minimalStrategy(),
+    prerequisites: [
+      {
+        name: 'mid',
+        kind: 'page-extract',
+        url: 'https://site.example.com/me',
+        vars: { member_id: { selector: '.profile #mid' } },
+      },
+    ],
+  };
+  const result = uchsRunMutation(
+    strategy,
+    uchsCtxWithUrls('https://site.example.com/me', 'https://site.example.com/profile'),
+    (s) => {
+      s.prerequisites[0].url = 'https://site.example.com/profile';
+      return s;
+    },
+  );
+  uchsAssertDiff(result, false, '(h) prereq.url swap');
+});
+
+test('user_confirmation hash scoping (i): new header key invalidates user_confirmation slice', () => {
+  const strategy = {
+    ...minimalStrategy(),
+    headers: { 'x-nonce': '{{cursor}}' },
+  };
+  const result = uchsRunMutation(strategy, minimalCtx(), (s) => {
+    s.headers['authorization'] = 'Bearer static-token';
+    return s;
+  });
+  const diff = uchsAssertDiff(result, true, '(i) new header key');
+  assert.ok(
+    diff.some((p) => p.startsWith('(user_confirmation)') && p.includes('header_keys')),
+    `(i): payload_diff should mention header_keys, got: ${JSON.stringify(diff)}`,
+  );
+});
+
+test('user_confirmation hash scoping (j): response.extract key rename invalidates user_confirmation slice', () => {
+  const strategy = {
+    ...minimalStrategy(),
+    response: { format: 'json', extract: { message_id: { selector: '$.id' } } },
+  };
+  const result = uchsRunMutation(strategy, minimalCtx(), (s) => {
+    s.response.extract = { thread_id: { selector: '$.id' } };
+    return s;
+  });
+  const diff = uchsAssertDiff(result, true, '(j) extract key rename');
+  assert.ok(
+    diff.some((p) => p.startsWith('(user_confirmation)') && p.includes('response_extract_keys')),
+    `(j): payload_diff should mention response_extract_keys, got: ${JSON.stringify(diff)}`,
+  );
+});
+
+test('user_confirmation hash scoping (m): new emitted warning_kind in runtime_meta invalidates user_confirmation slice', () => {
+  const result = uchsRunMutation(minimalStrategy(), minimalCtx(), (s) => {
+    s.runtime_meta = { save_warnings: [{ kind: 'lookup_sibling_not_referenced' }] };
+    return s;
+  });
+  const diff = uchsAssertDiff(result, true, '(m) new emitted warning');
+  assert.ok(
+    diff.some((p) => p.startsWith('(user_confirmation)') && p.includes('warning_kinds')),
+    `(m): payload_diff should mention warning_kinds, got: ${JSON.stringify(diff)}`,
+  );
 });
 
 // ----------------------------------------------------------------------
