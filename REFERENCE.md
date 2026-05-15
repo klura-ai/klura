@@ -119,9 +119,11 @@ Declare `response.format: "html"` with CSS selector extractors to get a structur
 ```
 
 - `response.format`: `"json"` (default) or `"html"`. For `"html"`, `extract` is required, and the strategy **must be a GET** (save rejects non-GET — the probe fires the real request).
-- Each extract entry: `{selector, attr?, multiple?}`. CSS selectors only. Absent `attr` pulls trimmed `textContent`.
-- Missing single → empty string; missing multi → empty array.
-- **Save-time probe** fires the real GET with session cookies, runs every selector, rejects non-2xx / non-HTML / all-empty responses.
+- Each extract entry: `{selector, attr?, multiple?}` (leaf) **or** `{selector, multiple, fields: {...}}` (row group). CSS selectors only. Absent `attr` pulls trimmed `textContent`.
+- **Row groups** extract listing-shaped data: declare a per-row `selector` and a `fields` map of leaf entries scoped to each matched row. With `multiple:true` produces `Array<Record<string,string>>` (search results, product cards, table rows); with explicit `multiple:false` produces a single `Record<string,string>` for the first match. Field selectors are flat (one level of nesting). Empty field selector (`""`) reads attr/text from the row element itself. `attr` and `fields` are mutually exclusive; `fields` requires explicit `multiple`.
+- Missing single → empty string; missing multi → empty array; missing row group → empty array / empty record.
+- The strict schema rejects unknown keys at save time (silently-degraded shapes like a flat `{fields: {...}}` without `multiple` no longer pass).
+- **Save-time probe** fires the real GET with session cookies, runs every selector, rejects non-2xx / non-HTML / all-empty responses. For row groups, empty = zero rows OR every row has all empty fields.
 - **Execute errors**: `extract_failed` (parser/selector threw), `response_too_large_html_trimmed` (HTML body overflowed budget; response falls back to `body.a11y_tree` for selector picking), `response_too_large` (≥20 KB JSON or non-HTML string — narrow selectors or tighten query).
 
 ### fetch prerequisites

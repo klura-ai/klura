@@ -336,6 +336,50 @@ test('validator rejects any transport field at save time (implicit in tier)', ()
   );
 });
 
+test('response.format:"html" + extract is applied at fire time (regression: executeFetchNode used to drop strategy.response)', async () => {
+  // Regression for the field-report finding where Amazon's saved
+  // search_products strategy correctly declared format:"html" + nested-fields
+  // extract, but the warm execute returned the raw 1.12 MB HTML body. Root
+  // cause was executeFetchNode building a fireStrategy with field-by-field
+  // copy that forgot `response`, so applyHtmlExtract saw `undefined` and
+  // passed the body through untouched.
+  installMockFetch();
+  try {
+    nextResponse = new Response(
+      '<div data-x="row"><h2>Alpha</h2><span class="p">$1</span></div>' +
+        '<div data-x="row"><h2>Beta</h2><span class="p">$2</span></div>',
+      { status: 200, headers: { 'Content-Type': 'text/html' } },
+    );
+    seedStrategy('exnode-html-extract', 'search', {
+      method: 'GET',
+      endpoint: '/listing',
+      response: {
+        format: 'html',
+        extract: {
+          rows: {
+            selector: '[data-x="row"]',
+            multiple: true,
+            fields: {
+              title: { selector: 'h2' },
+              price: { selector: '.p' },
+            },
+          },
+        },
+      },
+    });
+    const result = await execute('exnode-html-extract', 'search', { query: 'x' });
+    assert.strictEqual(result.status, 200);
+    assert.deepStrictEqual(result.body, {
+      rows: [
+        { title: 'Alpha', price: '$1' },
+        { title: 'Beta', price: '$2' },
+      ],
+    });
+  } finally {
+    restoreFetch();
+  }
+});
+
 test('executing the page-script tier without a pool fails cleanly (Node fetch mock untouched)', async () => {
   installMockFetch();
   try {

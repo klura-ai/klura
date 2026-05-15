@@ -165,7 +165,7 @@ export async function probeOneFetchHtml(
     );
   }
 
-  let extracted: Record<string, string | string[]>;
+  let extracted: Record<string, unknown>;
   try {
     extracted = extractFromHtml(result.body, spec.extract);
   } catch (err) {
@@ -177,11 +177,34 @@ export async function probeOneFetchHtml(
     );
   }
 
-  const isEmpty = (v: string | string[]): boolean => v.length === 0;
+  // Each extract entry's value is one of:
+  //  - string (leaf, single)
+  //  - string[] (leaf, multiple)
+  //  - Record<string,string> (row group, multiple:false)
+  //  - Array<Record<string,string>> (row group, multiple:true)
+  //
+  // "Empty" for a row group means zero rows extracted OR every row has all
+  // empty fields. Per-row partial emptiness is the strategy author's
+  // intentional tolerance for missing optional fields (e.g. some search
+  // results lack a price) — we don't reject on per-row partials, only on
+  // "the selector matched nothing usable anywhere."
+  const isExtractedEmpty = (v: unknown): boolean => {
+    if (typeof v === 'string') return v.length === 0;
+    if (Array.isArray(v)) {
+      if (v.length === 0) return true;
+      return v.every((entry) => isExtractedEmpty(entry));
+    }
+    if (v !== null && typeof v === 'object') {
+      const vals = Object.values(v as Record<string, unknown>);
+      if (vals.length === 0) return true;
+      return vals.every((entry) => isExtractedEmpty(entry));
+    }
+    return true;
+  };
 
   // All-empty = auth wall or wildly-wrong selectors. Reject loudly — a
   // successful 200 on a login interstitial will otherwise pass silently.
-  const allEmpty = Object.values(extracted).every(isEmpty);
+  const allEmpty = Object.values(extracted).every(isExtractedEmpty);
   if (allEmpty) {
     throw new Error(
       `invalid_strategy: fetch response probe — every extract selector resolved to empty on ${spec.url}. ` +
@@ -193,7 +216,7 @@ export async function probeOneFetchHtml(
 
   // Some-empty + some-populated = likely a single wrong selector. Name it.
   for (const [varName, value] of Object.entries(extracted)) {
-    if (isEmpty(value)) {
+    if (isExtractedEmpty(value)) {
       const spec1 = spec.extract[varName];
       throw new Error(
         `invalid_strategy: fetch response.extract.${varName} failed save-time probe — ` +

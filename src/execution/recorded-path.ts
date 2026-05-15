@@ -685,7 +685,7 @@ async function executeSteps(
           },
         };
       }
-      let extracted: Record<string, string | string[]>;
+      let extracted: Record<string, unknown>;
       try {
         extracted = extractFromHtml(html, response.extract);
       } catch (err) {

@@ -178,7 +178,7 @@ export async function probeOnePrereqFromNode(
     selectorSpec[varName] = specOut;
   }
 
-  let extracted: Record<string, string | string[]>;
+  let extracted: Record<string, unknown>;
   try {
     extracted = extractFromHtml(html, selectorSpec);
   } catch (err) {
@@ -189,7 +189,15 @@ export async function probeOnePrereqFromNode(
   }
 
   for (const [varName, value] of Object.entries(extracted)) {
-    const stringValue = Array.isArray(value) ? (value[0] ?? '') : value;
+    // page-extract prereqs use flat leaf specs only (no `fields`), so each
+    // value is string | string[]. Treat anything else as empty.
+    let stringValue = '';
+    if (typeof value === 'string') {
+      stringValue = value;
+    } else if (Array.isArray(value)) {
+      const first: unknown = value[0];
+      if (typeof first === 'string') stringValue = first;
+    }
     if (stringValue === '') {
       return {
         ok: false,

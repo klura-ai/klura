@@ -25,6 +25,7 @@ import {
 import {
   trimA11yTree,
   trimOversizedObjectBody,
+  sliceLargeString,
   DEFAULT_A11Y_BUDGET,
   MAX_TOOL_OUTPUT_CHARS,
 } from '../response/response-size';
@@ -979,6 +980,74 @@ export function dispatchExecuteGraphOutcome(
   });
 }
 
+/**
+ * Cap the `body` field of an in-flight `execute_result` to the agent-runtime
+ * output budget. Three body shapes are handled, each preserving the agent's
+ * primary decision signals (the surrounding `status`, top-level
+ * `body.ok` for object bodies, and `_hint` siblings):
+ *
+ *  - object body: JSON.stringify into a preview slice + sibling
+ *    `body_preview` / `body_total_chars` / `body_truncated`; the original
+ *    `body` value becomes a marker string.
+ *  - string body: route through `sliceLargeString` for the preview slice; same
+ *    sibling metadata pattern.
+ *  - array body: keep the first N entries + sibling `body_total_entries` /
+ *    `body_truncated_entries`; the original `body` value becomes a marker.
+ *
+ * Runs regardless of whether the strategy succeeded — a failed auto-exec may
+ * still attach a huge `body.original_body` (raw response captured for
+ * diagnosis) that needs the same cap.
+ */
+export function compactExecuteResultBody(er: Record<string, unknown>): void {
+  const body = er.body;
+  if (body === null || body === undefined) return;
+
+  if (typeof body === 'string') {
+    if (body.length <= MAX_TOOL_OUTPUT_CHARS / 2) return;
+    const sliced = sliceLargeString(body, { defaultMaxLength: MAX_TOOL_OUTPUT_CHARS / 2 });
+    er.body_preview = sliced.slice;
+    er.body_total_chars = sliced.total_chars;
+    er.body_truncated = true;
+    er.body =
+      `<truncated string body: ${sliced.total_chars} chars; first ${sliced.slice.length} in body_preview. ` +
+      `Re-shape the strategy's response.extract to return structured fields instead of raw text.>`;
+    return;
+  }
+
+  if (Array.isArray(body)) {
+    const KEEP = 50;
+    if (body.length <= KEEP) {
+      // Small array — only worth compacting if its JSON cost is over budget
+      // anyway (each entry could be a giant object).
+      const bodyStr = JSON.stringify(body);
+      if (bodyStr.length <= MAX_TOOL_OUTPUT_CHARS / 2) return;
+      const previewBudget = Math.floor(MAX_TOOL_OUTPUT_CHARS / 2);
+      er.body_preview = bodyStr.slice(0, previewBudget);
+      er.body_total_chars = bodyStr.length;
+      er.body_truncated = true;
+      er.body = `<truncated array body: ${body.length} entries, ${bodyStr.length} chars; first ${previewBudget} in body_preview.>`;
+      return;
+    }
+    const kept = body.slice(0, KEEP);
+    er.body = kept;
+    er.body_total_entries = body.length;
+    er.body_truncated_entries = true;
+    return;
+  }
+
+  if (typeof body === 'object') {
+    const bodyStr = JSON.stringify(body);
+    if (bodyStr.length <= MAX_TOOL_OUTPUT_CHARS / 2) return;
+    const previewBudget = Math.floor(MAX_TOOL_OUTPUT_CHARS / 2);
+    er.body_preview = bodyStr.slice(0, previewBudget);
+    er.body_total_chars = bodyStr.length;
+    er.body_truncated = true;
+    er.body =
+      `<truncated: ${bodyStr.length} chars; first ${previewBudget} in body_preview. ` +
+      `For a structured view of subsets, re-run with the strategy directly via execute() and shape the body in the strategy itself.>`;
+  }
+}
+
 function applyAutoExecuteHint(
   result: StartSessionResult,
   session: { graph?: string },
@@ -1207,36 +1276,22 @@ export async function startSession(
   // loses its primary signal. Drop the a11y tree first (recoverable via
   // get_a11y_tree(session_id)); if still oversized, compact the body too.
   // Aligns with principles.md §"Respect the MCP output budget".
-  if (result.executed === true) {
-    if (JSON.stringify(result).length > MAX_TOOL_OUTPUT_CHARS) {
-      const a11yChars = result.a11y_total_chars;
-      result.a11yTree =
-        `<dropped: auto-exec succeeded; the page UI isn't load-bearing here. ` +
-        `Fetch the full ${a11yChars}-char tree via get_a11y_tree({session_id: "${session.id}", page: 1}) if you need it.>`;
-      result.a11y_truncated = true;
-    }
-    if (JSON.stringify(result).length > MAX_TOOL_OUTPUT_CHARS && result.execute_result) {
-      // Body still over budget after the a11y drop — typically a big API
-      // response (search results, listings). Replace with a budget-bounded
-      // JSON preview + total-chars hint. The agent's primary signals
-      // (execute_result.status, body.ok, _hint) remain intact; the
-      // preview gives enough surface area to summarize to the user.
-      const er = result.execute_result as { body?: unknown; status?: number };
-      if (er.body && typeof er.body === 'object') {
-        const bodyStr = JSON.stringify(er.body);
-        if (bodyStr.length > MAX_TOOL_OUTPUT_CHARS / 2) {
-          const previewBudget = Math.floor(MAX_TOOL_OUTPUT_CHARS / 2);
-          (result.execute_result as unknown as Record<string, unknown>).body_preview =
-            bodyStr.slice(0, previewBudget);
-          (result.execute_result as unknown as Record<string, unknown>).body_total_chars =
-            bodyStr.length;
-          (result.execute_result as unknown as Record<string, unknown>).body_truncated = true;
-          (result.execute_result as unknown as Record<string, unknown>).body =
-            `<truncated: ${bodyStr.length} chars; first ${previewBudget} in body_preview. ` +
-            `For a structured view of subsets, re-run with the strategy directly via execute() and shape the body in the strategy itself.>`;
-        }
-      }
-    }
+  if (result.executed === true && JSON.stringify(result).length > MAX_TOOL_OUTPUT_CHARS) {
+    const a11yChars = result.a11y_total_chars;
+    result.a11yTree =
+      `<dropped: auto-exec succeeded; the page UI isn't load-bearing here. ` +
+      `Fetch the full ${a11yChars}-char tree via get_a11y_tree({session_id: "${session.id}", page: 1}) if you need it.>`;
+    result.a11y_truncated = true;
+  }
+  // Body compaction runs regardless of `executed`-state — a failed auto-exec
+  // can still carry a huge `body.original_body` (raw response captured for
+  // diagnosis), and the a11y-drop above only fires on success. Replace
+  // oversized body content with a budget-bounded preview + sibling metadata so
+  // the agent's primary signals (`status`, `body.ok` for object bodies,
+  // `_hint`) remain intact while the bulk is dropped. See
+  // principles.md §"Respect the MCP output budget".
+  if (result.execute_result) {
+    compactExecuteResultBody(result.execute_result as unknown as Record<string, unknown>);
   }
 
   // Unmissable top-level hint: callers that pass capability+args are asking the

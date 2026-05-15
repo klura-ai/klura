@@ -119,3 +119,131 @@ test('obligation + render-verbatim coexist as two leading blocks', () => {
   assert.match(blocks[1].text, /verbatim/i);
   assert.match(blocks[2].text, /^\[Tool result for start_remote_session\]:/);
 });
+
+// ---- Transport-cap enforcement (last-resort backstop in formatToolResult) ----
+
+const { MAX_TOOL_OUTPUT_CHARS, enforceFinalBudget } = await import(
+  '../dist/response/response-size.js'
+);
+const FORMAT_CEILING = MAX_TOOL_OUTPUT_CHARS * 2; // matches FORMAT_TOOL_RESULT_CEILING
+
+test('transport-cap: 1.5MB synthetic result is clipped under ceiling', () => {
+  // Mimic the 2026-05-15 amazon failure: saved strategy returns a huge
+  // `body.results` array that overshoots MCP's 1 MB transport ceiling.
+  const cards = [];
+  for (let i = 0; i < 60; i++) {
+    cards.push('Card #' + i + ' ' + 'lorem ipsum dolor sit amet '.repeat(800));
+  }
+  const result = {
+    sessionId: 'abc',
+    executed: true,
+    execute_result: { status: 200, body: { results: cards }, tier: 'fetch' },
+  };
+  assert.ok(JSON.stringify(result).length > 1_000_000, 'fixture really is huge');
+  const blocks = formatToolResult('start_session', result);
+  const text = blocks
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text)
+    .join('\n');
+  assert.ok(
+    text.length <= FORMAT_CEILING + 1_000,
+    `formatted text ${text.length} chars should fit ceiling ${FORMAT_CEILING} + small overhead`,
+  );
+  assert.match(text, /_runtime_oversize_warning/);
+  assert.match(text, /truncated_paths/);
+});
+
+test('transport-cap: warning names the offending leaf path', () => {
+  const result = {
+    sessionId: 'abc',
+    executed: true,
+    execute_result: {
+      status: 200,
+      body: { small_field: 'ok', original_body: 'x'.repeat(500_000) },
+    },
+  };
+  const blocks = formatToolResult('start_session', result);
+  const text = blocks
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text)
+    .join('\n');
+  assert.match(text, /_runtime_oversize_warning/);
+  assert.match(text, /original_body/);
+});
+
+test('transport-cap: small result passes through, no warning injected', () => {
+  const result = { ok: true, items: [1, 2, 3], status: 200 };
+  const blocks = formatToolResult('list_items', result);
+  assert.equal(blocks.length, 1);
+  assert.doesNotMatch(blocks[0].text, /_runtime_oversize_warning/);
+});
+
+test('transport-cap: screenshot image block survives backstop on oversized siblings', () => {
+  const fakeImage = 'A'.repeat(200);
+  const result = {
+    screenshot: fakeImage,
+    note: 'small',
+    payload: { detail: 'y'.repeat(100_000) },
+  };
+  const blocks = formatToolResult('perform_action', result);
+  const images = blocks.filter((b) => b.type === 'image');
+  assert.equal(images.length, 1);
+  assert.equal(images[0].data, fakeImage);
+  const text = blocks
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text)
+    .join('\n');
+  assert.ok(text.length <= FORMAT_CEILING + 1_000);
+});
+
+// ---- enforceFinalBudget unit tests ----
+
+test('enforceFinalBudget: small value untouched, truncations empty', () => {
+  const out = enforceFinalBudget(
+    { ok: true, items: [1, 2, 3] },
+    { ceiling: FORMAT_CEILING, toolName: 't' },
+  );
+  assert.deepEqual(out.value, { ok: true, items: [1, 2, 3] });
+  assert.equal(out.truncations.length, 0);
+});
+
+test('enforceFinalBudget: oversized string leaf is truncated with path marker', () => {
+  const out = enforceFinalBudget(
+    { ok: true, blob: 'x'.repeat(100_000) },
+    { ceiling: 10_000, toolName: 't' },
+  );
+  assert.ok(out.truncations.length > 0);
+  assert.equal(out.truncations[0].path, 'blob');
+  assert.match(out.value.blob, /<truncated path=blob>/);
+  assert.ok(JSON.stringify(out.value).length <= 10_000);
+});
+
+test('enforceFinalBudget: oversized array leaf head-sliced with sentinel', () => {
+  const big = new Array(2000).fill({
+    id: 1,
+    name: 'lorem ipsum dolor sit amet'.repeat(10),
+  });
+  const out = enforceFinalBudget({ rows: big }, { ceiling: 10_000, toolName: 't' });
+  assert.ok(out.truncations.length > 0);
+  assert.equal(out.truncations[0].path, 'rows');
+  assert.ok(Array.isArray(out.value.rows));
+  const last = out.value.rows[out.value.rows.length - 1];
+  assert.equal(last.__truncated, true);
+  assert.equal(last.original_length, 2000);
+  assert.ok(JSON.stringify(out.value).length <= 10_000);
+});
+
+test('enforceFinalBudget: input value not mutated when truncation fires', () => {
+  const original = { blob: 'x'.repeat(100_000), keep: 'me' };
+  const snapshot = JSON.stringify(original);
+  enforceFinalBudget(original, { ceiling: 10_000, toolName: 't' });
+  assert.equal(JSON.stringify(original), snapshot, 'caller reference unchanged');
+});
+
+test('enforceFinalBudget: deeply nested leaf path is dotted correctly', () => {
+  const out = enforceFinalBudget(
+    { execute_result: { body: { original_body: 'y'.repeat(60_000) } } },
+    { ceiling: 10_000, toolName: 't' },
+  );
+  assert.equal(out.truncations[0].path, 'execute_result.body.original_body');
+});

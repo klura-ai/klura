@@ -444,7 +444,7 @@ async function fetchPrereqFromNode(
     selectorSpec[varName] = specOut;
   }
 
-  let extracted: Record<string, string | string[]>;
+  let extracted: Record<string, unknown>;
   try {
     extracted = extractFromHtml(html, selectorSpec);
   } catch (err) {
@@ -456,7 +456,14 @@ async function fetchPrereqFromNode(
 
   const tokens: Record<string, string> = {};
   for (const [varName, value] of Object.entries(extracted)) {
-    const stringValue = Array.isArray(value) ? value.join(',') : value;
+    let stringValue: string;
+    if (typeof value === 'string') {
+      stringValue = value;
+    } else if (Array.isArray(value)) {
+      stringValue = value.map((v) => (typeof v === 'string' ? v : '')).join(',');
+    } else {
+      stringValue = '';
+    }
     if (stringValue === '') {
       throw new Error(
         `prereq "${prereq.name}" (page-extract): var "${varName}" selector ` +
@@ -555,6 +562,12 @@ export async function executeFetchNode(
     body: strategy.body,
     params: strategy.params,
     generated: strategy.generated,
+    // `response` carries format + extract; fireRequestFromNode reads it via
+    // applyHtmlExtract to convert raw HTML into the strategy's structured
+    // row shape. Dropping it here silently degrades every html-extract
+    // fetch into "return the raw body" — the symptom that first surfaced
+    // with the amazon search_products row-group extract.
+    response: strategy.response,
   };
   return await fireRequestFromNode(fireStrategy, mergedArgs, platform, { identity });
 }

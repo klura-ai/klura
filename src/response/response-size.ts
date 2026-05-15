@@ -191,6 +191,189 @@ export function guardLargeResult(
   return out;
 }
 
+/** Diagnostic record describing one truncation made by `enforceFinalBudget`. */
+export interface BudgetTruncation {
+  /** Dotted path to the truncated leaf within the tool result (e.g.
+   *  `execute_result.body.original_body` or `a11yTree`). */
+  path: string;
+  /** Pre-truncation byte cost of the leaf (chars). */
+  from: number;
+  /** Post-truncation byte cost of the leaf (chars). */
+  to: number;
+}
+
+export interface BudgetEnforced<T> {
+  /** Possibly-mutated value. When `truncations` is non-empty this is a fresh
+   *  deep-clone (via JSON round-trip), not the original — safe to mutate
+   *  further at the call site without aliasing concerns. */
+  value: T;
+  /** One entry per leaf that was clipped; empty when the value fit untouched. */
+  truncations: BudgetTruncation[];
+}
+
+/** Cap below which strings inside the budget walker are never touched. Below
+ *  this, the leaf contributes too little to be worth shaving. */
+const ENFORCE_STRING_LEAF_MIN = 1_000;
+
+/** Threshold below which arrays inside the budget walker are never touched. */
+const ENFORCE_ARRAY_LEAF_MIN = 50;
+
+/** Hard cap on tree-walk depth, prevents pathological recursion on hostile
+ *  shapes (`JSON.stringify` already rejects circular references). */
+const ENFORCE_MAX_DEPTH = 16;
+
+interface BudgetLeafCandidate {
+  parent: Record<string, unknown> | unknown[];
+  key: string | number;
+  path: string;
+  kind: 'string' | 'array';
+  value: string | unknown[];
+  size: number;
+}
+
+function dotJoin(parentPath: string, segment: string | number): string {
+  if (parentPath.length === 0) return String(segment);
+  if (typeof segment === 'number') return `${parentPath}[${segment}]`;
+  return `${parentPath}.${segment}`;
+}
+
+function collectBudgetLeaves(
+  node: unknown,
+  parent: Record<string, unknown> | unknown[] | null,
+  key: string | number | null,
+  path: string,
+  depth: number,
+  out: BudgetLeafCandidate[],
+): void {
+  if (depth > ENFORCE_MAX_DEPTH) return;
+  if (typeof node === 'string') {
+    if (parent === null || key === null) return;
+    if (node.length < ENFORCE_STRING_LEAF_MIN) return;
+    out.push({ parent, key, path, kind: 'string', value: node, size: node.length });
+    return;
+  }
+  if (Array.isArray(node)) {
+    if (parent !== null && key !== null && node.length >= ENFORCE_ARRAY_LEAF_MIN) {
+      const size = JSON.stringify(node).length;
+      out.push({ parent, key, path, kind: 'array', value: node, size });
+      // Don't descend into a large array's children — head-slicing the array
+      // itself is the cheaper move and avoids per-entry mutation.
+      return;
+    }
+    for (let i = 0; i < node.length; i++) {
+      collectBudgetLeaves(node[i], node, i, dotJoin(path, i), depth + 1, out);
+    }
+    return;
+  }
+  if (node !== null && typeof node === 'object') {
+    for (const [k, v] of Object.entries(node)) {
+      collectBudgetLeaves(v, node as Record<string, unknown>, k, dotJoin(path, k), depth + 1, out);
+    }
+  }
+}
+
+/**
+ * Last-resort transport-cap enforcement for a tool result. After all per-tool
+ * smart compaction has run, this walker guarantees the serialized result stays
+ * under `opts.ceiling` chars by greedy-truncating the largest leaves first.
+ *
+ * Strategy:
+ *  1. Serialize once. If under ceiling, return the original value untouched
+ *     with `truncations: []`.
+ *  2. Deep-clone via JSON round-trip (the stringify is paid; parse is cheap).
+ *  3. Collect string leaves ≥ 1 KB and array leaves ≥ 50 entries, sorted
+ *     descending by size.
+ *  4. Repeatedly clip the largest: strings via `truncateString` with a marker
+ *     naming the dot-path; arrays head-sliced to a count proportional to the
+ *     overshoot, with a `{__truncated, original_length, kept}` sentinel
+ *     appended.
+ *  5. Stop when the serialized clone fits.
+ *
+ * Returns a fresh value (not the input) when any truncation fires — the
+ * caller's reference is never mutated. Aligns with principles.md §"Respect
+ * the MCP output budget"; designed as the safety net layer behind per-tool
+ * compaction, so a regression in the per-tool layer surfaces as a populated
+ * `truncations[]` instead of an MCP transport rejection.
+ */
+export function enforceFinalBudget<T>(
+  value: T,
+  opts: { ceiling: number; toolName: string },
+): BudgetEnforced<T> {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    // Circular / non-serializable — let the downstream JSON.stringify in the
+    // formatter surface the failure. We can't measure or trim what won't
+    // serialize.
+    return { value, truncations: [] };
+  }
+  if (serialized.length <= opts.ceiling) {
+    return { value, truncations: [] };
+  }
+
+  let clone: T;
+  try {
+    clone = JSON.parse(serialized) as T;
+  } catch {
+    return { value, truncations: [] };
+  }
+
+  const truncations: BudgetTruncation[] = [];
+  let currentSize = serialized.length;
+  // Leave a small buffer below the ceiling so the injected
+  // `_runtime_oversize_warning` field (added by the caller) still fits.
+  const safeCeiling = Math.max(1_000, opts.ceiling - 2_000);
+
+  // Fixed-point loop: re-walk after every truncation so a previously-clipped
+  // array's surviving entries become reachable as string leaves on the next
+  // pass. Cap iterations to defend against pathological convergence on
+  // hostile shapes; each iteration measurably shrinks the largest offender,
+  // so 64 passes covers anything the runtime would ever emit in practice.
+  for (let iter = 0; iter < 64; iter++) {
+    if (currentSize <= safeCeiling) break;
+    const leaves: BudgetLeafCandidate[] = [];
+    collectBudgetLeaves(clone, null, null, '', 0, leaves);
+    leaves.sort((a, b) => b.size - a.size);
+    const leaf = leaves[0];
+    if (!leaf) break;
+
+    const overshoot = currentSize - safeCeiling;
+    if (leaf.kind === 'string') {
+      const before = (leaf.value as string).length;
+      // Aim to free `overshoot + 10% buffer`; never shave below 200 chars so
+      // the agent retains a usable preview.
+      const target = Math.max(200, before - overshoot - Math.floor(opts.ceiling * 0.1));
+      if (target >= before) break;
+      const marker = `…<truncated path=${leaf.path}>`;
+      const next = truncateString(leaf.value as string, target, marker);
+      (leaf.parent as Record<string, unknown>)[leaf.key as never] = next;
+      truncations.push({ path: leaf.path, from: before, to: next.length });
+    } else {
+      const arr = leaf.value as unknown[];
+      const before = leaf.size;
+      // Two-stage keep estimate. Stage 1: proportional to overshoot. Stage 2:
+      // walk down from that estimate until the slice's own JSON fits the
+      // target share. The walk handles the "array of huge entries" case
+      // where proportional alone keeps the slice oversized.
+      const ratio = Math.max(0.05, 1 - overshoot / before);
+      let keep = Math.max(1, Math.min(arr.length, Math.floor(arr.length * ratio)));
+      const targetSliceSize = Math.max(500, Math.floor(safeCeiling * 0.5));
+      while (keep > 1 && JSON.stringify(arr.slice(0, keep)).length > targetSliceSize) {
+        keep = Math.max(1, Math.floor(keep / 2));
+      }
+      const sliced: unknown[] = arr.slice(0, keep);
+      sliced.push({ __truncated: true, original_length: arr.length, kept: keep });
+      (leaf.parent as Record<string, unknown>)[leaf.key as never] = sliced;
+      const after = JSON.stringify(sliced).length;
+      truncations.push({ path: leaf.path, from: before, to: after });
+    }
+    currentSize = JSON.stringify(clone).length;
+  }
+
+  return { value: clone, truncations };
+}
+
 interface TrimmedA11yTree {
   /** The (possibly trimmed) tree text. Safe to inline in a tool result. */
   tree: string;

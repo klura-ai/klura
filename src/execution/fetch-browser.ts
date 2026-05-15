@@ -569,6 +569,11 @@ export async function executeFetchInBrowser(
       body: strategy.body,
       params: strategy.params,
       generated: strategy.generated,
+      // applyHtmlExtract in fireRequestInSession reads strategy.response to
+      // convert HTML bodies into structured rows. Dropping it here would
+      // make every html-extract fetch return the raw body instead of the
+      // extracted shape — same regression pattern as fetch-node.
+      response: strategy.response,
     };
 
     // Navigate decision: observe the page's actual origin and compare against

@@ -3,6 +3,15 @@ import * as skills from './strategies/skills';
 import * as health from './strategies/health';
 import { readStrategyEvents } from './working-dir/logbook';
 import { resolveSecret } from './identity/secrets';
+import { enforceFinalBudget, MAX_TOOL_OUTPUT_CHARS } from './response/response-size';
+
+/** Last-resort ceiling on a tool result's serialized size. 2× the per-tool
+ *  best-effort budget — tight enough that MCP's 1 MB transport cap is
+ *  unreachable, generous enough that the prefix obligation + checkpoint
+ *  envelopes still fit without false-positive backstop fires. Per-tool
+ *  compactors aim well below this; if `enforceFinalBudget` ever fires in
+ *  production, a per-tool layer missed a case. */
+const FORMAT_TOOL_RESULT_CEILING = MAX_TOOL_OUTPUT_CHARS * 2;
 
 export { getHealth } from './strategies/health';
 export type { HealthStatus } from './strategies/health';
@@ -129,11 +138,19 @@ export function formatToolResult(toolName: string, result: unknown): ContentBloc
   }
 
   const { block: obligationBlock, rest: afterObligation } = extractObligation(result);
-  const { block: renderBlock, rest } = extractRenderVerbatim(afterObligation);
+  const { block: renderBlock, rest: afterVerbatim } = extractRenderVerbatim(afterObligation);
   const prefix: ContentBlock[] = [
     ...(obligationBlock ? [obligationBlock] : []),
     ...(renderBlock ? [renderBlock] : []),
   ];
+
+  // Last-resort transport-cap enforcement. Walks the rest object tree and
+  // greedy-truncates the largest leaves until the serialized size fits the
+  // ceiling, then injects `_runtime_oversize_warning` so a regression in the
+  // per-tool compaction layer surfaces visibly instead of an MCP rejection.
+  // Image data in `screenshot` doesn't count toward the JSON-string budget;
+  // we extract it post-enforcement.
+  const rest = applyTransportBudget(toolName, afterVerbatim);
 
   // Tool result with embedded screenshot
   if (rest && typeof rest === 'object' && 'screenshot' in (rest as Record<string, unknown>)) {
@@ -151,6 +168,37 @@ export function formatToolResult(toolName: string, result: unknown): ContentBloc
   // Everything else → plain text
   const str = typeof rest === 'string' ? rest : JSON.stringify(rest);
   return [...prefix, { type: 'text', text: `[Tool result for ${toolName}]:\n${str}` }];
+}
+
+/**
+ * Route the tool result through `enforceFinalBudget` and, on truncation,
+ * attach a top-level `_runtime_oversize_warning` describing what was clipped.
+ * Object-only — strings (e.g. `get_screenshot`'s base64 payload, already
+ * short-circuited above) pass through untouched. The warning is diagnostic:
+ * its presence in field reports tells us which tool blew past the per-tool
+ * compaction layer.
+ */
+function applyTransportBudget(toolName: string, rest: unknown): unknown {
+  // Top-level non-object results (raw strings from get_screenshot, scalars
+  // from internal status calls) bypass the walker — they have no top-level
+  // field to anchor `_runtime_oversize_warning` on, and tool results at this
+  // layer are wrapped objects by convention.
+  if (!rest || typeof rest !== 'object' || Array.isArray(rest)) return rest;
+  const enforced = enforceFinalBudget(rest as Record<string, unknown>, {
+    ceiling: FORMAT_TOOL_RESULT_CEILING,
+    toolName,
+  });
+  if (enforced.truncations.length === 0) return rest;
+  const out = enforced.value;
+  const before = enforced.truncations.reduce((acc, t) => acc + t.from, 0);
+  const after = enforced.truncations.reduce((acc, t) => acc + t.to, 0);
+  out._runtime_oversize_warning = {
+    tool: toolName,
+    truncated_paths: enforced.truncations.map((t) => t.path),
+    bytes_clipped: before - after,
+    detail: enforced.truncations,
+  };
+  return out;
 }
 
 export type { ExecuteResult } from './execution/types';
