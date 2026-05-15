@@ -64,6 +64,15 @@ export interface BrowserPool {
   createSession(opts?: SessionOptions): Promise<Session>;
 
   /**
+   * Build a Session shell without spawning a browser context. Used by the
+   * execute-graph fast-path in start_session for saved fetch/node strategies
+   * — see Pool.createNodeOnlySession. Driver methods are unsafe on the
+   * returned session; the caller's contract is to transition the session to
+   * terminal{closed} via the FSM immediately after the auto-execute returns.
+   */
+  createNodeOnlySession(opts?: { platform?: string; identity?: string }): Session;
+
+  /**
    * Close a session. The pool decides internally whether to tear down the
    * backend or return it to a warm slot for reuse.
    */

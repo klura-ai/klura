@@ -312,6 +312,36 @@ export class Pool implements BrowserPool {
   }
 
   /**
+   * Build a `Session` shell registered in the lookup table without spawning a
+   * browser context. Used by the `start_session(graph:"execute")` fast-path
+   * when the saved strategy can run from Node alone (fetch tier with no
+   * browser-bound prereqs) — opening a Playwright page just to immediately
+   * close it costs 5-15 s of nav + a11y snapshot on a session that never
+   * exercises either. Driver methods are unsafe on the returned session; the
+   * caller's contract is that the session enters terminal{closed} via the
+   * execute-graph FSM right after auto-execute, after which the admissibility
+   * check blocks every driver-using tool. See start-session.ts `executeOnlyFastPath`.
+   *
+   * Sync by intent — no I/O. Skips the warm-pool registration (no context to
+   * reuse) and the driver-side init that `_driver.createSession` would do.
+   */
+  createNodeOnlySession(opts: { platform?: string; identity?: string } = {}): Session {
+    this._touch();
+    const session: Session = {
+      id: 'sess_' + crypto.randomBytes(6).toString('hex'),
+      intercepted: [],
+      intercepting: false,
+      hasTouch: false,
+      wsFrames: [],
+      subPages: [],
+    };
+    if (opts.platform) session.platform = opts.platform;
+    if (opts.identity) session.identity = opts.identity;
+    this._sessions.set(session.id, session);
+    return session;
+  }
+
+  /**
    * Check out a warm slot for a new klura session. Rotates the underlying
    * Session object's id (driver-private weakmaps stay keyed by object identity,
    * so the Page/Context bindings survive), asks the driver to reset ephemeral

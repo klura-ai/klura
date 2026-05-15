@@ -15,7 +15,7 @@ import {
   type StrategyTier,
 } from '../strategies/policy';
 import { buildPlatformMapSummary, type PlatformMapSummary } from '../response/platform-map-summary';
-import { getDeviceProfile } from '../identity/devices';
+import { getDeviceProfile, type DeviceProfile } from '../identity/devices';
 import {
   readArtifactFromDisk,
   listArtifactsForPlatform,
@@ -879,6 +879,127 @@ async function maybeAutoExecuteOnStart(
 }
 
 /**
+ * Decide whether `start_session({graph:"execute"})` can skip the entire
+ * browser-session lifecycle. Returns true only when:
+ *  - graph is explicitly "execute" (the agent is asking the runtime to RUN
+ *    a saved strategy, not to drive a page);
+ *  - platform + capability + args were all supplied (auto-execute would
+ *    fire on the slow path too);
+ *  - a saved strategy for (platform, capability) exists AND can run from
+ *    Node alone — fetch tier, no `transport:"browser"`, and no
+ *    browser-bound prereqs (js-eval, browser-kind imperative steps).
+ *
+ * Capability prereqs disqualify conservatively — they recursively dispatch
+ * to another saved strategy whose own browser-need we can't determine
+ * cheaply at this layer. (A future refinement: walk the dependency graph
+ * and only disqualify when a transitive prereq is genuinely
+ * browser-bound.)
+ *
+ * Disqualifying inputs fall through to the normal `pool.createSession` +
+ * `driver.navigate` path so the slow path's discover-graph fallback, auth
+ * probes, and recorded-path replay continue to work unchanged.
+ */
+function canFastPathExecute(opts: StartSessionOptions): boolean {
+  if (opts.graph !== 'execute') return false;
+  if (!opts.platform || !opts.capability) return false;
+  if (!opts.args || typeof opts.args !== 'object') return false;
+  const saved = skills.loadStrategies(opts.platform, opts.capability);
+  if (saved.length === 0) return false;
+  // Only consider the first (highest-priority) saved strategy. The cascade
+  // would still try lower tiers on Node failure — but we want the
+  // fast-path to be tight: only fire when we're certain no browser is needed
+  // at all.
+  return strategyRunsWithoutBrowser(saved[0]);
+}
+
+function strategyRunsWithoutBrowser(strategy: unknown): boolean {
+  if (!strategy || typeof strategy !== 'object') return false;
+  const tier = (strategy as { strategy?: string }).strategy;
+  if (tier !== 'fetch') return false;
+  const transport = (strategy as { transport?: string }).transport;
+  if (transport === 'browser') return false;
+  const prereqs = (strategy as { prerequisites?: Array<{ kind?: string }> }).prerequisites;
+  if (Array.isArray(prereqs)) {
+    for (const p of prereqs) {
+      const k = p.kind;
+      if (k === 'js-eval' || k === 'browser') return false;
+      // Capability prereqs may transitively need a browser. Conservative
+      // disqualifier — fall back to the slow path.
+      if (k === 'capability') return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Synthetic execute-only start_session. Builds a Session shell via
+ * `pool.createNodeOnlySession` (no browser context, no page nav, no a11y
+ * snapshot) and runs `maybeAutoExecuteOnStart` against it. The FSM
+ * transition to terminal{closed} fires inside maybeAutoExecuteOnStart →
+ * dispatchExecuteGraphOutcome, so subsequent agent tool calls on this
+ * session id get the standard "session has been finalized" admissibility
+ * rejection. Driver-using paths inside maybeAutoExecuteOnStart (the
+ * auth-failed probe at fetch-node.ts via pool.driverFor) already swallow
+ * lookup failures via a try/catch, so the synthetic session composes
+ * safely.
+ */
+async function executeOnlyFastPath(
+  opts: StartSessionOptions,
+  url: string,
+  identity: string | undefined,
+  deviceProfile: DeviceProfile,
+): Promise<StartSessionResult> {
+  // canFastPathExecute is the only entry point that gates these — narrow
+  // for the type checker so the rest of the function reads cleanly.
+  if (!opts.capability) {
+    throw new Error('executeOnlyFastPath called without capability');
+  }
+  const capability = opts.capability;
+  const sessionInit: { platform?: string; identity?: string } = {};
+  if (opts.platform) sessionInit.platform = opts.platform;
+  if (identity) sessionInit.identity = identity;
+  const session = pool.createNodeOnlySession(sessionInit);
+  if (opts.platform) session.platform = opts.platform;
+  if (identity) session.identity = identity;
+  session.device = deviceProfile.name ?? 'default';
+  session.graph = 'execute';
+  session.status = 'active';
+  session.declaredCapabilities = [
+    {
+      capability,
+      args: opts.args && typeof opts.args === 'object' ? opts.args : {},
+      declared_at: Date.now(),
+    },
+  ];
+
+  const result: StartSessionResult = {
+    sessionId: session.id,
+    a11yTree:
+      `<not loaded: start_session(graph:"execute") fast-path ran the saved ` +
+      `fetch strategy from Node — the page UI was never opened. The data is ` +
+      `in execute_result. If the strategy returned an error and you need to ` +
+      `re-drive the UI, open a new session without graph:"execute".>`,
+    a11y_total_chars: 0,
+    a11y_truncated: false,
+    url,
+    graph: 'execute',
+  };
+  if (opts.platform) populatePlatformResponseFields(result, opts.platform);
+
+  await maybeAutoExecuteOnStart(session, opts, result);
+
+  // Per-tool body cap (Layer 2 of the output-budget enforcement) — same
+  // pipeline as the slow path. enforceFinalBudget in formatToolResult is
+  // the last-resort backstop.
+  if (result.execute_result) {
+    compactExecuteResultBody(result.execute_result as unknown as Record<string, unknown>);
+  }
+
+  applyAutoExecuteHint(result, session, opts);
+  return result;
+}
+
+/**
  * `auto_execute_reason` values that mean the runtime DECLINED to attempt
  * the saved strategy — the executor never ran, so there's no failure to
  * route through the rediscover-gate. The session swaps back to the
@@ -1181,6 +1302,20 @@ export async function startSession(
   // rejected at the edge — omit the field instead. See
   // klura://reference#identities.
   const identity = normalizeIdentityOpt(opts.identity);
+
+  // Execute-graph fast path. When the agent calls
+  // start_session({graph:"execute", platform, capability, args}) AND a saved
+  // strategy exists AND the strategy can run from Node alone (fetch tier,
+  // node transport, no browser-bound prereqs), skip the entire browser
+  // session lifecycle. The slow path opens a Playwright context, navigates
+  // to `url`, captures forms, and snapshots the a11y tree — 5-15 s of
+  // setup the agent doesn't use, because the data is in execute_result and
+  // the session terminates immediately on success. The auth-probe branch
+  // inside maybeAutoExecuteOnStart already swallows driverFor failures, so
+  // the synthetic Session shell composes safely.
+  if (canFastPathExecute(opts)) {
+    return executeOnlyFastPath(opts, url, identity, deviceProfile);
+  }
 
   const sessionOpts: SessionOptions = {};
 
