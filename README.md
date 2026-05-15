@@ -10,8 +10,14 @@
 <p align="center"><sub>Klura is an MCP runtime your LLM agent uses to drive a browser, learn the API underneath, and save the result as a reusable skill.</sub></p>
 
 <p align="center">
+  <a href="https://www.npmjs.com/package/@klura/runtime"><img alt="npm version" src="https://img.shields.io/npm/v/@klura/runtime?style=flat-square&logo=npm&color=cb3837"></a>
+  <a href="https://www.npmjs.com/package/@klura/runtime"><img alt="npm downloads" src="https://img.shields.io/npm/dm/@klura/runtime?style=flat-square&logo=npm&color=cb3837"></a>
+  <a href="https://nodejs.org/"><img alt="Node.js" src="https://img.shields.io/node/v/@klura/runtime?style=flat-square&logo=node.js&logoColor=white&color=339933"></a>
+  <a href="https://www.typescriptlang.org/"><img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-3178c6?style=flat-square&logo=typescript&logoColor=white"></a>
+  <a href="https://modelcontextprotocol.io/"><img alt="MCP compatible" src="https://img.shields.io/badge/MCP-compatible-8a63d2?style=flat-square"></a>
   <a href="https://discord.gg/YJQ2zZYJ"><img alt="Discord" src="https://img.shields.io/discord/1496415213765791774?color=5865F2&label=Discord&logo=discord&logoColor=white&style=flat-square"></a>
   <a href="LICENSE"><img alt="License: BUSL-1.1" src="https://img.shields.io/badge/license-BUSL--1.1-blue?style=flat-square"></a>
+  <a href="#contributing"><img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square"></a>
 </p>
 
 ---
