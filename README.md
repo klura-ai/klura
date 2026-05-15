@@ -7,6 +7,8 @@
 
 <p align="center"><strong>Your agent learns a website once. Every run after is a direct API call — zero tokens, no browser.</strong></p>
 
+<p align="center"><sub>Klura is an MCP runtime your LLM agent uses to drive a browser, learn the API underneath, and save the result as a reusable skill.</sub></p>
+
 <p align="center">
   <a href="https://discord.gg/YJQ2zZYJ"><img alt="Discord" src="https://img.shields.io/discord/1496415213765791774?color=5865F2&label=Discord&logo=discord&logoColor=white&style=flat-square"></a>
   <a href="LICENSE"><img alt="License: BUSL-1.1" src="https://img.shields.io/badge/license-BUSL--1.1-blue?style=flat-square"></a>
@@ -242,6 +244,12 @@ Klura saves the simplest strategy that actually works.
 | T0   | `fetch`         | A direct HTTP or WebSocket call is enough                            |
 | T1   | `page-script`   | The page must run JavaScript to build, sign, or dispatch the request |
 | T2   | `recorded-path` | The safest available path is replaying the UI                        |
+
+The tier reflects **where the saved code runs**:
+
+- `fetch` is a static templated HTTP call, fired from Node. Possible when every input — body, headers, tokens — can be reconstructed without the page.
+- `page-script` runs JavaScript inside the live, already-authenticated browser tab. It can call functions the site itself defines: request signers, header rotators, MQTT codecs, WebSocket encoders, the in-page fetch wrapper. That makes lift possible for sites where the real request only exists as the output of in-page code, with no way to reproduce it from outside.
+- `recorded-path` replays UI actions through the browser driver. Slower, but works when the request can't be cleanly isolated.
 
 If a site cannot be lifted cleanly to `fetch` or `page-script`, klura still saves a `recorded-path`.
 
@@ -510,6 +518,12 @@ Bad fits:
 - endpoint or ID enumeration
 - tasks that violate platform policy
 - flows where the UI is intentionally the security boundary
+
+### What klura isn't
+
+- **A scraping framework.** Klura targets your own logged-in sessions, not unauthenticated pages at scale. If you're comparing it to Botasaurus, undetected-chromedriver, playwright-stealth, or Apify, that's a different category of tool.
+- **Code you write.** Strategies are reverse-engineered from one observed browser run by the LLM driving the session. There's no Python or JS script for you to author or maintain.
+- **An anti-detect toolkit.** Stealth fingerprint patches are supported; behavioral evasion (humanlike cursor jitter, residential proxies, CAPTCHA-solving services) isn't part of the mainline.
 
 ---
 
