@@ -7,7 +7,6 @@
 // Surfaces consumed by:
 //   - `submit_triage_plan` ok-response — tier-scoped slice as lift-entry priming.
 //   - `save_strategy` `invalid_shape` rejection — inlined in the rejection message.
-//   - `klura://reference#save-strategy-schema` — full catalog on demand.
 
 import { z } from 'zod';
 import { prereqSchemas, PREREQ_KINDS, prereqReferenceSlug } from './schemas/prereqs';

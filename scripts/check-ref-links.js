@@ -137,34 +137,27 @@ function main() {
     }
   }
 
-  // Orphan-vocab errors fail hard — those are explicit declarations in
-  // vocab.ts that should match REFERENCE.md headers; mismatches mean someone
-  // added an entry without writing the section.
-  //
-  // Broken-link warnings (klura://reference#<slug> with no matching header)
-  // print but don't fail. Pre-existing broken links from before this lint
-  // existed are grandfathered in; the warnings make them visible for
-  // incremental cleanup without blocking unrelated commits. Once the count
-  // hits zero, swap the warn-block below for the hard-fail path.
+  // Both classes of failure are hard errors:
+  //   - orphan-vocab: REF_LINKS entry pointing to a missing REFERENCE.md header
+  //   - broken-link: a klura://reference#<slug> usage whose slug isn't a header
   const orphanErrors = errors.filter((e) => e.startsWith('[orphan-vocab]'));
-  const brokenLinkWarnings = errors.filter((e) => e.startsWith('[broken-link]'));
+  const brokenLinkErrors = errors.filter((e) => e.startsWith('[broken-link]'));
 
-  if (brokenLinkWarnings.length > 0) {
-    console.warn(`! check-ref-links: ${brokenLinkWarnings.length} pre-existing broken link(s) — clean up incrementally:\n`);
-    for (const w of brokenLinkWarnings) console.warn('  ' + w);
-    console.warn('');
-  }
-
-  if (orphanErrors.length === 0) {
+  if (orphanErrors.length === 0 && brokenLinkErrors.length === 0) {
     console.log(
       `✓ check-ref-links: ${usages.length} usages, ${realSlugs.size} headers, ` +
-        `${vocabSlugs.size} vocab entries — vocab integrity OK ` +
-        `(${brokenLinkWarnings.length} broken-link warning(s) tolerated)`,
+        `${vocabSlugs.size} vocab entries — vocab integrity OK`,
     );
     process.exit(0);
   }
-  console.error(`✖ check-ref-links: ${orphanErrors.length} orphan vocab entr(y/ies) — REF_LINKS points to missing header(s):\n`);
-  for (const e of orphanErrors) console.error('  ' + e);
+  if (orphanErrors.length > 0) {
+    console.error(`✖ check-ref-links: ${orphanErrors.length} orphan vocab entr(y/ies) — REF_LINKS points to missing header(s):\n`);
+    for (const e of orphanErrors) console.error('  ' + e);
+  }
+  if (brokenLinkErrors.length > 0) {
+    console.error(`✖ check-ref-links: ${brokenLinkErrors.length} broken klura://reference#<slug> usage(s):\n`);
+    for (const e of brokenLinkErrors) console.error('  ' + e);
+  }
   process.exit(1);
 }
 

@@ -494,7 +494,6 @@ export async function endDrive(
       session_id: sessionId,
       message: rejectionToErrorMessage('end_drive', auditResult.rejection, {
         toolName: 'end_drive',
-        referenceUrl: 'klura://reference#end-drive-audit',
       }),
       re_call_count: heavyReCallCount + jsEvalCallCount,
       persist_call_count: persistCallCount,
@@ -680,7 +679,7 @@ export async function endDrive(
         `       (existing capability covers the task, user said abort, site dead), call ` +
         `       \`abort_session(session_id, "<reason ≥20 chars>")\` for the honest exit.\n` +
         `  → "I judged this as nothing worth saving" is NOT a legitimate verdict — that judgment ` +
-        `isn't yours to make. See klura://reference#end-drive-audit.`,
+        `isn't yours to make.`,
       re_call_count: countHeavyReToolCalls(session) + countJsEvalCalls(session),
       persist_call_count: countPersistCalls(session),
       end_drive_attempts: endDriveAttemptsPreBump,

@@ -3,7 +3,7 @@
 // warning kinds, decision values, REFERENCE.md slugs).
 //
 // **Why this exists.** Identifiers like `start_session`, `re_persistence`, or
-// `klura://reference#end-drive-audit` are referenced in many places: tool
+// `klura://reference#checkpoints` are referenced in many places: tool
 // descriptions, audit code, error messages, REFERENCE.md prose, runtime
 // template strings, tests. Every duplicated string literal is a drift
 // surface. When one is renamed, every stale literal becomes either a broken
@@ -167,11 +167,8 @@ export const REF_LINKS = {
   capabilityParameters: 'capability-parameters',
   capabilityPrereq: 'capability-prereq',
   checkpoints: 'checkpoints',
-  configure: 'configure',
   debuggerSurface: 'debugger-surface',
   discoveryArtifact: 'discovery-artifact',
-  endDriveAudit: 'end-drive-audit',
-  enumParams: 'enum-params',
   executeErrorsClassificationAndRecovery: 'execute-errors-classification-and-recovery',
   fetchSchema: 'fetch-schema',
   graphs: 'graphs',
@@ -180,9 +177,7 @@ export const REF_LINKS = {
   interrupts: 'interrupts',
   jsEval: 'js-eval',
   networkLogDiscoveryWorkflow: 'network-log-discovery-workflow',
-  observedCapabilities: 'observed-capabilities',
   pageScriptAnchors: 'page-script-anchors',
-  parameterizationDisclosureRequired: 'parameterization-disclosure-required',
   pageScriptSchema: 'page-script-schema',
   platformSurfaceMap: 'platform-surface-map',
   popups: 'popups',
@@ -192,10 +187,8 @@ export const REF_LINKS = {
   rediscoverGate: 'rediscover-gate',
   reverseEngineerMode: 'reverse-engineer-mode',
   reverseEngineerPlaybook: 'reverse-engineer-playbook',
-  saveStrategyAudit: 'save-strategy-audit',
   selfVerifyingStrategies: 'self-verifying-strategies',
   stepHealingResponseFormat: 'step-healing-response-format',
-  strategySchemasOverview: 'strategy-schemas-overview',
   tagPrereq: 'tag-prereq',
   triage: 'triage',
   triageSurfaceBinding: 'triage-surface-binding',

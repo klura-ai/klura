@@ -44,7 +44,7 @@ export function validateStrategyShape(data: unknown): asserts data is Strategy {
     const submitted = tier === '' ? '(missing)' : JSON.stringify(tier);
     throw new Error(
       `invalid_strategy: "strategy" = ${submitted} is not one of klura's tiers. The three tiers, in optimality order:\n${describeStrategyTiers()}\n\n` +
-        `For a JS expression that drives the page's own send: {strategy:"page-script", protocol:"websocket", origin:"<page URL>", frameFromPage:{expression:"...", returns:"hex"|"base64"}, frameEncoding:"binary", notes:{anchor_type:"module"|"protocol", params:{...}}}. For a pure Node-VM byte-splice generator with no page dependency: {strategy:"fetch", protocol:"websocket", wsUrl:"<captured>", frameEncoding:"binary", generated:{frame:{code:"..."}}, notes:{params:{...}}}. klura stores only complete, runnable strategies on disk; iterative work belongs in the discovery_artifact via save_verified_expression / add_discovery_note / add_resume_pointer. Detail: klura://reference#strategy-schemas-overview.`,
+        `For a JS expression that drives the page's own send: {strategy:"page-script", protocol:"websocket", origin:"<page URL>", frameFromPage:{expression:"...", returns:"hex"|"base64"}, frameEncoding:"binary", notes:{anchor_type:"module"|"protocol", params:{...}}}. For a pure Node-VM byte-splice generator with no page dependency: {strategy:"fetch", protocol:"websocket", wsUrl:"<captured>", frameEncoding:"binary", generated:{frame:{code:"..."}}, notes:{params:{...}}}. klura stores only complete, runnable strategies on disk; iterative work belongs in the discovery_artifact via save_verified_expression / add_discovery_note / add_resume_pointer.`,
     );
   }
 

@@ -179,7 +179,7 @@ export interface SubmitTriagePlanResult {
    *  the capabilities should be saved in. The agent reads this once at
    *  LIFT entry and authors save_strategy correctly on the first
    *  attempt — no audit-cycle thrash. The audit stays as the safety
-   *  net for what the agent missed. See klura://reference#save-authoring-contract. */
+   *  net for what the agent missed. */
   save_authoring_contract?: SaveAuthoringContract;
   /** Detector warnings the audit emitted that the agent acked through.
    *  Present when the audit committed despite emitting one or more
@@ -191,9 +191,7 @@ export interface SubmitTriagePlanResult {
    *  rendered from the canonical Zod validators. Lets the agent enter LIFT
    *  with the exact required + optional fields for the tier they're about
    *  to author — every field the validator enforces is enumerated, so
-   *  drift between docs and runtime is structurally impossible. The full
-   *  catalog is available on demand via
-   *  `klura://reference#save-strategy-schema`. */
+   *  drift between docs and runtime is structurally impossible. */
   save_strategy_schema?: string;
 }
 
@@ -234,7 +232,6 @@ export async function submitTriagePlan(rawArgs: unknown): Promise<SubmitTriagePl
     throw new Error(
       rejectionToErrorMessage('submit_triage_plan', triageAuditResult.rejection, {
         toolName: 'submit_triage_plan',
-        referenceUrl: 'klura://reference#triage',
       }),
     );
   }

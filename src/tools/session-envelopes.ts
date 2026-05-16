@@ -107,7 +107,7 @@ export const TOOL_DEFS: ToolDef[] = [
         audit_token: {
           type: 'string',
           description:
-            'Echo the audit_token returned on the prior end_drive audit rejection (capability_declaration_required / save_attempted_none_landed / re_persistence Detectors, or triage_acknowledgment Classifier). See klura://reference#end-drive-audit.',
+            'Echo the audit_token returned on the prior end_drive audit rejection (capability_declaration_required / save_attempted_none_landed / re_persistence Detectors, or triage_acknowledgment Classifier).',
         },
         audit_answers: {
           type: 'object',

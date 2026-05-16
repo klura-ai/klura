@@ -273,7 +273,7 @@ const rePersistenceDetector: Detector<EndDrivePayload, EndDriveCtx> = {
           `(existing capability covers the task, user said abort, site dead), call ` +
           `abort_session(session_id, "<reason ≥20 chars>") for the honest exit. ` +
           `NOT legitimate: "I judged this as nothing worth saving" — klura is always-save-by-default ` +
-          `and that judgment isn't yours to make. See klura://reference#end-drive-audit.`,
+          `and that judgment isn't yours to make.`,
         context: {
           session_id: p.sessionId,
           heavy_re_call_count: p.heavyReCallCount,

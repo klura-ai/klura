@@ -243,8 +243,7 @@ export async function probeOneJsEvalPrereq(
             `reason that QUOTES a substring (≥40 chars) of a prior js_eval expression from this ` +
             `session that exercised the same module/global>"}]. The runtime will validate the ` +
             `quoted substring appears in session.jsEvalCalls. Anti-canned: prose-only reasons rejected. ` +
-            `Expression was: ${JSON.stringify(prereq.expression).slice(0, 240)}. ` +
-            `See klura://reference#save-strategy-audit.`,
+            `Expression was: ${JSON.stringify(prereq.expression).slice(0, 240)}.`,
           { cause: err },
         );
       }

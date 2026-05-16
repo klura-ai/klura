@@ -87,8 +87,7 @@ type CloseHandoff = {
     /** Structured save-authoring brief for this capability — composed
      *  from session state. Lists every save_strategy constraint that
      *  would fire if violated. Reading this at LIFT entry replaces
-     *  cycling through audit rejections one-detector-at-a-time.
-     *  See klura://reference#save-authoring-contract. */
+     *  cycling through audit rejections one-detector-at-a-time. */
     save_authoring_contract?: SaveAuthoringContract;
     questions_to_answer: string[];
   }>;

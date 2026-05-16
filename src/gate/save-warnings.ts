@@ -820,7 +820,7 @@ export function detectEnumParamListingUnfactored(
     // load-bearing. The upstream save-time enum-guard rejects kind:"enum"
     // with <2 observed_values, so reaching this branch is the belt-and-
     // suspenders case where the guard missed (e.g. legacy saves, programmatic
-    // save shapes). See klura://reference#save-strategy-audit.
+    // save shapes).
     if (new Set(values).size < 2) continue;
 
     const listingUrl = findListingUrlForValues(intercepted, values, myEndpoint);

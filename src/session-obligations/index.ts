@@ -182,8 +182,7 @@ export function computeSessionObligation(session: Session): SessionObligation | 
         `In unattended runs, retry with just \`audit_token\` and the embedder's decider auto-resolves user_confirmation. ` +
         `Expect 1-3 retries before the save lands — that's normal. ` +
         `${ABORT_SESSION_HINT} ` +
-        `Do not end your turn yet. ` +
-        `See klura://reference#save-strategy-audit.`,
+        `Do not end your turn yet.`,
     };
   }
 

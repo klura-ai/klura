@@ -37,7 +37,7 @@ export function composeAckHint(kind: CheckpointKind, _args: CheckpointAckInput):
       return (
         'Inspect the live page (a11y_tree + screenshot from the checkpoint context). Fix via ' +
         'patch_step then resume_execution. Heal the failed step only — do not rewrite the ' +
-        'whole strategy. See klura://reference#patch-step.'
+        'whole strategy.'
       );
     case 'session_expired':
       return (

@@ -379,7 +379,6 @@ test('rejectionToErrorMessage: Stage-1 rejection renders warnings + hint, no tok
   assert.match(msg, /invalid_strategy: save_strategy/);
   assert.match(msg, /flagger.*flagged thing/);
   assert.match(msg, /hint: do X/);
-  assert.match(msg, /klura:\/\/reference#save-strategy-audit/);
 });
 
 test('rejectionToErrorMessage: Stage-2 rejection renders audit_token + how_to_respond', () => {

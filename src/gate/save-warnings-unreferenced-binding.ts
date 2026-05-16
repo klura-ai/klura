@@ -71,8 +71,7 @@ export function detectUnreferencedPrereqBinding(data: Strategy): SaveWarning[] {
         `(canonical for DOM-extraction page-scripts); (c) ack via notes.save_warnings_acked: ` +
         `[{kind: "unreferenced_prereq_binding", reason: "<one sentence — e.g. binding ` +
         `intentionally drives a refresh-only side effect, the value isn't consumed by warm ` +
-        `callers>"}] when the binding genuinely has no consumer but the prereq must still run. ` +
-        `See klura://reference#save-strategy-audit.`,
+        `callers>"}] when the binding genuinely has no consumer but the prereq must still run.`,
       context: { prereq_index: i, binds_name: binds },
     });
   }

@@ -397,7 +397,7 @@ export function validateLiteralAnswer(
             m.label,
           )}, param: "${m.paramName}"). A click-observed value is by-construction a selectable enum option, NOT a static literal. Template it: replace ${JSON.stringify(
             m.value,
-          )} with {{${m.paramName}}} in the field, declare notes.params.${m.paramName} as {kind: "enum", observed_values: [{value, label}, ...]} grounded in the captured pair, and reclassify this entry as {caller_input: "${m.paramName}"}. See klura://reference#enum-params.`,
+          )} with {{${m.paramName}}} in the field, declare notes.params.${m.paramName} as {kind: "enum", observed_values: [{value, label}, ...]} grounded in the captured pair, and reclassify this entry as {caller_input: "${m.paramName}"}.`,
       );
     }
     return [];

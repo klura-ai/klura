@@ -675,10 +675,6 @@ export interface RejectionFormatOpts {
    *  pre-save audit; pass the end-drive tool name for the end-drive
    *  audit. */
   toolName?: string;
-  /** Reference anchor to point the agent at. Defaults to
-   *  `klura://reference#save-strategy-audit`; pass a different anchor for
-   *  audit instances that have their own REFERENCE section. */
-  referenceUrl?: string;
 }
 
 /**
@@ -692,7 +688,6 @@ export function rejectionToErrorMessage(
   opts: RejectionFormatOpts = {},
 ): string {
   const toolName = opts.toolName ?? 'save_strategy';
-  const referenceUrl = opts.referenceUrl ?? 'klura://reference#save-strategy-audit';
   const lines: string[] = [];
 
   // Stage-0 shape rejection — bypass the classifier/token machinery
@@ -863,8 +858,6 @@ export function rejectionToErrorMessage(
     }
   }
 
-  lines.push('');
-  lines.push(`  See ${referenceUrl}.`);
   return lines.join('\n');
 }
 

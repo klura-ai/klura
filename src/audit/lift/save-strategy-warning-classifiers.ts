@@ -224,9 +224,7 @@ function collectObservedPropertyKeys(
       message:
         `${location} bakes observed property keys [${observed_keys.map((k) => JSON.stringify(k)).join(', ')}] ` +
         `inside ${JSON.stringify(text).slice(0, 120)}…`,
-      hint:
-        `Replace with a shape-walk: Object.values(window.X).find(v => typeof v?.<knownField> === "string"). ` +
-        `See klura://reference#save-strategy-audit.`,
+      hint: `Replace with a shape-walk: Object.values(window.X).find(v => typeof v?.<knownField> === "string").`,
       context: { location, observed_keys, expression: text },
     });
   }
@@ -299,7 +297,7 @@ function collectObservedLiteralValues(
       hint:
         `Template via a prereq: declare a js-eval prereq that re-derives the value from ` +
         `the live page on every call, bind it (e.g. \`binds: "nonce"\`), and reference \`{{nonce}}\` ` +
-        `in the header / body. See klura://reference#save-strategy-audit.`,
+        `in the header / body.`,
       context: { location: l.location, value: l.value },
     });
   }
