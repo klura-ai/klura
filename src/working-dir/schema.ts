@@ -405,43 +405,47 @@ export interface CapabilityLogbookEntry {
 // Hard validation on read. klura isn't released yet — on-disk shape drift is
 // handled by discarding and rebuilding, not by tolerant migration. See
 // feedback_no_backwards_compat.md.
+//
+// Validation depth mirrors the runtime's write surface: the top-level keys
+// the writers populate are checked, nested item shapes ride .loose() so a
+// minor field addition to e.g. a strategy_event doesn't blast the whole
+// logbook on the next read.
 // ---------------------------------------------------------------------------
 
+import { z } from 'zod';
+
+const platformLogbookSchemaZ = z.looseObject({
+  schema_version: z.literal(1),
+  platform: z.string(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  sessions_total: z.number(),
+  per_capability: z.record(z.string(), z.unknown()),
+  platform_wide: z.looseObject({}),
+  observed_capabilities: z.array(z.unknown()),
+  url_graph: z.looseObject({
+    nodes: z.array(z.unknown()),
+    edges: z.array(z.unknown()),
+  }),
+  forms_seen: z.array(z.unknown()),
+});
+
+const sessionArchiveSchemaZ = z.looseObject({
+  schema_version: z.literal(1),
+  session_id: z.string(),
+  platform: z.string(),
+  meta: z.looseObject({}),
+  http: z.array(z.unknown()),
+  ws: z.array(z.unknown()),
+  actions: z.array(z.unknown()),
+  tool_trace: z.array(z.unknown()),
+  bundle_shas: z.array(z.unknown()),
+});
+
 export function isPlatformLogbook(v: unknown): v is PlatformLogbook {
-  if (!v || typeof v !== 'object') return false;
-  const o = v as Record<string, unknown>;
-  return (
-    o.schema_version === 1 &&
-    typeof o.platform === 'string' &&
-    typeof o.created_at === 'string' &&
-    typeof o.updated_at === 'string' &&
-    typeof o.sessions_total === 'number' &&
-    !!o.per_capability &&
-    typeof o.per_capability === 'object' &&
-    !!o.platform_wide &&
-    typeof o.platform_wide === 'object' &&
-    Array.isArray(o.observed_capabilities) &&
-    !!o.url_graph &&
-    typeof o.url_graph === 'object' &&
-    Array.isArray((o.url_graph as { nodes?: unknown }).nodes) &&
-    Array.isArray((o.url_graph as { edges?: unknown }).edges) &&
-    Array.isArray(o.forms_seen)
-  );
+  return platformLogbookSchemaZ.safeParse(v).success;
 }
 
 export function isSessionArchive(v: unknown): v is SessionArchive {
-  if (!v || typeof v !== 'object') return false;
-  const o = v as Record<string, unknown>;
-  return (
-    o.schema_version === 1 &&
-    typeof o.session_id === 'string' &&
-    typeof o.platform === 'string' &&
-    !!o.meta &&
-    typeof o.meta === 'object' &&
-    Array.isArray(o.http) &&
-    Array.isArray(o.ws) &&
-    Array.isArray(o.actions) &&
-    Array.isArray(o.tool_trace) &&
-    Array.isArray(o.bundle_shas)
-  );
+  return sessionArchiveSchemaZ.safeParse(v).success;
 }

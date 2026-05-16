@@ -21,13 +21,14 @@
 // `setCookieNames`, or a URL from `domNavigations`. Empty justification
 // or zero matches → reject with the candidate list.
 
+import { z } from 'zod';
 import { pool } from '../runtime-state';
 import { loadLogbook, writeLogbook } from '../working-dir/logbook';
 import type { TriagePlan, DefenseSurface } from '../working-dir/schema';
 import { dispatch } from '../phases/state-machine';
 import { currentPhase } from '../phases/registry';
 import { invokeCheckpointAndGate, type CheckpointEnvelope } from '../checkpoints';
-import { asString, asObject, asArray, asEnum } from '../validators';
+import { parseOrThrow } from '../strategies/schemas/zod-helpers';
 import { bindUrlsToSurface, urlKey } from '../phases/surface-binding';
 import type { Session } from '../drivers/types/session';
 import { loadConfig } from '../config/handler';
@@ -46,6 +47,60 @@ import { renderSaveStrategySchemaMarkdown, type StrategyTier } from '../strategi
 
 const EXPECTED_TIERS = ['fetch', 'page-script', 'recorded-path'] as const;
 
+// Each observed_origins entry must be a parseable URL with http: or https:
+// scheme. Bare hostnames like "x.com" are silently dropped downstream by
+// `originOf()` (in audit/triage/triage-plan.ts) because `new URL("x.com")`
+// throws — the agent then sees a "request_pattern not on observed_origin"
+// rejection without knowing why their entries weren't recognized. Reject
+// explicitly here so the message names the missing scheme, not the
+// downstream symptom.
+const observedOriginSchema = z.string().superRefine((entry, ctx) => {
+  let parsed: URL;
+  try {
+    parsed = new URL(entry);
+  } catch {
+    const suggestion = JSON.stringify('https://' + entry.replace(/^https?:\/\//, ''));
+    ctx.addIssue({
+      code: 'custom',
+      message:
+        `must be a parseable URL with scheme (got ${JSON.stringify(entry)}). ` +
+        `Each entry must include the scheme: e.g. ${suggestion}. ` +
+        `Bare hostnames are silently dropped by the downstream audit, leading ` +
+        `to a confusing "request_pattern not on observed_origin" rejection.`,
+    });
+    return;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    ctx.addIssue({
+      code: 'custom',
+      message: `must use http: or https: scheme (${JSON.stringify(entry)} uses ${parsed.protocol}).`,
+    });
+  }
+});
+
+const defenseSurfaceSchema = z
+  .object({
+    observed_origins: z.array(observedOriginSchema),
+    observed_scripts: z.array(z.string()),
+    cookies_set: z.array(z.string()),
+    request_patterns: z.array(z.string()),
+    mechanism_hypothesis: z.string(),
+  })
+  .strict();
+
+const submitTriagePlanArgsSchema = z
+  .object({
+    session_id: z.string(),
+    capability: z.string(),
+    surface_label: z.string(),
+    defense_surface: defenseSurfaceSchema,
+    expected_tier: z.enum(EXPECTED_TIERS),
+    tier_justification: z.string(),
+    summary_for_user: z.string(),
+    acks: z.record(z.string(), z.string()).optional(),
+  })
+  .strict();
+
 export interface SubmitTriagePlanArgs {
   session_id: string;
   capability: string;
@@ -61,75 +116,10 @@ export interface SubmitTriagePlanArgs {
   acks?: Record<string, string>;
 }
 
-function parseDefenseSurface(raw: unknown): DefenseSurface {
-  const obj = asObject(raw, 'defense_surface');
-  const stringArray = (v: unknown, field: string): string[] =>
-    asArray(v, `defense_surface.${field}`).map((entry, i) =>
-      asString(entry, `defense_surface.${field}[${i}]`),
-    );
-  const observed_origins = stringArray(obj.observed_origins, 'observed_origins');
-  // Each observed_origins entry must be a parseable origin (scheme + host).
-  // Bare hostnames like "x.com" are silently dropped downstream by
-  // `originOf()` (in audit/triage/triage-plan.ts) because `new URL("x.com")`
-  // throws — the agent then sees a "request_pattern not on observed_origin"
-  // rejection without knowing why their entries weren't recognized. Reject
-  // explicitly here so the message is "observed_origins[i] missing scheme,"
-  // not the downstream symptom.
-  observed_origins.forEach((entry, i) => {
-    let parsed: URL;
-    try {
-      parsed = new URL(entry);
-    } catch {
-      const suggestion = JSON.stringify('https://' + entry.replace(/^https?:\/\//, ''));
-      throw new Error(
-        `invalid_strategy: defense_surface.observed_origins[${i}] = ${JSON.stringify(entry)} ` +
-          `is not a parseable URL. Each entry must include the scheme: ` +
-          `e.g. ${suggestion}, not ${JSON.stringify(entry)}. Bare hostnames are silently dropped by the ` +
-          `downstream audit, leading to a confusing "request_pattern not on observed_origin" ` +
-          `rejection. Add the scheme and re-submit.`,
-      );
-    }
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      throw new Error(
-        `invalid_strategy: defense_surface.observed_origins[${i}] = ${JSON.stringify(entry)} ` +
-          `uses ${parsed.protocol} scheme; must be http: or https:.`,
-      );
-    }
-  });
-  return {
-    observed_origins,
-    observed_scripts: stringArray(obj.observed_scripts, 'observed_scripts'),
-    cookies_set: stringArray(obj.cookies_set, 'cookies_set'),
-    request_patterns: stringArray(obj.request_patterns, 'request_patterns'),
-    mechanism_hypothesis: asString(
-      obj.mechanism_hypothesis,
-      'defense_surface.mechanism_hypothesis',
-    ),
-  };
-}
-
-function parseAcks(raw: unknown): Record<string, string> | undefined {
-  if (raw === undefined || raw === null) return undefined;
-  const obj = asObject(raw, 'acks');
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    out[k] = asString(v, `acks.${k}`);
-  }
-  return out;
-}
-
 function parseArgs(raw: unknown): SubmitTriagePlanArgs {
-  const root = asObject(raw, 'submit_triage_plan args');
-  return {
-    session_id: asString(root.session_id, 'session_id'),
-    capability: asString(root.capability, 'capability'),
-    surface_label: asString(root.surface_label, 'surface_label'),
-    defense_surface: parseDefenseSurface(root.defense_surface),
-    expected_tier: asEnum(root.expected_tier, 'expected_tier', EXPECTED_TIERS),
-    tier_justification: asString(root.tier_justification, 'tier_justification'),
-    summary_for_user: asString(root.summary_for_user, 'summary_for_user'),
-    acks: parseAcks(root.acks),
-  };
+  return parseOrThrow(submitTriagePlanArgsSchema, raw, {
+    where: 'submit_triage_plan args',
+  });
 }
 
 const TRIAGE_PLAN_HISTORY_CAP = 5;
