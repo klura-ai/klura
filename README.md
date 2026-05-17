@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="wordmark-dark-bg.png">
-    <img alt="klura" src="wordmark-light-bg.png" width="320">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/klura-ai/klura/v0.2.2/wordmark-dark-bg.png">
+    <img alt="klura" src="https://raw.githubusercontent.com/klura-ai/klura/v0.2.2/wordmark-light-bg.png" width="320">
   </picture>
 </p>
 
@@ -40,19 +40,22 @@ Later:
 
 Browser agents pay for the UI on every run. Klura pays once.
 
-|  | Hacker News search | GitHub create issue | Messenger send message |
-| --- | --: | --: | --: |
-| Plain browser agent — every run | 22.9s · 63k tok · $0.05 | 160s · 634k tok · $0.29 | 134s · 435k tok · $1.06 |
-| **Klura, warm — no LLM in the loop** | **0.33s · 0 tok · $0** | **1.23s · 0 tok · $0** | **5ms · 0 tok · $0** |
+|                                      |      Hacker News search |    Messenger send message |
+| ------------------------------------ | ----------------------: | ------------------------: |
+| Plain browser agent — every run      | 20.2s · 63k tok · $0.09 |   206s · 696k tok · $0.34 |
+| Klura cold — one-time, includes LIFT |  77s · 518k tok · $0.42 | 27 min · 3.5M tok · $2.53 |
+| **Klura, warm — no LLM in the loop** |  **274ms · 0 tok · $0** |    **0.1ms · 0 tok · $0** |
 
 <sub>The first klura run costs a normal browser-agent run plus one-time reverse-engineering — full table and method in <a href="#benchmarks">Benchmarks</a>.</sub>
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="hero-dark.gif">
-    <img alt="klura: one run, lift, then execute the saved skill directly" src="hero-light.gif" width="900">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/klura-ai/klura/v0.2.2/hero-dark.gif">
+    <img alt="klura: one run, lift, then execute the saved skill directly" src="https://raw.githubusercontent.com/klura-ai/klura/v0.2.2/hero-light.gif" width="900">
   </picture>
 </p>
+
+<p align="center"><sub>Whether the underlying call is a plain <code>fetch</code> or a binary WebSocket frame the page builds in-memory, klura saves the simplest strategy that actually fires — and replays it the same way every run after.</sub></p>
 
 Klura watches what the browser actually does — requests, responses, cookies, page state, tokens, and action trails — then turns repeatable flows into saved executable strategies.
 
@@ -192,8 +195,8 @@ Before LIFT:                    After LIFT:
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="learn-graph-dark.gif">
-    <img alt="Learn graph: drive the task in the browser, capture traffic, lift into a saved strategy" src="learn-graph-light.gif" width="900">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/klura-ai/klura/v0.2.2/learn-graph-dark.gif">
+    <img alt="Learn graph: drive the task in the browser, capture traffic, lift into a saved strategy" src="https://raw.githubusercontent.com/klura-ai/klura/v0.2.2/learn-graph-light.gif" width="900">
   </picture>
 </p>
 
@@ -269,8 +272,8 @@ Klura treats those as repairable failures.
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="execute-relearn-dark.gif">
-    <img alt="Execute graph: saved strategy fires; on stale-shape failure klura relearns and patches the strategy" src="execute-relearn-light.gif" width="900">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/klura-ai/klura/v0.2.2/execute-relearn-dark.gif">
+    <img alt="Execute graph: saved strategy fires; on stale-shape failure klura relearns and patches the strategy" src="https://raw.githubusercontent.com/klura-ai/klura/v0.2.2/execute-relearn-light.gif" width="900">
   </picture>
 </p>
 
@@ -300,8 +303,8 @@ The agent walks the surface area — pages, forms, settings, search, account flo
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="map-graph-dark.gif">
-    <img alt="Map graph: scout a platform and build a persistent logbook of pages and observed capabilities" src="map-graph-light.gif" width="900">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/klura-ai/klura/v0.2.2/map-graph-dark.gif">
+    <img alt="Map graph: scout a platform and build a persistent logbook of pages and observed capabilities" src="https://raw.githubusercontent.com/klura-ai/klura/v0.2.2/map-graph-light.gif" width="900">
   </picture>
 </p>
 
@@ -351,25 +354,22 @@ The agent stays in the loop when judgment is needed. The runtime takes over when
 
 Same task, same Claude model, same agent loop on both sides — the only difference is whether klura has seen the task before.
 
-|  | Hacker News search | GitHub create issue[^github-re] | Messenger send message[^messenger-re] |
+|  | Hacker News search | Messenger send message[^messenger-re] | Amazon product search |
 | --- | --: | --: | --: |
-| Plain browser agent — paid every run | 22.9s · 63k tok · $0.054 | 160s · 634k tok · $0.29 | 134s · 435k tok · $1.06 |
-| **Klura warm — runtime only**[^runtime-only] | **0.33s · 0 tok · $0** | **1.23s · 0 tok · $0** | **5ms · 0 tok · $0** |
-| Klura cold — first run only[^cold-includes-lift] | 43.8s · 363k tok · $0.191 | 318s · 1.29M tok · $0.84 | 1469s · 1.78M tok · $1.56 |
+| Plain browser agent — paid every run | 20.2s · 63k tok · $0.09 | 206s · 696k tok · $0.34 | 232s · 872k tok · $0.54 |
+| **Klura warm — runtime only**[^runtime-only] | **274ms · 0 tok · $0** | **0.1ms · 0 tok · $0** | — |
+| Klura cold — first run only[^cold-includes-lift] | 77.4s · 518k tok · $0.42 | 1648s · 3.5M tok · $2.53 | 120s · 621k tok · $0.52 |
+| Klura warm — agent in loop | 18.3s · 164k tok · $0.08 | 238s · 1.85M tok · $0.88 | 51.6s · 282k tok · $0.17 |
 
-**Warm** is the runtime call itself — no LLM in the loop, deterministic replay. This is what every run after the first costs: usually one request.
+**Warm runtime-only** is the saved-strategy call itself — no LLM in the loop, deterministic replay. The number every run after the first pays in pure execution time.
 
-**Cold** is the one-time tax. The agent first completes the task like any browser agent (roughly the "plain browser agent" row), then reverse-engineers the protocol and saves a runnable strategy. Hard sites cost more here — Messenger's send path is a binary MQTT frame with snowflake IDs and an in-page codec, so cold is ~24 minutes of work that the next thousand sends never pay again.
+**Klura warm — agent in loop** is what a conversational MCP host sees end-to-end: the host still spends a couple of LLM turns deciding to call the saved skill and reporting the result. Strictly slower than runtime-only, strictly faster than re-discovering the page.
 
-When klura runs inside an agent SDK, MCP host, or conversational loop, the host may still spend a couple of LLM turns deciding to call the saved skill and reporting the result. The warm row measures the saved-strategy execution itself.
-
-The benchmark harness runs both columns through the same Claude model and the same Agent SDK loop against live public sites — built so the numbers aren't a self-report. Full method and reproducible results are published alongside the runtime.
+**Cold** is the one-time tax. The agent first completes the task like any browser agent (roughly the "plain browser agent" row), then reverse-engineers the protocol and saves a runnable strategy. Hard sites cost more here — Messenger's send path is a binary MQTT frame with snowflake IDs and an in-page codec, so cold is ~27 minutes of work that the next thousand sends never pay again.
 
 [^cold-includes-lift]: Klura cold time includes discovery, triage, and LIFT. The agent first completes the user's task, then reverse-engineers the protocol and persists a runnable strategy. The actual sending or searching portion is roughly comparable to the raw Playwright row; the remainder is one-time work that amortizes across future runs.
 
-[^runtime-only]: No agent SDK in the loop. n=5 sequential, median wall-clock. GitHub's number is the median of a clean 5/5-ok page-script. When this same path is dispatched from inside an agent loop, add the host's LLM latency on top.
-
-[^github-re]: GitHub's web flow posts to `/_graphql` with a persisted-query hash, an `X-Fetch-Nonce` header that the in-page bundle rotates, and a numeric repository ID pulled from the rendered page. Sonnet 4.6 identified the call, isolated the rotating signal, and saved a `page-script` with `js-eval` prerequisites that read the nonce and client-version off the live page on each invocation.
+[^runtime-only]: No agent SDK in the loop. n=5 sequential, median wall-clock. When this same path is dispatched from inside an agent loop, add the host's LLM latency on top.
 
 [^messenger-re]: Messenger send is an MQTT PUBLISH on `/ls_req`, with a JSON body whose snowflake IDs exceed `Number.MAX_SAFE_INTEGER`, a packet-id counter in the in-page MQTT client, and binary framing through the page's `MqttProtocolCodec`. Sonnet 4.6 located the encoder, intercepted the live connection, decoded the envelope, and saved a script that rebuilds and dispatches the frame through the already-authenticated socket.
 
