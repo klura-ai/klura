@@ -318,7 +318,7 @@ async function main() {
           result.status >= 200 &&
           result.status < 400
         ) {
-          const { estimateRunSavings, formatRunSavings } = require('../dist/lift/savings');
+          const { estimateRunSavings, formatRunSavings } = require('../dist/telemetry/savings');
           const savings = estimateRunSavings(result.tier, result.elapsedMs);
           const useColor = Boolean(process.stderr.isTTY) && !process.env.NO_COLOR;
           process.stderr.write(formatRunSavings(savings, useColor) + '\n');
