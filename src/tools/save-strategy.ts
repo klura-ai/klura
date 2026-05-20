@@ -1117,11 +1117,32 @@ export const TOOL_DEFS: ToolDef[] = [
       },
       required: ['platform', 'capability', 'strategy', 'session_id'],
     },
-    handler: (args: any) =>
-      saveStrategy(args.platform, args.capability, args.strategy, args.changelog, args.session_id, {
-        token: args.audit_token,
-        answers: args.audit_answers,
-      }),
+    handler: (args: any) => {
+      // session_id is in `required` above, but enforce it at the boundary too:
+      // without it, `saveStrategy` silently skips the ENTIRE save-time audit
+      // (literal provenance, user_confirmation, …) AND post-save validation,
+      // committing an unverified strategy. Agents occasionally drop it (see the
+      // same guard in saveStrategyFromCapture). A loud reject beats a silent
+      // unaudited save.
+      if (typeof args.session_id !== 'string' || args.session_id.trim().length === 0) {
+        throw new Error(
+          'invalid_strategy: save_strategy requires session_id — without it the save-time ' +
+            'audit and post-save validation are skipped and the strategy would commit ' +
+            'unverified. Pass the session_id from start_session.',
+        );
+      }
+      return saveStrategy(
+        args.platform,
+        args.capability,
+        args.strategy,
+        args.changelog,
+        args.session_id,
+        {
+          token: args.audit_token,
+          answers: args.audit_answers,
+        },
+      );
+    },
   },
 
   {
