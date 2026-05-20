@@ -639,23 +639,24 @@ export async function endDrive(
     });
   }
 
-  // No-silent-close guard. klura is always-save-by-default
-  // (memory/feedback_klura_always_save_default.md). When a session declared a
-  // capability, manually saved nothing, and auto-synth couldn't derive a
-  // fallback either, the historical behaviour was to close cleanly with zero
-  // strategies on disk — a silent failure where the agent satisfied the
-  // declaration audit and then escaped without saving. Reject that path: the
-  // agent must either save manually, retry to give auto-synth more captures, or
-  // call `abort_session(reason)` for the honest exit. The third end_drive
-  // attempt force-tears-down regardless (preserving the existing escape hatch
-  // for genuinely stuck sessions).
+  // No-silent-close guard. klura is always-save-by-default: a session with a
+  // genuinely unresolved declared capability must not close having persisted
+  // nothing. The guard fires when `triageWouldFire` is true — some declared
+  // capability has no non-stale saved strategy on disk and isn't user-capped —
+  // AND the agent saved nothing manually AND auto-synth derived no fallback.
+  // The agent must save manually, retry to give auto-synth more captures, or
+  // call `abort_session(reason)` for the honest exit. When `triageWouldFire` is
+  // false every declared capability is already resolved on disk, so closing
+  // leaves a valid strategy behind — the guard stays silent and the session
+  // closes (e.g. a warm session that re-drove a capability it already has). The
+  // third end_drive attempt force-tears-down regardless, an escape hatch for
+  // genuinely stuck sessions.
   const skipAutoSynthForGuard = graphConfig(session).skipAutoSynth;
-  const declaredCapabilityCount = (session.declaredCapabilities ?? []).length;
   const saveSuccessCount = (session.savedCapabilities ?? []).length;
   const endDriveAttemptsPreBump = session.endDriveAttempts ?? 1; // we bumped above
   if (
     !skipAutoSynthForGuard &&
-    declaredCapabilityCount > 0 &&
+    triageWouldFire &&
     saveSuccessCount === 0 &&
     autoSynthesized.length === 0 &&
     endDriveAttemptsPreBump < 3
