@@ -9,6 +9,10 @@ import { invokeCheckpointAndGate, type CheckpointEnvelope } from '../checkpoints
 import { probeStrategySelectors } from '../strategies/probe';
 import { collectParamExamples } from '../strategies/probe-helpers';
 import { isMutatingStrategy } from '../gate/save-warnings-mutating-verification';
+import {
+  verifySavedStrategy,
+  type VerifySavedStrategyResult,
+} from '../strategies/verify-saved-strategy';
 import { verifyWsUrlObserved, verifyRecordedPathOverBinaryWs } from '../strategies/verify-observed';
 import * as skills from '../strategies/skills';
 import type { Strategy, AuditAnswers } from '../strategies/skills';
@@ -861,6 +865,7 @@ export async function saveStrategy(
     (data as { strategy?: string }).strategy === 'fetch' ||
     (data as { strategy?: string }).strategy === 'page-script';
   let validationCheckpoint: CheckpointEnvelope | undefined;
+  let postSaveValidation: VerifySavedStrategyResult | undefined;
   if (verifiableTier && sessionId) {
     try {
       // Stage the deferred verification on the session. `ack_checkpoint` reads
@@ -877,19 +882,33 @@ export async function saveStrategy(
       session.pendingPostSaveValidation = { platform, capability, args: verifyArgs };
 
       const mutating = isMutatingStrategy(data);
-      const { envelope } = await invokeCheckpointAndGate('post_save_validation_consent', {
-        session_id: sessionId,
-        capability,
-        context: {
-          kind: 'post_save_validation_consent',
+      const { resolution, envelope } = await invokeCheckpointAndGate(
+        'post_save_validation_consent',
+        {
+          session_id: sessionId,
           capability,
-          pendingAction: `the runtime re-running the saved \`${capability}\` strategy once, end-to-end, to verify it returns 2xx`,
-          contextSummary: `Strategy tier: ${(data as { strategy?: string }).strategy ?? 'unknown'}${mutating ? ', mutating-shaped — re-running repeats a real side effect, classify Tier 2 unless the action is genuinely idempotent' : ' — likely Tier 1 if the request is idempotent'}. On your consent (ack_checkpoint, non-cancelled) the RUNTIME itself re-runs the saved strategy end-to-end and asserts 2xx — a non-2xx archives it as broken and you fix + re-save this session. You do not fire anything yourself; classify Tier 1 (idempotent/read — ack immediately) vs Tier 2 (mutation / real-account side-effect / third-party recipient — explain, then ack only on user OK)`,
-          declineHandler: `the save stands but is recorded unverified (runtime_meta.post_save_validation: "declined"); a later session can re-validate. Add a discovery note saying why consent was withheld.`,
-          ...(validation ? { validation_target: validation } : {}),
+          context: {
+            kind: 'post_save_validation_consent',
+            capability,
+            pendingAction: `the runtime re-running the saved \`${capability}\` strategy once, end-to-end, to verify it returns 2xx`,
+            contextSummary: `Strategy tier: ${(data as { strategy?: string }).strategy ?? 'unknown'}${mutating ? ', mutating-shaped — re-running repeats a real side effect, classify Tier 2 unless the action is genuinely idempotent' : ' — likely Tier 1 if the request is idempotent'}. On your consent (ack_checkpoint, non-cancelled) the RUNTIME itself re-runs the saved strategy end-to-end and asserts 2xx — a non-2xx archives it as broken and you fix + re-save this session. You do not fire anything yourself; classify Tier 1 (idempotent/read — ack immediately) vs Tier 2 (mutation / real-account side-effect / third-party recipient — explain, then ack only on user OK)`,
+            declineHandler: `the save stands but is recorded unverified (runtime_meta.post_save_validation: "declined"); a later session can re-validate. Add a discovery note saying why consent was withheld.`,
+            ...(validation ? { validation_target: validation } : {}),
+          },
         },
-      });
-      validationCheckpoint = envelope;
+      );
+      if (envelope) {
+        // Interactive host: the agent acks the checkpoint and `ackCheckpoint`
+        // runs `verifySavedStrategy`. The deferred payload stays staged.
+        validationCheckpoint = envelope;
+      } else if (resolution.status === 'continue') {
+        // Unattended host (no interactive consenter) pre-consented by
+        // resolving the checkpoint to `continue` instead of handing over.
+        // Run the verification inline now — there is no later ack — and fold
+        // the result into this response. A non-2xx archives the strategy.
+        session.pendingPostSaveValidation = undefined;
+        postSaveValidation = await verifySavedStrategy(platform, capability, verifyArgs, pool);
+      }
     } catch {
       // Best-effort — a missing session just means no advisory lands; the
       // save itself still succeeds.
@@ -966,6 +985,7 @@ export async function saveStrategy(
     ...(validationCheckpoint
       ? { _checkpoint: validationCheckpoint, validation_target: validation }
       : {}),
+    ...(postSaveValidation ? { post_save_validation: postSaveValidation } : {}),
     ...(persistedWarnings.length > 0 ? { save_warnings: persistedWarnings } : {}),
     ...(persistedAcks.length > 0 ? { save_warnings_acked: persistedAcks } : {}),
     ...(authPrereqAutoInjected
