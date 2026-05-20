@@ -848,9 +848,20 @@ export async function saveStrategy(
   // monetary-flow context — so this is a consent handoff, same shape as
   // start_session's mutating-args advisory. See
   // klura://reference#checkpoints.
+  // Post-save verification fires for every HTTP-tier save. It is gated on the
+  // TIER, not on `buildValidationTarget` — a page-script strategy whose request
+  // lives entirely inside a js-eval prereq has no top-level baseUrl/endpoint, so
+  // no `{method,url}` can be derived, yet that is exactly the shape that most
+  // needs verifying. `verifySavedStrategy` runs the whole strategy through
+  // `execute()`, which loads it from disk and resolves the full prereq chain —
+  // it never needs a pre-derived target. `validation_target` rides along only
+  // as informational context for the agent's Tier classification.
   const validation = buildValidationTarget(data);
+  const verifiableTier =
+    (data as { strategy?: string }).strategy === 'fetch' ||
+    (data as { strategy?: string }).strategy === 'page-script';
   let validationCheckpoint: CheckpointEnvelope | undefined;
-  if (validation && sessionId) {
+  if (verifiableTier && sessionId) {
     try {
       // Stage the deferred verification on the session. `ack_checkpoint` reads
       // `pendingPostSaveValidation` on consented resolution and runs
@@ -872,10 +883,10 @@ export async function saveStrategy(
         context: {
           kind: 'post_save_validation_consent',
           capability,
-          pendingAction: `the runtime re-running the saved \`${capability}\` strategy once (${validation.method} ${validation.url}) to verify it returns 2xx`,
+          pendingAction: `the runtime re-running the saved \`${capability}\` strategy once, end-to-end, to verify it returns 2xx`,
           contextSummary: `Strategy tier: ${(data as { strategy?: string }).strategy ?? 'unknown'}${mutating ? ', mutating-shaped — re-running repeats a real side effect, classify Tier 2 unless the action is genuinely idempotent' : ' — likely Tier 1 if the request is idempotent'}. On your consent (ack_checkpoint, non-cancelled) the RUNTIME itself re-runs the saved strategy end-to-end and asserts 2xx — a non-2xx archives it as broken and you fix + re-save this session. You do not fire anything yourself; classify Tier 1 (idempotent/read — ack immediately) vs Tier 2 (mutation / real-account side-effect / third-party recipient — explain, then ack only on user OK)`,
           declineHandler: `the save stands but is recorded unverified (runtime_meta.post_save_validation: "declined"); a later session can re-validate. Add a discovery note saying why consent was withheld.`,
-          validation_target: validation,
+          ...(validation ? { validation_target: validation } : {}),
         },
       });
       validationCheckpoint = envelope;
