@@ -8,6 +8,12 @@ import { pool } from '../runtime-state';
 import { assertNoPendingCheckpoint } from '../checkpoints';
 import { peekPendingCheckpointKind } from '../checkpoints/gate-glue';
 import { composeAckHint } from '../checkpoints/ack-hints';
+import { stampRuntimeMeta } from '../strategies/skills';
+import {
+  verifySavedStrategy,
+  type VerifySavedStrategyResult,
+} from '../strategies/verify-saved-strategy';
+import type { Session } from '../drivers/types/session';
 export { assertNoPendingCheckpoint } from '../checkpoints';
 
 export interface AckCheckpointArgs {
@@ -17,6 +23,71 @@ export interface AckCheckpointArgs {
   viewer_result?: Record<string, unknown>;
   cancelled?: boolean;
   reason?: string;
+}
+
+export interface AckCheckpointResult {
+  ok: true;
+  _hint: string;
+  /** Present only when acking a `post_save_validation_consent` checkpoint with
+   *  consent — the outcome of the runtime's post-commit 2xx verification. */
+  post_save_validation?: VerifySavedStrategyResult;
+}
+
+/**
+ * Run the deferred post-save 2xx verification staged on the session by
+ * `save_strategy`. Called when a `post_save_validation_consent` checkpoint is
+ * acked. Consent (`!cancelled`) → run `verifySavedStrategy`; decline
+ * (`cancelled`) → stamp the strategy unverified. Clears the staged payload
+ * either way.
+ */
+async function resolvePostSaveValidation(
+  session: Session | null,
+  args: AckCheckpointArgs,
+): Promise<AckCheckpointResult> {
+  const pending = session?.pendingPostSaveValidation;
+  if (!session || !pending) {
+    return {
+      ok: true,
+      _hint:
+        'post_save_validation_consent acked, but no pending verification was staged for this ' +
+        'session — nothing to verify. Continue.',
+    };
+  }
+  session.pendingPostSaveValidation = undefined;
+
+  if (args.cancelled === true) {
+    stampRuntimeMeta(pending.platform, pending.capability, { post_save_validation: 'declined' });
+    return {
+      ok: true,
+      _hint:
+        `Post-save validation declined — \`${pending.capability}\` stands unverified ` +
+        `(runtime_meta.post_save_validation: "declined"). A later session can re-validate.`,
+    };
+  }
+
+  const result = await verifySavedStrategy(
+    pending.platform,
+    pending.capability,
+    pending.args,
+    pool,
+  );
+  if (result.ok) {
+    return {
+      ok: true,
+      _hint:
+        `Post-save validation passed — \`${pending.capability}\` returned HTTP ${result.status} ` +
+        `end-to-end. Strategy verified.`,
+    };
+  }
+  const statusLabel = result.status === 0 ? 'a runtime error' : `HTTP ${result.status}`;
+  return {
+    ok: true,
+    _hint:
+      `Post-save validation FAILED — \`${pending.capability}\` returned ${statusLabel} ` +
+      `and was archived as broken. Fix the strategy and re-save it this session — see ` +
+      `post_save_validation.message for the full rejection.`,
+    post_save_validation: result,
+  };
 }
 
 /**
@@ -35,7 +106,7 @@ export interface AckCheckpointArgs {
  * to do next. The composer (`composeAckHint`) is exhaustive over
  * CheckpointKind — every kind gets a tailored string.
  */
-export function ackCheckpoint(args: AckCheckpointArgs): { ok: true; _hint: string } {
+export async function ackCheckpoint(args: AckCheckpointArgs): Promise<AckCheckpointResult> {
   if (!args.session_id) throw new Error('session_id is required');
   if (typeof args.checkpoint_token !== 'string' || args.checkpoint_token.length === 0) {
     throw new Error(
@@ -110,6 +181,11 @@ export function ackCheckpoint(args: AckCheckpointArgs): { ok: true; _hint: strin
         'No pending checkpoint was outstanding for this session. Continue with whatever ' +
         'tool call you intended — no acknowledgement obligation.',
     };
+  }
+  // post_save_validation_consent carries a deferred runtime action: on consent
+  // the runtime itself re-runs the just-saved strategy and verifies 2xx.
+  if (ackedKind === 'post_save_validation_consent') {
+    return resolvePostSaveValidation(session, args);
   }
   return { ok: true, _hint: composeAckHint(ackedKind, args) };
 }

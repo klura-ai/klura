@@ -427,6 +427,18 @@ export interface Session {
    */
   pendingActionConsents?: Map<string, { action: string; selector: string }>;
   /**
+   * Deferred post-save 2xx verification. `save_strategy` sets this when it
+   * commits a strategy and emits the `post_save_validation_consent` checkpoint;
+   * `ack_checkpoint` reads it on consented resolution to run
+   * `verifySavedStrategy`, then clears it. Carries exactly what `execute()`
+   * needs to re-run the just-saved strategy.
+   */
+  pendingPostSaveValidation?: {
+    platform: string;
+    capability: string;
+    args: Record<string, unknown>;
+  };
+  /**
    * Capability names saved successfully during this session, in save order.
    * Populated by `saveStrategy` when `sessionId` is passed. Source of truth for
    * end_drive auto-synthesis — partitions the performActionHistory by the

@@ -30,12 +30,36 @@ import type { SaveWarning } from './save-warnings';
  * See `runtime/.claude/memory/feedback_always_verify_mutating_actions.md`
  * for the full design rule (always-verify, send-not-reply, anchor-match).
  */
-export function detectMutatingStrategyVerificationApproach(data: Strategy): SaveWarning[] {
+export interface MutatingSignals {
+  httpMutating: boolean;
+  recordedPathMutating: boolean;
+  wsPublishing: boolean;
+  wsProtocolFetch: boolean;
+  method: string;
+  tier: string;
+}
+
+/**
+ * Mutating-shape detection — four crisp signals, computed once. A mutating
+ * HTTP verb on an HTTP tier; a write-shaped recorded-path step; a WebSocket
+ * publish/send expression; or a websocket-protocol strategy (you don't open a
+ * WS connection and PUBLISH a frame to read state — always mutating by
+ * construction, independent of any HTTP verb).
+ */
+export function mutatingSignals(data: Strategy): MutatingSignals {
   const obj = data as Record<string, unknown>;
   const tier = typeof obj.strategy === 'string' ? obj.strategy : '';
-  if (tier !== 'fetch' && tier !== 'page-script' && tier !== 'recorded-path') return [];
+  if (tier !== 'fetch' && tier !== 'page-script' && tier !== 'recorded-path') {
+    return {
+      httpMutating: false,
+      recordedPathMutating: false,
+      wsPublishing: false,
+      wsProtocolFetch: false,
+      method: '',
+      tier,
+    };
+  }
 
-  // Mutating-shape detection. Four crisp signals.
   const method = typeof obj.method === 'string' ? obj.method.toUpperCase() : '';
   const httpMutating =
     (tier === 'fetch' || tier === 'page-script') &&
@@ -66,15 +90,26 @@ export function detectMutatingStrategyVerificationApproach(data: Strategy): Save
       : '';
   const wsPublishing = frameExpr.includes('.publish(') || frameExpr.includes('.send(');
 
-  // WebSocket-protocol strategy: `{strategy: "fetch"|"page-script",
-  // protocol: "websocket", ...}` is the canonical shape for binary-WS
-  // publishes (either via `generated.frame` on fetch, or via
-  // `frameFromPage` on page-script). Always mutating by construction —
-  // you don't open a WS connection and PUBLISH a frame to read state.
-  // Independent of HTTP `method` since WS frames use their own opcode,
-  // not an HTTP verb.
   const wsProtocolFetch =
     (tier === 'fetch' || tier === 'page-script') && obj.protocol === 'websocket';
+
+  return { httpMutating, recordedPathMutating, wsPublishing, wsProtocolFetch, method, tier };
+}
+
+/**
+ * Crisp boolean: does this strategy perform a server-state-changing action?
+ * The save-time 2xx verification reads this to decide whether the strategy can
+ * be re-fired automatically (read/idempotent) or only under consent (mutating
+ * — re-firing repeats the real side effect).
+ */
+export function isMutatingStrategy(data: Strategy): boolean {
+  const s = mutatingSignals(data);
+  return s.httpMutating || s.recordedPathMutating || s.wsPublishing || s.wsProtocolFetch;
+}
+
+export function detectMutatingStrategyVerificationApproach(data: Strategy): SaveWarning[] {
+  const { httpMutating, recordedPathMutating, wsPublishing, wsProtocolFetch, method, tier } =
+    mutatingSignals(data);
 
   if (!httpMutating && !recordedPathMutating && !wsPublishing && !wsProtocolFetch) return [];
 

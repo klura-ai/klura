@@ -175,6 +175,14 @@ export interface RuntimeMeta {
   tier_demote_reason?: string;
   /** Soft warnings the save-time probe accumulated (e.g. login-wall redirects). */
   probe_warnings?: string[];
+  /**
+   * Outcome of the post-commit 2xx verification (the `post_save_validation_consent`
+   * checkpoint). `passed` — `execute()` returned 2xx. `declined` — the user
+   * declined the verification fire; the strategy stands but is unverified. A
+   * non-2xx result is not recorded here: the strategy is archived to
+   * `.broken.json` instead, so the archive itself is the failure record.
+   */
+  post_save_validation?: 'passed' | 'declined';
 }
 
 export interface Strategy {
@@ -817,6 +825,26 @@ export function clearAll(): void {
   if (fs.existsSync(KLURA_DIR)) {
     fs.rmSync(KLURA_DIR, { recursive: true, force: true });
   }
+}
+
+/**
+ * Merge a partial `runtime_meta` patch into the active strategy file on disk.
+ * Used to record post-save validation outcome. No-op if the strategy is no
+ * longer on disk (e.g. archived between calls).
+ */
+export function stampRuntimeMeta(
+  platform: string,
+  capability: string,
+  patch: Partial<RuntimeMeta>,
+): void {
+  const strat = loadStrategy(platform, capability);
+  if (!strat) return;
+  const subdir = SUBDIR_MAP[strat.strategy];
+  if (!subdir) return;
+  const filePath = path.join(SKILLS_DIR, platform, subdir, `${capability}.json`);
+  if (!fs.existsSync(filePath)) return;
+  strat.runtime_meta = { ...(strat.runtime_meta ?? {}), ...patch };
+  fs.writeFileSync(filePath, JSON.stringify(strat, null, 2));
 }
 
 /**

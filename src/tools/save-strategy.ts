@@ -7,6 +7,8 @@ import {
 } from '../validators';
 import { invokeCheckpointAndGate, type CheckpointEnvelope } from '../checkpoints';
 import { probeStrategySelectors } from '../strategies/probe';
+import { collectParamExamples } from '../strategies/probe-helpers';
+import { isMutatingStrategy } from '../gate/save-warnings-mutating-verification';
 import { verifyWsUrlObserved, verifyRecordedPathOverBinaryWs } from '../strategies/verify-observed';
 import * as skills from '../strategies/skills';
 import type { Strategy, AuditAnswers } from '../strategies/skills';
@@ -850,17 +852,29 @@ export async function saveStrategy(
   let validationCheckpoint: CheckpointEnvelope | undefined;
   if (validation && sessionId) {
     try {
-      // Best-effort: ensure the session exists before we dispatch.
-      pool.getSession(sessionId);
+      // Stage the deferred verification on the session. `ack_checkpoint` reads
+      // `pendingPostSaveValidation` on consented resolution and runs
+      // `verifySavedStrategy` — the runtime owns the execute+2xx+archive, the
+      // agent only relays consent. Args come from the session's declared
+      // capability, falling back to notes.params examples.
+      const session = pool.getSession(sessionId);
+      const declared = session.declaredCapabilities?.find((d) => d.capability === capability);
+      const verifyArgs: Record<string, unknown> =
+        declared?.args && Object.keys(declared.args).length > 0
+          ? declared.args
+          : collectParamExamples(data);
+      session.pendingPostSaveValidation = { platform, capability, args: verifyArgs };
+
+      const mutating = isMutatingStrategy(data);
       const { envelope } = await invokeCheckpointAndGate('post_save_validation_consent', {
         session_id: sessionId,
         capability,
         context: {
           kind: 'post_save_validation_consent',
           capability,
-          pendingAction: `firing the post-save validation call (${validation.method} ${validation.url}) to confirm the strategy works end-to-end`,
-          contextSummary: `Strategy shape: ${(data as { strategy?: string }).strategy ?? 'unknown'}. Classify: a GET for a read-only list/search endpoint is Tier 1 (fire it with js_eval, check 2xx + response shape). A POST/PUT/DELETE, any mutation on a real account, or any capability whose warm execute would produce a side-effect is Tier 2 (explain + wait for user consent before firing)`,
-          declineHandler: `add a discovery note documenting that the strategy was saved without post-save validation and why (user declined / no consent available / side-effect risk). The save stands; the next session can re-validate.`,
+          pendingAction: `the runtime re-running the saved \`${capability}\` strategy once (${validation.method} ${validation.url}) to verify it returns 2xx`,
+          contextSummary: `Strategy tier: ${(data as { strategy?: string }).strategy ?? 'unknown'}${mutating ? ', mutating-shaped — re-running repeats a real side effect, classify Tier 2 unless the action is genuinely idempotent' : ' — likely Tier 1 if the request is idempotent'}. On your consent (ack_checkpoint, non-cancelled) the RUNTIME itself re-runs the saved strategy end-to-end and asserts 2xx — a non-2xx archives it as broken and you fix + re-save this session. You do not fire anything yourself; classify Tier 1 (idempotent/read — ack immediately) vs Tier 2 (mutation / real-account side-effect / third-party recipient — explain, then ack only on user OK)`,
+          declineHandler: `the save stands but is recorded unverified (runtime_meta.post_save_validation: "declined"); a later session can re-validate. Add a discovery note saying why consent was withheld.`,
           validation_target: validation,
         },
       });
