@@ -357,19 +357,16 @@ Same task, same Claude model, same agent loop on both sides — the only differe
 |  | Hacker News search | Messenger send message[^messenger-re] | Amazon product search |
 | --- | --: | --: | --: |
 | Plain browser agent — paid every run | 20.2s · 63k tok · $0.09 | 206s · 696k tok · $0.34 | 232s · 872k tok · $0.54 |
-| **Klura warm — runtime only**[^runtime-only] | **274ms · 0 tok · $0** | **0.1ms · 0 tok · $0** | — |
 | Klura cold — first run only[^cold-includes-lift] | 77.4s · 518k tok · $0.42 | 1648s · 3.5M tok · $2.53 | 120s · 621k tok · $0.52 |
-| Klura warm — agent in loop | 18.3s · 164k tok · $0.08 | 238s · 1.85M tok · $0.88 | 51.6s · 282k tok · $0.17 |
+| **Klura warm — runtime only**[^runtime-only] | **274ms · 0 tok · $0** | **0.1ms · 0 tok · $0** | **1.07s · 0 tok · $0** |
 
-**Warm runtime-only** is the saved-strategy call itself — no LLM in the loop, deterministic replay. The number every run after the first pays in pure execution time.
-
-**Klura warm — agent in loop** is what a conversational MCP host sees end-to-end: the host still spends a couple of LLM turns deciding to call the saved skill and reporting the result. Strictly slower than runtime-only, strictly faster than re-discovering the page.
+**Warm runtime-only** is the saved-strategy call itself — no LLM in the loop, deterministic replay. The number every run after the first pays in pure execution time. Dispatched from inside a conversational MCP host, add the host's LLM latency on top — still strictly faster than re-discovering the page.
 
 **Cold** is the one-time tax. The agent first completes the task like any browser agent (roughly the "plain browser agent" row), then reverse-engineers the protocol and saves a runnable strategy. Hard sites cost more here — Messenger's send path is a binary MQTT frame with snowflake IDs and an in-page codec, so cold is ~27 minutes of work that the next thousand sends never pay again.
 
 [^cold-includes-lift]: Klura cold time includes discovery, triage, and LIFT. The agent first completes the user's task, then reverse-engineers the protocol and persists a runnable strategy. The actual sending or searching portion is roughly comparable to the raw Playwright row; the remainder is one-time work that amortizes across future runs.
 
-[^runtime-only]: No agent SDK in the loop. n=5 sequential, median wall-clock. When this same path is dispatched from inside an agent loop, add the host's LLM latency on top.
+[^runtime-only]: No agent SDK in the loop — `klura.execute()` replaying the saved strategy. n=5 sequential, median wall-clock.
 
 [^messenger-re]: Messenger send is an MQTT PUBLISH on `/ls_req`, with a JSON body whose snowflake IDs exceed `Number.MAX_SAFE_INTEGER`, a packet-id counter in the in-page MQTT client, and binary framing through the page's `MqttProtocolCodec`. Sonnet 4.6 located the encoder, intercepted the live connection, decoded the envelope, and saved a script that rebuilds and dispatches the frame through the already-authenticated socket.
 
