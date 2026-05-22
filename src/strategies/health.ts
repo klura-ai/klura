@@ -276,6 +276,31 @@ export function listPlatformHealth(
   return out;
 }
 
+/**
+ * Most recent successful execute across every saved tier of `capability`,
+ * derived from the per-tier `lastSuccess` timestamps in `health.json`. Returns
+ * the ISO timestamp + the tier that produced it, or `undefined` when no tier
+ * has ever executed cleanly. The logbook flush folds this into
+ * `CapabilityLogbookEntry.last_verified_at` so downstream consumers read one
+ * "last re-verified on <date>" signal without walking per-tier health.
+ */
+export function lastVerified(
+  platform: string,
+  capability: string,
+): { at: string; tier: string } | undefined {
+  let bestMs = -Infinity;
+  let bestTier = '';
+  for (const e of listPlatformHealth(platform)) {
+    if (e.capability !== capability) continue;
+    const ts = e.status.lastSuccess;
+    if (ts === undefined || ts <= bestMs) continue;
+    bestMs = ts;
+    bestTier = e.strategyType;
+  }
+  if (bestTier === '') return undefined;
+  return { at: new Date(bestMs).toISOString(), tier: bestTier };
+}
+
 export function markHealed(platform: string, capability: string, strategyType: string): void {
   const k = innerKey(capability, strategyType);
   const data = loadPlatformHealth(platform);

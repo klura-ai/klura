@@ -12,6 +12,7 @@
 import fs from 'fs';
 import {
   type BundleSeenPayload,
+  type CapabilityLogbookEntry,
   type CaptureEvent,
   type DomFormObservedPayload,
   type DomNavigationPayload,
@@ -33,6 +34,7 @@ import {
   type SessionFormObservation,
   type SessionNavigation,
 } from './url-graph';
+import { lastVerified } from '../strategies/health';
 
 /**
  * Ingest a batch of capture events for one session on one platform. Writes the
@@ -171,6 +173,13 @@ export function ingestCaptureEvents(
     entry.sessions_contributed += 1;
     entry.last_session_at = new Date(meta.ended_at).toISOString();
     entry.last_session_id = sessionId;
+    // Fold the freshest successful-execute timestamp from health.json into the
+    // logbook rollup — the "last re-verified on <date>" signal.
+    const verified = lastVerified(platform, meta.capability);
+    if (verified) {
+      entry.last_verified_at = verified.at;
+      entry.last_verified_tier = verified.tier as CapabilityLogbookEntry['last_verified_tier'];
+    }
     refreshRecencyStats(entry, logbook.sessions_total);
   }
   // Lift attempts append in order they were emitted.

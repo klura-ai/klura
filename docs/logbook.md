@@ -104,6 +104,8 @@ interface CapabilityLogbookEntry {
     detail?: string;
   }>;
   current_tier: 'fetch' | 'page-script' | 'recorded-path' | 'none';
+  last_verified_at?: string; // ISO timestamp
+  last_verified_tier?: 'fetch' | 'page-script' | 'recorded-path';
   data_sufficiency: {
     captures_of_target_endpoint: number;
     field_stability_confidence: 'low' | 'medium' | 'high';
@@ -208,6 +210,8 @@ Per close, the adapter emits:
 - One `lift_attempt` event (outcome + rounds spent).
 
 The working-dir module partitions the stream into the session archive, updates `logbook.json` (per-capability counters, lift_attempts ledger, recency stats), and recomputes derived signals.
+
+`last_verified_at` is one such derived signal. On each flush the writer reads `health.json` and folds the freshest successful-execute timestamp across every saved tier of the session's capability into the capability entry (`last_verified_tier` names the tier that produced it). It is the single "this skill was last re-verified on `<date>`" value — downstream consumers read it instead of walking per-tier health. The raw per-tier `lastSuccess` stays in `health.json` (see `health.md`); the logbook only mirrors the max. It stays absent until a tier has executed cleanly at least once.
 
 ### Strategy events
 

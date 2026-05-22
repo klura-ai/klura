@@ -382,6 +382,17 @@ export interface CapabilityLogbookEntry {
    */
   strategy_events: StrategyEvent[];
   current_tier: 'fetch' | 'page-script' | 'recorded-path' | 'none';
+  /**
+   * ISO timestamp of the most recent successful execute across any saved tier
+   * of this capability, derived from `health.json` and refreshed on every
+   * session flush. The single "this skill was last re-verified on <date>"
+   * signal — downstream consumers (dashboards, scheduled jobs) read this to
+   * decide whether a strategy is fresh enough to trust. Absent until a tier
+   * has executed cleanly at least once. `last_verified_tier` names the tier
+   * that produced that success.
+   */
+  last_verified_at?: string;
+  last_verified_tier?: 'fetch' | 'page-script' | 'recorded-path';
   data_sufficiency: {
     captures_of_target_endpoint: number;
     field_stability_confidence: 'low' | 'medium' | 'high';

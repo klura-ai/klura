@@ -230,3 +230,35 @@ test('getPlatformLogbook returns compact summary + all derived signals', async (
   assert.ok(result.bundle_history);
   assert.ok(result.signer_history);
 });
+
+test('last_verified_at folds the freshest health.json success into the logbook entry', async () => {
+  const { healthPath } = await import('../dist/working-dir/layout.js');
+  const { loadLogbook } = await import('../dist/working-dir/logbook.js');
+  const platform = 'pl-verified';
+  const capability = 'get_list';
+  // Two saved tiers; page-script executed cleanly more recently than fetch.
+  const fetchSuccess = Date.parse('2026-05-01T00:00:00.000Z');
+  const psSuccess = Date.parse('2026-05-10T00:00:00.000Z');
+  const hp = healthPath(platform);
+  fs.mkdirSync(path.dirname(hp), { recursive: true });
+  fs.writeFileSync(
+    hp,
+    JSON.stringify({
+      'get_list/fetch': { status: 'healthy', failureCount: 0, lastSuccess: fetchSuccess },
+      'get_list/page-script': { status: 'healthy', failureCount: 0, lastSuccess: psSuccess },
+    }),
+  );
+  writeSession(platform, 'sess_v', { capability, outcome: 'fetch_saved' });
+  const entry = loadLogbook(platform).per_capability[capability];
+  assert.equal(entry.last_verified_at, new Date(psSuccess).toISOString());
+  assert.equal(entry.last_verified_tier, 'page-script');
+});
+
+test('last_verified_at stays absent until a tier has executed cleanly', async () => {
+  const { loadLogbook } = await import('../dist/working-dir/logbook.js');
+  const platform = 'pl-unverified';
+  writeSession(platform, 'sess_u', { capability: 'get_list', outcome: 'no_save' });
+  const entry = loadLogbook(platform).per_capability.get_list;
+  assert.equal(entry.last_verified_at, undefined);
+  assert.equal(entry.last_verified_tier, undefined);
+});
