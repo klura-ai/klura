@@ -48,27 +48,26 @@ test('merely loading @klura/mcp does not trip the flag', () => {
   assert.strictEqual(agent.isAgentAllowed(), true);
 });
 
-test('mcp/index.js latches the flag and pulls in no provider package', () => {
-  const src = fs.readFileSync(path.join(here, '..', '..', 'mcp', 'index.js'), 'utf8');
-  // Layer 1: main() latches the flag.
-  assert.match(src, /markExternalMcpHost\(\)/, 'mcp/index.js must call markExternalMcpHost()');
+test('mcp/index.js latches the flag; the server factory does not', () => {
+  const mcpSrc = fs.readFileSync(path.join(here, '..', '..', 'mcp', 'index.js'), 'utf8');
+  // Layer 1: mcp/index.js main() latches the flag.
+  assert.match(mcpSrc, /markExternalMcpHost\(\)/, 'mcp/index.js must call markExternalMcpHost()');
   // Layer 3: the MCP server process must never load a provider package — that
   // is where the LLM SDKs live. (The lightweight shim ships inside
   // @klura/runtime, which mcp legitimately requires; it is inert there because
   // every entry point checks the flag.)
   const importsProvider =
-    /['"]@klura\/agent-[a-z-]+['"]/.test(src) ||
-    /\brequire\(\s*['"][^'"]*agent-(openai|claude)[^'"]*['"]\s*\)/.test(src);
+    /['"]@klura\/agent-[a-z-]+['"]/.test(mcpSrc) ||
+    /\brequire\(\s*['"][^'"]*agent-(openai|claude)[^'"]*['"]\s*\)/.test(mcpSrc);
   assert.ok(!importsProvider, 'mcp/index.js must not require/import a provider package');
-  // The flag call must NOT live inside createKluraMcpServer — the harness and
-  // klura chat both call that factory legitimately.
-  const factoryStart = src.indexOf('async function createKluraMcpServer');
-  const factoryEnd = src.indexOf('async function main');
-  assert.ok(factoryStart !== -1 && factoryEnd > factoryStart, 'mcp/index.js shape changed');
-  const factoryBody = src.slice(factoryStart, factoryEnd);
+  // The server factory itself (runtime/mcp-server.js) must NOT latch the flag —
+  // the CLI agent and the harnesses call createKluraMcpServer() legitimately
+  // over an in-memory transport. Only mcp/index.js's stdio path latches it.
+  const factorySrc = fs.readFileSync(path.join(here, '..', 'mcp-server.js'), 'utf8');
+  assert.match(factorySrc, /async function createKluraMcpServer/, 'mcp-server.js shape changed');
   assert.ok(
-    !factoryBody.includes('markExternalMcpHost'),
-    'markExternalMcpHost() must not be inside createKluraMcpServer()',
+    !factorySrc.includes('markExternalMcpHost'),
+    'createKluraMcpServer (runtime/mcp-server.js) must not latch the guardrail flag',
   );
 });
 

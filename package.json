@@ -15,6 +15,7 @@
     "dist/**/*.d.ts",
     "bin/",
     "agent/",
+    "mcp-server.js",
     "SKILL.md",
     "README.md",
     "NOTICE"
@@ -58,6 +59,7 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "cheerio": "^1.2.0",
     "playwright": "^1.50.0",
     "ws": "^8.20.0",

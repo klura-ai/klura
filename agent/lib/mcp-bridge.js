@@ -2,7 +2,7 @@
 
 // In-process bridge to the klura MCP server.
 //
-// `@klura/agent` always drives klura through `createKluraMcpServer()` — the
+// The CLI agent always drives klura through `createKluraMcpServer()` — the
 // same server `@klura/mcp` connects to stdio for an external host — over an
 // in-memory transport. That keeps the phase-gating and checkpoint-gating
 // middleware identical to the MCP path; the agent does not get a privileged
@@ -13,11 +13,11 @@
 // so `bridgeServer()` wires an in-memory MCP client and exposes the tool list
 // pre-translated to OpenAI function schema plus a `dispatch()` callback.
 
-const { loadKluraMcp } = require('./klura-modules');
+const { loadMcpServer } = require('./klura-modules');
 
 /** Create a fresh, unconnected klura MCP server instance. */
 async function createKluraServer() {
-  const { createKluraMcpServer } = loadKluraMcp();
+  const { createKluraMcpServer } = loadMcpServer();
   return createKluraMcpServer();
 }
 

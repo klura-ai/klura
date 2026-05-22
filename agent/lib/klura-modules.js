@@ -1,9 +1,10 @@
 'use strict';
 
-// Resolve the klura packages the CLI agent shim builds on. The shim ships
-// inside the `@klura/runtime` package (`runtime/agent/`), so the runtime is a
-// sibling on disk; `@klura/mcp` is a separate package. Both resolve by name in
-// a published install and by relative path inside the klura workspace.
+// Resolve the klura modules the CLI agent shim builds on. The shim ships
+// inside the `@klura/runtime` package (`runtime/agent/`), so both the compiled
+// runtime barrel and the MCP server factory are siblings on disk — required
+// by relative path, with no dependency on `@klura/mcp` (which would be a cycle:
+// `@klura/mcp` depends on `@klura/runtime`).
 
 const path = require('path');
 
@@ -16,13 +17,11 @@ function loadKluraRuntime() {
   }
 }
 
-function loadKluraMcp() {
-  try {
-    return require('@klura/mcp');
-  } catch {
-    // runtime/agent/lib/ -> <workspace>/mcp
-    return require(path.join(__dirname, '..', '..', '..', 'mcp'));
-  }
+// The MCP server factory — `createKluraMcpServer()` — lives in the runtime
+// package at runtime/mcp-server.js, the same server `@klura/mcp` wraps.
+function loadMcpServer() {
+  // runtime/agent/lib/ -> runtime/mcp-server.js
+  return require(path.join(__dirname, '..', '..', 'mcp-server'));
 }
 
-module.exports = { loadKluraRuntime, loadKluraMcp };
+module.exports = { loadKluraRuntime, loadMcpServer };
