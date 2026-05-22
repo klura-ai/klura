@@ -330,6 +330,14 @@ export interface Session {
   /** Device profile name from the device registry, set at session creation. */
   device?: string;
   /**
+   * Which kind of klura client opened this session. `'mcp'` when an external
+   * MCP host is driving (derived from `isDrivenByExternalMcpHost()` at session
+   * creation), `'cli'` otherwise. Defense-in-depth for the agent guardrail:
+   * the CLI LLM agent refuses to drive a session whose origin is `'mcp'`. Set
+   * once at session creation; do not mutate.
+   */
+  origin?: 'cli' | 'mcp';
+  /**
    * URLs the driver has explicitly navigated to during this session (via
    * `driver.navigate` or session creation with a starting URL). Maintained by
    * driver implementations as a ground-truth list of pages the agent actually

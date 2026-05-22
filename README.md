@@ -134,6 +134,44 @@ npm link
 
 After every code change, re-run `npm run build` and restart the daemon: `klura restart-runtime --force` (or `pkill -f 'klura.*daemon'`).
 
+### Standalone — talk to klura directly
+
+Klura works two ways. The sections above set it up as **infrastructure**: an MCP server any agent (Claude Code, Claude Desktop, Cursor) builds on. But klura is also a **standalone agentic tool** — you can talk to it directly, with no MCP host, by attaching an optional LLM:
+
+```bash
+npm install -g @klura/runtime @klura/agent-claude-code   # or @klura/agent-openai
+klura chat
+> message Adam in the team chat
+```
+
+`klura chat` is a REPL: a local LLM drives klura through the same tools an MCP host would use. The agent ships with klura; the LLM provider is a pluggable add-on package. Pick the provider once — `claude-code` reuses your Claude Code login (no API key), `openai` works against OpenAI, NVIDIA, Together, Groq, vLLM, or any chat-completions endpoint:
+
+```bash
+klura chat --provider claude-code
+klura chat --provider openai --model gpt-5
+```
+
+Settings live in the `agent` block of `~/.klura/config.json`. For an OpenAI-compatible provider, set the API key there as `agent.api_key` — or, if you'd rather keep it out of the file (CI, shared machines), in the `KLURA_AGENT_API_KEY` environment variable. `claude-code` needs neither.
+
+```jsonc
+{
+  "agent": {
+    "provider": "openai",
+    "model": "gpt-5",
+    "base_url": "https://api.openai.com/v1",
+    "api_key": "sk-...",
+  },
+}
+```
+
+`klura execute` gets a self-healing mode. `klura execute <platform> <capability> --agent` runs the saved strategy with **no LLM cost** when it succeeds; if it fails, the LLM picks up the live session and re-drives to repair the strategy:
+
+```bash
+klura execute team-chat send_message --args '{"to":"Adam"}' --agent
+```
+
+The LLM is **never** invoked when klura is driven by an external MCP host — that host already supplies one. Providers: [`@klura/agent-claude-code`](https://www.npmjs.com/package/@klura/agent-claude-code), [`@klura/agent-openai`](https://www.npmjs.com/package/@klura/agent-openai).
+
 ### Try it
 
 Now ask your agent to do a website task:

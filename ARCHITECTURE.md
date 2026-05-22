@@ -219,6 +219,16 @@ These wrap the core loop but aren't part of every run.
 
 ---
 
+## The CLI agent
+
+Klura is normally driven by an MCP host — Claude Code, Claude Desktop, Cursor — and that host supplies the LLM. The runtime's TypeScript core (`src/`) stays LLM-free; it is plumbing. But the `klura` CLI can also be driven by an LLM of its own, so a user can talk to klura directly with no MCP host.
+
+That CLI agent is a small JS shim that ships inside this package at `runtime/agent/` — outside the TS core, carrying no LLM SDK. It is a client of the runtime, exactly like the MCP server is: it drives klura through an in-process `createKluraMcpServer()` over an in-memory transport — the same server an external host connects to — so phase- and checkpoint-gating are identical to the MCP path. The LLM SDK itself sits behind a pluggable `Provider` package (`@klura/agent-openai`, `@klura/agent-claude-code`, or a BYO package), installed on demand and resolved from `config.agent.provider` the same way `config.pool.driver` resolves a browser driver.
+
+It powers two CLI surfaces: `klura chat` (an interactive REPL) and `klura execute --agent` (a saved strategy runs with no LLM cost on success; on failure the LLM picks up the live session and re-drives through the existing `execute_failed → triage → lift` graph to repair the strategy).
+
+**The guardrail.** The CLI agent must never run when klura is driven by an external MCP host — that host already supplies an LLM. The runtime exposes a one-way process flag, `markExternalMcpHost()` / `isDrivenByExternalMcpHost()` (`runtime-state/mcp-host.ts`). `mcp/index.js`'s `main()` latches it as its first statement, before connecting the stdio transport; `createKluraMcpServer()` itself does not, so the in-memory server the CLI agent and the test harnesses build is unaffected. Every agent entry point refuses to run while the flag is set. The provider packages — where the LLM SDKs live — are never a dependency of `mcp/`, so the MCP server process never loads an LLM SDK at all.
+
 ## Design constraints
 
 One user, one daemon, one machine. The daemon spawns the first time a tool runs, listens on a per-user unix socket, and serves every session for that user from the same in-process Playwright pool. Sessions are logically isolated (separate `BrowserContext` per session) but share the daemon, the device profile, and the on-disk skill store at `~/.klura/`. The agent driving the daemon (Claude Desktop, Cursor, the CLI, an SDK loop) talks to it over the same socket; whether that agent is local or wraps a remote LLM is the agent's concern, not the runtime's. The pool layer is built on `BrowserPool` / `BrowserDriver` abstract interfaces so the driver can be swapped (`@klura/driver-playwright-stealth`, BYO) without the rest of the runtime seeing the difference.

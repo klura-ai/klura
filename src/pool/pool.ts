@@ -2,6 +2,7 @@ import { BrowserDriver } from '../drivers/interface';
 import type { BrowserPool, Session, SessionOptions } from '../drivers/types/session';
 import { JsEvalCacheImpl } from '../strategies/js-eval-cache';
 import { loadConfig } from '../config/handler';
+import { isDrivenByExternalMcpHost } from '../runtime-state/mcp-host';
 import {
   emptyStats,
   RECENT_DIFFS_RING_SIZE,
@@ -295,6 +296,7 @@ export class Pool implements BrowserPool {
     const session = await this._driver.createSession(opts);
     if (opts.platform) session.platform = opts.platform;
     if (opts.identity) session.identity = opts.identity;
+    session.origin = isDrivenByExternalMcpHost() ? 'mcp' : 'cli';
     this._sessions.set(session.id, session);
 
     if (this._warmEnabled && opts.platform && key && !this._warm.has(key)) {
@@ -334,6 +336,7 @@ export class Pool implements BrowserPool {
       hasTouch: false,
       wsFrames: [],
       subPages: [],
+      origin: isDrivenByExternalMcpHost() ? 'mcp' : 'cli',
     };
     if (opts.platform) session.platform = opts.platform;
     if (opts.identity) session.identity = opts.identity;

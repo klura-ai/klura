@@ -22,6 +22,14 @@ export function getReferenceMd(): string {
   return fs.readFileSync(REFERENCE_MD_PATH, 'utf-8');
 }
 
+// ---- Agent guardrail ----
+
+// `markExternalMcpHost` is called by `mcp/index.js` when an external MCP host
+// connects; `isDrivenByExternalMcpHost` is read by the CLI agent shim
+// (`runtime/agent/`) to refuse to run a second LLM underneath that host. See
+// runtime-state/mcp-host.ts.
+export { markExternalMcpHost, isDrivenByExternalMcpHost } from './runtime-state/mcp-host';
+
 // ---- Re-exports from non-tool modules ----
 
 export { readObservedCapabilities, readUrlGraph, readFormsSeen } from './working-dir/logbook';

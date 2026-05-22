@@ -98,6 +98,31 @@ export interface RuntimeBootConfig {
   listen: string;
 }
 
+/**
+ * Optional LLM agent settings, consumed only by the CLI agent shim
+ * (`klura chat`, `klura execute --agent`) and the CI harnesses — never by the
+ * runtime core. Absent by default; the whole block is opt-in. See
+ * runtime/ARCHITECTURE.md "The CLI agent".
+ */
+export interface AgentConfig {
+  /** Built-in provider id (`"openai"`, `"claude-code"`), or an npm package
+   *  name / filesystem path resolving to a module that exports a `Provider`. */
+  provider: string;
+  /** Model id. Defaults to the resolved provider's own default when omitted. */
+  model?: string;
+  /** Base URL for OpenAI-compatible endpoints (NVIDIA, Together, vLLM, ...). */
+  base_url?: string;
+  /** Agent-loop round budget. Defaults to 40 when omitted. */
+  max_rounds?: number;
+  /**
+   * Provider API key, for OpenAI-compatible providers. May also be supplied
+   * via the `KLURA_AGENT_API_KEY` env var (which takes a config-free path —
+   * handy for CI). The `claude-code` provider needs no key; it reuses your
+   * Claude Code login.
+   */
+  api_key?: string;
+}
+
 export interface DaemonConfig {
   runtime: RuntimeBootConfig;
   graduation: GraduationConfig;
@@ -110,6 +135,8 @@ export interface DaemonConfig {
    *  removeSecretResolver (which validate scheme + shell metachars). The
    *  configure tool treats this as opaque — use the dedicated helpers. */
   secrets?: Record<string, string>;
+  /** Optional LLM agent settings — opt-in, absent from CONFIG_DEFAULTS. */
+  agent?: AgentConfig;
 }
 
 export const CONFIG_DEFAULTS: DaemonConfig = {
@@ -359,6 +386,52 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
       'Short URLs (16-char base32, 60s TTL, single-use) survive LLM relay where the 250-400-char JWT does not.',
     needsRestart: false,
   },
+  {
+    path: 'agent.provider',
+    type: 'string',
+    optional: true,
+    default: undefined,
+    description:
+      'LLM provider for `klura chat` / `klura execute --agent`. Built-in id ' +
+      '("openai", "claude-code") or a BYO npm package name / path exporting a Provider. ' +
+      'Never used when klura is driven by an external MCP host.',
+    needsRestart: false,
+  },
+  {
+    path: 'agent.model',
+    type: 'string',
+    optional: true,
+    default: undefined,
+    description: "Model id for the CLI agent. Defaults to the provider's own default when unset.",
+    needsRestart: false,
+  },
+  {
+    path: 'agent.base_url',
+    type: 'string',
+    optional: true,
+    default: undefined,
+    description: 'Base URL for OpenAI-compatible endpoints (NVIDIA, Together, vLLM, ...).',
+    needsRestart: false,
+  },
+  {
+    path: 'agent.max_rounds',
+    type: 'number',
+    range: [1, 10_000],
+    optional: true,
+    default: undefined,
+    description: 'Round budget for the CLI agent loop. Defaults to 40 when unset.',
+    needsRestart: false,
+  },
+  {
+    path: 'agent.api_key',
+    type: 'string',
+    optional: true,
+    default: undefined,
+    description:
+      'Provider API key for OpenAI-compatible providers. Or set the ' +
+      'KLURA_AGENT_API_KEY env var. The claude-code provider needs no key.',
+    needsRestart: false,
+  },
 ];
 
 const CONFIG_PATH_REL = 'config.json';
@@ -387,6 +460,7 @@ function mergeWithDefaults(loaded: unknown): DaemonConfig {
     },
     remote: { ...CONFIG_DEFAULTS.remote, ...(src.remote ?? {}) },
     ...(src.secrets ? { secrets: { ...src.secrets } } : {}),
+    ...(src.agent ? { agent: { ...src.agent } } : {}),
   };
 }
 

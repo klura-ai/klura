@@ -28,6 +28,7 @@ function describeTool(snakeName) {
 
 const CLI_COMMAND_NAMES = {
   startSession: 'start-session',
+  chat: 'chat',
   performAction: 'perform-action',
   getNetworkLog: 'get-network-log',
   getScreenshot: 'get-screenshot',
@@ -57,12 +58,13 @@ const CLI_COMMAND_NAMES = {
 
 const COMMANDS = {
   [CLI_COMMAND_NAMES.startSession]: describeTool(TOOL_NAMES.startSession),
+  [CLI_COMMAND_NAMES.chat]: 'Talk to klura — an optional local LLM drives it (klura chat)',
   [CLI_COMMAND_NAMES.performAction]: describeTool(TOOL_NAMES.performAction),
   [CLI_COMMAND_NAMES.getNetworkLog]: describeTool(TOOL_NAMES.getNetworkLog),
   [CLI_COMMAND_NAMES.getScreenshot]: describeTool(TOOL_NAMES.getScreenshot),
   [CLI_COMMAND_NAMES.endDrive]: describeTool(TOOL_NAMES.endDrive),
   [CLI_COMMAND_NAMES.saveStrategy]: describeTool(TOOL_NAMES.saveStrategy),
-  [CLI_COMMAND_NAMES.execute]: 'Execute a saved strategy',
+  [CLI_COMMAND_NAMES.execute]: 'Execute a saved strategy (--agent: LLM recovers it if it fails)',
   [CLI_COMMAND_NAMES.startRemoteSession]: describeTool(TOOL_NAMES.startRemoteSession),
   [CLI_COMMAND_NAMES.stopRemoteSession]: describeTool(TOOL_NAMES.stopRemoteSession),
   [CLI_COMMAND_NAMES.startListener]: describeTool(TOOL_NAMES.startListener),
@@ -196,6 +198,18 @@ async function main() {
 
   if (command === 'hook-events') {
     await handleHookEvents();
+    return;
+  }
+
+  // The optional LLM agent runs in-process (its own pool), not through the
+  // daemon — it needs the full tool registry, which the daemon's HTTP API
+  // does not expose. Route these before daemon auto-start.
+  if (command === 'chat') {
+    await handleChat();
+    return;
+  }
+  if (command === 'execute' && agentFlagPresent()) {
+    await handleExecuteWithAgent();
     return;
   }
 
@@ -860,6 +874,109 @@ function handlePolicy() {
     console.error('in the per-session working-dir logbook, surfaced via get_platform_logbook.');
     process.exit(1);
   }
+}
+
+// --- Optional LLM agent (klura chat, klura execute --agent) ---
+//
+// The agent shim ships inside this package at runtime/agent/ and runs
+// in-process. It is barred from running under an external MCP host — that
+// path goes through mcp/index.js, which latches the guardrail flag.
+
+function agentFlagPresent() {
+  return args.some((a) => a === '--agent' || a.startsWith('--agent='));
+}
+
+function loadAgentModule() {
+  // runtime/bin/ -> runtime/agent/
+  return require(require('path').join(__dirname, '..', 'agent'));
+}
+
+// Resolve the agent config: ~/.klura/config.json `agent` block (snake_case),
+// overlaid with CLI flags, normalized to the camelCase shape the agent shim
+// and the providers expect.
+function readAgentConfig() {
+  const path = require('path');
+  const os = require('os');
+  const home = process.env.KLURA_HOME || path.join(os.homedir(), '.klura');
+  let block = {};
+  try {
+    const cfg = JSON.parse(require('fs').readFileSync(path.join(home, 'config.json'), 'utf8'));
+    if (cfg && typeof cfg.agent === 'object' && cfg.agent) block = cfg.agent;
+  } catch {
+    /* no config file or no agent block */
+  }
+  const maxRoundsRaw = parseFlag('--max-rounds');
+  return {
+    provider: parseFlag('--provider') || block.provider,
+    model: parseFlag('--model') || block.model,
+    baseUrl: parseFlag('--base-url') || block.base_url,
+    maxRounds: maxRoundsRaw ? Number(maxRoundsRaw) : block.max_rounds,
+    // OpenAI-compatible providers only; claude-code reuses Claude Code auth.
+    // config.agent.api_key, else the KLURA_AGENT_API_KEY env var.
+    apiKey: block.api_key || process.env.KLURA_AGENT_API_KEY,
+  };
+}
+
+async function handleChat() {
+  const agentConfig = readAgentConfig();
+  if (!agentConfig.provider) {
+    console.error('klura chat: no LLM provider configured.');
+    console.error('  Pass --provider openai|claude-code, or set agent.provider in ~/.klura/config.json.');
+    process.exit(1);
+  }
+  try {
+    const agent = loadAgentModule();
+    await agent.runChatAgent({ agent: agentConfig });
+  } catch (err) {
+    console.error(err && err.message ? err.message : String(err));
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
+async function handleExecuteWithAgent() {
+  const platform = args[1];
+  const capability = args[2];
+  if (!platform || !capability) {
+    console.error("Usage: klura execute <platform> <capability> --agent [--args '{\"key\":\"val\"}']");
+    process.exit(1);
+  }
+  const argsJson = parseFlag('--args');
+  let execArgs = {};
+  try {
+    execArgs = argsJson ? JSON.parse(argsJson) : {};
+  } catch {
+    console.error('--args must be valid JSON');
+    process.exit(1);
+  }
+  const agentConfig = readAgentConfig();
+  // `--agent=<provider>` pins the provider for this run.
+  const agentFlag = args.find((a) => a.startsWith('--agent='));
+  if (agentFlag) agentConfig.provider = agentFlag.slice('--agent='.length);
+  if (!agentConfig.provider) {
+    console.error('klura execute --agent: no LLM provider configured.');
+    console.error('  Pass --agent=openai|claude-code, or set agent.provider in ~/.klura/config.json.');
+    process.exit(1);
+  }
+  try {
+    const agent = loadAgentModule();
+    const r = await agent.runRecoveryAgent({
+      agent: agentConfig,
+      platform,
+      capability,
+      args: execArgs,
+      url: parseFlag('--url'),
+    });
+    out(
+      r.usedAgent
+        ? { recovered: true, terminationReason: r.result && r.result.terminationReason }
+        : { executed: true, succeeded: true, result: r.result },
+    );
+  } catch (err) {
+    console.error(err && err.message ? err.message : String(err));
+    process.exit(1);
+  }
+  process.exit(0);
 }
 
 main();
