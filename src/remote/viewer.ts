@@ -921,10 +921,20 @@ export async function startViewer(
     // interpolation. Each entry is [normX, normY] as received from the client.
     const moveHistory: [number, number][] = [];
 
+    // Viewer input messages must run strictly in arrival order. A single
+    // click is a stream — pointer_move* then pointer_down then pointer_up —
+    // and each pointer_move expands to up to 8 sequential mouseMove calls
+    // (Catmull-Rom). Playwright's `page.mouse` is one shared stateful object,
+    // so overlapping handlers interleave: an interpolated move drags the
+    // cursor off-target between mouse.down() and mouse.up() and the click
+    // never lands. The promise chain serialises handlers — each message
+    // drains fully before the next starts.
+    let inputQueue: Promise<void> = Promise.resolve();
+
     // Handle input events from viewer
     ws.on('message', (data: Buffer) => {
       // eslint-disable-next-line sonarjs/cognitive-complexity
-      void (async () => {
+      const handleInputMessage = async (): Promise<void> => {
         try {
           const event = JSON.parse(data.toString()) as InputEvent;
 
@@ -1197,7 +1207,10 @@ export async function startViewer(
         } catch {
           // Input failed, ignore
         }
-      })();
+      };
+      inputQueue = inputQueue.then(handleInputMessage).catch(() => {
+        // A handler error must not break the chain for later messages.
+      });
     });
 
     ws.on('close', () => {
