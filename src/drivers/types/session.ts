@@ -447,6 +447,23 @@ export interface Session {
     args: Record<string, unknown>;
   };
   /**
+   * Deferred abort teardown. `abort_session` stages the validated args here
+   * when the `abort_session_consent` checkpoint hands over to the user;
+   * `ack_checkpoint` reads it on consented resolution to run the actual
+   * teardown (storage-state persist + ledger append + pool.endDrive), then
+   * clears it. On declined ack the entry is cleared without tearing down so
+   * the agent can keep RE-ing the surface — `abort_session_consent` is the
+   * one checkpoint where "no" is the load-bearing answer (klura's mission
+   * is to figure out HOW, not bail on first friction).
+   */
+  pendingAbort?: {
+    reason: string;
+    kind: 'origin_blocked' | 'existing_capability_covers' | 'user_stop' | 'site_dead' | 'other';
+    vendor?: string;
+    phase_at_abort: string;
+    captured_actions_count: number;
+  };
+  /**
    * Capability names saved successfully during this session, in save order.
    * Populated by `saveStrategy` when `sessionId` is passed. Source of truth for
    * end_drive auto-synthesis — partitions the performActionHistory by the

@@ -13,6 +13,7 @@ import {
   verifySavedStrategy,
   type VerifySavedStrategyResult,
 } from '../strategies/verify-saved-strategy';
+import { performAbortTeardown } from '../tools/abort_session';
 import type { Session } from '../drivers/types/session';
 export { assertNoPendingCheckpoint } from '../checkpoints';
 
@@ -187,5 +188,61 @@ export async function ackCheckpoint(args: AckCheckpointArgs): Promise<AckCheckpo
   if (ackedKind === 'post_save_validation_consent') {
     return resolvePostSaveValidation(session, args);
   }
+  // abort_session_consent: the actual abort teardown is staged on
+  // `session.pendingAbort` and executed here when consent lands. The agent
+  // does NOT re-call `abort_session` after the ack — doing so would
+  // re-emit a fresh consent token (the checkpoint handler is stateless on
+  // its own) and loop forever. By running teardown inline we close the loop.
+  if (ackedKind === 'abort_session_consent') {
+    return resolveAbortSessionConsent(session, args);
+  }
   return { ok: true, _hint: composeAckHint(ackedKind, args) };
+}
+
+/**
+ * Run the deferred abort teardown staged on the session by
+ * `abort_session`. Called when an `abort_session_consent` checkpoint is
+ * acked. Consent (`!cancelled`) → run `performAbortTeardown`; decline
+ * (`cancelled`) → clear the staged payload and tell the agent to keep
+ * trying. Either way the per-session pendingAbort entry is cleared so a
+ * future legitimate abort (after more RE attempts) can stage afresh.
+ */
+async function resolveAbortSessionConsent(
+  session: Session | null,
+  args: AckCheckpointArgs,
+): Promise<AckCheckpointResult> {
+  const pending = session?.pendingAbort;
+  if (!session || !pending) {
+    return {
+      ok: true,
+      _hint:
+        'abort_session_consent acked, but no pending abort was staged for this session — ' +
+        'nothing to tear down. Continue.',
+    };
+  }
+  session.pendingAbort = undefined;
+  if (args.cancelled === true) {
+    return {
+      ok: true,
+      _hint:
+        "Abort cancelled. klura's mission is to figure out HOW, not bail on first friction. " +
+        'Keep RE-ing the surface: alternate sub-paths under the same host, wait + re-snap on ' +
+        'iframe challenges, js_eval / read_js_function / search_js_source on the gate. ' +
+        'Only re-call abort_session after exhausting the cheap RE tools.',
+    };
+  }
+  await performAbortTeardown(session.id, {
+    reason: pending.reason,
+    kind: pending.kind,
+    ...(pending.vendor !== undefined ? { vendor: pending.vendor } : {}),
+    phase_at_abort: pending.phase_at_abort,
+    captured_actions_count: pending.captured_actions_count,
+  });
+  return {
+    ok: true,
+    _hint:
+      `Session aborted (kind: \`${pending.kind}\`) — browser torn down, ` +
+      `platform's abort_events ledger updated. Do NOT call abort_session ` +
+      `again on this session_id.`,
+  };
 }

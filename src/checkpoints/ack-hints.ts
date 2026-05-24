@@ -51,5 +51,14 @@ export function composeAckHint(kind: CheckpointKind, _args: CheckpointAckInput):
         'user OK; if the user declined, call add_discovery_note explaining why and skip ' +
         'validation.'
       );
+    case 'abort_session_consent':
+      // Reached only as a safety fallback — `ack_checkpoint` short-
+      // circuits abort_session_consent through `resolveAbortSessionConsent`,
+      // which runs the actual teardown inline (or clears the staged entry
+      // on decline). The dispatcher never falls through here in practice.
+      return (
+        'Abort consent acknowledged. The runtime handled the teardown / decline inline — do ' +
+        'NOT re-call abort_session for this session_id.'
+      );
   }
 }

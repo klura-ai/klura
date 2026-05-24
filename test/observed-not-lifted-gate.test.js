@@ -33,6 +33,9 @@ function makePayload(overrides = {}) {
     rePersistenceThreshold: DISCOVER_THRESHOLD,
     triageWouldFire: false, // also sidestep triage_acknowledgment
     observedNotLifted: [],
+    graph: 'discover',
+    observedCapabilityCount: 0,
+    httpFailureCount: 0,
     ...overrides,
   };
 }

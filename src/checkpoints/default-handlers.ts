@@ -96,6 +96,39 @@ const DefaultPreActionConsentCheckpoint: CheckpointHandler = {
   },
 };
 
+const DefaultAbortSessionConsentCheckpoint: CheckpointHandler = {
+  name: 'default-abort-session-consent-checkpoint',
+  kinds: ['abort_session_consent'],
+  handle(event: CheckpointEvent): Promise<CheckpointResolution> {
+    const ctx = event.context as {
+      reason?: string;
+      kind?: string;
+      vendor?: string;
+      capturedActionsCount?: number;
+    };
+    const reason = ctx.reason ?? '<no reason given>';
+    const kind = ctx.kind ?? 'other';
+    const vendorLine = ctx.vendor ? ` Attributed vendor: ${ctx.vendor}.` : '';
+    const captures =
+      typeof ctx.capturedActionsCount === 'number'
+        ? ` Session captured ${ctx.capturedActionsCount} perform_action call(s) so far.`
+        : '';
+    return Promise.resolve({
+      status: 'handover',
+      target: 'user',
+      prompt:
+        `The agent wants to abort_session (kind: \`${kind}\`).${vendorLine}${captures} Reason given: ` +
+        `"${reason}".\n\nklura's mission is to REVERSE-ENGINEER sites — not bail on first ` +
+        `friction. Before approving abort, consider whether the agent tried the cheap things: ` +
+        `wait + re-snap on iframe challenges (~10s), alternate entry paths under the same host ` +
+        `(\`/api/...\`, \`/typeahead/...\`), stealth driver if available, start_remote_session for ` +
+        `interactive challenges. Approve abort only if you're satisfied those were tried or are ` +
+        `genuinely unavailable. Reply yes/no — yes lands the abort + writes the platform's ` +
+        `recent_aborts ledger; no tells the agent to keep trying.`,
+    });
+  },
+};
+
 function promptForKind(event: CheckpointEvent): string {
   const kind = (event.context.kind ?? event.context.reason) as string | undefined;
   switch (kind) {
@@ -150,4 +183,5 @@ export function registerCheckpointDefaults(): void {
   registerCheckpointHandler(DefaultHandoverViewerCheckpoint);
   registerCheckpointHandler(DefaultAskUserCheckpoint);
   registerCheckpointHandler(DefaultPreActionConsentCheckpoint);
+  registerCheckpointHandler(DefaultAbortSessionConsentCheckpoint);
 }

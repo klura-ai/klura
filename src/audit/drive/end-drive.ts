@@ -106,6 +106,20 @@ export interface EndDrivePayload {
    *  loop's primary teach-at-moment surface for the "save every safe
    *  read-only capability" task. */
   observedNotLifted: ReadonlyArray<string>;
+  /** Active graph slug. Lets graph-specific detectors fire without each
+   *  one reaching back into GraphConfig — payload stays self-contained. */
+  graph: import('../../phases/types').GraphName;
+  /** Count of `record_observed_capability` calls landed this session.
+   *  Distinct from `observedNotLifted.length` (which excludes lifted/saved
+   *  ones). Total observed = lifted + saved + observedNotLifted. */
+  observedCapabilityCount: number;
+  /** Count of intercepted HTTP requests this session whose status was
+   *  4xx or 5xx. The map_session_no_observations detector reads this to
+   *  discriminate "session against a blocked origin" (failures > 0) from
+   *  "session against a site that just doesn't expose machine-readable
+   *  surfaces" (no failures — agent might still abort, but it's not a
+   *  DOA pattern). */
+  httpFailureCount: number;
 }
 
 /** Empty by design — every payload field the audit needs is captured at
@@ -291,6 +305,67 @@ const rePersistenceDetector: Detector<EndDrivePayload, EndDriveCtx> = {
           re_call_count: p.heavyReCallCount + p.jsEvalCallCount,
           persist_call_count: p.persistCallCount,
           action_call_count: p.actionCallCount,
+        },
+      },
+    ];
+  },
+};
+
+// ---------- Detector: map_session_no_observations ----------
+//
+// Refuses close on map-graph sessions where the agent navigated but never
+// recorded a single observed capability, never saved anything, and never
+// performed a write-shaped action. The session is DOA — typically because
+// the origin hard-blocked at landing (anti-bot wall) or the site presented
+// no machine-readable surface at the entry URL. Closing via `end_drive`
+// silently leaves no signal on the platform's ledger; the next session
+// re-discovers the dead end from cold start.
+//
+// ackReason: 'none' — no LLM-authored ack. The right exit is
+// `abort_session({kind: "origin_blocked" | "site_dead" | "other", reason})`
+// which writes a machine-actionable entry to the platform's recent_aborts.
+// Future sessions reading recent_aborts at session start short-circuit
+// known-blocked starts without re-driving the failed flow.
+//
+// Releases at endDriveAttempts >= 2 per the existing third-attempt
+// escape hatch.
+
+const mapSessionNoObservationsDetector: Detector<EndDrivePayload, EndDriveCtx> = {
+  kind: 'map_session_no_observations',
+  ackReason: 'none',
+  detect: (p) => {
+    if (p.endDriveAttempts >= 2) return [];
+    if (p.graph !== 'map') return [];
+    if (p.observedCapabilityCount > 0) return [];
+    if (p.saveSuccessCount > 0) return [];
+    if (p.writeActions.length > 0) return [];
+    // Require at least one HTTP failure — that's the discriminator
+    // between "DOA against a blocked origin" and "agent explored a normal
+    // site but found nothing observable." Both shapes might warrant an
+    // abort, but the loop's primary failure mode is the blocked one.
+    if (p.httpFailureCount === 0) return [];
+    return [
+      {
+        kind: 'map_session_no_observations',
+        message:
+          `CANNOT CLOSE: map-graph session against \`${p.platform}\` recorded zero observed ` +
+          `capabilities, saved zero strategies, and performed zero write-shaped actions. ` +
+          `The session is DOA — typically the origin hard-blocked at landing (a bot-management ` +
+          `wall or WAF challenge) or the entry URL presents no machine-readable surface.`,
+        hint:
+          `Use \`abort_session({session_id, reason, kind})\` instead of end_drive. The kind ` +
+          `discriminator gets written to the platform's abort_events ledger; future sessions ` +
+          `read recent_aborts at start_session and short-circuit known-blocked starts without ` +
+          `re-driving the failed flow. Pick the kind that matches:\n` +
+          `  - "origin_blocked" — anti-bot wall / captcha / region gate (most common)\n` +
+          `  - "site_dead" — site permanently down or no longer exposes the surface\n` +
+          `  - "other" — none of the above; explain in reason\n` +
+          `If you genuinely think a human-in-the-loop session could unstick this, call ` +
+          `\`start_remote_session\` instead so a person can authenticate / solve the captcha.`,
+        context: {
+          session_id: p.sessionId,
+          platform: p.platform,
+          graph: p.graph,
         },
       },
     ];
@@ -504,6 +579,7 @@ export const endDriveAudit = new Audit<EndDrivePayload, EndDriveCtx>({
     saveAttemptedNoneLandedDetector,
     rePersistenceDetector,
     observedNotLiftedDetector,
+    mapSessionNoObservationsDetector,
   ],
   classifiers: [triageAcknowledgmentClassifier],
 });
@@ -519,6 +595,11 @@ interface SessionLike {
   performActionHistory?: ReadonlyArray<{ action?: string; value?: unknown }>;
   saveAttemptCount?: number;
   savedCapabilities?: ReadonlyArray<{ capability?: string }>;
+  /** Read by the map_session_no_observations detector to discriminate
+   *  "DOA session against a blocked origin" (4xx/5xx in intercepted) from
+   *  "agent explored a site that just doesn't expose machine-readable
+   *  surfaces" (no failed requests). */
+  intercepted?: ReadonlyArray<{ status?: number | null }>;
 }
 
 /**
@@ -584,6 +665,11 @@ export function buildEndDrivePayload(
     if (typeof s.capability === 'string') liftedOrSaved.add(s.capability);
   }
   const observedNotLifted = observed.filter((n) => !liftedOrSaved.has(n));
+  const observedCapabilityCount = observed.length;
+  let httpFailureCount = 0;
+  for (const r of session.intercepted ?? []) {
+    if (typeof r.status === 'number' && r.status >= 400) httpFailureCount += 1;
+  }
   return {
     sessionId: session.id,
     platform: opts.platform ?? session.platform ?? '<platform>',
@@ -606,5 +692,8 @@ export function buildEndDrivePayload(
     },
     triageWouldFire: opts.triageWouldFire,
     observedNotLifted,
+    graph: session.graph ?? 'discover',
+    observedCapabilityCount,
+    httpFailureCount,
   };
 }

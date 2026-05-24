@@ -32,6 +32,9 @@ function makePayload(overrides = {}) {
     rePersistenceThreshold: DISCOVER_THRESHOLD,
     triageWouldFire: false, // every cap is already saved → handoff would skip triage
     observedNotLifted: [],
+    graph: 'discover',
+    observedCapabilityCount: 0,
+    httpFailureCount: 0,
     ...overrides,
   };
 }

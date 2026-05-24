@@ -23,6 +23,7 @@ export const CHECKPOINT_KINDS = [
   'recorded_step_failed',
   'session_expired',
   'post_save_validation_consent',
+  'abort_session_consent',
 ] as const;
 
 export type CheckpointKind = (typeof CHECKPOINT_KINDS)[number];

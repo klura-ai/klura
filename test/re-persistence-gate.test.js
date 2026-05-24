@@ -36,6 +36,9 @@ function makePayload(overrides = {}) {
     rePersistenceThreshold: DISCOVER_THRESHOLD,
     triageWouldFire: true, // some declared capability still unresolved
     observedNotLifted: [],
+    graph: 'discover',
+    observedCapabilityCount: 0,
+    httpFailureCount: 0,
     ...overrides,
   };
 }

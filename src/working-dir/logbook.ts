@@ -291,6 +291,20 @@ export function recordObservedCapability(platform: string, input: ObservedCapabi
 export interface AbortEventInput {
   session_id: string;
   reason: string;
+  /** Optional machine-actionable kind discriminator. Older callers omit
+   *  this; historical ledger entries also lack it. Readers default to
+   *  `'other'` when absent. */
+  kind?: 'origin_blocked' | 'existing_capability_covers' | 'user_stop' | 'site_dead' | 'other';
+  /** Optional vendor attribution mirrored from `OriginBlockedAdvisory.vendor`
+   *  when the abort was on `kind: 'origin_blocked'` with a vendor signal.
+   *  Free-text and agent-supplied; the runtime never branches on its value.
+   *  A later session reading recent_aborts can use it as a human-readable
+   *  hint when deciding whether retrying the same egress is worthwhile. */
+  vendor?: string | null;
+  /** Host that was aborted on. Lets the start_session pre-nav check
+   *  match historical aborts to the requested URL by host without
+   *  parsing free-text `reason`. */
+  host?: string;
   captured_actions_count: number;
   phase_at_abort: string;
 }
@@ -314,27 +328,62 @@ export function appendAbortEvent(platform: string, input: AbortEventInput): void
     at: new Date().toISOString(),
     session_id: input.session_id,
     reason: input.reason,
+    ...(input.kind !== undefined ? { kind: input.kind } : {}),
+    ...(input.vendor !== undefined && input.vendor !== null ? { vendor: input.vendor } : {}),
+    ...(input.host !== undefined ? { host: input.host } : {}),
     captured_actions_count: input.captured_actions_count,
     phase_at_abort: input.phase_at_abort,
   });
   writeLogbook(logbook);
 }
 
+/** Computed-enrichment shape on each abort_event the readRecentAborts
+ *  caller gets. `hours_since` saves the caller from parsing ISO
+ *  timestamps to calibrate freshness. */
+export interface AbortEventRead {
+  at: string;
+  session_id: string;
+  reason: string;
+  kind?: 'origin_blocked' | 'existing_capability_covers' | 'user_stop' | 'site_dead' | 'other';
+  vendor?: string;
+  host?: string;
+  captured_actions_count: number;
+  phase_at_abort: string;
+  /** Hours since the abort fired, rounded to one decimal. Computed on read. */
+  hours_since: number;
+}
+
 /**
  * Read the most recent abort events for a platform, newest first. Capped at
  * `limit` (default 10) so the surface stays compact for agent reads.
+ * Each entry is enriched with `hours_since` so readers don't have to parse
+ * ISO timestamps to calibrate "is this fresh enough to short-circuit on."
  */
-export function readRecentAborts(
-  platform: string,
-  limit = 10,
-): PlatformLogbook['platform_wide']['abort_events'] {
+export function readRecentAborts(platform: string, limit = 10): AbortEventRead[] {
   const logbook = loadLogbook(platform);
   const wide = logbook.platform_wide as PlatformLogbook['platform_wide'] & {
     abort_events?: PlatformLogbook['platform_wide']['abort_events'];
   };
   const events = Array.isArray(wide.abort_events) ? wide.abort_events : [];
-  // Defensive copy + reverse-chronological slice.
-  return [...events].sort((a, b) => b.at.localeCompare(a.at)).slice(0, Math.max(0, limit));
+  const now = Date.now();
+  return [...events]
+    .sort((a, b) => b.at.localeCompare(a.at))
+    .slice(0, Math.max(0, limit))
+    .map((e) => {
+      const enriched: AbortEventRead = {
+        at: e.at,
+        session_id: e.session_id,
+        reason: e.reason,
+        captured_actions_count: e.captured_actions_count,
+        phase_at_abort: e.phase_at_abort,
+        hours_since: Math.round(((now - Date.parse(e.at)) / 3600000) * 10) / 10,
+      };
+      const extra = e as { kind?: AbortEventRead['kind']; vendor?: string; host?: string };
+      if (extra.kind !== undefined) enriched.kind = extra.kind;
+      if (extra.vendor !== undefined) enriched.vendor = extra.vendor;
+      if (extra.host !== undefined) enriched.host = extra.host;
+      return enriched;
+    });
 }
 
 /**

@@ -20,23 +20,67 @@ import { appendAbortEvent } from '../working-dir/logbook';
 import { clearStartersForSession } from '../response/starter-cache';
 import { clearForSession as clearSessionObservations } from '../response/session-observations';
 import { clearObservedSessionTracking } from '../working-dir/logbook';
+import { invokeCheckpointAndGate, type CheckpointEnvelope } from '../checkpoints';
 import { TOOL_NAMES } from '../vocab';
 import type { ToolDef } from '../tools/types';
 
 const REASON_MIN_LENGTH = 20;
 
+/** Machine-actionable abort kinds. Cross-session readers (start_session's
+ *  recent_aborts replay, autonomous loops) discriminate on this rather than
+ *  parsing free-text `reason`. Backwards-compatible: optional, defaults to
+ *  `'other'` on the wire so older callers and historical ledger entries
+ *  without the field don't crash readers. */
+export type AbortKind =
+  | 'origin_blocked'
+  | 'existing_capability_covers'
+  | 'user_stop'
+  | 'site_dead'
+  | 'other';
+
+export const ABORT_KIND_VALUES: readonly AbortKind[] = [
+  'origin_blocked',
+  'existing_capability_covers',
+  'user_stop',
+  'site_dead',
+  'other',
+];
+
 export interface AbortSessionArgs {
   session_id: string;
   reason: string;
+  /** Optional machine-actionable classification. Defaults to `'other'` when
+   *  omitted. Future sessions on the same platform read this off
+   *  `recent_aborts` to short-circuit known-blocked starts without
+   *  re-parsing English. */
+  kind?: AbortKind;
+  /** Optional vendor attribution when `kind === 'origin_blocked'`. Pass
+   *  the vendor field straight from start_session's
+   *  `origin_blocked.vendor`. Persisted to the abort_events ledger as
+   *  informational context — future sessions read it to know which
+   *  defense surface refused the prior start without parsing free-text
+   *  `reason`. The runtime does not branch behavior on the value (no
+   *  vendor-specific reasoning in runtime code per `CLAUDE.md`); it's
+   *  data the agent surfaces to the user. */
+  vendor?: string;
 }
 
 export interface AbortSessionResult {
   ok: true;
-  aborted: true;
+  /** False when the abort_session_consent checkpoint handed over to the
+   *  user and the runtime is awaiting their ack. True when the abort
+   *  actually landed (browser torn down, ledger entry written). */
+  aborted: boolean;
   session_id: string;
   reason: string;
+  kind: AbortKind;
   phase_at_abort: string;
   captured_actions_count: number;
+  /** Present when the consent checkpoint handed over to the user — the
+   *  agent must ack this checkpoint via `ack_checkpoint` for the abort
+   *  to proceed. When the user replies no, the abort is cancelled and
+   *  the agent should keep trying. */
+  _checkpoint?: CheckpointEnvelope;
 }
 
 export async function abortSession(args: AbortSessionArgs): Promise<AbortSessionResult> {
@@ -52,54 +96,150 @@ export async function abortSession(args: AbortSessionArgs): Promise<AbortSession
         `always for saving; if you'd reach for that reason, you're using klura wrong.`,
     );
   }
+  let kind: AbortKind = 'other';
+  if (args.kind !== undefined) {
+    if (!ABORT_KIND_VALUES.includes(args.kind)) {
+      const allowed = ABORT_KIND_VALUES.map((k) => '"' + k + '"').join(' | ');
+      throw new Error(
+        `invalid_args: abort_session \`kind\` must be one of ${allowed} (got ${JSON.stringify(args.kind)}).`,
+      );
+    }
+    kind = args.kind;
+  }
 
   const session = pool.getSession(args.session_id);
-  const platform = session.platform;
   const reason = args.reason.trim();
   const phaseAtAbort = session.phase ?? 'drive';
   const capturedActionsCount = (session.performActionHistory ?? []).length;
 
-  // Persist storage state if the session is bound to a platform. Abort doesn't
-  // mean "burn the auth context" — keep cookies so the next session can warm-
-  // start against an existing capability without re-logging-in.
+  // Consent checkpoint: abort is a significant decision (klura's mission
+  // is RE; bailing on first friction is the opposite). Surface to the
+  // user / orchestrator for confirmation. Unattended runs that register
+  // a `continue`-returning handler (test harnesses, autonomous loops
+  // where the oracle has decided) get pre-consent + abort proceeds. The
+  // user-facing prompt explicitly invites "no, keep trying" replies.
+  const { envelope } = await invokeCheckpointAndGate('abort_session_consent', {
+    session_id: args.session_id,
+    capability: session.declaredCapabilities?.[0]?.capability,
+    context: {
+      kind: 'abort_session_consent',
+      reason,
+      abort_kind: kind,
+      vendor: args.vendor,
+      capturedActionsCount,
+      phase_at_abort: phaseAtAbort,
+    },
+  });
+  if (envelope) {
+    // Handed over to user — stage the args on the session and return early
+    // WITHOUT tearing down. `ack_checkpoint` reads `session.pendingAbort`
+    // when the user replies yes and runs the teardown inline (mirror of
+    // `pendingPostSaveValidation`). The agent must NOT re-call
+    // `abort_session` after the ack — doing so would re-emit a fresh
+    // consent token and loop forever. If the user replies no
+    // (`{cancelled: true, reason}`), `ack_checkpoint` clears the staged
+    // entry and tells the agent to keep RE-ing.
+    session.pendingAbort = {
+      reason,
+      kind,
+      ...(args.vendor !== undefined ? { vendor: args.vendor } : {}),
+      phase_at_abort: phaseAtAbort,
+      captured_actions_count: capturedActionsCount,
+    };
+    return {
+      ok: true,
+      aborted: false,
+      session_id: args.session_id,
+      reason,
+      kind,
+      phase_at_abort: phaseAtAbort,
+      captured_actions_count: capturedActionsCount,
+      _checkpoint: envelope,
+    };
+  }
+  // resolution.status === 'continue' OR 'resolved' (auto-approved) — proceed inline.
+  await performAbortTeardown(args.session_id, {
+    reason,
+    kind,
+    ...(args.vendor !== undefined ? { vendor: args.vendor } : {}),
+    phase_at_abort: phaseAtAbort,
+    captured_actions_count: capturedActionsCount,
+  });
+  return {
+    ok: true,
+    aborted: true,
+    session_id: args.session_id,
+    reason,
+    kind,
+    phase_at_abort: phaseAtAbort,
+    captured_actions_count: capturedActionsCount,
+  };
+}
+
+/** Carry-payload for the deferred abort teardown. Matches the staging
+ *  shape on `session.pendingAbort` — when consent is granted via
+ *  `ack_checkpoint`, the handler reads the pending entry and feeds it
+ *  back into this function. */
+export interface PerformAbortTeardownArgs {
+  reason: string;
+  kind: AbortKind;
+  vendor?: string;
+  phase_at_abort: string;
+  captured_actions_count: number;
+}
+
+/** Run the actual abort teardown: persist storage state, log to the
+ *  platform's abort_events ledger, tear down the browser, clear per-
+ *  session maps. Called inline when consent is pre-granted, and from
+ *  `ack_checkpoint` when consent is granted by ack. Idempotent enough —
+ *  ledger appends are unconditional and not deduped (the same call shape
+ *  twice in a row would write two ledger entries), so callers must not
+ *  invoke this more than once per intended abort. */
+export async function performAbortTeardown(
+  sessionId: string,
+  payload: PerformAbortTeardownArgs,
+): Promise<void> {
+  let session;
+  try {
+    session = pool.getSession(sessionId);
+  } catch {
+    // Session already torn down — nothing to do. Common when the agent's
+    // prior tool call already closed the session (e.g. a parallel
+    // end_drive landed first). Safe no-op.
+    return;
+  }
+  const platform = session.platform;
+
   if (platform) {
     try {
       const statePath = skills.storageStatePath(platform, session.identity);
-      await pool.driverFor(args.session_id).saveStorageState(session, statePath);
+      await pool.driverFor(sessionId).saveStorageState(session, statePath);
     } catch {
       /* non-fatal — abort still proceeds */
     }
   }
 
-  // Log to the platform-wide abort_events ledger for cross-session visibility.
   if (platform) {
     try {
+      const hostFromCaptures = readFirstNavHost(session);
       appendAbortEvent(platform, {
-        session_id: args.session_id,
-        reason,
-        captured_actions_count: capturedActionsCount,
-        phase_at_abort: phaseAtAbort,
+        session_id: sessionId,
+        reason: payload.reason,
+        kind: payload.kind,
+        ...(payload.vendor !== undefined ? { vendor: payload.vendor } : {}),
+        ...(hostFromCaptures !== null ? { host: hostFromCaptures } : {}),
+        captured_actions_count: payload.captured_actions_count,
+        phase_at_abort: payload.phase_at_abort,
       });
     } catch {
       /* non-fatal — abort still proceeds */
     }
   }
 
-  // Tear down. Mirrors end_drive's terminal cleanup — same pool teardown,
-  // same per-session map clears.
-  await pool.endDrive(args.session_id);
-  clearStartersForSession(args.session_id);
-  clearSessionObservations(args.session_id);
-  clearObservedSessionTracking(args.session_id);
-
-  return {
-    ok: true,
-    aborted: true,
-    session_id: args.session_id,
-    reason,
-    phase_at_abort: phaseAtAbort,
-    captured_actions_count: capturedActionsCount,
-  };
+  await pool.endDrive(sessionId);
+  clearStartersForSession(sessionId);
+  clearSessionObservations(sessionId);
+  clearObservedSessionTracking(sessionId);
 }
 
 export const TOOL_DEF: ToolDef = {
@@ -128,8 +268,65 @@ export const TOOL_DEF: ToolDef = {
           `Free-text reason (≥${REASON_MIN_LENGTH} chars). Logged to the platform's abort_events ` +
           `for cross-session visibility. NOT "this is a one-off task".`,
       },
+      kind: {
+        type: 'string',
+        enum: [...ABORT_KIND_VALUES],
+        description:
+          `Machine-actionable classification (optional; defaults to "other"). Future sessions ` +
+          `read this off recent_aborts to short-circuit known-blocked starts without re-parsing ` +
+          `English. Pick the one that matches:\n` +
+          `  - "origin_blocked": anti-bot wall / captcha / region gate refused the session\n` +
+          `  - "existing_capability_covers": klura already has a strategy for this task\n` +
+          `  - "user_stop": user explicitly said stop\n` +
+          `  - "site_dead": site is permanently down or doesn't expose the surface anymore\n` +
+          `  - "other": none of the above`,
+      },
+      vendor: {
+        type: 'string',
+        description:
+          `Optional vendor attribution. When \`kind === "origin_blocked"\`, pass the ` +
+          `vendor straight from \`start_session.origin_blocked.vendor\`. Persisted to the ` +
+          `abort_events ledger as informational context; future sessions surface it to the ` +
+          `user when explaining why a known-blocked start was short-circuited.`,
+      },
     },
     required: ['session_id', 'reason'],
   },
-  handler: (args: any) => abortSession({ session_id: args.session_id, reason: args.reason }),
+  handler: (args: any) =>
+    abortSession({
+      session_id: args.session_id,
+      reason: args.reason,
+      kind: args.kind,
+      vendor: args.vendor,
+    }),
 };
+
+/** Pull the host of the first captured navigation off the session.
+ *  Used by abort_session to stamp `host` on the abort_event ledger so
+ *  future start_session pre-nav checks match by host without parsing
+ *  `reason`. Returns null on a session with no captures. */
+function readFirstNavHost(session: {
+  intercepted?: ReadonlyArray<{ url?: string; isNavigation?: boolean }>;
+}): string | null {
+  const intercepted = session.intercepted;
+  if (!Array.isArray(intercepted) || intercepted.length === 0) return null;
+  for (const req of intercepted) {
+    if (req.isNavigation !== true) continue;
+    if (typeof req.url !== 'string') continue;
+    try {
+      return new URL(req.url).host.toLowerCase();
+    } catch {
+      continue;
+    }
+  }
+  // Fallback: any captured URL.
+  for (const req of intercepted) {
+    if (typeof req.url !== 'string') continue;
+    try {
+      return new URL(req.url).host.toLowerCase();
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}

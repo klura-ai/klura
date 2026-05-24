@@ -234,6 +234,16 @@ export interface PlatformLogbook {
       at: string;
       session_id: string;
       reason: string;
+      /** Optional machine-actionable classification (added in v0.3.3).
+       *  Historical entries lack this field; readers default to "other". */
+      kind?: 'origin_blocked' | 'existing_capability_covers' | 'user_stop' | 'site_dead' | 'other';
+      /** Vendor attribution mirrored from origin_blocked advisory when
+       *  available. Added in v0.3.3. */
+      vendor?: string;
+      /** Host of the requested URL the session aborted on. Lets the
+       *  start_session pre-nav check match by host without parsing
+       *  free-text reason. Added in v0.3.3. */
+      host?: string;
       captured_actions_count: number;
       phase_at_abort: string;
     }>;
