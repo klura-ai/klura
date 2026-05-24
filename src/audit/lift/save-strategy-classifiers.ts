@@ -581,6 +581,17 @@ export const userConfirmationClassifier: Classifier<Strategy, SaveStrategyCtx, u
   expectedAnswerShape:
     'user_confirmation: {agent_prompt: "<the 1-3 sentence prompt you showed the user, in your own voice, mentioning the capability slug, tier, target host, anchor classification (when page-script), and any open warnings>", user_decision: "approve" | "reject", user_quote: "<the user\'s fresh reply — do NOT reuse their reply to triage_plan, surface_changed, or any earlier turn>"}',
   buildItems: (data, ctx) => {
+    // Map-graph sessions are user-pre-authorized exploration: the user
+    // already said "map this site and save every safe read-only capability"
+    // at session start. Demanding per-capability user_confirmation on every
+    // save inside that flow is friction without signal — and in production
+    // unattended map runs no human is reachable, so agents end up
+    // recycling the task prompt as `user_quote` and stalling on
+    // freshness-rejection loops. Skip the gate entirely. Mutating saves
+    // are already refused by the unattended-run policy + sensitive-shape
+    // detectors; the user_confirmation classifier isn't the gate keeping
+    // them out.
+    if (ctx.session?.graph === 'map') return null;
     const decider = getRegisteredSaveConfirmationDecider();
     if (decider) {
       try {
@@ -597,7 +608,7 @@ export const userConfirmationClassifier: Classifier<Strategy, SaveStrategyCtx, u
     return {
       required_facts: facts,
       agent_note:
-        'Compose a 1-3 sentence prompt to the user explaining what is about to be saved. Use your own voice — match the user\'s tone. The prompt MUST mention every fact in `required_facts`: the capability slug verbatim, the tier verbatim, the target host (or path), the anchor classification when tier is page-script, and at least the word "warning" / "flagged" / "issue" / "concern" when `warning_kinds` is non-empty. End with an explicit yes/no ask. Submit your prompt as `audit_answers.user_confirmation.agent_prompt`; submit the user\'s reply as `user_quote` and their decision as `user_decision`. Do NOT reuse the user\'s reply to a prior ack_checkpoint (triage_plan, surface_changed) or any earlier turn — the runtime cannot detect recycled replies, so freshness is on you. Self-resolving the gate by recycling a reply defeats the gate\'s purpose.',
+        'UNATTENDED-FIRST: if no human is reachable, the embedder (test harness, autonomous runner) should register a SaveConfirmationDecider that auto-resolves this gate — the runtime calls it and uses its verdict; no agent loop is needed. ATTENDED PATH (only when a human IS in the loop): compose a 1-3 sentence prompt to the user explaining what is about to be saved. Use your own voice — match the user\'s tone. The prompt MUST mention every fact in `required_facts`: the capability slug verbatim, the tier verbatim, the target host (or path), the anchor classification when tier is page-script, and at least the word "warning" / "flagged" / "issue" / "concern" when `warning_kinds` is non-empty. End with an explicit yes/no ask. Submit your prompt as `audit_answers.user_confirmation.agent_prompt`; submit the user\'s reply as `user_quote` and their decision as `user_decision`. Do NOT reuse the user\'s reply to a prior ack_checkpoint (triage_plan, surface_changed) or any earlier turn — the runtime cannot detect recycled replies, so freshness is on you. Self-resolving the gate by recycling a reply defeats the gate\'s purpose.',
       debug_prompt: composeUserPrompt(data, ctx),
     };
   },
@@ -610,7 +621,13 @@ export const userConfirmationClassifier: Classifier<Strategy, SaveStrategyCtx, u
         return validateAnswerShape(synthesized, data, ctx);
       }
       return [
-        `audit_answers.user_confirmation is required. Read \`required_facts\` from items.user_confirmation, ` +
+        `audit_answers.user_confirmation is required. ` +
+          `UNATTENDED RUNS: if no human is reachable, the embedder (autonomous runner / test harness) ` +
+          `should register a SaveConfirmationDecider — the runtime calls it and uses its verdict; ` +
+          `no agent loop is needed. Map-graph sessions skip this gate entirely (user pre-authorized exploration). ` +
+          `If you're hitting this rejection in an unattended run, that's an embedder configuration gap, ` +
+          `not a missing user reply — do NOT compose a prompt and recycle the task prompt as user_quote. ` +
+          `ATTENDED RUNS (only when a human IS in the loop): read \`required_facts\` from items.user_confirmation, ` +
           `compose a 1-3 sentence prompt in your own voice that mentions every fact, relay it to the user, ` +
           `wait for their fresh yes/no reply about THIS save, then retry with audit_answers.user_confirmation: ` +
           `{agent_prompt: "<the prompt you showed them>", user_decision: "approve" | "reject", user_quote: "<their fresh reply>"}. ` +
