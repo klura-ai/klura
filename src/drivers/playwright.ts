@@ -2142,6 +2142,33 @@ export class PlaywrightDriver extends BrowserDriver {
     return Promise.resolve(this._page(session, opts?.page).url());
   }
 
+  async listTopLevelIframes(
+    session: Session,
+    opts?: PageOpts,
+  ): Promise<ReadonlyArray<{ src: string }>> {
+    const page = this._page(session, opts?.page);
+    /* eslint-disable
+       @typescript-eslint/no-explicit-any,
+       @typescript-eslint/no-unsafe-assignment,
+       @typescript-eslint/no-unsafe-member-access,
+       @typescript-eslint/no-unsafe-call */
+    return page
+      .evaluate(() => {
+        const g = globalThis as any;
+        const doc = g.document;
+        if (!doc || typeof doc.querySelectorAll !== 'function') return [];
+        return Array.from(doc.querySelectorAll('iframe') as ArrayLike<any>).map((el: any) => ({
+          src: typeof el.src === 'string' ? el.src : '',
+        }));
+      })
+      .catch(() => []);
+    /* eslint-enable
+       @typescript-eslint/no-explicit-any,
+       @typescript-eslint/no-unsafe-assignment,
+       @typescript-eslint/no-unsafe-member-access,
+       @typescript-eslint/no-unsafe-call */
+  }
+
   async delay(session: Session, ms: number): Promise<void> {
     await this._page(session).waitForTimeout(ms);
   }

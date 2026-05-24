@@ -54,15 +54,6 @@ export interface AbortSessionArgs {
    *  `recent_aborts` to short-circuit known-blocked starts without
    *  re-parsing English. */
   kind?: AbortKind;
-  /** Optional vendor attribution when `kind === 'origin_blocked'`. Pass
-   *  the vendor field straight from start_session's
-   *  `origin_blocked.vendor`. Persisted to the abort_events ledger as
-   *  informational context — future sessions read it to know which
-   *  defense surface refused the prior start without parsing free-text
-   *  `reason`. The runtime does not branch behavior on the value (no
-   *  vendor-specific reasoning in runtime code per `CLAUDE.md`); it's
-   *  data the agent surfaces to the user. */
-  vendor?: string;
 }
 
 export interface AbortSessionResult {
@@ -125,7 +116,6 @@ export async function abortSession(args: AbortSessionArgs): Promise<AbortSession
       kind: 'abort_session_consent',
       reason,
       abort_kind: kind,
-      vendor: args.vendor,
       capturedActionsCount,
       phase_at_abort: phaseAtAbort,
     },
@@ -142,7 +132,6 @@ export async function abortSession(args: AbortSessionArgs): Promise<AbortSession
     session.pendingAbort = {
       reason,
       kind,
-      ...(args.vendor !== undefined ? { vendor: args.vendor } : {}),
       phase_at_abort: phaseAtAbort,
       captured_actions_count: capturedActionsCount,
     };
@@ -161,7 +150,6 @@ export async function abortSession(args: AbortSessionArgs): Promise<AbortSession
   await performAbortTeardown(args.session_id, {
     reason,
     kind,
-    ...(args.vendor !== undefined ? { vendor: args.vendor } : {}),
     phase_at_abort: phaseAtAbort,
     captured_actions_count: capturedActionsCount,
   });
@@ -183,7 +171,6 @@ export async function abortSession(args: AbortSessionArgs): Promise<AbortSession
 export interface PerformAbortTeardownArgs {
   reason: string;
   kind: AbortKind;
-  vendor?: string;
   phase_at_abort: string;
   captured_actions_count: number;
 }
@@ -226,7 +213,6 @@ export async function performAbortTeardown(
         session_id: sessionId,
         reason: payload.reason,
         kind: payload.kind,
-        ...(payload.vendor !== undefined ? { vendor: payload.vendor } : {}),
         ...(hostFromCaptures !== null ? { host: hostFromCaptures } : {}),
         captured_actions_count: payload.captured_actions_count,
         phase_at_abort: payload.phase_at_abort,
@@ -281,14 +267,6 @@ export const TOOL_DEF: ToolDef = {
           `  - "site_dead": site is permanently down or doesn't expose the surface anymore\n` +
           `  - "other": none of the above`,
       },
-      vendor: {
-        type: 'string',
-        description:
-          `Optional vendor attribution. When \`kind === "origin_blocked"\`, pass the ` +
-          `vendor straight from \`start_session.origin_blocked.vendor\`. Persisted to the ` +
-          `abort_events ledger as informational context; future sessions surface it to the ` +
-          `user when explaining why a known-blocked start was short-circuited.`,
-      },
     },
     required: ['session_id', 'reason'],
   },
@@ -297,7 +275,6 @@ export const TOOL_DEF: ToolDef = {
       session_id: args.session_id,
       reason: args.reason,
       kind: args.kind,
-      vendor: args.vendor,
     }),
 };
 

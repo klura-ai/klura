@@ -154,6 +154,19 @@ export abstract class BrowserDriver {
   abstract getText(session: Session, selector: string, opts?: PageOpts): Promise<string>;
   abstract getAccessibilityTree(session: Session, opts?: PageOpts): Promise<string>;
 
+  /** Enumerate every `<iframe>` element on the top-level frame. Used by
+   *  the origin-blocked detector to surface the cross-origin-iframe
+   *  challenge shape: when the visible UI is rendered inside an iframe
+   *  whose origin differs from the page origin, top-level a11y / selectors
+   *  cannot reach into it, and the agent's clicks fail silently. Returns
+   *  the `src` attribute of each iframe (raw, as-attributed on the
+   *  element); resolve to URL at the caller. Empty array when the page
+   *  has no iframes or the driver doesn't expose them. */
+  abstract listTopLevelIframes(
+    session: Session,
+    opts?: PageOpts,
+  ): Promise<ReadonlyArray<{ src: string }>>;
+
   /** Current top-level frame URL. */
   abstract getUrl(session: Session, opts?: PageOpts): Promise<string>;
 

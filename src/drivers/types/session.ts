@@ -459,7 +459,6 @@ export interface Session {
   pendingAbort?: {
     reason: string;
     kind: 'origin_blocked' | 'existing_capability_covers' | 'user_stop' | 'site_dead' | 'other';
-    vendor?: string;
     phase_at_abort: string;
     captured_actions_count: number;
   };

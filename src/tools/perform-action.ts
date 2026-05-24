@@ -19,7 +19,39 @@ import { asNonEmptyBoundedString, ValidationError } from '../validators';
 import { captureAndAppendForms } from './_internals';
 import { graphConfig } from '../phases/registry';
 import { maybeFireSurfaceChanged } from '../phases/surface-changed';
+import { readInitialNavStatus } from './start-session';
+import { detectOriginBlocked } from '../phases/origin-blocked-detector';
+import type { OriginBlockedAdvisory } from '../phases/origin-blocked-detector';
+import type { BrowserDriver, PageOpts } from '../drivers/interface';
+import type { Session } from '../drivers/types/session';
 import type { CheckpointEnvelope } from '../checkpoints';
+
+/** Run the origin-blocked detector on a freshly-navigated page. Extracted
+ *  from `performAction` to keep that function under the cognitive-complexity
+ *  cap; returns `{}` (no field) when the detector cleared, or
+ *  `{origin_blocked}` to spread into the response. */
+async function snapNavigateOriginBlocked(
+  driver: BrowserDriver,
+  session: Session,
+  pageOpts: PageOpts | undefined,
+  requestedUrl: string,
+  finalUrl: string,
+  navStatus: number | null,
+  a11yTree: string,
+): Promise<{ origin_blocked?: OriginBlockedAdvisory }> {
+  let iframes: ReadonlyArray<{ src: string }> = [];
+  if (typeof driver.listTopLevelIframes === 'function') {
+    iframes = await driver.listTopLevelIframes(session, pageOpts).catch(() => []);
+  }
+  const advisory = detectOriginBlocked({
+    requestedUrl,
+    finalUrl,
+    navStatus,
+    a11yTree,
+    iframes,
+  });
+  return advisory ? { origin_blocked: advisory } : {};
+}
 
 export interface ActionResult {
   a11yTree: string;
@@ -54,6 +86,18 @@ export interface ActionResult {
    * a defense-surface plan for the new surface.
    */
   _checkpoint?: CheckpointEnvelope;
+  /** HTTP status of the navigate response. Present only on
+   *  `action: "navigate"` calls when the driver captured a status for
+   *  the new URL. Mirrors `start_session.nav_status` so agents don't
+   *  need a follow-up `get_network_log` to learn the navigate landed on
+   *  a 4xx/5xx — the `origin_blocked` decision is one round earlier. */
+  nav_status?: number | null;
+  /** Origin-blocked advisory for the post-navigate landing. Mirrors
+   *  `start_session.origin_blocked`. Surfaced inline at the moment the
+   *  agent decides whether to abort or pivot — without it the agent
+   *  burns a session arriving at a conclusion start_session would have
+   *  short-circuited. Only fires on `action: "navigate"`. */
+  origin_blocked?: OriginBlockedAdvisory;
 }
 
 /**
@@ -666,12 +710,17 @@ export async function performAction(
   const subPagesField = subPagesSnapshot.length > 0 ? { subPages: subPagesSnapshot } : {};
   const checkpointField = surfaceCheckpoint ? { _checkpoint: surfaceCheckpoint } : {};
 
+  const navStatusForResponse =
+    action === 'navigate' ? readInitialNavStatus(session, selector, currentUrl) : null;
+  const navStatusField = action === 'navigate' ? { nav_status: navStatusForResponse } : {};
+
   if (opts.returnTree === false) {
     return {
       a11yTree: '',
       a11y_total_chars: 0,
       a11y_truncated: false,
       url: currentUrl,
+      ...navStatusField,
       ...subPagesField,
       ...checkpointField,
     };
@@ -695,11 +744,30 @@ export async function performAction(
       last.page_fingerprint = capturePageFingerprint(rawTree, currentUrl);
     }
   }
+  // Origin-blocked detector on navigate: catches 4xx / cross-host-redirect /
+  // challenge-shape landings inline so the agent's decision happens at the
+  // exact moment of the failed navigate, not one round later via
+  // get_network_log.
+  const originBlockedField =
+    action === 'navigate'
+      ? await snapNavigateOriginBlocked(
+          driver,
+          session,
+          pageOpts,
+          selector,
+          currentUrl,
+          navStatusForResponse,
+          trimmed.tree,
+        )
+      : {};
+
   return {
     a11yTree: trimmed.tree,
     a11y_total_chars: trimmed.total_chars,
     a11y_truncated: trimmed.truncated,
     url: currentUrl,
+    ...navStatusField,
+    ...originBlockedField,
     ...subPagesField,
     ...checkpointField,
   };

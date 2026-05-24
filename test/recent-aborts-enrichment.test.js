@@ -1,6 +1,6 @@
 // readRecentAborts enrichment: each abort_event read carries computed
 // `hours_since` so agents don't parse ISO timestamps to calibrate
-// freshness. vendor + host pass through from on-disk shape.
+// freshness. host + kind pass through from on-disk shape.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -15,12 +15,11 @@ const { appendAbortEvent, readRecentAborts } = await import(
   '../dist/working-dir/logbook.js'
 );
 
-test('readRecentAborts: hours_since computed on read, vendor+host pass through', () => {
+test('readRecentAborts: hours_since computed on read, host pass through', () => {
   appendAbortEvent('p-fresh', {
     session_id: 'sess-a',
-    reason: 'bot wall blocked the start',
+    reason: 'origin blocked the start',
     kind: 'origin_blocked',
-    vendor: 'examplewall',
     host: 'www.example.test',
     captured_actions_count: 0,
     phase_at_abort: 'drive',
@@ -29,26 +28,22 @@ test('readRecentAborts: hours_since computed on read, vendor+host pass through',
   assert.equal(events.length, 1);
   const e = events[0];
   assert.equal(e.kind, 'origin_blocked');
-  assert.equal(e.vendor, 'examplewall');
   assert.equal(e.host, 'www.example.test');
   // Just-appended → hours_since should be ~0 (very small)
   assert.ok(e.hours_since >= 0 && e.hours_since < 0.01, `expected hours_since ~0, got ${e.hours_since}`);
 });
 
-test('readRecentAborts: historical entries without vendor/host → omitted, default kind on missing', () => {
-  // Simulate a historical entry the library will read but didn't write
-  // (no vendor/host in input).
-  appendAbortEvent('p-legacy', {
+test('readRecentAborts: entries without optional fields → fields omitted', () => {
+  appendAbortEvent('p-bare', {
     session_id: 'sess-old',
     reason: 'something happened',
     captured_actions_count: 0,
     phase_at_abort: 'drive',
   });
-  const events = readRecentAborts('p-legacy');
+  const events = readRecentAborts('p-bare');
   assert.equal(events.length, 1);
   const e = events[0];
   assert.equal(e.kind, undefined);
-  assert.equal(e.vendor, undefined);
   assert.equal(e.host, undefined);
   assert.ok('hours_since' in e);
 });

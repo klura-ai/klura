@@ -82,7 +82,6 @@ test('consent ack → performAbortTeardown runs; ledger entry written; pendingAb
       session_id: session.id,
       reason: 'site is blocked — exhausted alternate entry paths and gate RE attempts',
       kind: 'origin_blocked',
-      vendor: 'examplewall',
     });
     assert.equal(result.aborted, false, 'aborted=false until consent lands');
     assert.ok(result._checkpoint, 'envelope present on first call');
@@ -90,7 +89,6 @@ test('consent ack → performAbortTeardown runs; ledger entry written; pendingAb
     assert.ok(result._checkpoint.checkpoint_token, 'envelope carries a checkpoint_token');
     assert.ok(session.pendingAbort, 'pendingAbort staged on session');
     assert.equal(session.pendingAbort.kind, 'origin_blocked');
-    assert.equal(session.pendingAbort.vendor, 'examplewall');
     assert.equal(endDriveSpy.calls, 0, 'pool.endDrive NOT called until consent');
 
     const ack = await ackCheckpoint({
@@ -110,7 +108,6 @@ test('consent ack → performAbortTeardown runs; ledger entry written; pendingAb
     const aborts = readRecentAborts(platform);
     assert.equal(aborts.length, 1, 'ledger entry written');
     assert.equal(aborts[0].kind, 'origin_blocked');
-    assert.equal(aborts[0].vendor, 'examplewall');
     assert.equal(aborts[0].session_id, session.id);
   } finally {
     restore();
@@ -125,9 +122,8 @@ test('decline ack → no teardown; pendingAbort cleared; agent told to keep tryi
   try {
     const result = await abortSession({
       session_id: session.id,
-      reason: 'challenge cookie not landing, considering abort',
+      reason: 'js challenge persists across nav — considering abort after RE attempts',
       kind: 'origin_blocked',
-      vendor: 'edgewall',
     });
     assert.ok(result._checkpoint, 'envelope present');
     assert.ok(session.pendingAbort, 'pendingAbort staged');

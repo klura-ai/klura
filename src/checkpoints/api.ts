@@ -234,7 +234,6 @@ async function resolveAbortSessionConsent(
   await performAbortTeardown(session.id, {
     reason: pending.reason,
     kind: pending.kind,
-    ...(pending.vendor !== undefined ? { vendor: pending.vendor } : {}),
     phase_at_abort: pending.phase_at_abort,
     captured_actions_count: pending.captured_actions_count,
   });

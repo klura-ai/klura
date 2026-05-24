@@ -15,6 +15,13 @@ import {
   type StrategyTier,
 } from '../strategies/policy';
 import { buildPlatformMapSummary, type PlatformMapSummary } from '../response/platform-map-summary';
+import { detectOriginBlocked, isResolvableChallengeShape } from '../phases/origin-blocked-detector';
+
+/** Wait window for the JS-challenge auto-resolve path. Most JS-only
+ *  challenges (purely client-side bot checks) complete in 3-6 seconds;
+ *  7s is a structurally generous bound that's still cheap vs the 15-30s
+ *  of failed clicks the agent would otherwise burn. */
+const CHALLENGE_RESOLVE_WAIT_MS = 7000;
 import { getDeviceProfile, type DeviceProfile } from '../identity/devices';
 import {
   readArtifactFromDisk,
@@ -88,6 +95,45 @@ function populatePlatformResponseFields(result: StartSessionResult, platform: st
  * coerced to `undefined` so re-issuing with the canonical handle isn't a
  * fail. The validator failure for slug shape preserves agent feedback.
  */
+/**
+ * Walk the session's intercepted ring and pull the HTTP status of the
+ * initial top-level navigation. Matches by host (requested or resolved
+ * current) — drivers vary on whether they mark `isNavigation` explicitly.
+ * Returns `null` when no matching captured request carried a status.
+ */
+export function readInitialNavStatus(
+  session: { intercepted?: ReadonlyArray<{ url?: unknown; status?: number | null }> },
+  requestedUrl: string,
+  currentUrl: string,
+): number | null {
+  const intercepted = session.intercepted;
+  if (!Array.isArray(intercepted) || intercepted.length === 0) return null;
+  let requestedHost = '';
+  let currentHost = '';
+  try {
+    requestedHost = new URL(requestedUrl).host.toLowerCase();
+  } catch {
+    /* keep empty — fall through to host comparison miss */
+  }
+  try {
+    currentHost = new URL(currentUrl).host.toLowerCase();
+  } catch {
+    /* keep empty */
+  }
+  for (const req of intercepted) {
+    if (typeof req.url !== 'string') continue;
+    let reqHost: string;
+    try {
+      reqHost = new URL(req.url).host.toLowerCase();
+    } catch {
+      continue;
+    }
+    if (reqHost !== requestedHost && reqHost !== currentHost) continue;
+    if (typeof req.status === 'number') return req.status;
+  }
+  return null;
+}
+
 function normalizeIdentityOpt(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'string') {
@@ -182,6 +228,22 @@ export interface StartSessionResult {
    * auto-execute already completed.
    */
   _hint?: string;
+  /**
+   * HTTP status of the initial nav response, when the driver captured it.
+   * Surfaced unconditionally on every cold start_session so agents don't
+   * need a `get_network_log` round-trip to confirm a 4xx landing.
+   */
+  nav_status?: number | null;
+  /**
+   * Structured signal that the initial navigation landed on a known
+   * anti-bot gate (a bot-management wall, IP-level block, or site-closed
+   * page). When present, the agent should call
+   * `abort_session({kind: "origin_blocked", reason})` instead of driving
+   * — the kind discriminator lands in the platform's recent_aborts ledger
+   * and future sessions short-circuit known-blocked starts. See
+   * `runtime/src/phases/origin-blocked-detector.ts`.
+   */
+  origin_blocked?: import('../phases/origin-blocked-detector').OriginBlockedAdvisory;
   /** Echoed back so the agent sees which graph the session is running. */
   graph?: (typeof GRAPH_MODES)[number];
   /**
@@ -1436,16 +1498,77 @@ export async function startSession(
   await captureAndAppendForms(session, driver);
 
   const rawTree = await driver.getAccessibilityTree(session);
-  const trimmed = trimA11yTree(rawTree, DEFAULT_A11Y_BUDGET);
-  const currentUrl = await driver.getUrl(session).catch(() => url);
+  // `trimmed` + `currentUrl` may be re-snapped below if the initial
+  // detection fires on a JS-challenge shape that auto-resolves.
+  let trimmed = trimA11yTree(rawTree, DEFAULT_A11Y_BUDGET);
+  let currentUrl = await driver.getUrl(session).catch(() => url);
   session.extractedContentBytes = (session.extractedContentBytes ?? 0) + trimmed.tree.length;
+  let navStatus = readInitialNavStatus(session, url, currentUrl);
+  const iframes: ReadonlyArray<{ src: string }> =
+    typeof driver.listTopLevelIframes === 'function'
+      ? await driver.listTopLevelIframes(session).catch(() => [])
+      : [];
+  let originBlocked = detectOriginBlocked({
+    requestedUrl: url,
+    finalUrl: currentUrl,
+    navStatus,
+    a11yTree: trimmed.tree,
+    iframes,
+  });
+  // Resolvable JS-challenge path: when the initial detection fires on a
+  // structurally challenge-shaped page (cross-host vendor redirect +
+  // iframe-only minimal a11y), the page MIGHT auto-resolve in a few
+  // seconds (purely client-side bot checks run as in-page JS).
+  // Wait briefly, re-snap a11y + url + status, re-run the detector.
+  // If the challenge cleared, the advisory drops and the session
+  // continues normally with the resolved page in hand. If it didn't
+  // clear, the advisory stands.
+  if (originBlocked && isResolvableChallengeShape(originBlocked, trimmed.tree, navStatus)) {
+    await new Promise((r) => setTimeout(r, CHALLENGE_RESOLVE_WAIT_MS));
+    const rawTreeAfter = await driver.getAccessibilityTree(session);
+    const trimmedAfter = trimA11yTree(rawTreeAfter, DEFAULT_A11Y_BUDGET);
+    const currentUrlAfter = await driver.getUrl(session).catch(() => currentUrl);
+    const navStatusAfter = readInitialNavStatus(session, url, currentUrlAfter);
+    const iframesAfter: ReadonlyArray<{ src: string }> =
+      typeof driver.listTopLevelIframes === 'function'
+        ? await driver.listTopLevelIframes(session).catch(() => [])
+        : [];
+    const advisoryAfter = detectOriginBlocked({
+      requestedUrl: url,
+      finalUrl: currentUrlAfter,
+      navStatus: navStatusAfter,
+      a11yTree: trimmedAfter.tree,
+      iframes: iframesAfter,
+    });
+    if (advisoryAfter === null) {
+      // Challenge resolved — swap in the post-wait snapshot.
+      session.extractedContentBytes =
+        (session.extractedContentBytes ?? 0) + (trimmedAfter.tree.length - trimmed.tree.length);
+      trimmed = trimmedAfter;
+      currentUrl = currentUrlAfter;
+      navStatus = navStatusAfter;
+      originBlocked = null;
+    } else {
+      // Challenge didn't resolve. Keep the post-wait snapshot anyway
+      // (it's at least no worse than the initial) and let the advisory
+      // stand.
+      session.extractedContentBytes =
+        (session.extractedContentBytes ?? 0) + (trimmedAfter.tree.length - trimmed.tree.length);
+      trimmed = trimmedAfter;
+      currentUrl = currentUrlAfter;
+      navStatus = navStatusAfter;
+      originBlocked = advisoryAfter;
+    }
+  }
   const result: StartSessionResult = {
     sessionId: session.id,
     a11yTree: trimmed.tree,
     a11y_total_chars: trimmed.total_chars,
     a11y_truncated: trimmed.truncated,
     url: currentUrl,
+    nav_status: navStatus,
   };
+  if (originBlocked) result.origin_blocked = originBlocked;
   if (opts.platform) populatePlatformResponseFields(result, opts.platform);
   result.graph = session.graph;
   // Mid-flow interruption behavior is plugin-orchestrated. Headless / CI

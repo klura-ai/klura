@@ -295,12 +295,6 @@ export interface AbortEventInput {
    *  this; historical ledger entries also lack it. Readers default to
    *  `'other'` when absent. */
   kind?: 'origin_blocked' | 'existing_capability_covers' | 'user_stop' | 'site_dead' | 'other';
-  /** Optional vendor attribution mirrored from `OriginBlockedAdvisory.vendor`
-   *  when the abort was on `kind: 'origin_blocked'` with a vendor signal.
-   *  Free-text and agent-supplied; the runtime never branches on its value.
-   *  A later session reading recent_aborts can use it as a human-readable
-   *  hint when deciding whether retrying the same egress is worthwhile. */
-  vendor?: string | null;
   /** Host that was aborted on. Lets the start_session pre-nav check
    *  match historical aborts to the requested URL by host without
    *  parsing free-text `reason`. */
@@ -329,7 +323,6 @@ export function appendAbortEvent(platform: string, input: AbortEventInput): void
     session_id: input.session_id,
     reason: input.reason,
     ...(input.kind !== undefined ? { kind: input.kind } : {}),
-    ...(input.vendor !== undefined && input.vendor !== null ? { vendor: input.vendor } : {}),
     ...(input.host !== undefined ? { host: input.host } : {}),
     captured_actions_count: input.captured_actions_count,
     phase_at_abort: input.phase_at_abort,
@@ -345,7 +338,6 @@ export interface AbortEventRead {
   session_id: string;
   reason: string;
   kind?: 'origin_blocked' | 'existing_capability_covers' | 'user_stop' | 'site_dead' | 'other';
-  vendor?: string;
   host?: string;
   captured_actions_count: number;
   phase_at_abort: string;
@@ -378,10 +370,8 @@ export function readRecentAborts(platform: string, limit = 10): AbortEventRead[]
         phase_at_abort: e.phase_at_abort,
         hours_since: Math.round(((now - Date.parse(e.at)) / 3600000) * 10) / 10,
       };
-      const extra = e as { kind?: AbortEventRead['kind']; vendor?: string; host?: string };
-      if (extra.kind !== undefined) enriched.kind = extra.kind;
-      if (extra.vendor !== undefined) enriched.vendor = extra.vendor;
-      if (extra.host !== undefined) enriched.host = extra.host;
+      if (e.kind !== undefined) enriched.kind = e.kind;
+      if (e.host !== undefined) enriched.host = e.host;
       return enriched;
     });
 }
