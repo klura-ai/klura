@@ -12,6 +12,7 @@
 // validateCallerInputKindsAndEnums, validateLookupPrereqsAreCapabilities.
 
 import { collectExecutableJsStrings } from './save-warnings';
+import { observedValuesAreIntegerRange } from './observation-shape';
 import { detectUrlBypassedFilter } from './save-warnings-url-bypass';
 import type { Strategy } from '../strategies/skills';
 import type { ParamObservation } from '../response/session-observations';
@@ -833,12 +834,18 @@ function validateCallerInputParamKind(
   //      param has only ever been observed via clicks — it IS an enum and
   //      the agent must ground it.
   if (hasUiClickObservations(observations)) {
-    const labels = Array.from(
-      new Set(observations.filter((o) => o.source.kind === 'ui_click').map((o) => o.source.label)),
-    );
-    const clickValues = new Set(
-      observations.filter((o) => o.source.kind === 'ui_click').map((o) => o.value),
-    );
+    const clickObs = observations.filter((o) => o.source.kind === 'ui_click');
+    // Range-shaped URL params (?limit=, ?offset=, ?page=) get incidentally
+    // captured when pagination/limit buttons fire requests. Integer-only
+    // click values are arbitrary positions in a numeric range, not an
+    // enumerable option set — kind:"text" with no justification is the
+    // right shape (caller passes any integer in the API's range). Mirrors
+    // the same skip in `detectUngroundedEnumPlaceholder`.
+    if (observedValuesAreIntegerRange(clickObs)) {
+      return issues;
+    }
+    const labels = Array.from(new Set(clickObs.map((o) => o.source.label)));
+    const clickValues = new Set(clickObs.map((o) => o.value));
     const hasNonClickObservation = observations.some(
       (o) => o.source.kind !== 'ui_click' || !clickValues.has(o.value),
     );

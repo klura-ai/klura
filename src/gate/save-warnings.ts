@@ -20,6 +20,7 @@ import {
 } from '../strategies/validate/constants';
 import { collectDeclaredPlaceholders } from '../strategies/placeholder-semantics';
 import { getDeclaredArgsProvider } from '../strategies/validate/providers';
+import { observedValuesAreIntegerRange, valueLooksIdShaped } from './observation-shape';
 import {
   canonicalizeEndpoint,
   detectEnumValueInCapabilitySlug,
@@ -186,10 +187,6 @@ export function detectSessionScopedIdExtraction(data: Strategy): SaveWarning[] {
 // A caller-typed value that could itself be an id — skip mismatch detection
 // when the caller clearly is handing over an id-shaped string (no gap to
 // report).
-function valueLooksIdShaped(v: string): boolean {
-  return ID_SHAPED_EXAMPLE_PATTERNS.some(({ re }) => re.test(v));
-}
-
 /**
  * Name-vs-id gap detector. When the saved strategy declares a `notes.params.X`
  * whose `example` is id-shaped (numeric id, ObjectId, opaque token) but the
@@ -546,7 +543,7 @@ export function detectUngroundedEnumPlaceholder(
     if (!placeholder) continue;
     const obs = observedParamValues[urlParam] ?? [];
     const clickObs = obs.filter((o) => o.source.kind === 'ui_click');
-    if (clickObs.length === 0) continue;
+    if (clickObs.length === 0 || observedValuesAreIntegerRange(clickObs)) continue;
     const declared = params && typeof params === 'object' ? params[placeholder] : undefined;
     if (declared && typeof declared === 'object') {
       const d = declared as { kind?: unknown; observed_values?: unknown; source?: unknown };

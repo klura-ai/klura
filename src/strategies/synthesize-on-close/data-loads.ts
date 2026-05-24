@@ -9,6 +9,7 @@ import { classifyDataLoadXhr } from '../../response/data-load-classifier';
 import { sliceLargeString } from '../../response/response-size';
 import { stringifyOrEmpty } from './helpers';
 import type { ParamObservation } from '../../response/session-observations';
+import { observedValuesAreIntegerRange } from '../../gate/observation-shape';
 
 /**
  * Candidate shape surfaced in the `end_drive` review response. The agent
@@ -167,7 +168,12 @@ export function collectListingCandidates(
   observedParamValues: Record<string, ParamObservation[]>,
   limit = 5,
 ): ListingCandidate[] {
-  // Group observed click-time values per URL param.
+  // Group observed click-time values per URL param. Range-shaped params
+  // (?limit=, ?offset=, ?page=) with integer-only values are dropped here:
+  // any sufficiently large response body contains short integer substrings
+  // ("10", "20", ...) verbatim — counters, indices, ids in unrelated JSON
+  // — which would let an unrelated capture pose as the "listing" for a
+  // pagination param.
   const obsByParam = new Map<string, Set<string>>();
   for (const [paramName, obsList] of Object.entries(observedParamValues)) {
     const values = new Set<string>();
@@ -175,7 +181,10 @@ export function collectListingCandidates(
       if (o.source.kind !== 'ui_click') continue;
       if (typeof o.value === 'string' && o.value.length > 0) values.add(o.value);
     }
-    if (values.size > 0) obsByParam.set(paramName, values);
+    if (values.size === 0) continue;
+    const valueList = [...values].map((v) => ({ value: v }));
+    if (observedValuesAreIntegerRange(valueList)) continue;
+    obsByParam.set(paramName, values);
   }
   if (obsByParam.size === 0) return [];
 

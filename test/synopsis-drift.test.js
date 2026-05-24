@@ -37,7 +37,8 @@ test('paramDocSchema renders inline with kind enum + observed_values + semantic 
   const inline = renderZodSkeletonInline(paramDocSchema);
   assert.match(inline, /^\{ description\?: string, kind\?: "id" \| "slug" \| "email" \| "url" \| "uuid" \| "enum" \| "text"  \/\//);
   assert.match(inline, /Counts\/limits\/numbers.*are "text"/);
-  assert.match(inline, /, source\?: string, example\?: string, observed_values\?: \{ value: string, label\?: string \}\[\] \}$/);
+  assert.match(inline, /, source\?: string, example\?: string, observed_values\?: \{ value: string, label\?: string \}\[\], text_kind_justification\?: string  \/\/ one-sentence justification when kind: "text" despite UI-click observations on this param/);
+  assert.match(inline, /this field just declares the slot\. \}$/);
 });
 
 test('describeShape is the project-wide alias for renderZodSkeletonInline', () => {
@@ -50,7 +51,7 @@ test('describeShape is the project-wide alias for renderZodSkeletonInline', () =
 test('notesParamsSchema renders inline as record-of-(string|paramDoc)', () => {
   const inline = renderZodSkeletonInline(notesParamsSchema);
   assert.match(inline, /^\{ <key>: string \| \{ description\?: string, kind\?: "id" \| "slug"/);
-  assert.match(inline, /\}\[\] \} \}  \/\/ caller-arg documentation$/);
+  assert.match(inline, /this field just declares the slot\. \} \}  \/\/ caller-arg documentation$/);
 });
 
 test('saveWarningAckSchema renders inline with required fields and per-field descriptions', () => {

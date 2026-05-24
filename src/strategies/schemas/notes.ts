@@ -22,6 +22,13 @@ export const paramDocSchema = z
           .strict(),
       )
       .optional(),
+    text_kind_justification: z
+      .string()
+      .max(PARAM_FIELD_MAX, 'is too long')
+      .optional()
+      .describe(
+        'one-sentence justification when kind: "text" despite UI-click observations on this param — names at least one observed click label verbatim and describes the non-click traffic shape. Substance is validated separately at save-audit time; this field just declares the slot.',
+      ),
   })
   .strict();
 

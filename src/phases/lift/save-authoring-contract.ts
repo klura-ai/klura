@@ -20,6 +20,7 @@ import {
   type ListingCandidate,
 } from '../../strategies/synthesize-on-close';
 import { getAllParamObservations } from '../../response/session-observations';
+import { observedValuesAreIntegerRange } from '../../gate/observation-shape';
 import * as skills from '../../strategies/skills';
 import { loadLogbook } from '../../working-dir/logbook';
 
@@ -494,6 +495,16 @@ function composeEnumParamConstraints(
         }
       }
       if (seenValues.size === 0) continue;
+      // Range-shaped URL params (?limit=, ?offset=, ?page=) where every
+      // observed value is a bare integer aren't structurally enum-grounding
+      // candidates: callers pass arbitrary integers in the API's range, not
+      // members of an enumerable set. Mirrors the same skip in
+      // `detectUngroundedEnumPlaceholder` so the contract doesn't pre-coach
+      // the agent into a shape the detector wouldn't enforce.
+      if (observedValuesAreIntegerRange([...seenValues].map((v) => ({ value: v })))) {
+        seen.add(paramName);
+        continue;
+      }
       seen.add(paramName);
       const matchingListing = listings.find((l) => l.used_as.url_param === paramName);
       let listingCaptureIndex: number | undefined;
