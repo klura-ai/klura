@@ -31,6 +31,7 @@ function makePayload(overrides = {}) {
     skipDeclarationGuard: false,
     rePersistenceThreshold: DISCOVER_THRESHOLD,
     triageWouldFire: false, // every cap is already saved → handoff would skip triage
+    observedNotLifted: [],
     ...overrides,
   };
 }

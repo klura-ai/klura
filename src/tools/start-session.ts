@@ -542,6 +542,17 @@ function collectDriveStartNudges(input: {
   }>;
   a11yTree: string;
   hasArtifacts: boolean;
+  /** Inlined artifacts keyed by capability slug. The graduation nudge reads
+   *  `tool_call_trace[*].outcome === 'ok'` per capability to discriminate
+   *  "this artifact has captured evidence ready to graduate" from "this
+   *  artifact is empty / still-RE-ing." */
+  artifacts?: Record<string, { tool_call_trace?: ReadonlyArray<{ outcome?: string }> }>;
+  /** Names of capabilities the platform's `observed_capabilities[]` slot
+   *  carries (cross-session: prior `record_observed_capability` calls).
+   *  The graduation nudge requires the capability to be BOTH artifacted
+   *  AND observed — that's the structural signal that lift_observed_capability
+   *  will accept it for this map session. */
+  observedCapabilityNames?: ReadonlyArray<string>;
 }): string[] {
   const nudges: string[] = [];
 
@@ -606,9 +617,52 @@ function collectDriveStartNudges(input: {
         'When you make new progress, persist it to the artifact via `add_discovery_note` / `save_verified_expression` / ' +
         '`add_resume_pointer` so the chain continues.',
     );
+    // Graduation nudge: when an inlined artifact has captured evidence
+    // (any `tool_call_trace` entry with `outcome === 'ok'` — proxy for
+    // "this artifact reached a working call") AND the slug is in the
+    // platform's observed_capabilities[], lift is the right next move.
+    // Re-driving the UI to re-discover is wasted rounds when the prior
+    // session already did the discovery. Per loop pattern
+    // `agent-skips-lift-observed-capability-graduation` (4 of 7 runs).
+    const liftCandidates = collectGraduationCandidates(input);
+    if (liftCandidates.length > 0) {
+      const sample = liftCandidates.slice(0, 3).join(', ');
+      const overflow = liftCandidates.length > 3 ? ` (+${liftCandidates.length - 3} more)` : '';
+      nudges.push(
+        `READY-TO-GRADUATE artifacts: ${liftCandidates.length} inlined artifact(s) ` +
+          `[${sample}${overflow}] carry captured 2xx-evidence tool_call_trace entries AND ` +
+          `appear in platform_map.observed_capabilities. Call ` +
+          '`lift_observed_capability({session_id, name: "<slug>"})` for each — that enters ' +
+          'triage with the prior captures already on hand, then save_strategy lands the ' +
+          'strategy. Re-driving the UI for fresh discovery is wasted rounds when the prior ' +
+          'session already paid for the captures.',
+      );
+    }
   }
 
   return nudges;
+}
+
+/** Filter inlined artifacts to those whose tool_call_trace shows captured
+ *  2xx evidence AND whose slug is in the platform's observed_capabilities.
+ *  Result is the set of slugs the agent should graduate via
+ *  `lift_observed_capability` instead of re-driving for fresh discovery. */
+function collectGraduationCandidates(input: {
+  artifacts?: Record<string, { tool_call_trace?: ReadonlyArray<{ outcome?: string }> }>;
+  observedCapabilityNames?: ReadonlyArray<string>;
+}): string[] {
+  const artifacts = input.artifacts;
+  if (!artifacts) return [];
+  const observed = new Set(input.observedCapabilityNames ?? []);
+  if (observed.size === 0) return [];
+  const out: string[] = [];
+  for (const [slug, artifact] of Object.entries(artifacts)) {
+    if (!observed.has(slug)) continue;
+    const trace = artifact.tool_call_trace ?? [];
+    if (!trace.some((e) => e.outcome === 'ok')) continue;
+    out.push(slug);
+  }
+  return out;
 }
 
 /**
@@ -1547,10 +1601,14 @@ export async function startSession(
   // stays terse — these are token-paid only when relevant. The pattern catalog
   // for contributors lives in runtime/docs/strategies.md (#common-capability-shapes).
   if (isDiscoveryMode && !result.executed) {
+    const observedNames =
+      result.platform_map?.observed_capabilities.map((c) => c.name) ?? ([] as string[]);
     const nudges = collectDriveStartNudges({
       forms: session.domFormsObserved ?? [],
       a11yTree: result.a11yTree,
       hasArtifacts: !!result.artifacts && Object.keys(result.artifacts).length > 0,
+      artifacts: result.artifacts,
+      observedCapabilityNames: observedNames,
     });
     if (nudges.length > 0) {
       const block = nudges.join(' ');

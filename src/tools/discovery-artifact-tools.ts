@@ -149,8 +149,21 @@ export interface RecordObservedCapabilityArgs {
  * (`observed_capabilities[]`) and is surfaced by `list_platform_skills` so the next
  * session sees the candidate. Dedup-by-name: re-observing the same capability
  * updates `last_observed_at` and bumps `observed_in_sessions` once per session.
+ *
+ * In-session lift nudge: when the recorded evidence has a 2xx status AND the
+ * session is in the map graph (where `lift_observed_capability` is the
+ * graduation path), attach a `_hint` suggesting graduating in-session instead
+ * of leaving the slug as a breadcrumb. Agents commonly observe + walk away,
+ * which forces a fresh session next time to re-discover from cold state. The
+ * hint fires at the moment of the mistake (per principles.md §"teach at
+ * moment of mistake") — same teach-at-the-rejection pattern as the
+ * `observed_capabilities_not_lifted` end-drive detector but earlier in the
+ * lifecycle.
  */
-export function recordObservedCapability(args: RecordObservedCapabilityArgs): { ok: true } {
+export function recordObservedCapability(args: RecordObservedCapabilityArgs): {
+  ok: true;
+  _hint?: string;
+} {
   const input: import('../working-dir/logbook').ObservedCapabilityInput = {
     name: args.name,
     evidence: args.evidence,
@@ -159,7 +172,40 @@ export function recordObservedCapability(args: RecordObservedCapabilityArgs): { 
   if (args.hypothesis !== undefined) input.hypothesis = args.hypothesis;
   if (args.session_id !== undefined) input.session_id = args.session_id;
   recordObservedCapabilityLogbook(args.platform, input);
-  return { ok: true };
+  const hint = composeLiftNudgeHint(args);
+  return hint ? { ok: true, _hint: hint } : { ok: true };
+}
+
+/**
+ * Compose the in-session lift nudge when the evidence shape + session
+ * graph make graduation a real next move. Returns `null` (no hint) when:
+ *  - no session_id (programmatic / unattended call without session context)
+ *  - evidence has no 2xx status (graduation candidates need a working
+ *    capture to lift)
+ *  - session is not on the map graph (`lift_observed_capability` is the
+ *    map-graph-only tool — see runtime/src/tools/lift-observed-capability.ts)
+ *  - the session has already terminated (no remaining lift budget)
+ */
+function composeLiftNudgeHint(args: RecordObservedCapabilityArgs): string | null {
+  if (!args.session_id) return null;
+  const status = (args.evidence as { status?: unknown }).status;
+  if (typeof status !== 'number' || status < 200 || status >= 300) return null;
+  let session: import('../drivers/types/session').Session;
+  try {
+    session = pool.getSession(args.session_id);
+  } catch {
+    return null;
+  }
+  if (session.graph !== 'map') return null;
+  if (session.status === 'closed') return null;
+  return (
+    `Captured 2xx evidence for observed slug "${args.name}" — you can graduate it in-session ` +
+    `via \`lift_observed_capability({session_id: "${args.session_id}", name: "${args.name}"})\` ` +
+    `now, rather than leaving it as a breadcrumb. Lifting walks the slug through triage + ` +
+    `save_strategy in this session; closing without lifting forces the next session to ` +
+    `re-discover from cold state and trips the \`observed_capabilities_not_lifted\` ` +
+    `end_drive detector.`
+  );
 }
 
 export interface SaveVerifiedExpressionArgs {

@@ -35,6 +35,7 @@ function makePayload(overrides = {}) {
     skipDeclarationGuard: false,
     rePersistenceThreshold: DISCOVER_THRESHOLD,
     triageWouldFire: true, // some declared capability still unresolved
+    observedNotLifted: [],
     ...overrides,
   };
 }

@@ -45,6 +45,7 @@
 
 import { Audit, type Classifier, type Detector } from '../index';
 import { graphFor } from '../../graphs';
+import { getObservedNamesForSession } from '../../working-dir/logbook';
 
 export const RE_CALL_THRESHOLD = 2;
 export const ACTION_CALL_THRESHOLD = 5;
@@ -96,6 +97,15 @@ export interface EndDrivePayload {
    *  agent to acknowledge that triage was considered even though the
    *  runtime would have skipped it. */
   triageWouldFire: boolean;
+  /** Capability names recorded via `record_observed_capability` this session
+   *  but NEITHER lifted via `lift_observed_capability` (which would have
+   *  pushed them into `session.declaredCapabilities`) NOR landed as a
+   *  successful save (`session.savedCapabilities`). The
+   *  `observed_capabilities_not_lifted` Detector reads this to refuse close
+   *  when the agent breadcrumbed candidates and then walked away — the
+   *  loop's primary teach-at-moment surface for the "save every safe
+   *  read-only capability" task. */
+  observedNotLifted: ReadonlyArray<string>;
 }
 
 /** Empty by design — every payload field the audit needs is captured at
@@ -287,6 +297,81 @@ const rePersistenceDetector: Detector<EndDrivePayload, EndDriveCtx> = {
   },
 };
 
+// ---------- Detector: observed_capabilities_not_lifted ----------
+//
+// Refuses close when the agent called `record_observed_capability` on
+// capability names that were neither lifted into the session's
+// declaredCapabilities (via `lift_observed_capability`) NOR landed as a
+// successful save. Agents commonly drop breadcrumbs and walk away — under
+// the loop's "save every safe read-only capability" task the leftover
+// observations represent missed save opportunities, not deferred ones.
+//
+// ackReason: 'required' — legitimate ack path: "intentionally deferring
+// these for next session because <structural reason>." validateAck demands
+// the ack reason names each leftover slug verbatim (anti-canned: agents
+// learn fast that `{reason: "deferred"}` won't pass).
+//
+// Releases at `endDriveAttempts >= 2` per the existing third-attempt
+// escape hatch.
+
+const observedNotLiftedDetector: Detector<EndDrivePayload, EndDriveCtx> = {
+  kind: 'observed_capabilities_not_lifted',
+  ackReason: 'required',
+  detect: (p) => {
+    if (p.endDriveAttempts >= 2) return [];
+    if (p.observedNotLifted.length === 0) return [];
+    const slugs = p.observedNotLifted.slice(0, 20);
+    const overflow =
+      p.observedNotLifted.length > 20 ? `, …+${p.observedNotLifted.length - 20} more` : '';
+    const slugList = slugs.map((s) => `\`${s}\``).join(', ') + overflow;
+    return [
+      {
+        kind: 'observed_capabilities_not_lifted',
+        message:
+          `CANNOT CLOSE: this session called record_observed_capability on ` +
+          `${p.observedNotLifted.length} capability name(s) but never lifted them: ${slugList}. ` +
+          `Each is a candidate the agent observed with structural evidence and then walked ` +
+          `away from. Closing now drops the captured XHR / DOM context the next session ` +
+          `would have to re-discover from cold start.`,
+        hint:
+          `Two ways forward: ` +
+          `(a) call lift_observed_capability({session_id, name: "<slug>"}) for each leftover, ` +
+          `walk it through triage + save_strategy this session; ` +
+          `(b) if a leftover is genuinely deferral-worthy (auth-walled, ` +
+          `paginated-listing-without-cursor, mutating-shape), ack with ` +
+          `notes-like input: append to acks {"observed_capabilities_not_lifted": ` +
+          `"deferring <slug1>, <slug2>, … because <structural reason>"} — the ack ` +
+          `reason MUST name each leftover slug verbatim or the ack fails (anti-canned).`,
+        context: {
+          session_id: p.sessionId,
+          platform: p.platform,
+          observed_not_lifted: [...p.observedNotLifted],
+        },
+      },
+    ];
+  },
+  validateAck: (reason, emittedIssues): string[] => {
+    // The ack must mention every leftover slug verbatim. Compose the
+    // canonical list from the first emitted issue's context (all emitted
+    // issues carry the same list — this detector only emits one issue).
+    const first = emittedIssues[0];
+    const ctx = first?.context as { observed_not_lifted?: unknown } | undefined;
+    const slugs = Array.isArray(ctx?.observed_not_lifted)
+      ? (ctx.observed_not_lifted as unknown[]).filter(
+          (v): v is string => typeof v === 'string' && v.length > 0,
+        )
+      : [];
+    const missing = slugs.filter((s) => !reason.includes(s));
+    if (missing.length === 0) return [];
+    return [
+      `ack reason must name each leftover observed slug verbatim — missing: ` +
+        missing.map((s) => `\`${s}\``).join(', ') +
+        `. A canned "deferring all" doesn't pass; the runtime forces the agent ` +
+        `to read which slugs they're acking through.`,
+    ];
+  },
+};
+
 /**
  * The re_persistence Detector fires when this session did reverse-engineering
  * work that isn't reflected on disk and isn't being persisted on close.
@@ -414,7 +499,12 @@ function shouldRunTriageAcknowledgment(p: EndDrivePayload): boolean {
 
 export const endDriveAudit = new Audit<EndDrivePayload, EndDriveCtx>({
   kind: 'end_drive',
-  detectors: [declarationRequiredDetector, saveAttemptedNoneLandedDetector, rePersistenceDetector],
+  detectors: [
+    declarationRequiredDetector,
+    saveAttemptedNoneLandedDetector,
+    rePersistenceDetector,
+    observedNotLiftedDetector,
+  ],
   classifiers: [triageAcknowledgmentClassifier],
 });
 
@@ -425,10 +515,10 @@ interface SessionLike {
   platform?: string;
   graph?: import('../../phases/types').GraphName;
   endDriveAttempts?: number;
-  declaredCapabilities?: ReadonlyArray<unknown>;
+  declaredCapabilities?: ReadonlyArray<{ capability?: string }>;
   performActionHistory?: ReadonlyArray<{ action?: string; value?: unknown }>;
   saveAttemptCount?: number;
-  savedCapabilities?: ReadonlyArray<unknown>;
+  savedCapabilities?: ReadonlyArray<{ capability?: string }>;
 }
 
 /**
@@ -481,6 +571,19 @@ export function buildEndDrivePayload(
   // and detectors should never reach back into runtime state.
   const graph = graphFor(session.graph ?? 'discover');
   const cfg = graph.config;
+  // Diff observed-this-session against (declaredCapabilities ∪ savedCapabilities):
+  // lift_observed_capability pushes onto declaredCapabilities; saveStrategy
+  // pushes onto savedCapabilities. A name in either set is "lifted" enough
+  // for the audit's purpose.
+  const observed = getObservedNamesForSession(session.id);
+  const liftedOrSaved = new Set<string>();
+  for (const d of session.declaredCapabilities ?? []) {
+    if (typeof d.capability === 'string') liftedOrSaved.add(d.capability);
+  }
+  for (const s of session.savedCapabilities ?? []) {
+    if (typeof s.capability === 'string') liftedOrSaved.add(s.capability);
+  }
+  const observedNotLifted = observed.filter((n) => !liftedOrSaved.has(n));
   return {
     sessionId: session.id,
     platform: opts.platform ?? session.platform ?? '<platform>',
@@ -502,5 +605,6 @@ export function buildEndDrivePayload(
       actions: 0,
     },
     triageWouldFire: opts.triageWouldFire,
+    observedNotLifted,
   };
 }

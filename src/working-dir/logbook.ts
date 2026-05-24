@@ -199,6 +199,18 @@ const observedBumpedPerSession = new Map<string, Set<string>>();
 export function clearObservedSessionTracking(sessionId: string): void {
   observedBumpedPerSession.delete(sessionId);
 }
+
+/**
+ * Capability names this session called `record_observed_capability` on.
+ * Used by the end-drive audit's observed-not-lifted detector to refuse close
+ * when the agent recorded observations but never lifted them. Returns a
+ * snapshot array (order undefined); empty when the session made no
+ * observations.
+ */
+export function getObservedNamesForSession(sessionId: string): string[] {
+  const s = observedBumpedPerSession.get(sessionId);
+  return s ? [...s] : [];
+}
 export interface ObservedCapabilityInput {
   name: string;
   evidence: { source: string; [k: string]: unknown };
