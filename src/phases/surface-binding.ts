@@ -47,12 +47,67 @@ export function bindUrlsToSurface(
 }
 
 /** Returns the bound surface label for a URL, or `undefined` when no
- *  triaged surface owns it. */
+ *  triaged surface owns it. Tries exact match first (fast path, covers the
+ *  common case where the lookup URL matches a captured URL). On miss,
+ *  iterates over templated map keys (those containing `{name}` segments,
+ *  from `request_patterns` like `GET /channels/{id}/messages`) and tries
+ *  segment-by-segment unification — a `{name}` segment matches any
+ *  non-empty path segment. Without this, a save whose endpoint expands to
+ *  `/channels/1412.../messages` (via `notes.params.<id>.example`) misses a
+ *  bound `/channels/{id}/messages` pattern and trips
+ *  `surface_triage_missing` despite the pattern structurally covering it. */
 export function lookupSurface(session: Session, rawUrl: string): string | undefined {
   if (!session.surfaceMap) return undefined;
   const key = urlKey(rawUrl);
   if (key === null) return undefined;
-  return session.surfaceMap.get(key);
+  const exact = session.surfaceMap.get(key);
+  if (exact !== undefined) return exact;
+  // The `new URL()` in `urlKey` percent-encodes `{` and `}` in pathname
+  // (`{id}` becomes `%7Bid%7D`), so a templated bind key looks like
+  // `.../channels/%7Bid%7D/messages`. Cheap pre-filter checks both forms;
+  // matchesTemplatedKey does the segment unification after decoding.
+  for (const [mapKey, label] of session.surfaceMap) {
+    if (!mapKey.includes('{') && !mapKey.includes('%7B')) continue;
+    if (matchesTemplatedKey(mapKey, key)) return label;
+  }
+  return undefined;
+}
+
+/** Does `templateKey` (a canonical urlKey containing `{name}` path segments,
+ *  possibly percent-encoded as `%7Bname%7D` by `new URL`) unify with
+ *  `expandedKey` (a canonical urlKey with concrete values)? Same origin
+ *  required; same segment count required; each segment matches if equal OR
+ *  decodes to a `{name}` template (which matches any non-empty value). */
+function matchesTemplatedKey(templateKey: string, expandedKey: string): boolean {
+  let tUrl: URL, eUrl: URL;
+  try {
+    tUrl = new URL(templateKey);
+    eUrl = new URL(expandedKey);
+  } catch {
+    return false;
+  }
+  if (tUrl.origin !== eUrl.origin) return false;
+  const tSegs = tUrl.pathname.split('/');
+  const eSegs = eUrl.pathname.split('/');
+  if (tSegs.length !== eSegs.length) return false;
+  for (let i = 0; i < tSegs.length; i += 1) {
+    const t = tSegs[i] ?? '';
+    const e = eSegs[i] ?? '';
+    if (t === e) continue;
+    if (isTemplateSegment(t) && e.length > 0) continue;
+    return false;
+  }
+  return true;
+}
+
+function isTemplateSegment(seg: string): boolean {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(seg);
+  } catch {
+    decoded = seg;
+  }
+  return decoded.startsWith('{') && decoded.endsWith('}') && decoded.length > 2;
 }
 
 /** Two URLs are path-distinct when their canonical `urlKey` differs. Same

@@ -879,35 +879,59 @@ export async function saveStrategy(
         declared?.args && Object.keys(declared.args).length > 0
           ? declared.args
           : collectParamExamples(data);
-      session.pendingPostSaveValidation = { platform, capability, args: verifyArgs };
 
-      const mutating = isMutatingStrategy(data);
-      const { resolution, envelope } = await invokeCheckpointAndGate(
-        'post_save_validation_consent',
-        {
-          session_id: sessionId,
-          capability,
-          context: {
-            kind: 'post_save_validation_consent',
+      // If the saved strategy templates any {{placeholder}} that verifyArgs
+      // doesn't satisfy, running execute() with the unsatisfied keys produces
+      // `undefined` substitutions — prereqs see `args.X = undefined`, expressions
+      // emit `JSON.stringify(undefined)`-shaped garbage, return-shape validation
+      // fails with noise like "string of length 14". That noise is structural,
+      // not a real strategy bug. Skip the verification entirely; the strategy
+      // stands unverified and the response carries the skip reason.
+      const unsatisfied = findUnsatisfiedPlaceholders(data, verifyArgs);
+      if (unsatisfied.size > 0) {
+        const placeholderList = [...unsatisfied].map((n) => '{{' + n + '}}').join(', ');
+        postSaveValidation = {
+          ok: true,
+          status: 0,
+          archived: false,
+          message:
+            `post_save_validation skipped: strategy templates ${unsatisfied.size} placeholder(s) ` +
+            `(${placeholderList}) that neither session-declared ` +
+            `args nor notes.params.*.example can satisfy. Re-running with undefined args would produce ` +
+            `false-negative failures. Either declare these args via start_session({args}) or add ` +
+            `notes.params.<name>.example values; then re-save.`,
+        };
+      } else {
+        session.pendingPostSaveValidation = { platform, capability, args: verifyArgs };
+
+        const mutating = isMutatingStrategy(data);
+        const { resolution, envelope } = await invokeCheckpointAndGate(
+          'post_save_validation_consent',
+          {
+            session_id: sessionId,
             capability,
-            pendingAction: `the runtime re-running the saved \`${capability}\` strategy once, end-to-end, to verify it returns 2xx`,
-            contextSummary: `Strategy tier: ${(data as { strategy?: string }).strategy ?? 'unknown'}${mutating ? ', mutating-shaped — re-running repeats a real side effect, classify Tier 2 unless the action is genuinely idempotent' : ' — likely Tier 1 if the request is idempotent'}. On your consent (ack_checkpoint, non-cancelled) the RUNTIME itself re-runs the saved strategy end-to-end and asserts 2xx — a non-2xx archives it as broken and you fix + re-save this session. You do not fire anything yourself; classify Tier 1 (idempotent/read — ack immediately) vs Tier 2 (mutation / real-account side-effect / third-party recipient — explain, then ack only on user OK)`,
-            declineHandler: `the save stands but is recorded unverified (runtime_meta.post_save_validation: "declined"); a later session can re-validate. Add a discovery note saying why consent was withheld.`,
-            ...(validation ? { validation_target: validation } : {}),
+            context: {
+              kind: 'post_save_validation_consent',
+              capability,
+              pendingAction: `the runtime re-running the saved \`${capability}\` strategy once, end-to-end, to verify it returns 2xx`,
+              contextSummary: `Strategy tier: ${(data as { strategy?: string }).strategy ?? 'unknown'}${mutating ? ', mutating-shaped — re-running repeats a real side effect, classify Tier 2 unless the action is genuinely idempotent' : ' — likely Tier 1 if the request is idempotent'}. On your consent (ack_checkpoint, non-cancelled) the RUNTIME itself re-runs the saved strategy end-to-end and asserts 2xx — a non-2xx archives it as broken and you fix + re-save this session. You do not fire anything yourself; classify Tier 1 (idempotent/read — ack immediately) vs Tier 2 (mutation / real-account side-effect / third-party recipient — explain, then ack only on user OK)`,
+              declineHandler: `the save stands but is recorded unverified (runtime_meta.post_save_validation: "declined"); a later session can re-validate. Add a discovery note saying why consent was withheld.`,
+              ...(validation ? { validation_target: validation } : {}),
+            },
           },
-        },
-      );
-      if (envelope) {
-        // Interactive host: the agent acks the checkpoint and `ackCheckpoint`
-        // runs `verifySavedStrategy`. The deferred payload stays staged.
-        validationCheckpoint = envelope;
-      } else if (resolution.status === 'continue') {
-        // Unattended host (no interactive consenter) pre-consented by
-        // resolving the checkpoint to `continue` instead of handing over.
-        // Run the verification inline now — there is no later ack — and fold
-        // the result into this response. A non-2xx archives the strategy.
-        session.pendingPostSaveValidation = undefined;
-        postSaveValidation = await verifySavedStrategy(platform, capability, verifyArgs, pool);
+        );
+        if (envelope) {
+          // Interactive host: the agent acks the checkpoint and `ackCheckpoint`
+          // runs `verifySavedStrategy`. The deferred payload stays staged.
+          validationCheckpoint = envelope;
+        } else if (resolution.status === 'continue') {
+          // Unattended host (no interactive consenter) pre-consented by
+          // resolving the checkpoint to `continue` instead of handing over.
+          // Run the verification inline now — there is no later ack — and fold
+          // the result into this response. A non-2xx archives the strategy.
+          session.pendingPostSaveValidation = undefined;
+          postSaveValidation = await verifySavedStrategy(platform, capability, verifyArgs, pool);
+        }
       }
     } catch {
       // Best-effort — a missing session just means no advisory lands; the
@@ -1000,6 +1024,40 @@ export async function saveStrategy(
     ...(artifactBreadcrumbHint ? { _hint: artifactBreadcrumbHint } : {}),
     timings: { ...timings },
   };
+}
+
+/**
+ * Names of `{{name}}` placeholders that appear in scanned strategy fields
+ * (URL / headers / body / recorded-path step values) but aren't keys in
+ * `args` with a non-empty value. Used by post-save validation staging to
+ * skip the verification rather than run it with `undefined` substitutions
+ * that produce false-negative failures. Generator placeholders
+ * (`{{__gen.X}}`) are excluded — those resolve from `generated` definitions
+ * at execute time, not from caller args.
+ */
+function findUnsatisfiedPlaceholders(data: Strategy, args: Record<string, unknown>): Set<string> {
+  const argKeys = new Set(
+    Object.keys(args).filter((k) => {
+      const v = args[k];
+      return v !== undefined && v !== null && v !== '';
+    }),
+  );
+  const missing = new Set<string>();
+  // \w+ avoids the unbounded-non-close-brace pattern that sonarjs flags as
+  // backtracking-friendly. Placeholder names in klura are
+  // `[A-Za-z0-9_]+`-shaped per the TEMPLATE_RE in `probe-helpers.ts`.
+  const re = /\{\{(\w+(?:\.\w+)*)\}\}/g;
+  for (const field of collectScannedFields(data)) {
+    let m: RegExpExecArray | null;
+    re.lastIndex = 0;
+    while ((m = re.exec(field.value)) !== null) {
+      const name = m[1];
+      if (!name) continue;
+      if (name.startsWith('__gen.')) continue;
+      if (!argKeys.has(name)) missing.add(name);
+    }
+  }
+  return missing;
 }
 
 /**

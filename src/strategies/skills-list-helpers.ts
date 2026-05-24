@@ -215,6 +215,10 @@ export function readPlatformSkillInfo(platform: string): SkillInfo {
     if (!fs.existsSync(dir)) continue;
     for (const file of fs.readdirSync(dir)) {
       if (!file.endsWith('.json')) continue;
+      // Archives aren't capabilities. Without this skip, list_platform_skills
+      // surfaces a phantom `<name>.broken` entry; the agent then tries to
+      // re-save under that name, creating `<name>.broken.broken.json`.
+      if (file.endsWith('.broken.json')) continue;
       readCapabilityStrategyFile(
         platform,
         subdir,

@@ -742,6 +742,8 @@ export function findCapabilitiesProviding(platform: string, tag: string): string
     }
     for (const entry of entries) {
       if (!entry.endsWith('.json')) continue;
+      // See skills-list-helpers.ts for why archives are filtered out here too.
+      if (entry.endsWith('.broken.json')) continue;
       const slug = entry.slice(0, -'.json'.length);
       if (seen.has(slug)) continue;
       const filePath = path.join(subdirPath, entry);
@@ -790,11 +792,17 @@ export function archiveStrategy(
 ): void {
   const subdir = SUBDIR_MAP[strategyType];
   if (!subdir) return;
-  const active = path.join(SKILLS_DIR, platform, subdir, `${capability}.json`);
-  const archived = path.join(SKILLS_DIR, platform, subdir, `${capability}.broken.json`);
+  // Idempotent: cap the .broken suffix at one. `<cap>.broken` already
+  // means "archived"; another archive of an already-archived slug should
+  // overwrite, not chain to `<cap>.broken.broken`.
+  const baseCapability = capability.endsWith('.broken')
+    ? capability.slice(0, -'.broken'.length)
+    : capability;
+  const active = path.join(SKILLS_DIR, platform, subdir, `${baseCapability}.json`);
+  const archived = path.join(SKILLS_DIR, platform, subdir, `${baseCapability}.broken.json`);
   if (fs.existsSync(active)) {
     fs.renameSync(active, archived);
-    appendStrategyEvent(platform, capability, {
+    appendStrategyEvent(platform, baseCapability, {
       strategy: strategyType,
       kind: 'archived',
       detail: detail || 'archived as broken',
