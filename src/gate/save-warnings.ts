@@ -384,9 +384,10 @@ export function detectInlineMultiFetchPrereqs(data: Strategy): SaveWarning[] {
  * with `_search`, starts with `lookup_`) — a lookup capability that fetches
  * a search endpoint is the whole point of that capability.
  *
- * Emits `kind: "lookup_embedded_in_prereq"`. Advisory — the agent can ack
- * via `notes.save_warnings_acked` with a one-sentence reason if an inline
- * lookup is genuinely required.
+ * Emits `kind: "lookup_embedded_in_prereq"`. The Detector is wired with
+ * `ackReason: 'none'` in `save-strategy.ts` — there is no `save_warnings_acked`
+ * path. The fix is structural: save the lookup as its own capability and
+ * compose via `{kind: "capability"}` prereq.
  */
 export function detectLookupEmbeddedInPrereq(data: Strategy, capability?: string): SaveWarning[] {
   const warnings: SaveWarning[] = [];

@@ -112,7 +112,12 @@ export const TOOL_DEFS: ToolDef[] = [
         audit_answers: {
           type: 'object',
           description:
-            'Audit answers per the checklist from the prior rejection. Shape: {triage_acknowledgment?: {acknowledged: true, reason: "<own words ≥20 chars>"}}. For triage_acknowledgment: only ack when you truly considered triage — explain in your own words why no triage round was warranted (e.g. "all caps fetch-tier saved, no graduation candidate observed in captures"). re_persistence is a Detector and has no audit_answers path: either persist progress (save_verified_expression / add_discovery_note / add_resume_pointer) and retry, or use abort_session(session_id, reason) to bail honestly.',
+            'Audit answers for Classifier-style gates per the checklist from the prior rejection. Shape: {triage_acknowledgment?: {acknowledged: true, reason: "<own words ≥20 chars>"}}. Only ack when you truly considered triage — explain in your own words why no triage round was warranted (e.g. "all caps fetch-tier saved, no graduation candidate observed in captures").',
+        },
+        acks: {
+          type: 'object',
+          description:
+            'Acknowledgements for Detector-emitted warnings, keyed by Detector kind, value is a one-sentence reason. Example: `{observed_capabilities_not_lifted: "deferring get_product_detail because the surface is paginated-listing-without-cursor"}`. The ack reason must mention every leftover slug verbatim (anti-canned). re_persistence is a Detector but has no acks path — either persist progress (save_verified_expression / add_discovery_note / add_resume_pointer) and retry, or use abort_session(session_id, reason) to bail honestly.',
         },
       },
       required: ['session_id'],
@@ -124,6 +129,7 @@ export const TOOL_DEFS: ToolDef[] = [
           platform: args.platform,
           auditToken: args.audit_token,
           auditAnswers: args.audit_answers,
+          acks: args.acks,
         },
         { progress: ctx?.progress },
       ),

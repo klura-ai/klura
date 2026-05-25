@@ -394,6 +394,8 @@ export async function endDrive(
     platform?: string;
     auditToken?: string;
     auditAnswers?: Record<string, unknown>;
+    /** Acks for Detector-emitted warnings (kind → reason). */
+    acks?: Record<string, string>;
   } = {},
   ctx: { progress?: (params: { stage: string }) => void } = {},
 ): Promise<
@@ -485,6 +487,7 @@ export async function endDrive(
     {
       token: opts.auditToken,
       answers: opts.auditAnswers,
+      acks: opts.acks,
     },
   );
   if (auditResult.status === 'rejected') {

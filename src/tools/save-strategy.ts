@@ -26,6 +26,10 @@ import {
 import { rejectionToErrorMessage } from '../audit';
 import { getRegisteredSaveConfirmationDecider } from '../audit/lift/save-confirmation-decider';
 import {
+  getRegisteredSaveWarningAcker,
+  type SaveWarningAck,
+} from '../audit/lift/save-warning-acker';
+import {
   recordParamObservation,
   getAllParamObservations,
   harvestUrlVarianceObservations,
@@ -737,12 +741,72 @@ export async function saveStrategy(
     return agentAnswers;
   };
 
+  // Resolve save-warning acks via the harness acker when registered —
+  // hijacks `notes.save_warnings_acked` so the LLM's inline reasons are
+  // ignored in favor of harness-attested user replies. Falls back to
+  // `extractAcksFromNotes` when no acker. Done OUTSIDE the audit
+  // pipeline so the audit class stays sync; the acker is async because
+  // harnesses (CLI stdin, GUI dialog, etc.) need that.
+  const harnessAcker = getRegisteredSaveWarningAcker();
+  let resolvedAcks: Record<string, string> = extractAcksFromNotes(data);
+  if (harnessAcker && sessionId) {
+    // First dry-run audit (with whatever acks the LLM had) to discover
+    // which ackable warnings emit. Then ack each one via the harness,
+    // override `resolvedAcks` with the user-attested verdicts, and let
+    // the canonical preAudit below see the harness-attested values.
+    const discoveryAudit = saveStrategyAudit.process(data, auditCtx, {
+      token: audit?.token,
+      answers: buildAuditAnswers(),
+      acks: {},
+      dryRun: true,
+    });
+    if (discoveryAudit.status === 'rejected') {
+      const emitted = discoveryAudit.rejection.warnings;
+      const harnessAcks: Record<string, string> = {};
+      const tier =
+        typeof (data as { strategy?: string }).strategy === 'string'
+          ? (data as { strategy: string }).strategy
+          : undefined;
+      for (const warning of emitted) {
+        const verdict = await invokeWarningAcker(harnessAcker, warning, {
+          platform,
+          capability,
+          tier,
+        }).catch((err: unknown) => {
+          rejectWithTimings(
+            `save_warning_acker_threw:${warning.kind}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          return null as never;
+        });
+        if (verdict.decision === 'reject') {
+          rejectWithTimings(
+            `user_rejected_save_warning:${warning.kind} — user reply: ${JSON.stringify(verdict.reason.slice(0, 200))}`,
+          );
+        }
+        if (verdict.reason.trim().length === 0) {
+          rejectWithTimings(
+            `save_warning_acker_empty_reason:${warning.kind} — harness must return a non-empty reason on approve`,
+          );
+        }
+        harnessAcks[warning.kind] = verdict.reason;
+      }
+      resolvedAcks = harnessAcks;
+      // Persist harness-attested acks to the strategy so the saved file
+      // records what the USER said (not the LLM's prior canned text).
+      const notes = ((data as { notes?: Record<string, unknown> }).notes ??= {});
+      notes.save_warnings_acked = Object.entries(harnessAcks).map(([kind, reason]) => ({
+        kind,
+        reason,
+      }));
+    }
+  }
+
   if (sessionId) {
     const tAuditPreStart = Date.now();
     const preAudit = saveStrategyAudit.process(data, auditCtx, {
       token: audit?.token,
       answers: buildAuditAnswers(),
-      acks: extractAcksFromNotes(data),
+      acks: resolvedAcks,
       dryRun: true,
     });
     timings.audit_precheck_ms = Date.now() - tAuditPreStart;
@@ -811,7 +875,12 @@ export async function saveStrategy(
     const finalAudit = saveStrategyAudit.process(data, auditCtx, {
       token: audit?.token,
       answers: buildAuditAnswers(),
-      acks: extractAcksFromNotes(data),
+      // resolvedAcks already reflects harness-attested verdicts when an
+      // acker was registered, or falls back to the LLM's notes when not.
+      // Re-read from notes here to pick up any post-probe mutations to
+      // save_warnings_acked (the harness-mode write above is already in
+      // place at this point).
+      acks: harnessAcker ? resolvedAcks : extractAcksFromNotes(data),
     });
     timings.audit_postcheck_ms = Date.now() - tAuditPostStart;
     if (finalAudit.status === 'rejected') {
@@ -1044,6 +1113,17 @@ export async function saveStrategy(
     ...(budgetWarning !== undefined ? { _budget_warning: budgetWarning } : {}),
     timings: { ...timings },
   };
+}
+
+/** Thin wrapper around `harnessAcker.ack` that returns a Promise — lets
+ *  the call-site use `.catch(...)` for a typed rejectWithTimings path
+ *  instead of try/catch with non-null-assertions on the verdict variable. */
+function invokeWarningAcker(
+  acker: import('../audit/lift/save-warning-acker').SaveWarningAcker,
+  warning: import('../audit/index').Issue,
+  ctx: import('../audit/lift/save-warning-acker').SaveWarningAckCtx,
+): Promise<SaveWarningAck> {
+  return acker.ack(warning, ctx);
 }
 
 /**

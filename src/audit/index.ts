@@ -257,6 +257,14 @@ export interface AuditRejection {
   /** Detector warnings the agent must ack OR fix to proceed. Empty when
    *  no detector emitted issues. */
   warnings: Issue[];
+  /** Subset of `warnings[].kind` whose Detector has `ackReason: 'none'`
+   *  — these blocking warnings have NO ack path. The agent must
+   *  restructure the strategy (or accept the save won't land); a
+   *  `notes.save_warnings_acked` entry for one of these kinds is a no-op.
+   *  Renderer uses this to mark the warning explicitly in the envelope
+   *  so the generic "ack via notes.save_warnings_acked" prose doesn't
+   *  mislead. */
+  non_ackable_warning_kinds?: string[];
   /** Classifier validation issues — one bullet per inconsistency. */
   classifier_issues?: string[];
   /** Detector ack-shape issues (ack referenced unemitted kind, missing
@@ -440,11 +448,15 @@ export class Audit<TPayload, TCtx> {
     // The token-binding semantics don't change — only the timing of
     // when the token is first minted.
     if (unackedBlocking.length > 0 || ackIssues.length > 0) {
+      const nonAckableKinds = unackedBlocking
+        .filter((w) => detectorByKind.get(w.kind)?.ackReason === 'none')
+        .map((w) => w.kind);
       return {
         status: 'rejected',
         rejection: {
           reason: 'unacked_warnings',
           warnings: unackedBlocking,
+          ...(nonAckableKinds.length > 0 ? { non_ackable_warning_kinds: nonAckableKinds } : {}),
           ...(ackIssues.length > 0 ? { ack_issues: ackIssues } : {}),
         },
       };
@@ -798,10 +810,19 @@ export function rejectionToErrorMessage(
   if (rejection.token) lines.push(`  audit_token: ${rejection.token}`);
 
   if (rejection.warnings.length > 0) {
+    const nonAckable = new Set(rejection.non_ackable_warning_kinds ?? []);
     lines.push('  warnings:');
     for (const w of rejection.warnings) {
-      lines.push(`    - [${w.kind}] ${w.message}`);
+      const ackableTag = nonAckable.has(w.kind) ? ' [NOT ACKABLE — fix the strategy]' : '';
+      lines.push(`    - [${w.kind}]${ackableTag} ${w.message}`);
       if (w.hint) lines.push(`      hint: ${w.hint}`);
+    }
+    if (nonAckable.size > 0) {
+      lines.push(
+        `    NOTE: warnings marked [NOT ACKABLE] cannot be cleared via ` +
+          `notes.save_warnings_acked — the Detector emits unconditional blockers. ` +
+          `Restructure the strategy per the per-warning hint, or abandon the save.`,
+      );
     }
   }
 
