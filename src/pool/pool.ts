@@ -297,6 +297,7 @@ export class Pool implements BrowserPool {
     if (opts.platform) session.platform = opts.platform;
     if (opts.identity) session.identity = opts.identity;
     session.origin = isDrivenByExternalMcpHost() ? 'mcp' : 'cli';
+    session.startedAt = Date.now();
     this._sessions.set(session.id, session);
 
     if (this._warmEnabled && opts.platform && key && !this._warm.has(key)) {

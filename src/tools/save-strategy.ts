@@ -37,6 +37,7 @@ import { collectScannedFields } from '../strategies/validate/helpers';
 import { rejectAgentEmittedRuntimeMeta } from '../strategies/validate/notes';
 import type { LiteralClassification } from '../gate/save-audit';
 import { detectAuthGatedWithoutAuthPrereq } from '../gate/save-warnings';
+import { composeBudgetWarning } from '../session-obligations/budget-warning';
 
 /** Per-phase wall-clock timings for one save_strategy call. Returned on
  *  success; attached to the thrown error on rejection (see
@@ -535,6 +536,11 @@ export async function saveStrategy(
     prerequisites: Array<{ name: string; kind: 'tag'; tag: string }>;
     reason: string;
   };
+  /** Long-lived-session budget warning. Decorates save responses past
+   *  the soft session-age cap so agents see the budget before getting
+   *  SIGKILLed mid-thrash by an orchestrator wall-clock cap. See
+   *  `runtime/src/session-obligations/budget-warning.ts`. */
+  _budget_warning?: string;
   /** Per-phase wall-clock timings. Lets the harness see where time goes;
    *  in particular, `probe_ms` is 0 (and `probe_skipped: true`) on rejected
    *  attempts that failed shape validation or the audit pre-check. */
@@ -1003,6 +1009,19 @@ export async function saveStrategy(
 
   timings.total_ms = Date.now() - t0;
 
+  // Long-lived-session budget warning. When the session has been driving
+  // past the soft cap, decorate the save response so the agent sees the
+  // budget before getting SIGKILLed by an orchestrator wall-clock cap.
+  // See loop pattern #15 (session-timeout-no-end-drive-no-retrospective).
+  let budgetWarning: string | undefined;
+  if (sessionId) {
+    try {
+      budgetWarning = composeBudgetWarning(pool.getSession(sessionId)) ?? undefined;
+    } catch {
+      // session may be torn down — warning is best-effort
+    }
+  }
+
   return {
     ok: true,
     path: filePath,
@@ -1022,6 +1041,7 @@ export async function saveStrategy(
         }
       : {}),
     ...(artifactBreadcrumbHint ? { _hint: artifactBreadcrumbHint } : {}),
+    ...(budgetWarning !== undefined ? { _budget_warning: budgetWarning } : {}),
     timings: { ...timings },
   };
 }

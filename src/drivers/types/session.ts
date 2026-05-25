@@ -338,6 +338,14 @@ export interface Session {
    */
   origin?: 'cli' | 'mcp';
   /**
+   * Unix-ms timestamp when `pool.createSession` returned. Used by the
+   * budget-warning helper (`composeBudgetWarning`) to decorate
+   * long-lived sessions with an end_drive nudge so agents don't get
+   * SIGKILLed mid-thrash by orchestrator timeouts. Set once at session
+   * creation; do not mutate.
+   */
+  startedAt?: number;
+  /**
    * URLs the driver has explicitly navigated to during this session (via
    * `driver.navigate` or session creation with a starting URL). Maintained by
    * driver implementations as a ground-truth list of pages the agent actually
