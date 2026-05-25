@@ -305,6 +305,57 @@ test('unreferenced_prereq_binding: per-prereq detection — fires only on the un
   assert.strictEqual(warnings[0].context.prereq_index, 1);
 });
 
+test('unreferenced_prereq_binding: skips when response.from matches the prereq.name (the validator-accepted axis)', () => {
+  // The validator (strategies/validate/response.ts) accepts response.from
+  // = prereq.name (NOT binds). The skip-condition here must mirror that
+  // axis so the warning doesn't fire on legitimate prereq-as-response
+  // saves where name and binds differ.
+  const warnings = detectUnreferencedPrereqBinding({
+    strategy: 'page-script',
+    baseUrl: 'https://www.example.com',
+    endpoint: '/api/x',
+    method: 'GET',
+    response: { from: 'cartIdExtract', format: 'object' },
+    prerequisites: [
+      {
+        name: 'cartIdExtract',
+        kind: 'js-eval',
+        url: 'https://www.example.com/',
+        binds: 'cart_id',
+        expression: 'document.querySelector("[data-cart-id]")?.getAttribute("data-cart-id")',
+        return_shape: { kind: 'string' },
+      },
+    ],
+  });
+  assert.deepStrictEqual(warnings, []);
+});
+
+test('unreferenced_prereq_binding: still fires when response.from matches binds but NOT name (drift case)', () => {
+  // Old skip-condition matched on binds — that misses the validator's
+  // actual rule. With from = binds but != name, the validator rejects
+  // the save AND the warning should still fire so the agent fixes the
+  // root cause (use name, not binds).
+  const warnings = detectUnreferencedPrereqBinding({
+    strategy: 'page-script',
+    baseUrl: 'https://www.example.com',
+    endpoint: '/api/x',
+    method: 'GET',
+    response: { from: 'cart_id', format: 'object' },
+    prerequisites: [
+      {
+        name: 'cartIdExtract',
+        kind: 'js-eval',
+        url: 'https://www.example.com/',
+        binds: 'cart_id',
+        expression: 'extract()',
+        return_shape: { kind: 'string' },
+      },
+    ],
+  });
+  assert.strictEqual(warnings.length, 1);
+  assert.strictEqual(warnings[0].context.binds_name, 'cart_id');
+});
+
 test('unreferenced_prereq_binding: skips when strategy has no prerequisites', () => {
   const warnings = detectUnreferencedPrereqBinding({
     strategy: 'fetch',
