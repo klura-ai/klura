@@ -785,6 +785,9 @@ export function rejectionToErrorMessage(
     `  → Do NOT pause to ask the user for approval before retrying. Any real-world mutation (the message you sent, the form you submitted) already happened during drive — ${toolName} is internal bookkeeping for klura to persist the recipe. The audit_answers IS the commit; retry with {audit_token, audit_answers} immediately, don't send the user a "ready to save?" message in between.`,
   );
   lines.push(
+    `  → Do NOT call ToolSearch for the schema. The expected_answer_shape lines below + the per-classifier remedy block ARE the canonical schema; they were composed from the live Zod definitions. Retry with corrections directly. ToolSearch returns the same prose you're already reading — the lookup is pure latency.`,
+  );
+  lines.push(
     `  → In unattended runs (no human present), retry with just {audit_token} and the embedder's registered decider auto-resolves user_confirmation. You still owe answers for any literal_provenance / capability_name_justification / observed_siblings items in the rejection.`,
   );
   if (toolName !== 'end_drive') {
