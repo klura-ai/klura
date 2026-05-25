@@ -702,6 +702,17 @@ export interface ArtifactAccumulator {
   listLoadedScriptsCalls: Array<{ at: string }>;
   setBreakpointCalls: Array<{ file_digest: string; line: number; at: string }>;
   evaluateOnFrameCalls: Array<{ expression_digest: string; ok: boolean; at: string }>;
+  /** Per-call `evaluate_in_iframe` record. Third RE-toolkit axis
+   *  parallel to `inspectWsFrameCalls` (WS) and `searchJsSourceCalls`
+   *  (HTTP signer). Counted by the signer-discovery gate and the
+   *  end_drive nag suppression. */
+  evaluateInIframeCalls: Array<{ src_digest: string; expression_digest: string; at: string }>;
+  evaluateInIframeChainCalls: Array<{
+    src_digest: string;
+    step_count: number;
+    at: string;
+  }>;
+  evaluateInWorkerCalls: Array<{ source_digest: string; at: string }>;
   /**
    * Typed, prose-length hints the agent has dropped this session. Persisted to
    * the discovery artifact at end_drive for the next session to read. Keyed
@@ -743,7 +754,13 @@ export interface ArtifactAccumulator {
   agentResumePointers: Record<
     string,
     Array<{
-      kind: 'js_source' | 'request_index' | 'frame_index' | 'page_url' | 'other';
+      kind:
+        | 'js_source'
+        | 'request_index'
+        | 'frame_index'
+        | 'page_url'
+        | 'context_bound_handle'
+        | 'other';
       ref: string;
       line?: number;
       note?: string;

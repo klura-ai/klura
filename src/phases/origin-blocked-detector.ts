@@ -200,6 +200,13 @@ function composeRecommendedAction(signals: ReadonlyArray<OriginBlockedSignal>): 
       `\`js_eval({expression: "fetch('/api/...').then(r => r.status)"})\` from the warmed ` +
       `homepage probes the protected endpoint cheaply; a working probe is the seed for a ` +
       `saved page-script strategy.`,
+    `Context-bound request rejection: if a captured request 200:ed live but a replay ` +
+      `(Node-side OR in-page \`fetch()\`) returns 401/403, the server may bind tokens to the ` +
+      `JS context that generated them (vendor SDK init in an iframe, proof-of-work bound to a ` +
+      `WebWorker origin, iframe-init-bound CSRF cookies). Use \`evaluate_in_iframe\` / ` +
+      `\`evaluate_in_iframe_chain\` / \`evaluate_in_worker\` to fire the request from inside ` +
+      `the imitating context. Same shape as \`inspect_ws_frame\` + \`try_generator\` for binary ` +
+      `WS — third RE-toolkit axis, runtime hosts the context, you compose the JS.`,
     `Wait + re-snap: some JS challenges auto-resolve in 5-10 s. start_session already does ` +
       `one wait+resnap pass on the resolvable-challenge shape — if you don't see the advisory ` +
       `clear, poll \`get_a11y_tree\` + \`get_network_log\` for another ~10 s before treating ` +

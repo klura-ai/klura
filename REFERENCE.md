@@ -1204,7 +1204,7 @@ Hardcode when the value is the same for every caller: site-wide paths/hostnames,
 
 ## Discovery artifact
 
-A protocol-neutral cross-run handoff carrier. Every tool call the agent makes during investigative work — `inspect_ws_frame`, `try_generator`, `get_js_source`, `get_send_encoder`, `find_in_page`, `get_network_log`, `get_attribute` — appends a structural record (tool name, args digest, outcome flag) to the session's accumulator. On `save_strategy` / `end_drive`, the runtime merges the accumulator with any prior on-disk artifact for the same `(platform, capability)` pair and writes the result. Next-session responses (`list_platform_skills`, `start_session`, `execute`) inline the artifact so the agent sees the handoff without extra tool calls.
+A protocol-neutral cross-run handoff carrier. Every tool call the agent makes during investigative work — `inspect_ws_frame`, `try_generator`, `get_js_source`, `get_send_encoder`, `find_in_page`, `get_network_log`, `get_attribute`, `evaluate_in_iframe`, `evaluate_in_iframe_chain`, `evaluate_in_worker` — appends a structural record (tool name, args digest, outcome flag) to the session's accumulator. On `save_strategy` / `end_drive`, the runtime merges the accumulator with any prior on-disk artifact for the same `(platform, capability)` pair and writes the result. Next-session responses (`list_platform_skills`, `start_session`, `execute`) inline the artifact so the agent sees the handoff without extra tool calls.
 
 **On-disk layout** — under `<KLURA_HOME>/workdir/<platform>/artifacts/`:
 
@@ -1227,7 +1227,7 @@ Neither file is shipped via ClawHub; `workdir/` is separate from `skills/` so pu
     "verified_ok": <int>
   },
   "resume_pointers": [
-    {"kind": "js_source"|"request_index"|"frame_index"|"page_url"|"other",
+    {"kind": "js_source"|"request_index"|"frame_index"|"page_url"|"context_bound_handle"|"other",
      "ref": "<string ≤ 500>",
      "line": <int, only valid when kind==="js_source">,
      "note": "<string ≤ 120, PII-scanned>",
@@ -1249,6 +1249,7 @@ Caps: `resume_pointers` ≤ 20, `observations` ≤ 40, `tool_call_trace` ≤ 80 
 - `request_index` — came from `get_network_log`; `ref` is the captured request's index.
 - `frame_index` — came from `inspect_ws_frame`; `ref` is the WS frame index.
 - `page_url` — a page worth re-visiting; `ref` is the URL.
+- `context_bound_handle` — came from `evaluate_in_iframe` / `evaluate_in_worker`; `ref` is the iframe `src` or worker bootstrap snippet that produced a valid request token last session, so the next session can re-instantiate the same context. `note` is the protected route the agent reached through it.
 - `other` — anything else; `ref` carries the detail in bounded prose.
 
 **Observations** — opaque slug array. Agents write whatever shapes their discovery flow; runtime just enforces slug regex + length cap + dedupe. Examples: `['epoch_id','otid','thread_id']`, `['x-csrf-token','x-request-signature']`, `['persisted_hash','operation_name']`.
@@ -1372,6 +1373,102 @@ The signal you're patching well vs. re-RE'ing: discovery_artifact pickup. `list_
 ```
 
 Warm runs auto-execute: args interpolate into the expression, the page's signing runs on every call, the fetch fires from inside the browser with live cookies, the response projects via `response.extract`.
+
+## context-bound-replaybook
+
+Third RE-toolkit axis. Companion to the WS encoder loop (`inspect_ws_frame` + `try_generator`) and the HTTP signer-source path (`search_js_source` + `read_js_function`). Tools: `evaluate_in_iframe`, `evaluate_in_iframe_chain`, `evaluate_in_worker`.
+
+### When to suspect context-binding
+
+The captured request 200:ed live (the agent saw the network log entry succeed during drive). When you try to replay it:
+
+- From Node, with the same headers / cookies / body → 4xx.
+- From in-page `js_eval('fetch("/<path>", {...})')` on the main frame → also 4xx.
+
+The server is validating something the request derives from the JS-execution context that generated it, not from the cookie jar alone. Typical causes (vendor-agnostic structural shapes):
+
+- **Vendor SDK init bound to an iframe**: the page spawns a hidden iframe at session start; the SDK initializes inside that iframe and stamps a per-request token on every send the iframe makes. Main-frame `fetch()` doesn't carry the token because the SDK never patched main-frame fetch.
+- **Proof-of-work in a dedicated WebWorker**: the page spawns a worker that solves a continuous PoW; the worker returns short-lived tokens that the page applies to outgoing requests. Tokens bind to the worker's TLS session / origin tuple — they don't validate when re-issued from a different request origin.
+- **Iframe-init-bound CSRF cookies**: cookies set on an iframe origin (Set-Cookie on an iframe response) only validate on requests fired from that iframe. The parent's cookie jar carries them but the server checks the request's iframe context.
+
+Structural tells in the captured request:
+
+- Opaque high-entropy header values (length ≥ 24, mixed-class characters) the agent's `args` didn't supply and the page didn't echo back from a cookie.
+- The same header value appears in the agent's iframe-targeted requests but not in the main-frame requests during the same session.
+- Network log shows requests to vendor-hosted JS bundles loaded inside an iframe whose origin differs from the page origin.
+
+### Confirm before reaching for the toolkit
+
+Cheap diagnostic before spawning iframes / workers:
+
+1. `js_eval(sid, 'fetch("<protected path>", {credentials:"include"}).then(r => r.status)')` from the main frame. 200 → not context-bound; just a regular fetch save. 4xx → continue.
+2. `js_eval(sid, 'fetch("<protected path>", {credentials:"include", headers: {<verbatim captured headers>}}).then(r => r.status)')` — same with the captured opaque headers stripped or templated. Still 4xx → the binding is on something beyond the headers (context, TLS, JS origin). Move to the primitives.
+
+### Primitives in order of complexity
+
+**`evaluate_in_iframe(session_id, iframe_src, expression)`** — spawn one iframe at `iframe_src`, run a single expression inside `iframe.contentWindow`, return the result, remove the iframe. Use for one-shot probes: "does this request 200 from inside an iframe on this same origin?"
+
+```ts
+evaluate_in_iframe(
+  sid,
+  '/',
+  'fetch("/zgw/<path>", {credentials:"include"}).then(r => ({status: r.status, body: (await r.text()).slice(0, 200)}))',
+);
+```
+
+If `status: 200`, you've confirmed iframe-context fixes it. Save as `page-script` with the expression wrapped in `frameFromPage`.
+
+**`evaluate_in_iframe_chain(session_id, iframe_src, steps[])`** — spawn one iframe, run a sequence of expressions persisting state across steps. Use when the iframe needs an init-wait before the request will work:
+
+```ts
+evaluate_in_iframe_chain(sid, '/', [
+  {
+    expression:
+      'await new Promise(r => { const t = setInterval(() => window.<VendorSdk> && (clearInterval(t), r()), 50); })',
+    wait_for_ms: 0,
+  },
+  { expression: 'fetch("/zgw/<path>", {credentials:"include"}).then(r => ({status: r.status}))' },
+]);
+```
+
+Returns the last step's result by default (`return_all: true` for the array).
+
+**`evaluate_in_worker(session_id, worker_source, message?)`** — spawn a Web Worker from `worker_source`, optionally `postMessage(message)`, wait for the first response message, terminate. Use when the binding is to a worker context (server validates that the request was fired from a worker, or that a worker-side PoW is included):
+
+```ts
+evaluate_in_worker(
+  sid,
+  `
+  self.onmessage = async (e) => {
+    const r = await fetch(e.data.url, {credentials: 'include'});
+    self.postMessage({status: r.status, body: (await r.text()).slice(0, 200)});
+  };
+`,
+  { url: '/zgw/<path>' },
+);
+```
+
+The worker MUST call `self.postMessage(...)` to return; otherwise the call times out.
+
+### Cross-origin constraints
+
+`iframe_src` must be same-origin to the active page (cross-origin iframes are opaque from the parent — `iframe.contentWindow.Function` throws). `"/"` works for most cases — the iframe loads the page's own root in a fresh context. For cross-origin targets, the only path is to navigate the main frame there first, then iframe a same-origin sub-path.
+
+Workers are always created from the active page's origin (blob URLs inherit the document origin). The worker can fetch cross-origin if the server's CORS permits it.
+
+### Common failure shapes
+
+- **TLS-fingerprint binding** (rare in browser-vs-browser, common in browser-vs-Node): the iframe AND the worker use the page's TLS context, so this is transparent inside the browser. But if the captured live request rode the agent's browser TLS and the server is hashing JA3/JA4, even iframe-context fetch will work (same TLS) — confirm. The case where this breaks is when the server validates a worker-specific TLS handshake initiated by a service worker; klura doesn't (yet) expose service-worker context.
+- **WebWorker-source-binding**: the server checks that the worker's source matches a SHA the vendor SDK shipped. Klura's worker source is whatever the agent wrote — won't match. Path forward: lift the vendor's worker source via `get_js_source` and pass it verbatim as `worker_source`. The agent's payload (the protected URL, the message body) goes via `postMessage` instead.
+- **User-gesture-binding**: some SDKs only stamp tokens on requests fired in response to a real user gesture (click, keypress). Spawning from `evaluate_in_iframe` doesn't carry a user gesture. Workaround: `perform_action({action:"click", selector: "<some innocuous button>"})` immediately before the chain to bank a recent gesture.
+
+### Save shape
+
+Once an `evaluate_in_iframe` / `evaluate_in_iframe_chain` / `evaluate_in_worker` call lands 2xx, save as `page-script` with the expression as `frameFromPage` — the warm execute will re-spawn the iframe / worker per call from inside the live page. Anchor: `notes.anchor_type: "module"` if the iframe context provides a callable global; `"protocol"` if the agent crafts the request body from scratch and rides only the context. See `klura://reference#page-script-anchors`.
+
+### Handoff
+
+Drop an `add_resume_pointer({kind: "context_bound_handle", ref: "<iframe_src or compact worker snippet>", note: "<protected route this worked for>"})` so the next session can re-instantiate the same context without re-discovering the binding.
 
 ## debugger-surface
 
@@ -1618,22 +1715,26 @@ Set `transport: "node"`, declare `wsHeaders` (`Cookie`, `Origin`, `User-Agent`),
 - **Node-transport fingerprint fragility.** JA3-sensitive sites reject Node handshakes. Runtime retries in browser, demotes after 3 consecutive failures (per-protocol counter).
 - **Binary ackMatch.** Substring test on the raw received frame; for binary envelopes, match on the stable ASCII key the envelope text portion contains.
 - **Complex envelopes.** Length-prefixed binary / nested-escaped JSON / varint-encoded / compressed framing → use `try_generator` (`klura://reference#try-generator`).
+- **Context-bound tokens.** When the server validates tokens bound to the JS-execution context that generated them (vendor SDK init in an iframe, proof-of-work bound to a WebWorker origin, iframe-init-bound CSRF cookies) → fire the request from inside the matching context via `evaluate_in_iframe` / `evaluate_in_iframe_chain` / `evaluate_in_worker`. See `klura://reference#context-bound-replaybook`.
 
 ## RE pattern choice
 
-Reverse-engineering an encoded payload — binary WebSocket frame, signed HTTP body, persisted GraphQL request, MQTT-shaped write — offers two legitimate attack patterns. They aren't ordered; they're matched to the envelope. Picking the wrong one wastes rounds.
+Reverse-engineering an encoded payload — binary WebSocket frame, signed HTTP body, persisted GraphQL request, MQTT-shaped write, context-bound token — offers three legitimate attack patterns. They aren't ordered; they're matched to the envelope. Picking the wrong one wastes rounds.
 
 **Black-box iteration.** Capture a reference payload, write a candidate generator, `try_generator` against the reference, read the diff, refine, repeat. The convergence coach (`klura://reference#try-generator`) guides the loop: `shape: "envelope_correct"` after a few rounds means the framing is right and only body values differ, at which point `match: "structural"` accepts value-level differences and returns ok:true. Works when every unknown field is either the user's input literally, or a value the agent can construct from the user's input (ids looked up via companion strategies, flags, flags-of-flags).
 
 **White-box encoder read.** `set_breakpoint` at the send callsite (sourced from `js_callstack` on the captured frame), let the page break on the next real send, `get_frame_scope` to see what's in scope, `evaluate_on_frame` to read the exact builder arguments, and walk up the call stack until you find the function that constructs the payload. Then lift the encoder into a `frameFromPage` expression. Works — and only works — when at least one unknown field is runtime-computed without a derivable formula: rolling counters, HMACs over session state, monotonic epoch ids, nonces seeded from private state, timestamps-with-skew. No amount of iteration converges on a value the agent can't compute.
 
+**Context-bound fire.** When the server validates a token bound to the JS-execution context that generated it — vendor SDK init in an iframe, proof-of-work computed in a dedicated WebWorker, iframe-init-bound CSRF cookies — the token doesn't lift to Node and doesn't survive a fetch from the main frame's context. The fix is structural: fire the request from inside the matching context via `evaluate_in_iframe` / `evaluate_in_iframe_chain` / `evaluate_in_worker`. See `klura://reference#context-bound-replaybook` for the deep dive.
+
 **Signals for each:**
 
 - Agent-controllable unknowns → iterate. Payload diffs after one round show only the bytes the user's request controls changing; other fields are stable across the capture window.
 - Runtime-computed unknowns → read the encoder. Two captures of "the same" action produce different bytes at positions that aren't the user's input — the delta is the signature of a counter, HMAC, or hash-of-state. Field names like `otid`, `nonce`, `sig`, `ts`, `epoch_id`, `seq`, `mac` are structural tells.
-- Mixed envelope (both kinds of unknowns in the same payload) → read the encoder once to learn the runtime-field formulas, then iterate on the rest. Most mature sites land here.
+- Context-bound unknowns → fire from the matching context. A captured request 200:ed live; replaying the exact bytes from Node (or even from an in-page `js_eval` `fetch()`) returns 4xx. Opaque high-entropy header values that aren't in the agent's args, no encoder reachable on the main frame, the page spawns an iframe / worker as part of its bootstrap — these are the structural tells.
+- Mixed envelope (kinds combined in the same payload) → read the encoder once to learn the runtime-field formulas, iterate on the rest, fire from the context when binding constraints stick. Most mature sites land here.
 
-The toolkit supports both patterns; the runtime doesn't steer. Pick based on the envelope, not on habit.
+The toolkit supports all three patterns; the runtime doesn't steer. Pick based on the envelope, not on habit.
 
 ## try-generator
 
@@ -1754,7 +1855,7 @@ revisit_prompt?: {
 
 The agent should relay `user_prompt_suggestion` VERBATIM as a text-only turn after delivering the user's answer. Reply shapes:
 
-- **YES / try / lift** — proceed with the LIFT playbook (inspect_ws_frame / try_generator / set_breakpoint, then `save_strategy` against the captured request). Even though execute succeeded, this session enters LIFT to attempt a tier upgrade. (Triage runs automatically on end_drive's LIFT handoff; no separate call needed.)
+- **YES / try / lift** — proceed with the LIFT playbook (inspect_ws_frame / try_generator / set_breakpoint, or `evaluate_in_iframe` / `evaluate_in_iframe_chain` / `evaluate_in_worker` when the request needs to fire from a specific JS-execution context, then `save_strategy` against the captured request). Even though execute succeeded, this session enters LIFT to attempt a tier upgrade. (Triage runs automatically on end_drive's LIFT handoff; no separate call needed.)
 - **NO / skip / later** — call `end_drive`. The next natural invocation surfaces the same prompt; no urgency.
 
 Recorded-path is ~10× slower and brittle to DOM drift. DOM-anchored page-scripts survive until the next UI refactor. Surface this prompt every time it fires; we always want to hunt for durable-anchor upgrades when the saved strategy is below ceiling or fragile.
@@ -1997,7 +2098,7 @@ The save-time `literal_provenance` classifier asks the agent to classify every b
 
 ### Side-effect consent applies during RE
 
-The `pre_action_consent` Tier-1 / Tier-2 taxonomy (see `klura://reference#checkpoints`) is NOT scoped to the first action. Any LIFT tool call that causes an external write (`trigger_reference_send` with a submit-shaped step sequence, `perform_action` to re-submit for fresh diff data, `execute_strategy` against a write capability to verify) needs the same consent rule. Side-effect-free tools (`try_generator`, `js_eval` on pure expressions, `inspect_ws_frame`, `set_breakpoint` family, source-read tools, `get_network_log`, `get_action_history`) are safe to call freely.
+The `pre_action_consent` Tier-1 / Tier-2 taxonomy (see `klura://reference#checkpoints`) is NOT scoped to the first action. Any LIFT tool call that causes an external write (`trigger_reference_send` with a submit-shaped step sequence, `perform_action` to re-submit for fresh diff data, `execute_strategy` against a write capability to verify) needs the same consent rule. Side-effect-free tools (`try_generator`, `js_eval` on pure expressions, `inspect_ws_frame`, `set_breakpoint` family, source-read tools, `get_network_log`, `get_action_history`, and the context-bound primitives `evaluate_in_iframe` / `evaluate_in_iframe_chain` / `evaluate_in_worker` when the agent's expression itself has no side effect) are safe to call freely.
 
 ### Multi-capability sessions
 

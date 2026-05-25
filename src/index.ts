@@ -277,6 +277,17 @@ export type {
 } from './tools/js-tools';
 
 export {
+  evaluateInIframe,
+  evaluateInIframeChain,
+  evaluateInWorker,
+} from './tools/context-bound-eval';
+export type {
+  EvaluateInIframeArgs,
+  EvaluateInIframeChainArgs,
+  EvaluateInWorkerArgs,
+} from './tools/context-bound-eval';
+
+export {
   setBreakpointTool,
   removeBreakpointTool,
   listBreakpointsTool,

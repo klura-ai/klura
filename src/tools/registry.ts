@@ -47,6 +47,7 @@ import { TOOL_DEF as declareCapability } from './declare-capability';
 import { TOOL_DEF as liftObservedCapability } from './lift-observed-capability';
 import { TOOL_DEFS as discoveryArtifactTools } from './discovery-artifact-tools';
 import { TOOL_DEFS as jsTools } from './js-tools';
+import { TOOL_DEFS as contextBoundEvalTools } from './context-bound-eval';
 import { TOOL_DEFS as debuggerTools } from './debugger';
 import { TOOL_DEFS as remoteTools } from './remote';
 import { TOOL_DEFS as listenerTools } from './listeners';
@@ -71,6 +72,7 @@ export const TOOL_REGISTRY: ToolDef[] = [
   liftObservedCapability,
   ...discoveryArtifactTools,
   ...jsTools,
+  ...contextBoundEvalTools,
   ...debuggerTools,
   ...remoteTools,
   ...listenerTools,

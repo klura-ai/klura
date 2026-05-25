@@ -62,6 +62,13 @@ export const READ_ONLY_DIAGNOSTIC: ReadonlySet<string> = new Set([
   'pin_ws_frame',
   'explain_ws_frame_structure',
   'js_eval',
+  // Context-bound page-script primitives — same shape as js_eval (run an
+  // agent-authored expression inside a browser context, no driver side
+  // effect beyond what the expression itself does), available everywhere
+  // js_eval is.
+  'evaluate_in_iframe',
+  'evaluate_in_iframe_chain',
+  'evaluate_in_worker',
 ]);
 
 /** Discovery-artifact persistence. Allowed in drive, triage, and lift —

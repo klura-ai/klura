@@ -21,28 +21,38 @@ import type { Session } from '../drivers/types/session';
 // declaration. - CircleCI (2026) "Building LLM agents to validate tool use" —
 // business rules in prompts become suggestions, not constraints; enforce in the
 // validator where the model can't talk past it. Transport-aware
-// encoder/signer-discovery gate. Two satisfier paths: HTTP path:
+// encoder/signer-discovery gate. Three satisfier paths: HTTP path:
 // list_loaded_scripts + search_js_source + read_js_function — right toolchain
 // for signed HTTP URLs where the signer lives in a JS bundle and the agent
 // needs to locate + read + call it. WS path: inspect_ws_frame + try_generator +
 // evaluate_on_frame — right toolchain for binary WebSocket sends where the
 // encoder is the page's own publisher and the inspect_ws_frame starter +
-// try_generator convergence loop is the canonical lift path.
+// try_generator convergence loop is the canonical lift path. Context-bound
+// path: evaluate_in_iframe + evaluate_in_iframe_chain + evaluate_in_worker —
+// right toolchain for sites where the server validates tokens bound to the
+// JS-execution context that generated them (vendor SDK init in an iframe,
+// proof-of-work bound to its WebWorker origin, iframe-init-bound CSRF cookies).
 //
-// Agent satisfies the gate by demonstrating non-zero use of EITHER path.
+// Agent satisfies the gate by demonstrating non-zero use of ANY path.
 // The transport-aware split prevents binary-WS agents being forced down the
 // HTTP path (search_js_source for a signer that doesn't exist in WS captures)
-// and never reaching for inspect_ws_frame.
+// and never reaching for inspect_ws_frame; same shape for context-bound agents
+// who solved the problem via iframe-context fetch but used no HTTP/WS RE tools.
 export const HTTP_SIGNER_TOOLS = [
   'list_loaded_scripts',
   'search_js_source',
   'read_js_function',
 ] as const;
 export const WS_ENCODER_TOOLS = ['inspect_ws_frame', 'try_generator', 'evaluate_on_frame'] as const;
+export const CONTEXT_BOUND_TOOLS = [
+  'evaluate_in_iframe',
+  'evaluate_in_iframe_chain',
+  'evaluate_in_worker',
+] as const;
 
 export function getUnusedSignerDiscoveryTools(session: Session): string[] {
   const acc = session.artifactAccumulator;
-  if (!acc) return [...HTTP_SIGNER_TOOLS, ...WS_ENCODER_TOOLS];
+  if (!acc) return [...HTTP_SIGNER_TOOLS, ...WS_ENCODER_TOOLS, ...CONTEXT_BOUND_TOOLS];
   const httpUsed =
     acc.listLoadedScriptsCalls.length +
       acc.searchJsSourceCalls.length +
@@ -53,11 +63,16 @@ export function getUnusedSignerDiscoveryTools(session: Session): string[] {
       acc.tryGeneratorCalls.length +
       acc.evaluateOnFrameCalls.length >
     0;
+  const contextBoundUsed =
+    acc.evaluateInIframeCalls.length +
+      acc.evaluateInIframeChainCalls.length +
+      acc.evaluateInWorkerCalls.length >
+    0;
   // At least one path exercised satisfies the gate — return empty "unused."
-  if (httpUsed || wsUsed) return [];
-  // Neither path touched. Name both so the agent picks whichever fits their
-  // capture shape.
-  return [...HTTP_SIGNER_TOOLS, ...WS_ENCODER_TOOLS];
+  if (httpUsed || wsUsed || contextBoundUsed) return [];
+  // None of the paths touched. Name all so the agent picks whichever fits
+  // their capture shape.
+  return [...HTTP_SIGNER_TOOLS, ...WS_ENCODER_TOOLS, ...CONTEXT_BOUND_TOOLS];
 }
 
 /**
@@ -98,7 +113,7 @@ export const TOOL_DEFS: ToolDef[] = [
   {
     name: TOOL_NAMES.endDrive,
     description:
-      'End the DRIVE phase. The agent has finished driving the UI; runtime ALWAYS hands over to TRIAGE — agent does not get to decide "this was a one-off task, no triage needed." When any declared capability is unresolved, the triage handoff returns with captures inventory + diagnostic tools menu + plan-structure preview. When every declared capability is already saved (no unresolved work), the end_drive_audit `triage_acknowledgment` classifier fires instead: agent must echo `audit_token` + `{triage_acknowledgment: {acknowledged: true, reason: "<own words ≥20 chars>"}}` to confirm triage was considered. Phase-locked to drive — calling from triage or lift returns a structured rejection. Auto-close on terminal save_strategy means most sessions never need to call this explicitly.\n\nCloses the browser session. Runs auto-synthesis: builds `page-script`/`fetch` strategies by joining typed literals to captured HTTP request bodies, and a `recorded-path` from perform_action history. Also persists the discovery artifact (resume pointers + tool-call trace). Response carries `auto_synthesized: [{capability, tier, path}]`, `artifacts_updated: [{capability, sessions_contributed, has_blob}]`, and `_diagnostics.synth: [{pass, capability, phase, outcome, detail}]` explaining exactly what each synth pass found — whether it matched, where (http_request_body / ws_frame_sent / etc.), and why it saved or skipped. Read `_diagnostics` when you need to understand why auto-save produced nothing — the most common case is `outcome: "literal_in_ws_frame_only"` which means the send rode a binary WS frame and needs manual lift via `inspect_ws_frame` + `try_generator`.',
+      'End the DRIVE phase. The agent has finished driving the UI; runtime ALWAYS hands over to TRIAGE — agent does not get to decide "this was a one-off task, no triage needed." When any declared capability is unresolved, the triage handoff returns with captures inventory + diagnostic tools menu + plan-structure preview. When every declared capability is already saved (no unresolved work), the end_drive_audit `triage_acknowledgment` classifier fires instead: agent must echo `audit_token` + `{triage_acknowledgment: {acknowledged: true, reason: "<own words ≥20 chars>"}}` to confirm triage was considered. Phase-locked to drive — calling from triage or lift returns a structured rejection. Auto-close on terminal save_strategy means most sessions never need to call this explicitly.\n\nCloses the browser session. Runs auto-synthesis: builds `page-script`/`fetch` strategies by joining typed literals to captured HTTP request bodies, and a `recorded-path` from perform_action history. Also persists the discovery artifact (resume pointers + tool-call trace). Response carries `auto_synthesized: [{capability, tier, path}]`, `artifacts_updated: [{capability, sessions_contributed, has_blob}]`, and `_diagnostics.synth: [{pass, capability, phase, outcome, detail}]` explaining exactly what each synth pass found — whether it matched, where (http_request_body / ws_frame_sent / etc.), and why it saved or skipped. Read `_diagnostics` when you need to understand why auto-save produced nothing — the most common case is `outcome: "literal_in_ws_frame_only"` which means the send rode a binary WS frame and needs manual lift via `inspect_ws_frame` + `try_generator`. A related shape is `outcome: "context_bound_token_in_request"` — auto-save produced a fetch strategy whose captured request carries opaque headers that may bind to the JS context that generated them; if warm execute returns 401/403, lift manually via `evaluate_in_iframe` / `evaluate_in_iframe_chain` / `evaluate_in_worker` (third RE-toolkit axis).',
     inputSchema: {
       type: 'object',
       properties: {

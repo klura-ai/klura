@@ -43,6 +43,7 @@ export const RESUME_POINTER_KINDS = [
   'request_index',
   'frame_index',
   'page_url',
+  'context_bound_handle',
   'other',
 ] as const;
 export type ResumePointerKind = (typeof RESUME_POINTER_KINDS)[number];
@@ -369,6 +370,9 @@ export function ensureAccumulator(session: Session): ArtifactAccumulator {
       listLoadedScriptsCalls: [],
       setBreakpointCalls: [],
       evaluateOnFrameCalls: [],
+      evaluateInIframeCalls: [],
+      evaluateInIframeChainCalls: [],
+      evaluateInWorkerCalls: [],
       notes: {},
       verifiedExpressions: {},
       agentResumePointers: {},

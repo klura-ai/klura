@@ -28,7 +28,7 @@ import type {
 } from './types/session';
 import { attachCdpNetworkCapture, getInterceptedFromSink } from './cdp-network-capture';
 import { parseStack } from '../response/stack-parse';
-import { needsBlockBodyWrap } from '../response/js-eval-wrapper';
+import { needsBlockBodyWrap, wrapAgentExpression } from '../response/js-eval-wrapper';
 
 // Per-session transient state that we don't want to expose through the Session
 // interface (CDP client for touch dispatch, focus listeners, and the flag
@@ -201,6 +201,177 @@ async function withPageOpTimeout<T>(
  */
 const WS_FRAMES_BUFFER_CAP = 2000;
 const sessionExtras = new WeakMap<Session, SessionExtras>();
+
+// Page-side helpers for evaluate_in_iframe / evaluate_in_iframe_chain /
+// evaluate_in_worker. Each runs inside page.evaluate so the body is
+// serialized + re-evaluated in the browser realm; the function body
+// cannot close over any module-scoped binding from this file.
+/* eslint-disable
+   @typescript-eslint/no-explicit-any,
+   @typescript-eslint/no-unsafe-assignment,
+   @typescript-eslint/no-unsafe-member-access,
+   @typescript-eslint/no-unsafe-call */
+async function runIframeEvaluatePagefn(args: {
+  src: string;
+  wrapped: string;
+  waitForMs: number;
+  cleanup: boolean;
+}): Promise<unknown> {
+  const g = globalThis as any;
+  const doc = g.document;
+  if (!doc || typeof doc.createElement !== 'function') {
+    throw new Error('evaluate_in_iframe: no document on page');
+  }
+  const iframe = doc.createElement('iframe');
+  iframe.src = args.src;
+  iframe.style.display = 'none';
+  doc.body.appendChild(iframe);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error('iframe_load_failed: load timeout (8s)'));
+      }, 8000);
+      iframe.addEventListener('load', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      iframe.addEventListener('error', () => {
+        clearTimeout(timer);
+        reject(new Error('iframe_load_failed: load error event'));
+      });
+    });
+    if (args.waitForMs > 0) {
+      await new Promise<void>((r) => setTimeout(r, args.waitForMs));
+    }
+    const win = iframe.contentWindow;
+    if (!win) throw new Error('iframe_no_content_window');
+    let runner;
+    try {
+      runner = new win.Function('return ' + args.wrapped);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(
+        'iframe_eval_failed: cannot create Function in iframe (likely cross-origin): ' + msg,
+        { cause: e },
+      );
+    }
+    return await runner();
+  } finally {
+    if (args.cleanup && iframe.parentNode) {
+      iframe.parentNode.removeChild(iframe);
+    }
+  }
+}
+
+async function runIframeChainPagefn(args: {
+  src: string;
+  steps: ReadonlyArray<{ wrapped: string; waitForMs: number }>;
+  cleanup: boolean;
+  returnAll: boolean;
+}): Promise<unknown> {
+  const g = globalThis as any;
+  const doc = g.document;
+  if (!doc || typeof doc.createElement !== 'function') {
+    throw new Error('evaluate_in_iframe_chain: no document on page');
+  }
+  const iframe = doc.createElement('iframe');
+  iframe.src = args.src;
+  iframe.style.display = 'none';
+  doc.body.appendChild(iframe);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error('iframe_load_failed: load timeout (8s)'));
+      }, 8000);
+      iframe.addEventListener('load', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      iframe.addEventListener('error', () => {
+        clearTimeout(timer);
+        reject(new Error('iframe_load_failed: load error event'));
+      });
+    });
+    const win = iframe.contentWindow;
+    if (!win) throw new Error('iframe_no_content_window');
+    const results: unknown[] = [];
+    for (let i = 0; i < args.steps.length; i++) {
+      const step = args.steps[i];
+      if (!step) continue;
+      if (step.waitForMs > 0) {
+        await new Promise<void>((r) => setTimeout(r, step.waitForMs));
+      }
+      let runner;
+      try {
+        runner = new win.Function('return ' + step.wrapped);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(`iframe_chain_step_${i}_failed: cannot create Function in iframe: ` + msg, {
+          cause: e,
+        });
+      }
+      try {
+        const r = await runner();
+        results.push(r);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(`iframe_chain_step_${i}_threw: ` + msg, { cause: e });
+      }
+    }
+    return args.returnAll ? results : results[results.length - 1];
+  } finally {
+    if (args.cleanup && iframe.parentNode) {
+      iframe.parentNode.removeChild(iframe);
+    }
+  }
+}
+
+async function runWorkerPagefn(args: { source: string; message: unknown }): Promise<unknown> {
+  const g = globalThis as any;
+  if (typeof g.Worker !== 'function' || typeof g.Blob !== 'function' || !g.URL) {
+    throw new Error('evaluate_in_worker: Worker / Blob / URL not available in this realm');
+  }
+  const blob = new g.Blob([args.source], { type: 'application/javascript' });
+  const url = g.URL.createObjectURL(blob);
+  let worker: any = null;
+  try {
+    worker = new g.Worker(url);
+    return await new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error('worker: no message returned within 8s'));
+      }, 8000);
+      worker.addEventListener('message', (e: any) => {
+        clearTimeout(timer);
+        resolve(e?.data);
+      });
+      worker.addEventListener('error', (e: any) => {
+        clearTimeout(timer);
+        const msg: string =
+          typeof e?.message === 'string' ? e.message : 'unknown error in worker source';
+        reject(new Error('worker_error: ' + msg));
+      });
+      worker.postMessage(args.message);
+    });
+  } finally {
+    if (worker) {
+      try {
+        worker.terminate();
+      } catch {
+        /* terminate may throw on already-failed worker; non-fatal */
+      }
+    }
+    try {
+      g.URL.revokeObjectURL(url);
+    } catch {
+      /* revoke may throw if already revoked; non-fatal */
+    }
+  }
+}
+/* eslint-enable
+   @typescript-eslint/no-explicit-any,
+   @typescript-eslint/no-unsafe-assignment,
+   @typescript-eslint/no-unsafe-member-access,
+   @typescript-eslint/no-unsafe-call */
 function getExtras(session: Session): SessionExtras {
   let e = sessionExtras.get(session);
   if (!e) {
@@ -3633,6 +3804,91 @@ export class PlaywrightDriver extends BrowserDriver {
         },
         Math.max(1, params.timeoutMs),
       );
+      (t as unknown as { unref?: () => void }).unref?.();
+    });
+    return await Promise.race([evalPromise, timeoutPromise]);
+  }
+
+  async evaluateInIframe(
+    session: Session,
+    params: {
+      src: string;
+      expression: string;
+      waitForMs?: number;
+      timeoutMs?: number;
+      cleanup?: boolean;
+    },
+    opts?: PageOpts,
+  ): Promise<unknown> {
+    const page = this._page(session, opts?.page);
+    const waitForMs = Math.max(0, Math.min(params.waitForMs ?? 1500, 30_000));
+    const timeoutMs = Math.max(1000, Math.min(params.timeoutMs ?? 10_000, 60_000));
+    const cleanup = params.cleanup !== false;
+    const wrapped = wrapAgentExpression(params.expression);
+    const evalPromise = page.evaluate(runIframeEvaluatePagefn, {
+      src: params.src,
+      wrapped,
+      waitForMs,
+      cleanup,
+    });
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      const t = setTimeout(() => {
+        reject(new Error(`evaluate_in_iframe: timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      (t as unknown as { unref?: () => void }).unref?.();
+    });
+    return await Promise.race([evalPromise, timeoutPromise]);
+  }
+
+  async evaluateInIframeChain(
+    session: Session,
+    params: {
+      src: string;
+      steps: ReadonlyArray<{ expression: string; waitForMs?: number }>;
+      timeoutMs?: number;
+      cleanup?: boolean;
+      returnAll?: boolean;
+    },
+    opts?: PageOpts,
+  ): Promise<unknown> {
+    const page = this._page(session, opts?.page);
+    const timeoutMs = Math.max(1000, Math.min(params.timeoutMs ?? 15_000, 90_000));
+    const cleanup = params.cleanup !== false;
+    const returnAll = params.returnAll === true;
+    const wrappedSteps = params.steps.map((s) => ({
+      wrapped: wrapAgentExpression(s.expression),
+      waitForMs: Math.max(0, Math.min(s.waitForMs ?? 0, 30_000)),
+    }));
+    const evalPromise = page.evaluate(runIframeChainPagefn, {
+      src: params.src,
+      steps: wrappedSteps,
+      cleanup,
+      returnAll,
+    });
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      const t = setTimeout(() => {
+        reject(new Error(`evaluate_in_iframe_chain: timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      (t as unknown as { unref?: () => void }).unref?.();
+    });
+    return await Promise.race([evalPromise, timeoutPromise]);
+  }
+
+  async evaluateInWorker(
+    session: Session,
+    params: { source: string; message?: unknown; timeoutMs?: number },
+    opts?: PageOpts,
+  ): Promise<unknown> {
+    const page = this._page(session, opts?.page);
+    const timeoutMs = Math.max(1000, Math.min(params.timeoutMs ?? 10_000, 60_000));
+    const evalPromise = page.evaluate(runWorkerPagefn, {
+      source: params.source,
+      message: params.message ?? null,
+    });
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      const t = setTimeout(() => {
+        reject(new Error(`evaluate_in_worker: timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
       (t as unknown as { unref?: () => void }).unref?.();
     });
     return await Promise.race([evalPromise, timeoutPromise]);

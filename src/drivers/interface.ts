@@ -759,6 +759,65 @@ export abstract class BrowserDriver {
     return this.unsupportedDebuggerSurface('evaluateOnFrame');
   }
 
+  /** Spawn an `<iframe>` at `src` on the active page, wait for it to
+   *  load, evaluate `expression` inside `iframe.contentWindow`, return
+   *  the result, optionally remove the iframe. Use when the request the
+   *  agent wants to fire is rejected from main-frame context because
+   *  the server binds tokens to the JS-execution context that generated
+   *  them (KPSDK / iframe-init-bound CSRF / vendor-SDK-spawned worker).
+   *  Parallel to evaluateOnFrame but spawns the frame instead of
+   *  addressing a stack frame. Drivers without iframe support throw the
+   *  standard unsupported-surface error. */
+  evaluateInIframe(
+    _session: Session,
+    _params: {
+      src: string;
+      expression: string;
+      waitForMs?: number;
+      timeoutMs?: number;
+      cleanup?: boolean;
+    },
+    _opts?: PageOpts,
+  ): Promise<unknown> {
+    return this.unsupportedDebuggerSurface('evaluateInIframe');
+  }
+
+  /** Spawn one iframe at `src` and run a sequence of expressions inside
+   *  its context, persisting state across steps (so "wait for SDK
+   *  ready" then "fetch /zgw/..." land as one tool call). Returns the
+   *  last step's result (or all steps when `returnAll`). Saves the
+   *  spawn cost of multiple `evaluateInIframe` calls. */
+  evaluateInIframeChain(
+    _session: Session,
+    _params: {
+      src: string;
+      steps: ReadonlyArray<{ expression: string; waitForMs?: number }>;
+      timeoutMs?: number;
+      cleanup?: boolean;
+      returnAll?: boolean;
+    },
+    _opts?: PageOpts,
+  ): Promise<unknown> {
+    return this.unsupportedDebuggerSurface('evaluateInIframeChain');
+  }
+
+  /** Spawn a Web Worker from `source` on the active page, optionally
+   *  `postMessage(message)`, wait for the first response message,
+   *  terminate. Use when the server binds tokens to a WebWorker context
+   *  (vendor SDKs that run proof-of-work in a dedicated worker so the
+   *  main thread never sees the computation). */
+  evaluateInWorker(
+    _session: Session,
+    _params: {
+      source: string;
+      message?: unknown;
+      timeoutMs?: number;
+    },
+    _opts?: PageOpts,
+  ): Promise<unknown> {
+    return this.unsupportedDebuggerSurface('evaluateInWorker');
+  }
+
   stepDebugger(
     _session: Session,
     _mode: 'over' | 'into' | 'out',

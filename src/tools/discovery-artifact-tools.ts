@@ -465,7 +465,22 @@ export const TOOL_DEFS: ToolDef[] = [
         capability: { type: 'string', description: 'Capability slug this pointer applies to.' },
         kind: {
           type: 'string',
-          enum: ['js_source', 'request_index', 'frame_index', 'page_url', 'other'],
+          enum: [
+            'js_source',
+            'request_index',
+            'frame_index',
+            'page_url',
+            'context_bound_handle',
+            'other',
+          ],
+          description:
+            '`js_source` — file:line pointer for an encoder/signer the next session should re-read. ' +
+            '`request_index` — index into platform_map.captured_requests. ' +
+            '`frame_index` — WS frame index into session.wsFrames. ' +
+            '`page_url` — URL that revealed a useful surface. ' +
+            '`context_bound_handle` — iframe URL / worker source that produced a valid request token ' +
+            'last session (third RE-toolkit axis; agent reuses via `evaluate_in_iframe` / `evaluate_in_worker`). ' +
+            '`other` — anything else.',
         },
         ref: { type: 'string', description: 'The reference string; shape depends on `kind`.' },
         line: {
