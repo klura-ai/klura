@@ -612,6 +612,15 @@ export interface PaginatedA11yTree {
   page_size: number;
   total_pages: number;
   has_more: boolean;
+  /** Annotate-by-exception list of interactive nodes that aren't plainly
+   *  visible on the current viewport. Always present on responses from
+   *  `get_a11y_tree`; empty when every interactive element is cleanly
+   *  clickable. See `runtime/src/phases/visibility.ts` for the codes. */
+  visibility_anomalies?: ReadonlyArray<{
+    role: string;
+    name: string;
+    _v: 'o' | 'f' | 's';
+  }>;
 }
 
 /**

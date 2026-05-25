@@ -16,6 +16,8 @@ import {
 } from '../strategies/policy';
 import { buildPlatformMapSummary, type PlatformMapSummary } from '../response/platform-map-summary';
 import { detectOriginBlocked, isResolvableChallengeShape } from '../phases/origin-blocked-detector';
+import type { VisibilityAnomaly } from '../phases/visibility';
+import { snapVisibilityAnomalies } from '../phases/visibility';
 
 /** Wait window for the JS-challenge auto-resolve path. Most JS-only
  *  challenges (purely client-side bot checks) complete in 3-6 seconds;
@@ -235,15 +237,27 @@ export interface StartSessionResult {
    */
   nav_status?: number | null;
   /**
-   * Structured signal that the initial navigation landed on a known
-   * anti-bot gate (a bot-management wall, IP-level block, or site-closed
-   * page). When present, the agent should call
-   * `abort_session({kind: "origin_blocked", reason})` instead of driving
-   * — the kind discriminator lands in the platform's recent_aborts ledger
-   * and future sessions short-circuit known-blocked starts. See
-   * `runtime/src/phases/origin-blocked-detector.ts`.
+   * Structured signal that the initial navigation landed on a non-
+   * functional page (anti-bot gate, custom error/block page, cross-
+   * origin challenge iframe, site-closed page). Carries the structural
+   * signals that fired — agents branch on shape, not vendor identity.
+   * See `runtime/src/phases/origin-blocked-detector.ts` for the full
+   * signal taxonomy; `recommended_action` is informational and lists
+   * try-first options before mentioning abort.
    */
   origin_blocked?: import('../phases/origin-blocked-detector').OriginBlockedAdvisory;
+  /**
+   * Visibility anomalies on the landing's interactive elements. Annotate-
+   * by-exception: only nodes that are NOT plainly visible appear here.
+   * `_v` values: `"o"` overlapped (covered by another element — clicks
+   * land on the cover), `"f"` below-fold (off-screen vertically), `"s"`
+   * off-screen (outside viewport horizontally or otherwise unreachable
+   * without scroll). Empty array means every interactive element is
+   * cleanly clickable. Surfaced unconditionally on every cold start —
+   * cookie banners, modals, and sticky-header overlap show up here so
+   * agents don't waste clicks on covered targets.
+   */
+  visibility_anomalies?: ReadonlyArray<VisibilityAnomaly>;
   /** Echoed back so the agent sees which graph the session is running. */
   graph?: (typeof GRAPH_MODES)[number];
   /**
@@ -1560,6 +1574,7 @@ export async function startSession(
       originBlocked = advisoryAfter;
     }
   }
+  const visibilityAnomalies = await snapVisibilityAnomalies(driver, session);
   const result: StartSessionResult = {
     sessionId: session.id,
     a11yTree: trimmed.tree,
@@ -1567,6 +1582,7 @@ export async function startSession(
     a11y_truncated: trimmed.truncated,
     url: currentUrl,
     nav_status: navStatus,
+    visibility_anomalies: visibilityAnomalies,
   };
   if (originBlocked) result.origin_blocked = originBlocked;
   if (opts.platform) populatePlatformResponseFields(result, opts.platform);

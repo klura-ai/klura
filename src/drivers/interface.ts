@@ -167,6 +167,21 @@ export abstract class BrowserDriver {
     opts?: PageOpts,
   ): Promise<ReadonlyArray<{ src: string }>>;
 
+  /** Snap visibility for every interactive node (button / link / form
+   *  control) on the top-level page. Returns annotate-by-exception:
+   *  only nodes that are NOT plainly visible appear. `_v` codes:
+   *  `'o'` overlapped (covered by another element — clicks land on the
+   *  cover), `'f'` below-fold (off-screen vertically — needs scroll),
+   *  `'s'` off-screen (other unreachable-without-scroll cases). Used
+   *  by `start_session` / `get_a11y_tree` / `perform_action` click-fail
+   *  to surface cookie-banner / modal / sticky-header overlap before
+   *  the agent burns rounds clicking covered targets. Cap at 100 nodes
+   *  in the returned array. */
+  abstract snapVisibilityForInteractiveNodes(
+    session: Session,
+    opts?: PageOpts,
+  ): Promise<ReadonlyArray<{ role: string; name: string; _v: 'o' | 'f' | 's' }>>;
+
   /** Current top-level frame URL. */
   abstract getUrl(session: Session, opts?: PageOpts): Promise<string>;
 

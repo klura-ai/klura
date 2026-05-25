@@ -2169,6 +2169,93 @@ export class PlaywrightDriver extends BrowserDriver {
        @typescript-eslint/no-unsafe-call */
   }
 
+  async snapVisibilityForInteractiveNodes(
+    session: Session,
+    opts?: PageOpts,
+  ): Promise<ReadonlyArray<{ role: string; name: string; _v: 'o' | 'f' | 's' }>> {
+    const page = this._page(session, opts?.page);
+    /* eslint-disable
+       @typescript-eslint/no-explicit-any,
+       @typescript-eslint/no-unsafe-assignment,
+       @typescript-eslint/no-unsafe-member-access,
+       @typescript-eslint/no-unsafe-call */
+    return page
+      .evaluate(() => {
+        const g = globalThis as any;
+        const doc = g.document;
+        const win = g.window;
+        if (!doc || !win || typeof doc.querySelectorAll !== 'function') return [];
+        const selectors = [
+          'button',
+          'a[href]',
+          'input:not([type="hidden"])',
+          'select',
+          'textarea',
+          '[role="button"]',
+          '[role="link"]',
+          '[role="checkbox"]',
+          '[role="menuitem"]',
+          '[role="tab"]',
+          '[role="option"]',
+          '[role="switch"]',
+        ];
+        const seen = new Set<any>();
+        const out: Array<{ role: string; name: string; _v: 'o' | 'f' | 's' }> = [];
+        for (const sel of selectors) {
+          const els = doc.querySelectorAll(sel);
+          for (let i = 0; i < els.length; i++) {
+            if (out.length >= 100) return out;
+            const el: any = els[i];
+            if (seen.has(el)) continue;
+            seen.add(el);
+            let rect: any;
+            try {
+              rect = el.getBoundingClientRect();
+            } catch {
+              continue;
+            }
+            const w = Number(rect.width);
+            const h = Number(rect.height);
+            if (w === 0 || h === 0) continue; // hidden / display:none — skip silently
+            const vw = Number(win.innerWidth || doc.documentElement.clientWidth);
+            const vh = Number(win.innerHeight || doc.documentElement.clientHeight);
+            const left = Number(rect.left);
+            const top = Number(rect.top);
+            const inX = left + w > 0 && left < vw;
+            const inY = top + h > 0 && top < vh;
+            let v: 'o' | 'f' | 's' | null = null;
+            if (!inY) v = 'f';
+            else if (!inX) v = 's';
+            else {
+              const cx = left + w / 2;
+              const cy = top + h / 2;
+              const topEl: any = doc.elementFromPoint(cx, cy);
+              const sameOrNested =
+                topEl && (topEl === el || el.contains(topEl) || topEl.contains(el));
+              if (!sameOrNested) v = 'o';
+            }
+            if (v === null) continue;
+            const explicitRole = el.getAttribute('role');
+            const role = explicitRole || (el.tagName ? String(el.tagName).toLowerCase() : '');
+            const ariaLabel = el.getAttribute('aria-label');
+            const text = el.textContent || el.value || el.placeholder || '';
+            const name = String(ariaLabel || text)
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 60);
+            out.push({ role, name, _v: v });
+          }
+        }
+        return out;
+      })
+      .catch(() => []);
+    /* eslint-enable
+       @typescript-eslint/no-explicit-any,
+       @typescript-eslint/no-unsafe-assignment,
+       @typescript-eslint/no-unsafe-member-access,
+       @typescript-eslint/no-unsafe-call */
+  }
+
   async delay(session: Session, ms: number): Promise<void> {
     await this._page(session).waitForTimeout(ms);
   }

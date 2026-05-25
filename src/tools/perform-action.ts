@@ -21,6 +21,7 @@ import { graphConfig } from '../phases/registry';
 import { maybeFireSurfaceChanged } from '../phases/surface-changed';
 import { readInitialNavStatus } from './start-session';
 import { detectOriginBlocked } from '../phases/origin-blocked-detector';
+import { snapVisibilityAnomalies } from '../phases/visibility';
 import type { OriginBlockedAdvisory } from '../phases/origin-blocked-detector';
 import type { BrowserDriver, PageOpts } from '../drivers/interface';
 import type { Session } from '../drivers/types/session';
@@ -98,6 +99,16 @@ export interface ActionResult {
    *  burns a session arriving at a conclusion start_session would have
    *  short-circuited. Only fires on `action: "navigate"`. */
   origin_blocked?: OriginBlockedAdvisory;
+  /** Annotate-by-exception list of interactive nodes that aren't plainly
+   *  visible on the post-action page. Always populated when the action
+   *  returns a tree (`returnTree !== false`); empty when every interactive
+   *  element is cleanly clickable. Same shape as `start_session.visibility_anomalies`.
+   *  See `runtime/src/phases/visibility.ts` for the codes. */
+  visibility_anomalies?: ReadonlyArray<{
+    role: string;
+    name: string;
+    _v: 'o' | 'f' | 's';
+  }>;
 }
 
 /**
@@ -519,7 +530,47 @@ export async function performAction(
       if (dialectHint) hint = dialectHint + (await buildSelectorHint());
       else if (overlay) hint = overlay;
       else hint = await buildSelectorHint();
-      throw new Error(msg + hint, { cause: err });
+      // Visibility evidence: always append concrete visibility info from a
+      // post-failure snap. Even when one of the other hints fired (overlay-
+      // intercept named the cover, dialect was off, selector was stale), the
+      // visible-only list tells the agent what else they CAN click right now
+      // — saves a follow-up get_a11y_tree call when the right move is to
+      // dismiss-then-retry against a visible element. Costs ~10-30 ms on a
+      // failure path that's already slow; worth it.
+      const visibilityHint = await buildVisibilityFailureHint();
+      throw new Error(msg + hint + visibilityHint, { cause: err });
+    }
+  };
+  const buildVisibilityFailureHint = async (): Promise<string> => {
+    try {
+      const anomalies = await snapVisibilityAnomalies(driver, session);
+      // No data → silent. Visibility info is best-effort context, never a
+      // hard failure axis.
+      if (anomalies.length === 0) return '';
+      const overlapped = anomalies.filter((a) => a._v === 'o');
+      const belowFold = anomalies.filter((a) => a._v === 'f' || a._v === 's');
+      const lines: string[] = [];
+      lines.push(`\n\nVisibility snap (post-failure):`);
+      lines.push(
+        `  ${overlapped.length} overlapped (covered by another element), ` +
+          `${belowFold.length} below-fold / off-screen.`,
+      );
+      if (overlapped.length > 0) {
+        const sample = overlapped.slice(0, 5).map((a) => {
+          const name = a.name ? ` "${a.name}"` : '';
+          return `    - ${a.role}${name} _v: o`;
+        });
+        lines.push(`  Sample overlapped:`);
+        lines.push(...sample);
+      }
+      lines.push(
+        `  If your target appears overlapped, dismiss the covering element first. If your ` +
+          `target appears below-fold, scroll it into view. Full visibility info is on every ` +
+          `get_a11y_tree response under \`visibility_anomalies\`.`,
+      );
+      return lines.join('\n');
+    } catch {
+      return '';
     }
   };
   switch (action) {
@@ -761,6 +812,7 @@ export async function performAction(
         )
       : {};
 
+  const visibilityAnomalies = await snapVisibilityAnomalies(driver, session);
   return {
     a11yTree: trimmed.tree,
     a11y_total_chars: trimmed.total_chars,
@@ -768,6 +820,7 @@ export async function performAction(
     url: currentUrl,
     ...navStatusField,
     ...originBlockedField,
+    visibility_anomalies: visibilityAnomalies,
     ...subPagesField,
     ...checkpointField,
   };
@@ -789,6 +842,7 @@ export async function getA11yTree(
   const rawTree = await driver.getAccessibilityTree(session);
   const paginated = paginateA11yTree(rawTree, opts);
   session.extractedContentBytes = (session.extractedContentBytes ?? 0) + paginated.tree.length;
+  paginated.visibility_anomalies = await snapVisibilityAnomalies(driver, session);
   return paginated;
 }
 
