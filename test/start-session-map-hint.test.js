@@ -51,7 +51,8 @@ test("graph: 'map' → response carries the map-graph start hint", async () => {
     assert.ok(result._hint, 'map graph has a hint');
     assert.match(result._hint, /Map mode/i);
     assert.match(result._hint, /mutating actions/);
-    assert.ok(result._hint.length < 300, `hint should be terse, got ${result._hint.length} chars`);
+    assert.match(result._hint, /Default target/i);
+    assert.ok(result._hint.length < 800, `hint should be terse, got ${result._hint.length} chars`);
   } finally {
     restore();
   }

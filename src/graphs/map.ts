@@ -49,6 +49,11 @@ export const MAP_GRAPH: Graph = {
       'Map mode: explore freely. mutating actions gate on consent (one ack per session). ' +
       'record_observed_capability flags candidates; when one is ready to save, ' +
       'lift_observed_capability({name, args}) opens triage + lift for that slug. ' +
-      'Repeat for as many as you find; end_drive when done.',
+      'Repeat for as many as you find; end_drive when done. ' +
+      'Default target: save what real users come to this site to do (the operations the ' +
+      'landing page presents as primary; what platform_map.observed_capabilities suggests ' +
+      'prior agents found valuable). Chrome surfaces (header/footer/nav HTML, CMS ' +
+      'fragments, IP-echo, static manifests) are easy 200s but rarely the work — your ' +
+      'judgment overrides this default when the user explicitly cares about them.',
   },
 };
