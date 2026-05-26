@@ -84,6 +84,65 @@ function populatePlatformResponseFields(result: StartSessionResult, platform: st
   if (map) result.platform_map = map;
   const aborts = readRecentAborts(platform, RECENT_ABORTS_BUDGET);
   if (aborts.length > 0) result.recent_aborts = aborts;
+  // Escalation pattern: ≥3 aborts within 24h sharing root cause (kind + host).
+  // The "try the same approach harder" reflex burned full sessions on
+  // identical bot-management walls — this surfaces the same-cause count so
+  // the agent has to consciously choose to escalate or acknowledge the
+  // pattern.
+  const escalation = computeAbortEscalation(readRecentAborts(platform, 50));
+  if (escalation) result.must_escalate = escalation;
+}
+
+const ESCALATION_THRESHOLD = 3;
+const ESCALATION_WINDOW_HOURS = 24;
+
+function computeAbortEscalation(
+  aborts: ReadonlyArray<{
+    kind?: string;
+    host?: string;
+    hours_since: number;
+  }>,
+): NonNullable<StartSessionResult['must_escalate']> | undefined {
+  if (aborts.length < ESCALATION_THRESHOLD) return undefined;
+  const groups = new Map<string, { kind: string; host?: string; count: number }>();
+  for (const a of aborts) {
+    if (a.hours_since > ESCALATION_WINDOW_HOURS) continue;
+    const kind = a.kind ?? 'other';
+    const host = a.host;
+    const key = `${kind}|${host ?? ''}`;
+    const entry = groups.get(key);
+    if (entry) entry.count += 1;
+    else groups.set(key, { kind, host, count: 1 });
+  }
+  let worst: { kind: string; host?: string; count: number } | null = null;
+  for (const entry of groups.values()) {
+    if (entry.count < ESCALATION_THRESHOLD) continue;
+    if (!worst || entry.count > worst.count) worst = entry;
+  }
+  if (!worst) return undefined;
+  const hostFragment = worst.host ? ` on host ${JSON.stringify(worst.host)}` : '';
+  return {
+    same_root_cause_count: worst.count,
+    kind: worst.kind,
+    ...(worst.host !== undefined ? { host: worst.host } : {}),
+    advisory:
+      `${worst.count} prior aborts in the last ${ESCALATION_WINDOW_HOURS}h share root cause ` +
+      `kind=${JSON.stringify(worst.kind)}${hostFragment}. The "try the same approach harder" ` +
+      `reflex will not work — the underlying gate has not changed since the prior sessions, and ` +
+      `the levers that COULD flip it (egress / proxy / driver / human-in-the-loop) are not in ` +
+      `the agent's control. What you CAN do: ` +
+      `(a) abort_session immediately with a reason that names the structural condition that has ` +
+      `NOT changed since the prior aborts (e.g. "same egress IP, no proxy rotation since session ` +
+      `<prior_session_id>") — do NOT restate this advisory verbatim, that's circular and inflates ` +
+      `the abort ledger; ` +
+      `(b) if you have hard evidence the condition HAS changed (site lifted block, new cookies ` +
+      `primed, observed different network) document that in your abort_session.reason so future ` +
+      `readers can distinguish a real retry from a duplicate. ` +
+      `Note: the runtime surfaces this count so the human operator who reads the abort ledger ` +
+      `sees the pattern. Operator-level moves (residential / mobile proxy, manual remote-viewer ` +
+      `session, driver swap) are out of scope for an unattended session — the agent suggesting ` +
+      `them is theater. Document the condition; let the operator decide.`,
+  };
 }
 
 /**
@@ -196,6 +255,21 @@ export interface StartSessionResult {
     captured_actions_count: number;
     phase_at_abort: string;
   }>;
+  /**
+   * Fires when ≥3 prior aborts in the last 24h share the same root cause
+   * (same `kind` and `host`). Cross-session signal that the agent's natural
+   * "try the same approach harder" reflex won't work — N prior sessions
+   * already proved it. Agent must escalate (stealth driver, start_remote_session,
+   * different egress) or explicitly acknowledge that the underlying condition
+   * has changed before driving the UI further. Absent when no escalation
+   * pattern is detected.
+   */
+  must_escalate?: {
+    same_root_cause_count: number;
+    kind: string;
+    host?: string;
+    advisory: string;
+  };
   /**
    * True when start_session auto-executed a matching saved strategy.
    * `execute_result` carries the executor's response. When executed is true the
