@@ -57,8 +57,17 @@ export interface ListPlatformSkillsResult {
   _hint?: string;
 }
 
-export function listPlatformSkills(): ListPlatformSkillsResult {
-  const list = skills.listPlatformSkills();
+export interface ListPlatformSkillsArgs {
+  /** Filter result to one platform — caller already knows which site they're
+   *  asking about, so the full corpus inlining is waste. Same shape as
+   *  `get_platform_logbook` for the cross-tool consistency. */
+  platform?: string;
+}
+
+export function listPlatformSkills(args: ListPlatformSkillsArgs = {}): ListPlatformSkillsResult {
+  const wanted = typeof args.platform === 'string' ? args.platform : null;
+  const fullList = skills.listPlatformSkills();
+  const list = wanted ? fullList.filter((s) => s.platform === wanted) : fullList;
   // Inline discovery_artifact onto every capability that has one on disk. The
   // artifact summarizes what prior sessions learned so the next-run agent can
   // resume without re-discovering from zero. See
@@ -80,6 +89,20 @@ export function listPlatformSkills(): ListPlatformSkillsResult {
   const hasAnyCapability = list.some((s) => s.capabilities.length > 0);
   const result: ListPlatformSkillsResult = { platforms: list };
   if (hasAnyCapability) result._hint = TEST_BEFORE_BUILD_HINT;
+  // Promote the scoped form when the caller asked for the full corpus and the
+  // result is large enough that the host's tool-budget will spill it to disk.
+  // Without this nudge, agents reach for `Bash grep` / `python3` to parse the
+  // spilled file instead of re-calling with the platform filter — wastes
+  // rounds on basic bookkeeping. Threshold (8) picked from field-reports:
+  // single-platform results stay under the budget; ≥8 platforms with inlined
+  // discovery_artifacts routinely spill.
+  if (!wanted && list.length >= 8) {
+    result._hint =
+      (result._hint ? `${result._hint} ` : '') +
+      `If you already know which platform you need, re-call list_platform_skills({platform: "<slug>"}) — the scoped form fits inline. ` +
+      `For just the platform's capability/abort summary use get_platform_logbook({platform: "<slug>"}). ` +
+      `Bash grep / python3 against a spilled tool-result file is the wrong move.`;
+  }
   return result;
 }
 
@@ -259,9 +282,18 @@ export const TOOL_DEFS: ToolDef[] = [
   {
     name: TOOL_NAMES.listPlatformSkills,
     description:
-      'List every platform skill — one entry per platform with its saved capabilities and any observed-but-not-lifted ones. The "platform skill" is the bundle of all capabilities klura has learned for one site.',
-    inputSchema: { type: 'object', properties: {} },
-    handler: () => listPlatformSkills(),
+      'List platform skills — one entry per platform with its saved capabilities and any observed-but-not-lifted ones. Pass `platform` to scope the result to a single site (recommended when the caller already knows which platform they need — the full-corpus response routinely exceeds the output budget on machines with many primed platforms).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        platform: {
+          type: 'string',
+          description:
+            'Optional platform slug filter (e.g. "github"). When omitted, every platform is returned and the response usually spills to a persisted file — prefer the scoped form when you already know the target.',
+        },
+      },
+    },
+    handler: (args: unknown) => listPlatformSkills((args ?? {}) as ListPlatformSkillsArgs),
   },
 
   {
