@@ -13,8 +13,8 @@ import {
   recordObservedCapability,
 } from '../../working-dir/logbook';
 import { inferObservedCapabilitiesFromGraph } from '../../working-dir/url-graph';
-import { loadLogbook } from '../../working-dir/logbook';
-import type { ObservedCapabilityInput } from '../../working-dir/logbook';
+import { buildSessionSummary, countPerformActionCalls } from './session-summary';
+import { inferObservedCapabilitiesFromTriage } from './triage-inference';
 import type {
   CaptureEvent,
   HttpRequestPayload,
@@ -799,8 +799,22 @@ export async function endDrive(
   clearStartersForSession(sessionId);
   clearSessionObservations(sessionId);
   clearObservedSessionTracking(sessionId);
+  // session_summary: verbatim ground truth for the agent's retrospective.
+  // Without this the retro is reconstructed from list_platform_skills + the
+  // logbook + recent_aborts — all of which mix prior-session state into
+  // this-session prose. Agents quote `recent_aborts[*].reason` strings as
+  // "tested this session", inflating the abort ledger with fabricated path
+  // coverage that future sessions then paraphrase. Each field below is
+  // observable from session state only.
+  const sessionSummary = buildSessionSummary(
+    session,
+    autoSynthesized,
+    countPerformActionCalls(session),
+  );
+
   const result: {
     ok: true;
+    session_summary: typeof sessionSummary;
     auto_synthesized?: SynthLedgerEntry[];
     artifacts_updated?: typeof artifactWrites;
     prior_decline_applied?: Array<{
@@ -813,7 +827,7 @@ export async function endDrive(
       synth: typeof synthDiag;
       declared_capabilities?: Array<{ capability: string; args: Record<string, string> }>;
     };
-  } = { ok: true };
+  } = { ok: true, session_summary: sessionSummary };
   if (autoSynthesized.length > 0) result.auto_synthesized = autoSynthesized;
   if (artifactWrites.length > 0) result.artifacts_updated = artifactWrites;
 
@@ -855,145 +869,4 @@ export async function endDrive(
     };
   }
   return result;
-}
-
-/** For each capability on the platform, find triaged surfaces whose
- *  URLs aren't covered by the saved strategy's endpoint or prereq URLs,
- *  and yield observed_capability inputs naming them. The triage plan is
- *  the agent's recognition that the surface exists; the absence of a
- *  matching saved strategy is the choice not to lift it. Together they
- *  fit `record_observed_capability`'s contract — agent saw it, agent
- *  didn't lift it.
- *
- *  Best-effort: any malformed plan or load failure yields zero entries
- *  for that capability rather than blocking close. */
-function inferObservedCapabilitiesFromTriage(
-  platform: string,
-  sessionId: string,
-): ObservedCapabilityInput[] {
-  let logbook: ReturnType<typeof loadLogbook>;
-  try {
-    logbook = loadLogbook(platform);
-  } catch {
-    return [];
-  }
-  const out: ObservedCapabilityInput[] = [];
-  const taken = new Set<string>();
-  for (const cap of logbook.observed_capabilities) {
-    if (typeof cap.name === 'string') taken.add(cap.name);
-  }
-  for (const [capabilityName, entry] of Object.entries(logbook.per_capability)) {
-    const plansBySurface = entry.triage_plans_by_surface;
-    if (!plansBySurface || typeof plansBySurface !== 'object') continue;
-    let savedStrategyUrls: Set<string>;
-    try {
-      const strategies = skills.loadStrategies(platform, capabilityName);
-      savedStrategyUrls = collectStrategyUrls(strategies);
-    } catch {
-      continue;
-    }
-    for (const [surfaceLabel, plan] of Object.entries(plansBySurface)) {
-      if (typeof plan !== 'object') continue;
-      const surfaceUrls: string[] = [];
-      const obs = (plan as { observed_at_urls?: unknown }).observed_at_urls;
-      if (Array.isArray(obs)) for (const u of obs) if (typeof u === 'string') surfaceUrls.push(u);
-      const ds = (plan as { defense_surface?: unknown }).defense_surface;
-      if (ds && typeof ds === 'object') {
-        const reqs = (ds as { request_patterns?: unknown }).request_patterns;
-        if (Array.isArray(reqs)) {
-          for (const r of reqs) {
-            if (typeof r !== 'string') continue;
-            const tokens = r.trim().split(/\s+/);
-            for (const t of tokens) {
-              if (t.startsWith('http://') || t.startsWith('https://') || t.startsWith('/')) {
-                surfaceUrls.push(t);
-              }
-            }
-          }
-        }
-      }
-      if (surfaceUrls.length === 0) continue;
-      const covered = surfaceUrls.some((u) => urlMatchesAny(u, savedStrategyUrls));
-      if (covered) continue;
-      // Generate a slug from the surface_label. Surface labels like
-      // `search`, `checkout` map to capability-shaped names.
-      const name = surfaceLabel
-        .toLowerCase()
-        .replace(/[^a-z0-9_]/g, '_')
-        .replace(/_+/g, '_');
-      if (!name || taken.has(name)) continue;
-      taken.add(name);
-      out.push({
-        name,
-        evidence: {
-          source: 'auto_inferred_triage_plan',
-          capability: capabilityName,
-          surface_label: surfaceLabel,
-          urls: surfaceUrls.slice(0, 5),
-        },
-        why_not_lifted: 'triaged_not_lifted',
-        session_id: sessionId,
-      });
-    }
-  }
-  return out;
-}
-
-/** Collect every URL the strategies for a capability touch — main
- *  endpoint plus any prereq URL. Used by triaged-not-lifted inference
- *  to decide whether a triaged surface is structurally part of an
- *  existing saved strategy or a sibling that wasn't lifted. */
-function collectStrategyUrls(strategies: Array<Record<string, unknown>>): Set<string> {
-  const urls = new Set<string>();
-  for (const strat of strategies) {
-    const baseUrl = strat.baseUrl;
-    const endpoint = strat.endpoint;
-    if (typeof baseUrl === 'string' && typeof endpoint === 'string') {
-      try {
-        urls.add(new URL(endpoint, baseUrl).toString());
-      } catch {
-        urls.add(`${baseUrl}${endpoint}`);
-      }
-    } else if (typeof endpoint === 'string') {
-      urls.add(endpoint);
-    }
-    const prereqs = strat.prerequisites;
-    if (Array.isArray(prereqs)) {
-      for (const p of prereqs) {
-        if (!p || typeof p !== 'object') continue;
-        const u = (p as { url?: unknown }).url;
-        if (typeof u === 'string') urls.add(u);
-      }
-    }
-  }
-  return urls;
-}
-
-/** Does `candidate` (URL or absolute path) hit any URL in `coveredUrls`?
- *  Compares origin+pathname; query strings and templates ignored.
- *  Tolerates relative candidates by checking pathname-only match. */
-function urlMatchesAny(candidate: string, coveredUrls: Set<string>): boolean {
-  const candidatePath = pathnameOf(candidate);
-  if (!candidatePath) return false;
-  for (const url of coveredUrls) {
-    const coveredPath = pathnameOf(url);
-    if (!coveredPath) continue;
-    if (candidatePath === coveredPath) return true;
-  }
-  return false;
-}
-
-function pathnameOf(rawUrl: string): string | null {
-  try {
-    const u = new URL(rawUrl);
-    let p = u.pathname || '/';
-    if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
-    return p;
-  } catch {
-    if (!rawUrl.startsWith('/')) return null;
-    const q = rawUrl.indexOf('?');
-    let p = q === -1 ? rawUrl : rawUrl.slice(0, q);
-    if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
-    return p;
-  }
 }

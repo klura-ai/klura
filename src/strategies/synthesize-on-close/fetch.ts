@@ -16,6 +16,7 @@ import {
 } from './helpers';
 import {
   attachSaveWarningsToStrategy,
+  detectBlockingTypedTextDrift,
   detectTypedTextDrift,
   findLiteralInSessionCaptures,
   type LiteralMatch,
@@ -535,6 +536,33 @@ export function synthesizeFetchFromCaptures(
       ...(Object.keys(runtimeMetaBlock).length > 0 ? { runtime_meta: runtimeMetaBlock } : {}),
     };
     attachSaveWarningsToStrategy(strategy, detectTypedTextDrift(session, save.args));
+    // Hard-block on guaranteed-broken drifts: declared arg's literal never
+    // surfaced in capture AND the synthesized strategy lacks any
+    // `{{argName}}` placeholder. The saved strategy bakes whatever the
+    // agent did type into the arg slot, so future callers' values can
+    // never reach the wire. Skip persistence so the next session re-drives
+    // with the literal typed verbatim.
+    const blockingDrifts = detectBlockingTypedTextDrift(strategy, session, save.args);
+    if (blockingDrifts.length > 0) {
+      diag.push({
+        pass: 'synth_fetch',
+        capability: save.capability,
+        phase: 'skip',
+        outcome: 'typed_text_drift_blocking',
+        detail: {
+          baseUrl,
+          endpoint,
+          method: req.method,
+          unbound_args: blockingDrifts
+            .map((w) => {
+              const m = /declared arg "([^"]+)"/.exec(w.message);
+              return m ? m[1] : null;
+            })
+            .filter((n): n is string => n !== null),
+        },
+      });
+      continue;
+    }
     // Parameterization disclosure: auto-synth bypasses saveStrategyAudit
     // (no sessionId passed). Run the structural check here so paramless
     // auto-saves carry the warning into runtime_meta.save_warnings; next

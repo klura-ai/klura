@@ -28,6 +28,7 @@
 
 import { hashGatePayload } from '../gate/hash';
 import { issueToken, lookupToken, consumeToken } from '../gate/store';
+import { didYouMeanSuffix } from '../validators';
 import { diffPaths } from '../gate/diff';
 import { extractBundledIssues } from '../strategies/validate/bundled-issues';
 
@@ -398,9 +399,15 @@ export class Audit<TPayload, TCtx> {
       }
       const emittedForKind = allWarnings.filter((w) => w.kind === ackKind);
       if (emittedForKind.length === 0) {
+        const emittedKinds = [...new Set(allWarnings.map((w) => w.kind))];
+        const suggestionFragment = didYouMeanSuffix(ackKind, emittedKinds);
+        const fallbackFragment =
+          suggestionFragment.length === 0 && emittedKinds.length > 0
+            ? ` — emitted this audit: ${emittedKinds.map((k) => JSON.stringify(k)).join(', ')}`
+            : '';
         ackIssues.push(
           `acks contains kind "${ackKind}" but no detector emitted a warning with that kind — ` +
-            `remove the ack or fix the kind spelling`,
+            `remove the ack or fix the kind spelling${suggestionFragment}${fallbackFragment}`,
         );
         continue;
       }

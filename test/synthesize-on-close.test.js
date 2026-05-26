@@ -179,11 +179,36 @@ test('synth_recorded: assigns unique slug ids to every step', async () => {
   }
 });
 
+test('synth_recorded: skips persistence when declared arg literal absent AND no {{arg}} placeholder', async () => {
+  // Guaranteed-broken-drift case: declared arg "text"="hello world" but agent typed
+  // "noise" — the recorded-path's value would bake "noise", warm execute
+  // sends "noise" for every caller. detectBlockingTypedTextDrift catches this
+  // (literal absent AND no {{text}} placeholder in the strategy) so synth
+  // skips persistence and the diagnostic surfaces the unbound arg.
+  const session = mkSession({
+    performActionHistory: [
+      { at: Date.now() - 1000, action: 'type', selector: 'textarea#body', value: 'noise' },
+      { at: Date.now() - 500, action: 'click', selector: 'button#publish' },
+    ],
+  });
+  session.platform = 'test-synth-drift-blocking';
+  const diag = [];
+  const out = await synthesizeFallbacksOnClose(session, session.platform, null, diag);
+  const recorded = out.find((r) => r.tier === 'recorded-path');
+  assert.equal(recorded, undefined, 'recorded-path must NOT be persisted on guaranteed-broken drift');
+  const drift = diag.find((d) => d.outcome === 'typed_text_drift_blocking');
+  assert.ok(drift, `expected typed_text_drift_blocking diagnostic, got: ${JSON.stringify(diag)}`);
+  assert.deepEqual(drift.detail?.unbound_args, ['text']);
+});
+
 test('synth_recorded does not add a second navigate when history already starts with one', async () => {
+  // value must include the declared arg literal verbatim so typed_text_drift
+  // doesn't trigger the synth_recorded skip — the test's subject is navigate
+  // deduplication, not drift detection.
   const session = mkSession({
     performActionHistory: [
       { at: Date.now() - 2000, action: 'navigate', url: 'https://example.com/edit' },
-      { at: Date.now() - 1000, action: 'type', selector: 'textarea#body', value: 'x' },
+      { at: Date.now() - 1000, action: 'type', selector: 'textarea#body', value: 'hello world' },
       { at: Date.now() - 500, action: 'click', selector: 'button#publish' },
     ],
   });

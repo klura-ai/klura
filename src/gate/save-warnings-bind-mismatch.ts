@@ -3,6 +3,7 @@
 
 import type { Strategy } from '../strategies/skills';
 import { getCapturedRequestsProvider } from '../strategies/validate/providers';
+import { levenshtein } from '../utils/string-distance';
 import type { SaveWarning } from './save-warnings';
 
 type BindSlot = 'query' | 'body' | 'header';
@@ -128,7 +129,7 @@ function closestWireKey(bindName: string, wireKeys: Set<string>): string | null 
     const canon = canonKey(k);
     if (!canon) continue;
     if (canon === target) return k; // Same canonical form — strong signal.
-    const d = editDistance(canon, target);
+    const d = levenshtein(canon, target);
     const maxLen = Math.max(canon.length, target.length);
     let threshold = 4;
     if (maxLen <= 6) threshold = 2;
@@ -138,24 +139,6 @@ function closestWireKey(bindName: string, wireKeys: Set<string>): string | null 
     }
   }
   return best?.key ?? null;
-}
-
-function editDistance(a: string, b: string): number {
-  if (a === b) return 0;
-  if (!a.length) return b.length;
-  if (!b.length) return a.length;
-  const prev = new Array<number>(b.length + 1);
-  const curr = new Array<number>(b.length + 1);
-  for (let j = 0; j <= b.length; j += 1) prev[j] = j;
-  for (let i = 1; i <= a.length; i += 1) {
-    curr[0] = i;
-    for (let j = 1; j <= b.length; j += 1) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      curr[j] = Math.min((prev[j] ?? 0) + 1, (curr[j - 1] ?? 0) + 1, (prev[j - 1] ?? 0) + cost);
-    }
-    for (let j = 0; j <= b.length; j += 1) prev[j] = curr[j] ?? 0;
-  }
-  return prev[b.length] ?? 0;
 }
 
 interface CapturedRequestSnapshot {

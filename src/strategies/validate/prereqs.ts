@@ -11,6 +11,7 @@ import {
   prereqReferenceSlug as prereqReferenceSlugFromSchema,
 } from '../schemas/prereqs';
 import { parseOrThrow, renderZodSkeleton } from '../schemas/zod-helpers';
+import { didYouMeanSuffix } from '../../utils/string-distance';
 
 /** Render the JSON skeleton for a prereq kind. Reads from the canonical
  *  Zod schema in `schemas/prereqs.ts` — single source for both validate
@@ -68,8 +69,10 @@ export function validatePrereqShape(
 
   const schema = getPrereqSchema(kind);
   if (!schema) {
+    const allKinds = [...PREREQ_KINDS, 'cached'];
+    const suggestion = didYouMeanSuffix(kind, allKinds);
     throw new Error(
-      `invalid_strategy: ${where}.kind = ${JSON.stringify(kind)} is not a recognized prereq kind. ` +
+      `invalid_strategy: ${where}.kind = ${JSON.stringify(kind)} is not a recognized prereq kind${suggestion}. ` +
         `Allowed: ${PREREQ_KINDS.map((k) => JSON.stringify(k)).join(', ')}, "cached".\n\n` +
         `Expected shape:\n  { kind: ${PREREQ_KINDS.map((k) => JSON.stringify(k)).join(' | ')}, ... }\n\n` +
         `See klura://reference#capability-prereq.`,

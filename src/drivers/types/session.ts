@@ -479,6 +479,24 @@ export interface Session {
    */
   savedCapabilities?: Array<{ capability: string; at: number; tier: string }>;
   /**
+   * Post-save validation outcomes that left a capability in a non-working
+   * state — either `archived` (verifySavedStrategy returned non-2xx, the
+   * `.json` was moved to `.broken.json`) or `declined` (the agent acked
+   * `post_save_validation_consent` with `cancelled: true`, leaving the
+   * strategy on disk unverified). Pushed by `resolvePostSaveValidation`
+   * in `runtime/src/checkpoints/api.ts`. Read by the end_drive audit's
+   * `abandoned_save_attempts_not_retried` Detector: each entry whose
+   * capability has no successful `save_strategy` in this session AFTER
+   * the abandonment timestamp blocks close — the agent declined or hit
+   * a structural rejection and walked away without fixing it, leaving
+   * a stale/.broken strategy that warm callers would silently use.
+   */
+  abandonedSaveAttempts?: Array<{
+    capability: string;
+    kind: 'archived' | 'declined';
+    at: number;
+  }>;
+  /**
    * Total `save_strategy` calls the agent made on this session, including
    * attempts that threw (audit rejection, validation failure). Incremented
    * unconditionally at the top of every saveStrategy entry — separate from

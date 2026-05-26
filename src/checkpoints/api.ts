@@ -58,11 +58,13 @@ async function resolvePostSaveValidation(
 
   if (args.cancelled === true) {
     stampRuntimeMeta(pending.platform, pending.capability, { post_save_validation: 'declined' });
+    recordAbandonedSaveAttempt(session, pending.capability, 'declined');
     return {
       ok: true,
       _hint:
         `Post-save validation declined — \`${pending.capability}\` stands unverified ` +
-        `(runtime_meta.post_save_validation: "declined"). A later session can re-validate.`,
+        `(runtime_meta.post_save_validation: "declined"). end_drive will refuse close ` +
+        `until you re-save this capability with a fix OR explicitly ack the abandonment.`,
     };
   }
 
@@ -80,15 +82,27 @@ async function resolvePostSaveValidation(
         `end-to-end. Strategy verified.`,
     };
   }
+  if (result.archived) recordAbandonedSaveAttempt(session, pending.capability, 'archived');
   const statusLabel = result.status === 0 ? 'a runtime error' : `HTTP ${result.status}`;
   return {
     ok: true,
     _hint:
       `Post-save validation FAILED — \`${pending.capability}\` returned ${statusLabel} ` +
       `and was archived as broken. Fix the strategy and re-save it this session — see ` +
-      `post_save_validation.message for the full rejection.`,
+      `post_save_validation.message for the full rejection. end_drive will refuse close ` +
+      `until this capability has a successful save OR you explicitly ack the abandonment.`,
     post_save_validation: result,
   };
+}
+
+function recordAbandonedSaveAttempt(
+  session: Session,
+  capability: string,
+  kind: 'archived' | 'declined',
+): void {
+  const list = session.abandonedSaveAttempts ?? [];
+  list.push({ capability, kind, at: Date.now() });
+  session.abandonedSaveAttempts = list;
 }
 
 /**

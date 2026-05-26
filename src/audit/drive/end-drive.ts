@@ -46,6 +46,7 @@
 import { Audit, type Classifier, type Detector } from '../index';
 import { graphFor } from '../../graphs';
 import { getObservedNamesForSession } from '../../working-dir/logbook';
+import { collectUnsavedHotXhrEndpoints } from './xhr-noise';
 
 export const RE_CALL_THRESHOLD = 2;
 export const ACTION_CALL_THRESHOLD = 5;
@@ -120,6 +121,32 @@ export interface EndDrivePayload {
    *  surfaces" (no failures — agent might still abort, but it's not a
    *  DOA pattern). */
   httpFailureCount: number;
+  /** Capabilities whose post-save validation either failed (strategy archived
+   *  to `.broken.json`) or was declined via cancelled-checkpoint, AND which
+   *  the agent did NOT subsequently re-save successfully in the same session.
+   *  Each entry blocks `end_drive` close — agents who declined or hit a
+   *  validation failure and walked away leave warm callers running against
+   *  a stale or `.broken` strategy that silently misbehaves. Optional so
+   *  pre-existing test payloads that don't set it stay valid; defaults to
+   *  `[]` (detector no-ops). */
+  abandonedSaveAttemptsNotRetried?: ReadonlyArray<{
+    capability: string;
+    kind: 'archived' | 'declined';
+    at: number;
+  }>;
+  /** Distinct (method, urlPath) tuples for 2xx XHR responses captured this
+   *  session whose path isn't covered by any saved strategy's endpoint
+   *  template AND doesn't match an obvious tracking-shape heuristic. The
+   *  `unsaved_xhr_endpoints` Detector reads this to refuse close when the
+   *  agent observed JSON-bearing surfaces but didn't save (or ack with a
+   *  reason). Optional so pre-existing test payloads that don't set it stay
+   *  valid; defaults to `[]` (detector no-ops). Capped at 20 entries
+   *  (smaller of "noise floor" + "rejection envelope budget"). */
+  unsavedHotXhrEndpoints?: ReadonlyArray<{
+    method: string;
+    urlPath: string;
+    sampleUrl: string;
+  }>;
 }
 
 /** Empty by design — every payload field the audit needs is captured at
@@ -570,6 +597,186 @@ function shouldRunTriageAcknowledgment(p: EndDrivePayload): boolean {
   return true;
 }
 
+// ---------- Detector: unsaved_xhr_endpoints ----------
+//
+// Refuses close when the network log carries 2xx XHR responses on URL paths
+// that aren't covered by any saved strategy's endpoint template AND don't
+// match an obvious tracking-shape heuristic. The agent observed JSON-bearing
+// surfaces and walked away from them — under map-graph and any "save every
+// safe read-only capability" task framing, leftover hot endpoints represent
+// missed lift opportunities, not deferred ones.
+//
+// Sibling of `observed_capabilities_not_lifted` — that detector reads the
+// `record_observed_capability` ledger (what the agent explicitly noted), this
+// detector reads the network log (structural evidence the runtime can see
+// regardless of what the agent acknowledged). Together they close the gap
+// where agents satisfy end_drive by adding cheap notes instead of lifting +
+// saving.
+//
+// ackReason: 'required'. The ack must name at least one URL path verbatim
+// from the emitted list (anti-canned: a generic "all noise" answer fails;
+// the agent has to read what they're acking through).
+//
+// Releases at `endDriveAttempts >= 2` per the existing third-attempt escape
+// hatch.
+
+const unsavedXhrEndpointsDetector: Detector<EndDrivePayload, EndDriveCtx> = {
+  kind: 'unsaved_xhr_endpoints',
+  ackReason: 'required',
+  detect: (p) => {
+    if (p.endDriveAttempts >= 2) return [];
+    const endpoints = p.unsavedHotXhrEndpoints ?? [];
+    if (endpoints.length === 0) return [];
+    const list = endpoints
+      .slice(0, 20)
+      .map((e) => `${e.method} \`${e.urlPath}\``)
+      .join('\n  ');
+    return [
+      {
+        kind: 'unsaved_xhr_endpoints',
+        message:
+          `CANNOT CLOSE: this session captured 2xx XHR responses on ` +
+          `${endpoints.length} URL path(s) that aren't covered by any saved ` +
+          `strategy AND don't match an obvious tracking-shape heuristic ` +
+          `(see runtime/docs/principles.md §Allowed runtime heuristics):\n  ${list}\n` +
+          `Each is a candidate read-only capability the runtime can see in your network log. ` +
+          `add_discovery_note doesn't clear this gate; save_strategy does.`,
+        hint:
+          `Two ways forward: ` +
+          `(a) for each path that's a real capability, call declare_capability + drive a ` +
+          `minimal flow to capture the literal-bearing request, then save_strategy at fetch ` +
+          `or page-script tier; ` +
+          `(b) for paths that are genuine noise (tracking, telemetry, marketing pixel that ` +
+          `slipped the heuristic), ack with append to acks ` +
+          `{"unsaved_xhr_endpoints": "noise: <urlPath1>, <urlPath2>, … — <structural reason>"}. ` +
+          `The ack MUST name each path verbatim from the list above (anti-canned: a generic ` +
+          `"all noise" answer fails so the runtime forces you to read which paths you're ` +
+          `dismissing).`,
+        context: {
+          session_id: p.sessionId,
+          platform: p.platform,
+          unsaved_xhr_endpoints: endpoints.map((e) => ({
+            method: e.method,
+            url_path: e.urlPath,
+            sample_url: e.sampleUrl,
+          })),
+        },
+      },
+    ];
+  },
+  validateAck: (reason, emittedIssues): string[] => {
+    const first = emittedIssues[0];
+    const ctx = first?.context as { unsaved_xhr_endpoints?: unknown } | undefined;
+    const rawList = Array.isArray(ctx?.unsaved_xhr_endpoints)
+      ? (ctx.unsaved_xhr_endpoints as unknown[])
+      : [];
+    const paths: string[] = [];
+    for (const e of rawList) {
+      if (e && typeof e === 'object' && 'url_path' in e) {
+        const candidate = (e as { url_path?: unknown }).url_path;
+        if (typeof candidate === 'string' && candidate.length > 0) paths.push(candidate);
+      }
+    }
+    if (paths.length === 0) return [];
+    const mentioned = paths.filter((p) => reason.includes(p));
+    if (mentioned.length === 0) {
+      return [
+        `ack reason must name at least one URL path verbatim from the emitted list ` +
+          `(anti-canned: a generic "all noise" answer doesn't pass — the runtime forces ` +
+          `the agent to read which specific paths they're dismissing). Paths in list: ` +
+          paths
+            .slice(0, 5)
+            .map((p) => `\`${p}\``)
+            .join(', ') +
+          (paths.length > 5 ? `, …+${paths.length - 5} more` : ''),
+      ];
+    }
+    return [];
+  },
+};
+
+// ---------- Detector: abandoned_save_attempts_not_retried ----------
+//
+// Refuses close when post-save validation either failed (strategy archived
+// to `.broken.json`) or was declined via `post_save_validation_consent`
+// cancellation, AND the agent didn't subsequently re-save that capability
+// in the same session. Catches the "silent corruption" failure mode: agent
+// hits one validation failure or chooses to decline, walks away, leaves
+// warm callers running against a stale or `.broken` strategy that silently
+// misbehaves.
+//
+// ackReason: 'required' — legitimate ack path: "structural reason this
+// capability can't be re-saved this session." validateAck demands the
+// reason names each abandoned capability slug verbatim (anti-canned).
+// Releases at `endDriveAttempts >= 2` per the third-attempt escape hatch.
+
+const abandonedSaveAttemptsDetector: Detector<EndDrivePayload, EndDriveCtx> = {
+  kind: 'abandoned_save_attempts_not_retried',
+  ackReason: 'required',
+  detect: (p) => {
+    if (p.endDriveAttempts >= 2) return [];
+    const abandoned = p.abandonedSaveAttemptsNotRetried ?? [];
+    if (abandoned.length === 0) return [];
+    const lines = abandoned.map(
+      (a) =>
+        `\`${a.capability}\` (${a.kind === 'archived' ? 'validation failed → .broken' : 'consent declined'})`,
+    );
+    return [
+      {
+        kind: 'abandoned_save_attempts_not_retried',
+        message:
+          `CANNOT CLOSE: ${abandoned.length} capability/capabilities had post-save validation ` +
+          `${abandoned.length === 1 ? 'leave them' : 'leave each one'} in a non-working state ` +
+          `this session and were not re-saved: ${lines.join(', ')}. Closing now leaves warm ` +
+          `callers running against a stale or \`.broken\` strategy that silently returns wrong ` +
+          `data — the silent-corruption failure mode.`,
+        hint:
+          `Two ways forward: ` +
+          `(a) for each abandoned capability, fix the rejection reason (most rejection envelopes ` +
+          `name a concrete fix verbatim — re-read the post_save_validation.message) and call ` +
+          `save_strategy again this session. The new successful save clears the gate. ` +
+          `(b) if a capability is genuinely unrecoverable this session (e.g. requires an ` +
+          `unavailable prereq, mutating-shape requires user consent klura-loop can't supply), ` +
+          `ack with append to acks {"abandoned_save_attempts_not_retried": "abandoning ` +
+          `<capability1>, <capability2>, … because <structural reason naming each>"}. The ack ` +
+          `MUST name each abandoned capability verbatim (anti-canned: a generic "all unfixable" ` +
+          `answer fails — the runtime forces you to read which capabilities you're abandoning).`,
+        context: {
+          session_id: p.sessionId,
+          platform: p.platform,
+          abandoned_save_attempts: abandoned.map((a) => ({
+            capability: a.capability,
+            kind: a.kind,
+            at: a.at,
+          })),
+        },
+      },
+    ];
+  },
+  validateAck: (reason, emittedIssues): string[] => {
+    const first = emittedIssues[0];
+    const ctx = first?.context as { abandoned_save_attempts?: unknown } | undefined;
+    const rawList = Array.isArray(ctx?.abandoned_save_attempts)
+      ? (ctx.abandoned_save_attempts as unknown[])
+      : [];
+    const slugs: string[] = [];
+    for (const e of rawList) {
+      if (e && typeof e === 'object' && 'capability' in e) {
+        const candidate = (e as { capability?: unknown }).capability;
+        if (typeof candidate === 'string' && candidate.length > 0) slugs.push(candidate);
+      }
+    }
+    const missing = slugs.filter((s) => !reason.includes(s));
+    if (missing.length === 0) return [];
+    return [
+      `ack reason must name each abandoned capability slug verbatim — missing: ` +
+        missing.map((s) => `\`${s}\``).join(', ') +
+        `. A canned "abandoning all" doesn't pass; the runtime forces the agent to read ` +
+        `which capabilities they're walking away from.`,
+    ];
+  },
+};
+
 // ---------- The audit instance ----------
 
 export const endDriveAudit = new Audit<EndDrivePayload, EndDriveCtx>({
@@ -580,6 +787,8 @@ export const endDriveAudit = new Audit<EndDrivePayload, EndDriveCtx>({
     rePersistenceDetector,
     observedNotLiftedDetector,
     mapSessionNoObservationsDetector,
+    unsavedXhrEndpointsDetector,
+    abandonedSaveAttemptsDetector,
   ],
   classifiers: [triageAcknowledgmentClassifier],
 });
@@ -594,12 +803,20 @@ interface SessionLike {
   declaredCapabilities?: ReadonlyArray<{ capability?: string }>;
   performActionHistory?: ReadonlyArray<{ action?: string; value?: unknown }>;
   saveAttemptCount?: number;
-  savedCapabilities?: ReadonlyArray<{ capability?: string }>;
-  /** Read by the map_session_no_observations detector to discriminate
-   *  "DOA session against a blocked origin" (4xx/5xx in intercepted) from
-   *  "agent explored a site that just doesn't expose machine-readable
-   *  surfaces" (no failed requests). */
-  intercepted?: ReadonlyArray<{ status?: number | null }>;
+  savedCapabilities?: ReadonlyArray<{ capability?: string; at?: number }>;
+  abandonedSaveAttempts?: ReadonlyArray<{
+    capability: string;
+    kind: 'archived' | 'declined';
+    at: number;
+  }>;
+  /** Read by map_session_no_observations (status discrimination) and by
+   *  the unsaved_xhr_endpoints detector (URL/method extraction). */
+  intercepted?: ReadonlyArray<{
+    status?: number | null;
+    method?: string;
+    url?: string;
+    isNavigation?: boolean;
+  }>;
 }
 
 /**
@@ -670,6 +887,21 @@ export function buildEndDrivePayload(
   for (const r of session.intercepted ?? []) {
     if (typeof r.status === 'number' && r.status >= 400) httpFailureCount += 1;
   }
+  const platform = opts.platform ?? session.platform ?? '';
+  const unsavedHotXhrEndpoints = collectUnsavedHotXhrEndpoints(
+    session.intercepted,
+    session.savedCapabilities,
+    platform,
+  );
+  // Filter abandoned attempts: an entry "clears" if there is a successful
+  // save for the same capability AFTER the abandonment timestamp. The agent
+  // recovered — no gate fires.
+  const abandonedSaveAttemptsNotRetried = (session.abandonedSaveAttempts ?? []).filter((a) => {
+    const recovered = (session.savedCapabilities ?? []).some(
+      (s) => s.capability === a.capability && typeof s.at === 'number' && s.at > a.at,
+    );
+    return !recovered;
+  });
   return {
     sessionId: session.id,
     platform: opts.platform ?? session.platform ?? '<platform>',
@@ -695,5 +927,11 @@ export function buildEndDrivePayload(
     graph: session.graph ?? 'discover',
     observedCapabilityCount,
     httpFailureCount,
+    unsavedHotXhrEndpoints,
+    abandonedSaveAttemptsNotRetried: abandonedSaveAttemptsNotRetried.map((a) => ({
+      capability: a.capability,
+      kind: a.kind,
+      at: a.at,
+    })),
   };
 }

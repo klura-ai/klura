@@ -23,6 +23,7 @@ import {
   asIdentifierSlug,
   ValidationError,
 } from '../validators';
+import { didYouMeanSuffix } from '../utils/string-distance';
 
 function emptyLogbook(platform: string): PlatformLogbook {
   const now = new Date().toISOString();
@@ -237,7 +238,8 @@ export function recordObservedCapability(platform: string, input: ObservedCapabi
     const why = asNonEmptyString(input.why_not_lifted, 'why_not_lifted');
     if (!OBSERVED_WHY_NOT_LIFTED_VALUES.includes(why as never)) {
       const allowedValues = OBSERVED_WHY_NOT_LIFTED_VALUES.map((v) => `"${v}"`).join(', ');
-      throw new ValidationError('why_not_lifted', `must be one of: ${allowedValues}`);
+      const suggestion = didYouMeanSuffix(why, OBSERVED_WHY_NOT_LIFTED_VALUES as readonly string[]);
+      throw new ValidationError('why_not_lifted', `must be one of: ${allowedValues}${suggestion}`);
     }
     if (input.hypothesis !== undefined) {
       asBoundedString(input.hypothesis, 'hypothesis', OBSERVED_HYPOTHESIS_MAX);

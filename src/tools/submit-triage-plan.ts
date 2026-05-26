@@ -47,35 +47,39 @@ import { renderSaveStrategySchemaMarkdown, type StrategyTier } from '../strategi
 
 const EXPECTED_TIERS = ['fetch', 'page-script', 'recorded-path'] as const;
 
-// Each observed_origins entry must be a parseable URL with http: or https:
-// scheme. Bare hostnames like "x.com" are silently dropped downstream by
-// `originOf()` (in audit/triage/triage-plan.ts) because `new URL("x.com")`
-// throws — the agent then sees a "request_pattern not on observed_origin"
-// rejection without knowing why their entries weren't recognized. Reject
-// explicitly here so the message names the missing scheme, not the
-// downstream symptom.
-const observedOriginSchema = z.string().superRefine((entry, ctx) => {
+// observed_origins entries must round-trip through `new URL()` because
+// `originOf()` downstream relies on it. Bare hostnames like "x.com" used
+// to reject explicitly (forcing an extra round-trip); now we auto-prepend
+// `https://` and accept. The runtime can compute the canonical form
+// harmlessly — "prefer-runtime-enforcement" cuts both ways: when the
+// runtime CAN auto-fix, it should, instead of bouncing the agent.
+// Non-http(s) schemes (file:, javascript:, data:) still reject — those
+// aren't a missing-scheme typo.
+const observedOriginSchema = z.string().transform((entry, ctx) => {
+  const trimmed = entry.trim();
+  if (trimmed.length === 0) {
+    ctx.addIssue({ code: 'custom', message: 'observed_origins entry must not be empty.' });
+    return z.NEVER;
+  }
+  const candidate = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed) ? trimmed : `https://${trimmed}`;
   let parsed: URL;
   try {
-    parsed = new URL(entry);
+    parsed = new URL(candidate);
   } catch {
-    const suggestion = JSON.stringify('https://' + entry.replace(/^https?:\/\//, ''));
     ctx.addIssue({
       code: 'custom',
-      message:
-        `must be a parseable URL with scheme (got ${JSON.stringify(entry)}). ` +
-        `Each entry must include the scheme: e.g. ${suggestion}. ` +
-        `Bare hostnames are silently dropped by the downstream audit, leading ` +
-        `to a confusing "request_pattern not on observed_origin" rejection.`,
+      message: `observed_origins entry "${entry}" is not parseable as a URL even after prepending "https://".`,
     });
-    return;
+    return z.NEVER;
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     ctx.addIssue({
       code: 'custom',
-      message: `must use http: or https: scheme (${JSON.stringify(entry)} uses ${parsed.protocol}).`,
+      message: `observed_origins entry "${entry}" must use http: or https: (got ${parsed.protocol}).`,
     });
+    return z.NEVER;
   }
+  return candidate;
 });
 
 const defenseSurfaceSchema = z

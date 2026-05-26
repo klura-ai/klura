@@ -1,4 +1,5 @@
 import { pool, tokenCache } from '../runtime-state';
+import { didYouMeanSuffix } from '../utils/string-distance';
 import * as skills from '../strategies/skills';
 import { execute as executeStrategy } from '../execution';
 import type { ExecuteResult } from '../execution/types';
@@ -383,7 +384,11 @@ const POLICY_TIERS = ['recorded-path', 'page-script', 'fetch'] as const;
 
 function normalizePolicyTier(value: unknown, field: string): StrategyTier {
   if (typeof value !== 'string' || !POLICY_TIERS.includes(value as StrategyTier)) {
-    throw new Error(`invalid_start_session: ${field} must be one of: ${POLICY_TIERS.join(', ')}`);
+    const suggestion =
+      typeof value === 'string' ? didYouMeanSuffix(value, POLICY_TIERS as readonly string[]) : '';
+    throw new Error(
+      `invalid_start_session: ${field} must be one of: ${POLICY_TIERS.join(', ')}${suggestion}`,
+    );
   }
   return value as StrategyTier;
 }

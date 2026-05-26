@@ -1,6 +1,6 @@
 // evaluate_in_iframe / evaluate_in_iframe_chain / evaluate_in_worker
 // entry-point validation. End-to-end browser semantics are covered by
-// the field-reports retail-site-a scenario — this suite covers argument
+// a context-bound field-reports scenario — this suite covers argument
 // shape + ArtifactAccumulator recording so the signer-discovery gate
 // credits agents who use these tools.
 

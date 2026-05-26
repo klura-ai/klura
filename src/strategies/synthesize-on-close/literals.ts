@@ -131,6 +131,60 @@ export function detectTypedTextDrift(
   return warnings;
 }
 
+/**
+ * Subset of `detectTypedTextDrift` warnings that are *guaranteed* to break the
+ * saved strategy at warm execute: the declared arg's literal was never typed
+ * or sent (so auto-synth couldn't template it), AND the synthesized strategy
+ * does not contain a `{{argName}}` placeholder anywhere either. The arg slot
+ * is baked to whatever literal the agent actually typed during discovery —
+ * future callers' arg values can never reach the wire.
+ *
+ * For each blocking drift the saved strategy is structurally non-functional;
+ * the synth-on-close caller should skip persistence and let the agent re-drive
+ * with proper literal typing.
+ *
+ * Lower-confidence drifts (declared arg WAS templated somewhere in the
+ * strategy but didn't surface in capture — e.g. URL-encoded forms, base64
+ * wrappers) stay as advisory warnings via `detectTypedTextDrift`.
+ */
+export function detectBlockingTypedTextDrift(
+  strategy: Record<string, unknown>,
+  session: Session,
+  declaredArgs: Record<string, unknown> | undefined,
+): SaveWarning[] {
+  const drifts = detectTypedTextDrift(session, declaredArgs);
+  if (drifts.length === 0) return [];
+  const serialized = JSON.stringify(strategy);
+  const blocking: SaveWarning[] = [];
+  for (const drift of drifts) {
+    const argName = extractArgNameFromMessage(drift.message);
+    if (!argName) continue;
+    const placeholder = `{{${argName}}}`;
+    if (serialized.includes(placeholder)) continue;
+    blocking.push({
+      ...drift,
+      kind: 'typed_text_drift_blocking',
+      message:
+        `STRUCTURAL: declared arg "${argName}" was neither typed/sent during discovery NOR ` +
+        `templated as \`{{${argName}}}\` anywhere in the synthesized strategy. The strategy ` +
+        `bakes whatever literal the agent did type into the arg slot — caller-supplied ` +
+        `"${argName}" values cannot reach the wire at warm execute. ` +
+        `Original drift: ${drift.message}`,
+      hint:
+        `Re-open the session, type the literal value of "${argName}" verbatim so capture-join ` +
+        `can template it, then end_drive again. Auto-synth will skip persisting this capability ` +
+        `until the literal appears in typed text or a captured request body.`,
+    });
+  }
+  return blocking;
+}
+
+const ARG_NAME_RE = /Declared arg "([^"]+)"/;
+function extractArgNameFromMessage(message: string): string | null {
+  const match = ARG_NAME_RE.exec(message);
+  return match?.[1] ?? null;
+}
+
 export function attachSaveWarningsToStrategy(
   strategy: Record<string, unknown>,
   warnings: SaveWarning[],

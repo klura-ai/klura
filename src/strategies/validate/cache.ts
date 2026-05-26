@@ -8,6 +8,7 @@
 
 import { isPlainObject } from './helpers';
 import { parseTtl } from '../../cache/capability-cache';
+import { didYouMeanSuffix } from '../../utils/string-distance';
 
 const ALLOWED_CACHE_KEYS = new Set(['ttl']);
 
@@ -24,11 +25,13 @@ export function validateCacheShape(data: unknown): void {
   // Closed schema — reject unknown keys. Future fields (e.g. cache.scope,
   // cache.invalidate_on) need to be added here explicitly so the agent
   // can't accidentally set a typo'd field that silently does nothing.
+  const allowedKeys = [...ALLOWED_CACHE_KEYS];
   for (const key of Object.keys(cache)) {
     if (!ALLOWED_CACHE_KEYS.has(key)) {
-      const allowed = [...ALLOWED_CACHE_KEYS].map((k) => `"${k}"`).join(', ');
+      const allowed = allowedKeys.map((k) => `"${k}"`).join(', ');
+      const suggestion = didYouMeanSuffix(key, allowedKeys);
       throw new Error(
-        `invalid_strategy: cache.${key} is not a valid field — allowed keys: ${allowed}. ` +
+        `invalid_strategy: cache.${key} is not a valid field — allowed keys: ${allowed}${suggestion}. ` +
           `See klura://reference#capability-cache.`,
       );
     }

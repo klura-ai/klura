@@ -15,6 +15,7 @@ import type { BrowserDriver } from '../drivers/interface';
 import type { Session } from '../drivers/types/session';
 import { z } from 'zod';
 import { ValidationError } from '../validators';
+import { didYouMeanSuffix } from '../utils/string-distance';
 import { asBoundedScript } from './js-eval-validators';
 import { getActiveRemoteBackend } from '../remote/backend';
 import { interpolateVars } from '../execution/vars';
@@ -121,7 +122,8 @@ function validateBindFrom(value: unknown, where: string): string | null {
     return `${where}.kind must be a string (one of: "cookie", "selector", "js-eval")`;
   }
   if (kind !== 'cookie' && kind !== 'selector' && kind !== 'js-eval') {
-    return `${where}.kind = ${JSON.stringify(kind)} is not allowed; must be one of: "cookie", "selector", "js-eval"`;
+    const suggestion = didYouMeanSuffix(kind, ['cookie', 'selector', 'js-eval']);
+    return `${where}.kind = ${JSON.stringify(kind)} is not allowed; must be one of: "cookie", "selector", "js-eval"${suggestion}`;
   }
   const parsed = bindFromSchema.safeParse(value);
   if (parsed.success) return null;

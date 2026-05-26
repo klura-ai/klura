@@ -6,7 +6,11 @@ import * as skills from '../skills';
 import { assignAutoStepIds } from '../auto-step-id';
 import type { Session, PerformActionRecord } from '../../drivers/types/session';
 import { findLastIndex, pickDiscoveredFromUrl } from './helpers';
-import { attachSaveWarningsToStrategy, detectTypedTextDrift } from './literals';
+import {
+  attachSaveWarningsToStrategy,
+  detectBlockingTypedTextDrift,
+  detectTypedTextDrift,
+} from './literals';
 import { detectParameterizationDisclosureRequired } from '../../gate/save-warnings-parameterization';
 import { parseSnapshotSelector } from '../../execution/snapshot-selector';
 import type { AutoSynthResult, SaveMarker, SynthDiagnosticEntry } from './types';
@@ -221,6 +225,31 @@ export function synthesizeRecordedPaths(
       (strategy.notes as Record<string, unknown>).params = params;
     }
     attachSaveWarningsToStrategy(strategy, detectTypedTextDrift(session, save.args));
+    // Hard-block on guaranteed-broken drifts: recorded-path step values bake
+    // the literal the agent typed during discovery. When a declared arg never
+    // appeared in typed text AND no `{{argName}}` placeholder lands anywhere
+    // in steps, warm replay sends the discovery-time literal for every caller
+    // — the strategy is structurally non-functional. Skip persistence; next
+    // session re-drives with the literal typed verbatim.
+    const blockingDrifts = detectBlockingTypedTextDrift(strategy, session, save.args);
+    if (blockingDrifts.length > 0) {
+      diag.push({
+        pass: 'synth_recorded',
+        capability: save.capability,
+        phase: 'skip',
+        outcome: 'typed_text_drift_blocking',
+        detail: {
+          slice_len: slice.length,
+          unbound_args: blockingDrifts
+            .map((w) => {
+              const m = /declared arg "([^"]+)"/.exec(w.message);
+              return m ? m[1] : null;
+            })
+            .filter((n): n is string => n !== null),
+        },
+      });
+      continue;
+    }
     // Parameterization disclosure: auto-synth doesn't go through the
     // saveStrategy audit pipeline (no sessionId passed below), so the new
     // parameterization_disclosure_required Detector wouldn't fire on

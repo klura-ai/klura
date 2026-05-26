@@ -22,6 +22,7 @@ import { clearForSession as clearSessionObservations } from '../response/session
 import { clearObservedSessionTracking } from '../working-dir/logbook';
 import { invokeCheckpointAndGate, type CheckpointEnvelope } from '../checkpoints';
 import { TOOL_NAMES } from '../vocab';
+import { didYouMeanSuffix } from '../utils/string-distance';
 import type { ToolDef } from '../tools/types';
 
 const REASON_MIN_LENGTH = 20;
@@ -91,8 +92,9 @@ export async function abortSession(args: AbortSessionArgs): Promise<AbortSession
   if (args.kind !== undefined) {
     if (!ABORT_KIND_VALUES.includes(args.kind)) {
       const allowed = ABORT_KIND_VALUES.map((k) => '"' + k + '"').join(' | ');
+      const suggestion = didYouMeanSuffix(args.kind, ABORT_KIND_VALUES as readonly string[]);
       throw new Error(
-        `invalid_args: abort_session \`kind\` must be one of ${allowed} (got ${JSON.stringify(args.kind)}).`,
+        `invalid_args: abort_session \`kind\` must be one of ${allowed} (got ${JSON.stringify(args.kind)})${suggestion}.`,
       );
     }
     kind = args.kind;

@@ -12,6 +12,7 @@
 
 import { isPlainObject } from './helpers';
 import { WS_FIELDS, WS_UNSAFE_HEADERS, HTTP_EXCLUSIVE_FIELDS } from './constants';
+import { didYouMeanSuffix } from '../../utils/string-distance';
 import { asBoundedScript } from '../js-eval-validators';
 import { collectInlinePlaceholderRefs } from '../../execution/placeholders';
 import { collectDeclaredPlaceholders } from '../placeholder-semantics';
@@ -82,8 +83,10 @@ function validateHttpProtocolNoWsFields(
 
 function validateProtocolValue(protocol: unknown, tier: string): void {
   if (protocol !== 'websocket') {
+    const suggestion =
+      typeof protocol === 'string' ? didYouMeanSuffix(protocol, ['http', 'websocket']) : '';
     throw new Error(
-      `invalid_strategy: ${tier}.protocol = ${JSON.stringify(protocol)} is not allowed; must be one of: "http", "websocket"`,
+      `invalid_strategy: ${tier}.protocol = ${JSON.stringify(protocol)} is not allowed; must be one of: "http", "websocket"${suggestion}`,
     );
   }
 }
@@ -304,8 +307,12 @@ function validateWebSocketTimeouts(data: Record<string, unknown>, tier: string):
 function validateFrameEncoding(data: Record<string, unknown>, tier: string): void {
   if ('frameEncoding' in data && data.frameEncoding !== undefined) {
     if (data.frameEncoding !== 'text' && data.frameEncoding !== 'binary') {
+      const suggestion =
+        typeof data.frameEncoding === 'string'
+          ? didYouMeanSuffix(data.frameEncoding, ['text', 'binary'])
+          : '';
       throw new Error(
-        `invalid_strategy: ${tier}.frameEncoding = ${JSON.stringify(data.frameEncoding)} is not allowed; must be one of: "text", "binary"`,
+        `invalid_strategy: ${tier}.frameEncoding = ${JSON.stringify(data.frameEncoding)} is not allowed; must be one of: "text", "binary"${suggestion}`,
       );
     }
   }
