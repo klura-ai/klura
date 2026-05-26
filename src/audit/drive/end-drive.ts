@@ -47,6 +47,7 @@ import { Audit, type Classifier, type Detector } from '../index';
 import { graphFor } from '../../graphs';
 import { getObservedNamesForSession } from '../../working-dir/logbook';
 import { collectUnsavedHotXhrEndpoints } from './xhr-noise';
+import { readPlatformSkillInfo } from '../../strategies/skills-list-helpers';
 
 export const RE_CALL_THRESHOLD = 2;
 export const ACTION_CALL_THRESHOLD = 5;
@@ -452,25 +453,56 @@ const observedNotLiftedDetector: Detector<EndDrivePayload, EndDriveCtx> = {
       },
     ];
   },
-  validateAck: (reason, emittedIssues): string[] => {
-    // The ack must mention every leftover slug verbatim. Compose the
-    // canonical list from the first emitted issue's context (all emitted
-    // issues carry the same list — this detector only emits one issue).
+  validateAck: (ack, emittedIssues): string[] => {
+    // The ack must mention every leftover slug verbatim in its reason —
+    // anti-canned check (a "deferring all" reason that doesn't name a
+    // single slug doesn't prove the agent read the rejection).
     const first = emittedIssues[0];
-    const ctx = first?.context as { observed_not_lifted?: unknown } | undefined;
+    const ctx = first?.context as { observed_not_lifted?: unknown; platform?: unknown } | undefined;
     const slugs = Array.isArray(ctx?.observed_not_lifted)
       ? (ctx.observed_not_lifted as unknown[]).filter(
           (v): v is string => typeof v === 'string' && v.length > 0,
         )
       : [];
-    const missing = slugs.filter((s) => !reason.includes(s));
-    if (missing.length === 0) return [];
-    return [
-      `ack reason must name each leftover observed slug verbatim — missing: ` +
-        missing.map((s) => `\`${s}\``).join(', ') +
-        `. A canned "deferring all" doesn't pass; the runtime forces the agent ` +
-        `to read which slugs they're acking through.`,
-    ];
+    const issues: string[] = [];
+    const missing = slugs.filter((s) => !ack.reason.includes(s));
+    if (missing.length > 0) {
+      issues.push(
+        `ack reason must name each leftover observed slug verbatim — missing: ` +
+          missing.map((s) => `\`${s}\``).join(', ') +
+          `. A canned "deferring all" doesn't pass; the runtime forces the agent ` +
+          `to read which slugs they're acking through.`,
+      );
+    }
+    // Anti-fabrication via structured field: when the agent claims a cover
+    // ("deferring slug X because it's already covered by saved capability Y"),
+    // they pass `covered_by: ["<Y>", ...]` on the ack and the runtime
+    // validates each name structurally against the platform's saved set.
+    // No prose-parsing — `covered_by` is a list of slug strings, the saved
+    // set is a list of slug strings, the check is set-membership.
+    const platform = typeof ctx?.platform === 'string' ? ctx.platform : '';
+    if (platform && Array.isArray(ack.covered_by) && ack.covered_by.length > 0) {
+      let savedNames: Set<string>;
+      try {
+        const info = readPlatformSkillInfo(platform);
+        savedNames = new Set(info.capabilities.map((c) => c.name));
+      } catch {
+        savedNames = new Set();
+      }
+      const bogus = ack.covered_by.filter((c) => !savedNames.has(c));
+      if (bogus.length > 0) {
+        const bogusList = bogus.map((c) => '`' + c + '`').join(', ');
+        const subject = bogus.length === 1 ? "that capability isn't" : "those capabilities aren't";
+        const platformJson = JSON.stringify(platform);
+        issues.push(
+          `covered_by names ${bogusList} but ${subject} a saved capability on platform ` +
+            `${platformJson}. Either pass real slug(s) (check list_platform_skills({platform: ` +
+            `${platformJson}}) for the canonical names), lift the observed slug yourself this ` +
+            `session, or drop covered_by and state a structural reason.`,
+        );
+      }
+    }
+    return issues;
   },
 };
 
@@ -664,7 +696,7 @@ const unsavedXhrEndpointsDetector: Detector<EndDrivePayload, EndDriveCtx> = {
       },
     ];
   },
-  validateAck: (reason, emittedIssues): string[] => {
+  validateAck: (ack, emittedIssues): string[] => {
     const first = emittedIssues[0];
     const ctx = first?.context as { unsaved_xhr_endpoints?: unknown } | undefined;
     const rawList = Array.isArray(ctx?.unsaved_xhr_endpoints)
@@ -678,7 +710,7 @@ const unsavedXhrEndpointsDetector: Detector<EndDrivePayload, EndDriveCtx> = {
       }
     }
     if (paths.length === 0) return [];
-    const mentioned = paths.filter((p) => reason.includes(p));
+    const mentioned = paths.filter((p) => ack.reason.includes(p));
     if (mentioned.length === 0) {
       return [
         `ack reason must name at least one URL path verbatim from the emitted list ` +
@@ -753,7 +785,7 @@ const abandonedSaveAttemptsDetector: Detector<EndDrivePayload, EndDriveCtx> = {
       },
     ];
   },
-  validateAck: (reason, emittedIssues): string[] => {
+  validateAck: (ack, emittedIssues): string[] => {
     const first = emittedIssues[0];
     const ctx = first?.context as { abandoned_save_attempts?: unknown } | undefined;
     const rawList = Array.isArray(ctx?.abandoned_save_attempts)
@@ -766,7 +798,7 @@ const abandonedSaveAttemptsDetector: Detector<EndDrivePayload, EndDriveCtx> = {
         if (typeof candidate === 'string' && candidate.length > 0) slugs.push(candidate);
       }
     }
-    const missing = slugs.filter((s) => !reason.includes(s));
+    const missing = slugs.filter((s) => !ack.reason.includes(s));
     if (missing.length === 0) return [];
     return [
       `ack reason must name each abandoned capability slug verbatim — missing: ` +

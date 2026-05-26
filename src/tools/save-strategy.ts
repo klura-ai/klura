@@ -568,7 +568,27 @@ export async function saveStrategy(
     try {
       const trackingSession = pool.getSession(sessionId);
       trackingSession.saveAttemptCount = (trackingSession.saveAttemptCount ?? 0) + 1;
-    } catch {
+      // Session-platform cross-check. When the agent passes a `platform` that
+      // disagrees with the slug start_session opened on, the save commits
+      // under a fresh `~/.klura/skills/<wrong-slug>/` dir invisible to the
+      // session's prior on-disk strategies — observations and saves split
+      // across parallel namespaces. Reject before committing.
+      if (
+        typeof trackingSession.platform === 'string' &&
+        trackingSession.platform.length > 0 &&
+        trackingSession.platform !== platform
+      ) {
+        rejectWithTimings(
+          `invalid_strategy: platform mismatch — session ${JSON.stringify(sessionId)} opened on ` +
+            `platform ${JSON.stringify(trackingSession.platform)}, but save_strategy was called ` +
+            `with platform ${JSON.stringify(platform)}. Saving here would write under the wrong ` +
+            `~/.klura/skills/${platform}/ dir, invisible to the session's prior observations + ` +
+            `on-disk strategies. Pass platform ${JSON.stringify(trackingSession.platform)} (the ` +
+            `slug start_session opened on) so the save lands in the canonical namespace.`,
+        );
+      }
+    } catch (e) {
+      if (e instanceof SaveStrategyRejection) throw e;
       // Session may already be torn down; counter is best-effort.
     }
   }

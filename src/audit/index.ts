@@ -135,12 +135,19 @@ export interface Detector<TPayload, TCtx> {
   ackReason: 'required' | 'none';
   /** Optional per-detector ack-validation beyond "reason is non-empty."
    *  Use this to require a specific shape — e.g., ack must mention one of
-   *  the flagged keys to prove the rejection was read (anti-canned-ack).
-   *  Returns 0+ issue bullets when the reason is structurally
-   *  insufficient. Called only when `ackReason === 'required'` AND the
-   *  agent supplied a non-empty reason. */
-  validateAck?: (reason: string, emittedIssues: Issue[]) => string[];
+   *  the flagged keys to prove the rejection was read (anti-canned-ack),
+   *  or to validate structured fields on the ack (`covered_by: [<slug>]`
+   *  validated against the on-disk strategy registry, etc.).
+   *  Returns 0+ issue bullets when the ack is structurally insufficient.
+   *  Called only when `ackReason === 'required'` AND the agent supplied a
+   *  non-empty reason. */
+  validateAck?: (ack: NormalizedAck, emittedIssues: Issue[]) => string[];
 }
+
+// Ack types + normalizer live in `./ack-types.ts` — re-exported so callers
+// outside this module can pick them up from the canonical `audit` import.
+export type { AckValue, StructuredAck, NormalizedAck } from './ack-types';
+import { type AckValue, type NormalizedAck, normalizeAck } from './ack-types';
 
 export interface Classifier<TPayload, TCtx, TAnswer> {
   kind: string;
@@ -222,7 +229,7 @@ export interface AuditInput<TAnswers extends Record<string, unknown> = Record<st
   answers?: Partial<TAnswers>;
   /** Acks for Detector-emitted warnings. Keyed by Detector.kind; value
    *  is the agent's one-sentence reason. */
-  acks?: Record<string, string>;
+  acks?: Record<string, AckValue>;
   /** When true, skip token consumption on payload_changed and on commit.
    *  Lets a caller pre-check audit verdict cheaply (before paying probe
    *  cost) without spending the agent's token. Token MINTING still
@@ -389,11 +396,12 @@ export class Audit<TPayload, TCtx> {
     const acks = input.acks ?? {};
     const ackIssues: string[] = [];
     const ackedKinds = new Set<string>();
-    for (const [ackKind, reason] of Object.entries(acks)) {
-      if (typeof reason !== 'string' || reason.trim().length === 0) {
+    for (const [ackKind, rawAck] of Object.entries(acks)) {
+      const normalized = normalizeAck(rawAck);
+      if (!normalized) {
         ackIssues.push(
-          `acks["${ackKind}"] requires a non-empty reason — one-sentence justification ` +
-            `for why the save should proceed despite the warning`,
+          `acks["${ackKind}"] requires a non-empty reason — pass either a string ("the one-` +
+            `sentence justification") or an object {reason: "...", covered_by?: [<slug>, ...]}`,
         );
         continue;
       }
@@ -412,10 +420,12 @@ export class Audit<TPayload, TCtx> {
         continue;
       }
       // Per-detector ack-validation hook — preserves anti-canned-ack
-      // semantics (e.g., ack must mention a flagged key).
+      // semantics (e.g., ack must mention a flagged key) AND lets the
+      // detector validate structural fields like `covered_by` against
+      // its own ground truth.
       const det = detectorByKind.get(ackKind);
       if (det && det.validateAck) {
-        const issues = det.validateAck(reason, emittedForKind);
+        const issues = det.validateAck(normalized, emittedForKind);
         if (issues.length > 0) {
           for (const i of issues) ackIssues.push(`acks["${ackKind}"]: ${i}`);
           continue;

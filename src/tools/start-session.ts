@@ -1,5 +1,6 @@
 import { pool, tokenCache } from '../runtime-state';
 import { didYouMeanSuffix } from '../utils/string-distance';
+import { asPlatformSlug } from '../validators';
 import * as skills from '../strategies/skills';
 import { execute as executeStrategy } from '../execution';
 import type { ExecuteResult } from '../execution/types';
@@ -158,13 +159,28 @@ function computeAbortEscalation(
  * fail. The validator failure for slug shape preserves agent feedback.
  */
 /**
- * Walk the session's intercepted ring and pull the HTTP status of the
- * initial top-level navigation. Matches by host (requested or resolved
- * current) — drivers vary on whether they mark `isNavigation` explicitly.
- * Returns `null` when no matching captured request carried a status.
+ * Walk the session's intercepted ring and pull the HTTP status of the MOST
+ * RECENT top-level navigation matching the requested or resolved host.
+ *
+ * Reverse-iteration is load-bearing: perform_action navigate calls also use
+ * this helper, and on a long-lived session the ring already contains the
+ * original session-start request. Walking forward returned that early entry
+ * regardless of the new navigation, masking the just-fired status as
+ * whatever the initial start_session captured (typically 200) — agents
+ * moved on assuming success and missed 4xx on the actual target.
+ *
+ * Preference order, applied in reverse: (1) entry with
+ * `isNavigation === true` matching host; (2) any entry matching host with a
+ * status. Drivers that don't set `isNavigation` fall through to (2) cleanly.
  */
 export function readInitialNavStatus(
-  session: { intercepted?: ReadonlyArray<{ url?: unknown; status?: number | null }> },
+  session: {
+    intercepted?: ReadonlyArray<{
+      url?: unknown;
+      status?: number | null;
+      isNavigation?: boolean;
+    }>;
+  },
   requestedUrl: string,
   currentUrl: string,
 ): number | null {
@@ -182,8 +198,10 @@ export function readInitialNavStatus(
   } catch {
     /* keep empty */
   }
-  for (const req of intercepted) {
-    if (typeof req.url !== 'string') continue;
+  let fallback: number | null = null;
+  for (let i = intercepted.length - 1; i >= 0; i--) {
+    const req = intercepted[i];
+    if (!req || typeof req.url !== 'string') continue;
     let reqHost: string;
     try {
       reqHost = new URL(req.url).host.toLowerCase();
@@ -191,9 +209,11 @@ export function readInitialNavStatus(
       continue;
     }
     if (reqHost !== requestedHost && reqHost !== currentHost) continue;
-    if (typeof req.status === 'number') return req.status;
+    if (typeof req.status !== 'number') continue;
+    if (req.isNavigation === true) return req.status;
+    if (fallback === null) fallback = req.status;
   }
-  return null;
+  return fallback;
 }
 
 function normalizeIdentityOpt(value: unknown): string | undefined {
@@ -1448,6 +1468,22 @@ function applyAutoExecuteHint(
     `save a new one rather than ad-hoc-redoing the flow.`;
 }
 
+function validatePlatformSlugShape(platform: string | undefined): void {
+  if (platform === undefined || platform === '') return;
+  try {
+    asPlatformSlug(platform, 'platform');
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `invalid_start_session: ${msg}. Pick a platform slug consistent with what ` +
+        `record_observed_capability and save_strategy accept (kebab-case, lowercase letters / ` +
+        `digits / dashes only). For multi-segment TLDs prefer collapsing dots/underscores to ` +
+        `dashes, dropping a trailing \`.com\`, or staying single-token.`,
+      { cause: e },
+    );
+  }
+}
+
 export async function startSession(
   url: string,
   opts: StartSessionOptions = {},
@@ -1485,6 +1521,14 @@ export async function startSession(
     }
   }
 
+  // Platform-slug shape validation. Without this, `start_session({platform:
+  // "some_store_uk"})` succeeds at boot but the slug doesn't match
+  // `asPlatformSlug` (kebab-only); downstream calls (record_observed_capability,
+  // save_strategy) reject the same slug, so the session ends up writing
+  // strategies under one slug while observations and prior on-disk skills
+  // live under another — invisible to lift_observed_capability and to
+  // list_platform_skills lookups. Reject at the edge instead.
+  validatePlatformSlugShape(opts.platform);
   // Platform is required when capability is set. Saved strategies live under
   // <platform>/, storage state lives at storage-state/<platform>.json, and
   // every downstream lifecycle (auto-execute, synth, submit_triage_plan)

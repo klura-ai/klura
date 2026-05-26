@@ -535,8 +535,8 @@ const endpointCollidesWithSavedCapabilityDetector: Detector<Strategy, SaveStrate
   // get the rejection — they just have to articulate why they think it's
   // different, and a reviewer reading the saved file sees the reason.
   ackReason: 'required',
-  validateAck: (reason): string[] => {
-    const trimmed = reason.trim();
+  validateAck: (ack): string[] => {
+    const trimmed = ack.reason.trim();
     if (trimmed.length < 30) {
       return [
         `endpoint_collides_with_saved_capability ack reason must name the structural diff in ≥30 chars ` +
