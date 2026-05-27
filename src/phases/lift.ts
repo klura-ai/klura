@@ -92,13 +92,18 @@ export const LIFT_SPEC: PhaseSpec = {
     _graphConfig: GraphConfig,
   ): AdmissibilityResult {
     if (!this.allowedTools.has(toolName)) {
+      const isPerformAction = toolName === 'perform_action';
+      const mapModeNav = isPerformAction && session.graph === 'map';
+      const mapModeHint = mapModeNav
+        ? ` Map-mode loop-continuation: \`perform_action\` is inadmissible here because triage/lift is bound to the surface from \`lift_observed_capability\`. To explore additional surfaces, \`end_drive\` first (the FSM rebinds on the next \`start_session\` graph:"map" + \`record_observed_capability\` cycle). Recommended pattern: record EVERY candidate observed via \`record_observed_capability\` BEFORE the first lift so the per-slug cost stays inside one session.`
+        : '';
       return {
         ok: false,
         reason:
           `tool '${toolName}' is not available in phase 'lift'. ` +
           `In lift, you execute the RE playbook against the bound surface and aim T0 (fetch) → T1 (page-script) → T2 (recorded-path) in order. ` +
           `Save the resulting strategy via \`save_strategy\` (gates on a triage plan for the targeted surface), ` +
-          `or revise via \`submit_triage_plan\` if reality contradicts the verdict.`,
+          `or revise via \`submit_triage_plan\` if reality contradicts the verdict.${mapModeHint}`,
       };
     }
     if (session.lift?.softBlockEngaged && !this.allowedToolsWhenExhausted.has(toolName)) {

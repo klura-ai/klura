@@ -71,6 +71,30 @@ export class SaveStrategyRejection extends Error {
   }
 }
 
+/** When every warning on a save_strategy audit rejection is
+ *  `endpoint_collides_with_saved_capability`, the agent isn't failing to save —
+ *  the runtime is refusing to overwrite an already-working strategy. Counting
+ *  the attempt would force the end_drive `save_attempted_none_landed` Detector
+ *  to refuse close on a session that did no new work. Rolls back the
+ *  increment so the counter reflects "save attempts that could have landed". */
+function decrementOnDuplicateOnlyRejection(
+  sessionId: string,
+  warnings: ReadonlyArray<{ kind: string }>,
+): void {
+  if (warnings.length === 0) return;
+  const everyWarningDuplicate = warnings.every(
+    (w) => w.kind === 'endpoint_collides_with_saved_capability',
+  );
+  if (!everyWarningDuplicate) return;
+  try {
+    const session = pool.getSession(sessionId);
+    const current = session.saveAttemptCount ?? 0;
+    if (current > 0) session.saveAttemptCount = current - 1;
+  } catch {
+    // Session may already be torn down; counter is best-effort.
+  }
+}
+
 function newTimings(): SaveStrategyTimings {
   return {
     total_ms: 0,
@@ -831,6 +855,14 @@ export async function saveStrategy(
     });
     timings.audit_precheck_ms = Date.now() - tAuditPreStart;
     if (preAudit.status === 'rejected') {
+      // Decrement saveAttemptCount when the ONLY rejection cause is
+      // `endpoint_collides_with_saved_capability` — that warning is
+      // "duplicate correctly rejected" (the platform already has a
+      // working strategy for this endpoint), not "save attempt failed".
+      // Counting it as a failed attempt would force the end_drive
+      // `save_attempted_none_landed` Detector to refuse close, leaving
+      // the agent with no clean exit on a session that did no new work.
+      decrementOnDuplicateOnlyRejection(sessionId, preAudit.rejection.warnings);
       rejectWithTimings(rejectionToErrorMessage('save_strategy', preAudit.rejection));
     }
   }

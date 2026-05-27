@@ -114,7 +114,12 @@ export function liftObservedCapability(
       `${TOOL_NAMES.submitTriagePlan} with surface_label, defense_surface, expected_tier, ` +
       `tier_justification, and summary_for_user. The triage_plan checkpoint hands off to lift; ` +
       `${TOOL_NAMES.saveStrategy} lands the strategy. After save you remain in the session — call ` +
-      `${TOOL_NAMES.liftObservedCapability} again for the next slug or ${TOOL_NAMES.endDrive} when done.`,
+      `${TOOL_NAMES.liftObservedCapability} again for the next slug or ${TOOL_NAMES.endDrive} when done. ` +
+      `IMPORTANT: \`perform_action\` is inadmissible in triage/lift — once you enter this cycle, ` +
+      `you cannot navigate to new pages. Recommended map-mode pattern: BEFORE the first ` +
+      `${TOOL_NAMES.liftObservedCapability} call, navigate to every candidate surface and ` +
+      `${TOOL_NAMES.recordObservedCapability} for each. Lifting too early strands the remaining ` +
+      `candidates and costs you an extra session-open/close per slug.`,
   };
 }
 
