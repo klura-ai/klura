@@ -12,10 +12,7 @@ import type { ObservedCapabilityInput } from '../../working-dir/logbook';
  *  yield observed_capability inputs naming them. Best-effort: any
  *  malformed plan or load failure yields zero entries for that capability
  *  rather than blocking close. */
-export function inferObservedCapabilitiesFromTriage(
-  platform: string,
-  sessionId: string,
-): ObservedCapabilityInput[] {
+export function inferObservedCapabilitiesFromTriage(platform: string): ObservedCapabilityInput[] {
   let logbook: ReturnType<typeof loadLogbook>;
   try {
     logbook = loadLogbook(platform);
@@ -66,11 +63,18 @@ export function inferObservedCapabilitiesFromTriage(
         .replace(/_+/g, '_');
       if (!name || taken.has(name)) continue;
       taken.add(name);
+      // No session_id: this is a runtime-derived breadcrumb for the NEXT
+      // session's candidate list, not an agent-made observation. Bumping the
+      // per-session observed map would feed it to this session's
+      // observed_capabilities_not_lifted gate in surface-label namespace
+      // (e.g. `customer_care`), which never intersects the capability-name
+      // namespace the gate diffs against (`get_customer_care`) — so a surface
+      // the agent DID lift gets re-counted as "observed but not lifted" and
+      // forces a spurious end_drive ack.
       out.push({
         name,
         evidence: { source: 'triage_inference', observed_at_urls: surfaceUrls },
         why_not_lifted: 'other',
-        session_id: sessionId,
       });
     }
   }

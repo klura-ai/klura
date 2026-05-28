@@ -448,7 +448,7 @@ export async function endDrive(
   // landing in the logbook.
   if (platform) {
     try {
-      const inferred = inferObservedCapabilitiesFromTriage(platform, sessionId);
+      const inferred = inferObservedCapabilitiesFromTriage(platform);
       for (const entry of inferred) {
         try {
           recordObservedCapability(platform, entry);
@@ -764,11 +764,18 @@ export async function endDrive(
       );
       for (const entry of inferred) {
         try {
+          // No session_id: these are runtime-derived nav/form breadcrumbs
+          // (`view_*`, form_post), not agent-made observations. They persist
+          // to the logbook for the next session's candidate list, but must not
+          // bump the per-session observed map — otherwise nav-noise like
+          // `view_index_js` / `view_sitemap_xml` floods
+          // session_summary.observed_unlifted_this_session, diluting the
+          // genuine under-saving signal (only agent `record_observed_capability`
+          // calls belong there). Mirrors inferObservedCapabilitiesFromTriage.
           recordObservedCapability(platform, {
             name: entry.name,
             evidence: entry.evidence,
             why_not_lifted: entry.why_not_lifted,
-            session_id: sessionId,
           });
         } catch {
           /* per-entry rejection (e.g. slug shape) shouldn't block the others */
@@ -795,22 +802,25 @@ export async function endDrive(
     }
   }
 
-  await pool.endDrive(sessionId);
-  clearStartersForSession(sessionId);
-  clearSessionObservations(sessionId);
-  clearObservedSessionTracking(sessionId);
   // session_summary: verbatim ground truth for the agent's retrospective.
   // Without this the retro is reconstructed from list_platform_skills + the
   // logbook + recent_aborts — all of which mix prior-session state into
   // this-session prose. Agents quote `recent_aborts[*].reason` strings as
   // "tested this session", inflating the abort ledger with fabricated path
   // coverage that future sessions then paraphrase. Each field below is
-  // observable from session state only.
+  // observable from session state only. Built BEFORE the teardown clears
+  // below: observed_unlifted_this_session reads the per-session observed-
+  // names map that clearObservedSessionTracking wipes.
   const sessionSummary = buildSessionSummary(
     session,
     autoSynthesized,
     countPerformActionCalls(session),
   );
+
+  await pool.endDrive(sessionId);
+  clearStartersForSession(sessionId);
+  clearSessionObservations(sessionId);
+  clearObservedSessionTracking(sessionId);
 
   const result: {
     ok: true;
