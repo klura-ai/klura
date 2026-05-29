@@ -511,26 +511,34 @@ export function findMissingCapturedQueryParams(
 
   let strategyUrl: string;
   let strategyParams: Set<string>;
+  let strategyHostKey: string;
   try {
     const u = new URL(endpointPath, baseUrl);
     strategyUrl = u.toString();
     strategyParams = new Set(u.searchParams.keys());
+    strategyHostKey = `${u.protocol}//${u.hostname.toLowerCase()}`;
   } catch {
     return [];
   }
-  const strategyCanon = normalizeUrlForObservation(strategyUrl);
-  if (!strategyCanon) return [];
+  // Match on host + path SHAPE, not exact path. A path-templated endpoint
+  // (`/search/{{q}}`) percent-encodes to `/search/%7B%7Bq%7D%7D`, which never
+  // equals any concrete observed path (`/search/milk`) — so an exact-canonical
+  // compare skipped every observed URL and the dropped query param (e.g. a
+  // required `key`) was never reported. The segment matcher treats each
+  // whole-segment `{{placeholder}}` as a wildcard so the concrete captures the
+  // strategy was derived from still match and their query params still diff.
+  const strategySegs = pathSegments(endpointPath);
 
   const missing = new Map<string, MissingCapturedQueryParam>();
   for (const observed of observedUrls) {
-    const oCanon = normalizeUrlForObservation(observed);
-    if (oCanon !== strategyCanon) continue;
     let oUrl: URL;
     try {
       oUrl = new URL(observed);
     } catch {
       continue;
     }
+    if (`${oUrl.protocol}//${oUrl.hostname.toLowerCase()}` !== strategyHostKey) continue;
+    if (!pathShapeMatches(strategySegs, pathSegments(oUrl.pathname))) continue;
     for (const [name, value] of oUrl.searchParams.entries()) {
       if (strategyParams.has(name)) continue;
       if (missing.has(name)) continue;
@@ -543,6 +551,35 @@ export function findMissingCapturedQueryParams(
     }
   }
   return [...missing.values()];
+}
+
+/** Split a path into its `/`-delimited segments, dropping any query/fragment
+ *  and leading/trailing slashes. `"/v1/search/"` → `["v1", "search"]`; `"/"`
+ *  → `[]`. */
+function pathSegments(rawPath: string): string[] {
+  let p = rawPath;
+  const cut = p.search(/[?#]/);
+  if (cut !== -1) p = p.slice(0, cut);
+  // Drop leading/trailing/duplicate slashes by filtering empty segments —
+  // both compared paths run through here, so segment counts stay consistent.
+  return p.split('/').filter((s) => s.length > 0);
+}
+
+/** True when the observed path matches the strategy's path SHAPE: same segment
+ *  count, every literal segment equal, and each whole-segment `{{placeholder}}`
+ *  treated as a single-segment wildcard. A strategy path with no placeholders
+ *  reduces to exact equality — identical to the prior canonical-compare for
+ *  non-templated endpoints. Partial-segment placeholders (`pre-{{id}}.json`)
+ *  are matched literally (conservative: no false wildcard), so they behave as
+ *  before rather than over-matching. Pure segment walk — no regex backtracking. */
+function pathShapeMatches(strategySegs: string[], observedSegs: string[]): boolean {
+  if (strategySegs.length !== observedSegs.length) return false;
+  for (let i = 0; i < strategySegs.length; i += 1) {
+    const seg = strategySegs[i] ?? '';
+    if (/^\{\{[^}]+\}\}$/.test(seg)) continue; // whole-segment placeholder → wildcard
+    if (seg !== observedSegs[i]) return false;
+  }
+  return true;
 }
 
 /**

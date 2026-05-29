@@ -11,6 +11,7 @@
 // caller_input param.
 
 import type { Strategy } from '../strategies/skills';
+import { escapeRegExp } from '../utils/regex';
 import { wireParamNamesForPlaceholder } from './save-audit';
 
 /** Local structural shape of a notes.params entry. The canonical type lives
@@ -39,7 +40,7 @@ function paramIsUrlQueryValue(data: Strategy, paramName: string): boolean {
   const queryString = endpoint.slice(queryIdx + 1);
   const names = new Set<string>([paramName, ...wireParamNamesForPlaceholder(data, paramName)]);
   for (const name of names) {
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escaped = escapeRegExp(name);
     // Match `<key>={{<name>}}` or `<key>={{<name>}}&...` shapes — the
     // placeholder must be the entire value, not a substring of one.
     const re = new RegExp(`(?:^|&)[^=&]+=\\{\\{${escaped}\\}\\}(?:&|$)`);

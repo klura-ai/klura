@@ -16,6 +16,7 @@
 // `js-eval` always returns a value but the value isn't always consumed.
 
 import type { Strategy } from '../strategies/skills';
+import { escapeRegExp } from '../utils/regex';
 import type { SaveWarning } from './save-warnings';
 
 export function detectUnreferencedPrereqBinding(data: Strategy): SaveWarning[] {
@@ -57,7 +58,7 @@ export function detectUnreferencedPrereqBinding(data: Strategy): SaveWarning[] {
     // widening).
     const trimmedPrereqs = (prereqs as unknown[]).filter((_, j) => j !== i);
     const corpus = JSON.stringify({ ...obj, prerequisites: trimmedPrereqs });
-    const escaped = binds.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escaped = escapeRegExp(binds);
     const re = new RegExp(`\\{\\{\\s*${escaped}\\s*\\}\\}`);
     if (re.test(corpus)) continue;
 

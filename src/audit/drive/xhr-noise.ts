@@ -5,6 +5,7 @@
 // allowed runtime heuristic #8 in runtime/docs/principles.md.
 
 import { loadStrategy } from '../../strategies/skills';
+import { escapeRegExp } from '../../utils/regex';
 import { readPlatformSkillInfo } from '../../strategies/skills-list-helpers';
 
 interface InterceptedLike {
@@ -50,7 +51,7 @@ function looksLikeTracking(urlPath: string): boolean {
  *  unmatchable. The agent's "covered by saved strategy" check is path-level. */
 function endpointTemplateToRegex(template: string): RegExp {
   const pathOnly = template.split('?')[0] ?? template;
-  const escaped = pathOnly.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escaped = escapeRegExp(pathOnly);
   // After escape, `\{\{[^}]+\}\}` is the literal placeholder. Restore as
   // wildcard segments (any chars except `/` to keep the path-segment shape).
   const wildcarded = escaped.replace(/\\\{\\\{[^}]+\\\}\\\}/g, '[^/?#]+');

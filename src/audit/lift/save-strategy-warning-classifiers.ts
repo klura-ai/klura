@@ -8,6 +8,7 @@
 // hashFields scope cascade-invalidates if the relevant slice mutates.
 
 import type { Classifier, Issue } from '../index';
+import { escapeRegExp } from '../../utils/regex';
 import type { Strategy } from '../../strategies/skills';
 import type { SaveStrategyCtx } from './save-strategy';
 import {
@@ -256,7 +257,7 @@ export const observedPropertyKeysClassifier: Classifier<Strategy, SaveStrategyCt
     const { allKeys } = collectObservedPropertyKeys(data, ctx);
     if (allKeys.size === 0) return [];
     const referenced = [...allKeys].some((k) => {
-      const escaped = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const escaped = escapeRegExp(k);
       const re = new RegExp(`(?<![A-Za-z0-9_])${escaped}(?![A-Za-z0-9_])`, 'i');
       return re.test(answer);
     });

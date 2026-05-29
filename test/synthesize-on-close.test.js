@@ -404,3 +404,85 @@ test('synth_fetch skips auto-save with body_unparseable diagnostic when body is 
   const rejected = diag.filter((d) => d.pass === 'synth_fetch' && d.outcome === 'validation_rejected');
   assert.equal(rejected.length, 0, `validator must not be reached: ${JSON.stringify(rejected)}`);
 });
+
+// --- Bug 1: auto-synth must never synthesize from a failed (non-2xx) capture.
+// A literal landing in a request whose RESPONSE was 4xx/5xx would otherwise be
+// templated into a strategy that returns the same error at warm-execute —
+// silent corruption that also blocks future re-discovery. The gate reads the
+// real `status` field on the intercepted record (the older fixtures above use
+// the ignored `responseStatus` name, so their status is undefined → treated as
+// unknown → still synth).
+
+function mkReqWithStatus({ url, method = 'GET', postData, status }) {
+  return {
+    url,
+    method,
+    headers: { 'content-type': 'application/json' },
+    postData,
+    status,
+    responseBody: '{}',
+  };
+}
+
+test('synth_fetch withholds auto-save when the only literal-carrying capture returned 4xx', async () => {
+  const literal = 'milkXYZ123';
+  const session = mkSession({
+    declaredCapabilities: [{ capability: 'search_items', args: { q: literal } }],
+    performActionHistory: [
+      { at: Date.now() - 1000, action: 'type', selector: 'input', value: literal },
+      { at: Date.now() - 500, action: 'click', selector: 'button "Search"' },
+    ],
+    intercepted: [
+      mkReqWithStatus({ url: `https://api.example.com/v1/search?q=${literal}`, status: 403 }),
+    ],
+  });
+  session.platform = 'test-synth-fetch-4xx-only';
+
+  const diag = [];
+  const out = await synthesizeFallbacksOnClose(session, session.platform, null, diag);
+
+  const fetched = out.find((r) => r.tier === 'fetch');
+  assert.equal(
+    fetched,
+    undefined,
+    `no fetch strategy should synth from a 403 capture; got ${JSON.stringify(out)}`,
+  );
+
+  const skip = diag.filter(
+    (d) => d.pass === 'synth_fetch' && d.outcome === 'synth_skipped_non_2xx_capture',
+  );
+  assert.equal(
+    skip.length,
+    1,
+    `expected synth_skipped_non_2xx_capture diagnostic, got ${JSON.stringify(diag)}`,
+  );
+  assert.equal(skip[0].detail.status, 403);
+});
+
+test('synth_fetch prefers a 2xx capture over a more-recent 4xx one carrying the same literal', async () => {
+  const literal = 'milkXYZ456';
+  const session = mkSession({
+    declaredCapabilities: [{ capability: 'search_ok', args: { q: literal } }],
+    performActionHistory: [
+      { at: Date.now() - 1000, action: 'type', selector: 'input', value: literal },
+      { at: Date.now() - 500, action: 'click', selector: 'button "Search"' },
+    ],
+    intercepted: [
+      // Healthy 200 first ...
+      mkReqWithStatus({ url: `https://api.example.com/v1/search?q=${literal}`, status: 200 }),
+      // ... then a more-recent 403 to a DIFFERENT host (most-recent would win
+      // without the health gate, baking the blocked endpoint into the save).
+      mkReqWithStatus({ url: `https://blocked.example.com/x?q=${literal}`, status: 403 }),
+    ],
+  });
+  session.platform = 'test-synth-fetch-prefer-2xx';
+
+  const diag = [];
+  const out = await synthesizeFallbacksOnClose(session, session.platform, null, diag);
+
+  const fetched = out.find((r) => r.tier === 'fetch');
+  assert.ok(fetched, `expected a fetch synth from the 200 capture; got ${JSON.stringify(out)}`);
+  const saved = JSON.parse(fs.readFileSync(fetched.path, 'utf-8'));
+  assert.equal(saved.baseUrl, 'https://api.example.com');
+  assert.equal(saved.endpoint, '/v1/search?q={{q}}');
+});

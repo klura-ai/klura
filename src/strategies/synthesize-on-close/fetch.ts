@@ -122,6 +122,38 @@ function firstScanPointer(
     .find(({ m }) => m.source === source);
 }
 
+/** A captured response is a usable basis for a synthesized strategy unless it
+ *  is a KNOWN failure. `null`/`undefined` = we never captured a status (don't
+ *  penalize on missing data — preserves the no-response path); 2xx/3xx = OK;
+ *  a present status outside 200–399 (4xx/5xx, or 0 for an aborted/errored
+ *  request) = failure. Synthesizing from a failed capture lands a strategy
+ *  that returns the same error at warm-execute — silent corruption. */
+function isHealthyResponseStatus(status: number | null | undefined): boolean {
+  if (status === null || status === undefined) return true;
+  return status >= 200 && status < 400;
+}
+
+function pushNon2xxOnlyDiagnostic(
+  save: SaveMarker,
+  httpMatches: CandidateMatch[],
+  diag: SynthDiagnosticEntry[],
+): void {
+  const mostRecent = [...httpMatches].sort((a, b) => b.requestIdx - a.requestIdx)[0];
+  diag.push({
+    pass: 'synth_fetch',
+    capability: save.capability,
+    phase: 'skip',
+    outcome: 'synth_skipped_non_2xx_capture',
+    detail: {
+      status: mostRecent?.request.status ?? null,
+      url: mostRecent?.request.url,
+      candidate_count: httpMatches.length,
+      advice:
+        'The typed literal appeared only in captured request(s) whose response was a failure (status outside 200–399). Auto-save was withheld — a strategy templated from a failed request returns the same error at warm-execute. Re-drive so the literal lands in a 2xx response, or lift manually with save_strategy once a working capture exists.',
+    },
+  });
+}
+
 /** Headers whose values look like context-bound tokens — high-entropy
  *  random strings the agent's args didn't supply. Used by the synth
  *  pass to surface a `context_bound_token_in_request` diagnostic when
@@ -338,7 +370,28 @@ export function synthesizeFetchFromCaptures(
 
     // Filter scans to HTTP-body / URL matches — those we can template. WS
     // matches land in the diagnostic for the agent to pick up.
-    const { matches, sawWsSent, sawVisitedUrl } = collectCandidateMatches(session, scans);
+    const {
+      matches: httpMatches,
+      sawWsSent,
+      sawVisitedUrl,
+    } = collectCandidateMatches(session, scans);
+
+    if (httpMatches.length === 0) {
+      pushNoHttpMatchDiagnostic(save, scans, sawWsSent, sawVisitedUrl, diag);
+      continue;
+    }
+
+    // Response-health gate: drop captures whose response was a definite
+    // failure (status outside 200–399). A literal can land in several
+    // captures; prefer one whose response was OK. If EVERY literal-carrying
+    // capture failed, synthesizing from any of them ships a strategy that
+    // returns the same error at warm-execute — withhold + diagnose rather
+    // than persist silent corruption.
+    const matches = httpMatches.filter((m) => isHealthyResponseStatus(m.request.status));
+    if (matches.length === 0) {
+      pushNon2xxOnlyDiagnostic(save, httpMatches, diag);
+      continue;
+    }
 
     // Generic-literal guard: when a typed-arg value is a common string (brand
     // name, domain, "en-US", a 3-letter word) it appears in dozens of captured
@@ -349,11 +402,6 @@ export function synthesizeFetchFromCaptures(
     // surface the data-load classifier's candidates instead, and the agent
     // picks from body_preview.
     if (shouldSkipNoisyLiteralMatches(matches, save, diag)) continue;
-
-    if (matches.length === 0) {
-      pushNoHttpMatchDiagnostic(save, scans, sawWsSent, sawVisitedUrl, diag);
-      continue;
-    }
 
     // Pick the most-recent match (highest request index). That's the one
     // temporally closest to "the agent hit send."

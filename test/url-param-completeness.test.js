@@ -103,3 +103,50 @@ test('trailing slash variance does not break matching', () => {
   assert.equal(missing.length, 1);
   assert.equal(missing[0].param, 'site');
 });
+
+// --- Bug 2: path-templated endpoints. The canonical compare used exact path
+// equality, so a path-templated endpoint (`/search/{{q}}` → encoded
+// `/search/%7B%7Bq%7D%7D`) never matched a concrete observed path
+// (`/search/milk`) and the per-URL query-param diff was skipped entirely — the
+// dropped param slipped through. Observed live on a search-as-a-service
+// endpoint (`/search/{{q}}?key=...` saved without the required `key`). The segment
+// matcher treats each whole-segment `{{placeholder}}` as a wildcard so the
+// concrete captures still match and their query params still diff.
+
+test('path-templated endpoint with a dropped query param → warning fires (search-endpoint key-drop repro)', () => {
+  const strategy = fetchStrategy('/search/{{q}}', 'https://ac.cnstrc.test');
+  const observed = ['https://ac.cnstrc.test/search/milk?key=key_abc123&c=ciojs'];
+  const missing = findMissingCapturedQueryParams(strategy, observed);
+  const params = missing.map((m) => m.param).sort();
+  assert.deepEqual(params, ['c', 'key']);
+  const key = missing.find((m) => m.param === 'key');
+  assert.equal(key.observed_value, 'key_abc123');
+});
+
+test('path-templated endpoint with the query param templated → no warning', () => {
+  const strategy = fetchStrategy('/search/{{q}}?key={{key}}', 'https://ac.cnstrc.test');
+  const observed = ['https://ac.cnstrc.test/search/milk?key=key_abc123'];
+  assert.deepEqual(findMissingCapturedQueryParams(strategy, observed), []);
+});
+
+test('path-templated endpoint does not match a path with a different segment count', () => {
+  const strategy = fetchStrategy('/search/{{q}}', 'https://ac.cnstrc.test');
+  // Extra trailing segment → not the same resource shape → no match → no warning.
+  const observed = ['https://ac.cnstrc.test/search/milk/extra?key=key_abc123'];
+  assert.deepEqual(findMissingCapturedQueryParams(strategy, observed), []);
+});
+
+test('path-templated endpoint only matches the same host', () => {
+  const strategy = fetchStrategy('/search/{{q}}', 'https://ac.cnstrc.test');
+  const observed = ['https://other.example.test/search/milk?key=key_abc123'];
+  assert.deepEqual(findMissingCapturedQueryParams(strategy, observed), []);
+});
+
+test('partial-segment placeholder is matched literally (conservative — no false wildcard)', () => {
+  // `pre-{{id}}` is NOT a whole-segment placeholder, so it stays literal and
+  // won't match `pre-42`. The detector simply stays silent (same as before),
+  // rather than over-matching unrelated paths.
+  const strategy = fetchStrategy('/x/pre-{{id}}', 'https://api.example.test');
+  const observed = ['https://api.example.test/x/pre-42?k=1'];
+  assert.deepEqual(findMissingCapturedQueryParams(strategy, observed), []);
+});

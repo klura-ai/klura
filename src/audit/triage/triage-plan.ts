@@ -26,6 +26,7 @@
 // save audit's `unobservedUrlDetector` consume it.
 
 import { Audit, type Detector, type Issue } from '../index';
+import { escapeRegExp } from '../../utils/regex';
 import type { Session } from '../../drivers/types/session';
 import type { DefenseSurface } from '../../working-dir/schema';
 import { findObservedMatch } from '../../strategies/verify-observed';
@@ -254,7 +255,7 @@ function citeableCandidatesPreview(set: Set<string>, max = 10): string {
 function justificationCitesArtifact(justification: string, artifacts: Set<string>): boolean {
   if (justification.trim().length === 0) return false;
   for (const artifact of artifacts) {
-    const escaped = artifact.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escaped = escapeRegExp(artifact);
     const re = new RegExp(`(?<![A-Za-z0-9_])${escaped}(?![A-Za-z0-9_])`, 'i');
     if (re.test(justification)) return true;
   }

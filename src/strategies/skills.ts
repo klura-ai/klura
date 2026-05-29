@@ -8,6 +8,7 @@ import { asPlatformSlug, asIdentifierSlug, asEnum, ValidationError } from '../va
 import { KLURA_DIR, SKILLS_DIR, WORKDIR_DIR } from '../paths';
 import { appendStrategyEvent } from '../working-dir/logbook';
 import { readPlatformSkillInfo } from './skills-list-helpers';
+import { escapeRegExp } from '../utils/regex';
 export { KLURA_DIR, SKILLS_DIR };
 
 // Shape / prereq / placeholder validators live in ./validate; gate consumers
@@ -466,10 +467,6 @@ function findUrlParamForPlaceholder(data: Strategy, placeholder: string): string
   const re = new RegExp(`[?&]([^=&]+)=\\{\\{${escapeRegExp(placeholder)}\\}\\}`);
   const m = re.exec(urlString);
   return m ? (m[1] ?? null) : null;
-}
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 export function saveStrategy(
