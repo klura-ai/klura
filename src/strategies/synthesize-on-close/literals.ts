@@ -185,6 +185,80 @@ function extractArgNameFromMessage(message: string): string | null {
   return match?.[1] ?? null;
 }
 
+/**
+ * A typed arg value can land on the wire in several encodings depending on the
+ * request body's content-type: raw (JSON string value, plain query), percent-
+ * encoded (form-urlencoded, URL query), form-plus (space as `+`), or JSON-
+ * string-escaped (value embedded in a JSON body — quotes, `\n`, non-ASCII).
+ * Auto-synth templating and the silent-bake postcondition both match against
+ * this candidate set so a value that is present-but-encoded is still found
+ * rather than baked into the strategy as a literal. Raw value is always first.
+ */
+export function wireEncodingVariants(value: string): string[] {
+  if (value.length === 0) return [];
+  const out = new Set<string>([value]);
+  try {
+    const pct = encodeURIComponent(value);
+    out.add(pct);
+    out.add(pct.replace(/%20/g, '+')); // form-urlencoded encodes space as '+'
+  } catch {
+    // encodeURIComponent throws only on lone surrogates — skip the variant.
+  }
+  try {
+    const json = JSON.stringify(value); // "a\nb" -> "\"a\\nb\""
+    if (json.length >= 2) out.add(json.slice(1, -1)); // drop the wrapping quotes
+  } catch {
+    // Non-serializable — skip the JSON-escaped variant.
+  }
+  return [...out];
+}
+
+/**
+ * Silent-bake postcondition for auto-synthesized fetch / page-script
+ * strategies — the resilient backstop to the best-effort templating passes.
+ *
+ * Templating replaces a declared arg's value with `{{arg}}` wherever the value
+ * (in any `wireEncodingVariants` form) appears in the captured request. When
+ * it misses — an encoding it does not recognize, a partial match — the arg
+ * ships baked as a literal and warm execute silently ignores caller input
+ * while still returning the same 2xx the agent saw during discovery. That
+ * false-positive success is the worst failure mode a saved strategy can have:
+ * it looks like it worked and the caller's data never reached the wire.
+ *
+ * Rather than depend on templating having handled every encoding, this asserts
+ * the end state directly: every declared string arg whose value is present in
+ * the capture the strategy was built from MUST surface as a `{{arg}}`
+ * placeholder in the serialized strategy. Any present-but-untemplated arg is
+ * returned; the caller skips persistence so the recorded-path fallback (which
+ * replays the real typed values) stands in and the next session can lift
+ * manually.
+ *
+ * Complete for every strategy auto-synth actually ships: a body is persisted
+ * only when it parsed as JSON or form-urlencoded, and for both a value's wire
+ * form is one of the encodings `wireEncodingVariants` enumerates — so a present
+ * value cannot hide from this check on a shipped strategy. Anchoring to THIS
+ * capture (not the whole session) also means args that legitimately belong to a
+ * different request in a multi-call flow are not false-flagged. Values shorter
+ * than 3 chars are skipped — they match too much to give a reliable signal.
+ */
+export function detectSilentlyBakedArgs(
+  strategy: Record<string, unknown>,
+  capturedUrl: string,
+  capturedBody: string,
+  declaredArgs: Record<string, unknown> | undefined,
+): string[] {
+  if (!declaredArgs) return [];
+  const serialized = JSON.stringify(strategy);
+  const wire = `${capturedUrl}\n${capturedBody}`;
+  const baked: string[] = [];
+  for (const [argName, argVal] of Object.entries(declaredArgs)) {
+    if (typeof argVal !== 'string' || argVal.length < 3) continue;
+    if (serialized.includes(`{{${argName}}}`)) continue; // templated — fine
+    if (wireEncodingVariants(argVal).some((v) => wire.includes(v))) baked.push(argName);
+  }
+  return baked;
+}
+
 export function attachSaveWarningsToStrategy(
   strategy: Record<string, unknown>,
   warnings: SaveWarning[],

@@ -17,8 +17,10 @@ import {
 import {
   attachSaveWarningsToStrategy,
   detectBlockingTypedTextDrift,
+  detectSilentlyBakedArgs,
   detectTypedTextDrift,
   findLiteralInSessionCaptures,
+  wireEncodingVariants,
   type LiteralMatch,
 } from './literals';
 import { detectParameterizationDisclosureRequired } from '../../gate/save-warnings-parameterization';
@@ -421,9 +423,18 @@ export function synthesizeFetchFromCaptures(
     for (const [paramName, paramValue] of Object.entries(save.args)) {
       if (typeof paramValue !== 'string' || paramValue.length === 0) continue;
       let bodyMatch = false;
-      if (templatedBody && templatedBody.includes(paramValue)) {
-        templatedBody = templatedBody.split(paramValue).join(`{{${paramName}}}`);
-        bodyMatch = true;
+      if (templatedBody) {
+        // The value lands on the wire encoded by the body's content-type
+        // (form-urlencoded: `alice%40example.com`, `Hello+from+discovery`; JSON
+        // body: `\n`/quote-escaped), so match against each candidate encoding
+        // — not just the raw typed value — or the arg ships baked as a literal.
+        for (const variant of wireEncodingVariants(paramValue)) {
+          if (templatedBody.includes(variant)) {
+            templatedBody = templatedBody.split(variant).join(`{{${paramName}}}`);
+            bodyMatch = true;
+            break;
+          }
+        }
       }
       // URL match is handled via the endpoint templating block below (needs
       // baseUrl/endpoint parsed first). Stub the paramsDoc entry here so both
@@ -466,8 +477,14 @@ export function synthesizeFetchFromCaptures(
     // site-hardcoded URL.
     for (const [paramName, paramValue] of Object.entries(save.args)) {
       if (typeof paramValue !== 'string' || paramValue.length === 0) continue;
-      if (endpoint.includes(paramValue)) {
-        endpoint = endpoint.split(paramValue).join(`{{${paramName}}}`);
+      // Query values are percent-encoded on the wire (`?q=thai%20food`); match
+      // the same encoding candidates as the body so a spaced/non-ASCII arg in
+      // the URL gets templated rather than hardcoded into the endpoint.
+      for (const variant of wireEncodingVariants(paramValue)) {
+        if (endpoint.includes(variant)) {
+          endpoint = endpoint.split(variant).join(`{{${paramName}}}`);
+          break;
+        }
       }
     }
 
@@ -607,6 +624,35 @@ export function synthesizeFetchFromCaptures(
               return m ? m[1] : null;
             })
             .filter((n): n is string => n !== null),
+        },
+      });
+      continue;
+    }
+    // Silent-bake postcondition (resilient backstop): the templating passes
+    // above are best-effort across known wire encodings. detectBlockingTypedText-
+    // Drift only catches args that were never observed at all; this catches the
+    // complementary failure — an arg that WAS present in the capture but that
+    // templating missed (an encoding it didn't recognize), so it ships baked as
+    // a literal and warm execute silently drops caller input while still
+    // returning the discovery-time 2xx. Assert the end state directly: every
+    // arg present in the capture we built from must surface as a {{placeholder}}.
+    // If one didn't, skip persistence rather than ship a false-positive-success
+    // strategy — the recorded-path fallback replays the real values and the next
+    // session can lift manually.
+    const bakedArgs = detectSilentlyBakedArgs(strategy, req.url, postDataStr ?? '', save.args);
+    if (bakedArgs.length > 0) {
+      diag.push({
+        pass: 'synth_fetch',
+        capability: save.capability,
+        phase: 'skip',
+        outcome: 'arg_baked_as_literal',
+        detail: {
+          baseUrl,
+          endpoint,
+          method: req.method,
+          baked_args: bakedArgs,
+          advice:
+            'A declared arg appeared in the captured request but auto-synth could not template it into a {{placeholder}} (likely an unrecognized body encoding), so the saved strategy would ignore caller input while still returning success. Auto-save was skipped; lift manually with save_strategy, or rely on the recorded-path fallback.',
         },
       });
       continue;
