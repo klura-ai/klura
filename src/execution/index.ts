@@ -879,7 +879,7 @@ function collectAuthProvidingPrereqCapabilities(
  *   - partial-replay step fails mid-flow
  *   - primary-retry still misses (4xx / throws)
  *
- * Logging: each tier transition writes to `errors[]` so field-reports can
+ * Logging: each tier transition writes to `errors[]` so bench can
  * read the cascade trail in `finalizeCascadeFailure`'s `details`.
  */
 async function tryRevisitPartialReplay(

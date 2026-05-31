@@ -62,7 +62,7 @@ See [remote.md](remote.md) for the viewer protocol.
 
 | Field | Type | Default | Purpose |
 | --- | --- | --- | --- |
-| `defaults.lift_mode` | `explicit_learn` \| `skip` | `explicit_learn` | Fallback when `start_session` doesn't supply one. `explicit_learn` asks the user before spending LIFT rounds; `skip` disables the LIFT handoff. For autonomous runs without a human, register a checkpoint handler that auto-resolves prompts to `continue` — see `field-reports/lib/checkpoint-stubs.js`. |
+| `defaults.lift_mode` | `explicit_learn` \| `skip` | `explicit_learn` | Fallback when `start_session` doesn't supply one. `explicit_learn` asks the user before spending LIFT rounds; `skip` disables the LIFT handoff. For autonomous runs without a human, register a checkpoint handler that auto-resolves prompts to `continue` — see `bench/lib/checkpoint-stubs.js`. |
 
 ### `graduation.*`
 

@@ -11,9 +11,8 @@ import {
 } from '../strategies/try-generator-stats';
 
 // Gate `[pool]` trace lines behind KLURA_VERBOSE so daemon stderr stays quiet
-// in normal use. Matches the convention used by the benchmark harnesses
-// (`benchmarks-internal/agent.js`, `field-reports/*`). Errors and warnings stay
-// unconditional — only routine lifecycle traces filter.
+// in normal use. Matches the convention used by the bench harness (`bench/*`).
+// Errors and warnings stay unconditional — only routine lifecycle traces filter.
 const trace = (...args: unknown[]): void => {
   if (process.env.KLURA_VERBOSE === '1') console.log(...args);
 };

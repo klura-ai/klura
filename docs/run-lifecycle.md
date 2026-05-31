@@ -95,7 +95,7 @@ User-facing settings live in `~/.klura/config.json`, not in `KLURA_*` env vars. 
 - `explicit_learn` (default) — handoff fires; the agent writes a user-facing prompt in its own voice from the inline triage bundle + captures and waits for a reply. Standard interactive user flow.
 - `skip` — no handoff fires; end_drive tears down. Use for one-shot reads where you never want RE.
 
-For autonomous runs without a human, register a checkpoint handler that auto-resolves the relevant kinds to `continue` — see `field-reports/lib/checkpoint-stubs.js` for the canonical example. Behavior is plugin-orchestrated via the checkpoint registry; no flag-driven branches in runtime hot paths.
+For autonomous runs without a human, register a checkpoint handler that auto-resolves the relevant kinds to `continue` — see `bench/lib/checkpoint-stubs.js` for the canonical example. Behavior is plugin-orchestrated via the checkpoint registry; no flag-driven branches in runtime hot paths.
 
 ## CLI-only controls (no agent write path)
 

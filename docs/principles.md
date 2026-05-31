@@ -218,7 +218,7 @@ See [`runtime/docs/gates.md`](gates.md) for implementation detail, taxonomy rati
 
 A **checkpoint** is a runtime-emitted mid-flow event with a known `kind` from a closed enum (`triage_plan`, `surface_changed`, `recorded_step_failed`, `session_expired`, `post_save_validation_consent`). The runtime is the detector — step threw, post-save validation pending, navigation crossed to a fresh surface — so dispatch is **direct**: the runtime invokes whichever plugin claimed that kind, last-registered wins. No menu, no LLM-semantic routing. Distinct from gates (save/commit-time payload shape) and from interruptions (agent-detected ambient state).
 
-Handlers take `(kind, event, session) → resolution` and return `resolved` / `handover` / `continue`. On `handover`, runtime mints a `checkpoint_token`, surfaces `_checkpoint: {kind, prompt?, viewer_url?, checkpoint_token}` on the next tool response, and gates subsequent tool calls on `ack_checkpoint`. Autonomous runs without a human register a single handler claiming every kind that returns `{status: 'continue'}` — see `field-reports/lib/checkpoint-stubs.js`.
+Handlers take `(kind, event, session) → resolution` and return `resolved` / `handover` / `continue`. On `handover`, runtime mints a `checkpoint_token`, surfaces `_checkpoint: {kind, prompt?, viewer_url?, checkpoint_token}` on the next tool response, and gates subsequent tool calls on `ack_checkpoint`. Autonomous runs without a human register a single handler claiming every kind that returns `{status: 'continue'}` — see `bench/lib/checkpoint-stubs.js`.
 
 Reach for the checkpoint framework when: (a) the runtime is the detector; (b) the event has a known kind from the closed enum; (c) the resolution can be plugged by enterprise / test code.
 

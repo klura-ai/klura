@@ -611,7 +611,7 @@ When the capture-pipeline saves a `fetch` / `page-script` strategy it also stamp
 3. Full recorded-path replay (no retry — recorded-path IS the fallback tier) → miss
 4. `needs_rediscovery` (as today)
 
-The partial replay is the new node in the ladder. It's a best-effort fix-up to restore session state (cookies, in-page tokens, navigation context) that a cold warm session lacks; when it sticks, the primary retry is ~100ms instead of ~5s of full replay. Partial replay skips entirely when the anchor id is absent, the sibling recorded-path is missing, or the anchor id no longer matches any step in the recorded-path (renamed / deleted via `patch_step`). Logging for each tier transition lands in `execute()`'s `errors[]` so field-reports can read the cascade trail.
+The partial replay is the new node in the ladder. It's a best-effort fix-up to restore session state (cookies, in-page tokens, navigation context) that a cold warm session lacks; when it sticks, the primary retry is ~100ms instead of ~5s of full replay. Partial replay skips entirely when the anchor id is absent, the sibling recorded-path is missing, or the anchor id no longer matches any step in the recorded-path (renamed / deleted via `patch_step`). Logging for each tier transition lands in `execute()`'s `errors[]` so bench can read the cascade trail.
 
 ### Sharable-skill robustness: locale variants
 
@@ -1812,7 +1812,7 @@ Every `save_strategy` call passes through `surface_triage_missing` on the consol
 - `explicit_learn` (default) — end-drive emits the LIFT handoff prompt for relay to the user.
 - `skip` — end-drive tears down silently; no handoff.
 
-For autonomous runs (benchmark / CI), register a checkpoint handler claiming `triage_plan` + `surface_changed` whose `continue` resolution pre-empts the default interactive handover — see `field-reports/lib/checkpoint-stubs.js`.
+For autonomous runs (benchmark / CI), register a checkpoint handler claiming `triage_plan` + `surface_changed` whose `continue` resolution pre-empts the default interactive handover — see `bench/lib/checkpoint-stubs.js`.
 
 ### How data accumulates
 
