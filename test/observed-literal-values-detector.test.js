@@ -28,8 +28,7 @@ registerSaveConfirmationDecider({
   },
 });
 
-const VERIFY_ACK =
-  'transaction-shape: response.extract grounds the verification (test default)';
+const VERIFY_ACK = 'transaction-shape: server returns a confirmation field (test default)';
 
 const BAKED = 'c958faf6168bed67ea86dabacee3f5b7';
 

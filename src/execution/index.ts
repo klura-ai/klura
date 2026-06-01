@@ -96,6 +96,55 @@ function isAuthCodeField(value: unknown): boolean {
   return AUTH_FAILURE_CODES.has(normalized);
 }
 
+// Per-call token-rotation codes: the saved token-bearing field (nonce / csrf)
+// rotated server-side but the ACCOUNT session is intact. Distinct from
+// AUTH_FAILURE_CODES — these are agent-recoverable (re-derive the token), not
+// human-reauth. Exact-match (case-insensitive), same crisp-not-fuzzy discipline
+// as isAuthCodeField — never matched against free-text `message`.
+const STALE_NONCE_CODES = new Set([
+  'stale_nonce',
+  'nonce_expired',
+  'nonce_invalid',
+  'invalid_nonce',
+  'nonce_mismatch',
+  'csrf_invalid',
+  'invalid_csrf',
+  'csrf_token_mismatch',
+  'xsrf_invalid',
+]);
+
+function isStaleNonceCodeField(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
+  return STALE_NONCE_CODES.has(normalized);
+}
+
+// True when the response body's machine-readable code field names a token
+// rotation (vs a genuine auth failure). REST {error|code} + GraphQL
+// {errors:[{type,extensions:{code}}]} shapes, mirroring looksLikeAuthFailure.
+function bodyHasStaleNonceCode(result: ExecuteResult): boolean {
+  const body = result.body;
+  if (!body || typeof body !== 'object') return false;
+  const bodyObj = body as Record<string, unknown>;
+  if (isStaleNonceCodeField(bodyObj.error)) return true;
+  if (isStaleNonceCodeField(bodyObj.code)) return true;
+  if (Array.isArray(bodyObj.errors)) {
+    for (const raw of bodyObj.errors) {
+      if (!raw || typeof raw !== 'object') continue;
+      const entry = raw as Record<string, unknown>;
+      if (isStaleNonceCodeField(entry.type)) return true;
+      if (entry.extensions && typeof entry.extensions === 'object') {
+        const ext = entry.extensions as Record<string, unknown>;
+        if (isStaleNonceCodeField(ext.code)) return true;
+      }
+    }
+  }
+  return false;
+}
+
 // Deliberately generous on inputs (status, login-wall URL, machine-readable
 // code fields) — reauth is cheap, re-discovery is not. Handles REST
 // {error|code} and GraphQL {errors:[{type,extensions:{code}}]} shapes.
@@ -1083,8 +1132,11 @@ function classifyAuthShapeFromProbe(
 ): 'stale_nonce' | 'auth_failed' | null {
   if (status !== 401 && status !== 403) return null;
   if (authState === 'logged_in') return 'stale_nonce';
-  // logged_out OR indeterminate → conservative: assume auth failure.
-  return 'auth_failed';
+  if (authState === 'logged_out') return 'auth_failed';
+  // indeterminate / probe-absent: don't assert auth_failed from the probe — let
+  // the caller fall through to body-code inspection (stale-nonce) and only then
+  // the 401/403 blanket, so a rotated-token failure isn't mislabeled needs-reauth.
+  return null;
 }
 
 function strategyEndpoint(strategy: skills.Strategy | null): string | undefined {
@@ -1126,14 +1178,22 @@ export function classifyAutoExecDiagnosis(
   if (probeKind === 'stale_nonce') {
     kind = 'stale_nonce';
     failure_signal =
-      `HTTP ${lastFailedResult?.status} on ${endpoint ?? '<unknown endpoint>'} ` +
-      `+ auth-probe of ${authProbe?.url} returned ${authProbe?.status} (logged_in) — ` +
+      `HTTP ${lastFailedResult?.status ?? '<no-status>'} on ${endpoint ?? '<unknown endpoint>'} ` +
+      `+ auth-probe of ${authProbe?.url ?? '<no-probe-url>'} returned ${authProbe?.status ?? '<no-status>'} (logged_in) — ` +
       `per-call token rotated, account session is fine`;
   } else if (probeKind === 'auth_failed') {
     kind = 'auth_failed';
     failure_signal =
-      `HTTP ${lastFailedResult?.status} on ${endpoint ?? '<unknown endpoint>'} ` +
-      `+ auth-probe of ${authProbe?.url} → ${authProbe?.auth_state} (${authProbe?.reason})`;
+      `HTTP ${lastFailedResult?.status ?? '<no-status>'} on ${endpoint ?? '<unknown endpoint>'} ` +
+      `+ auth-probe of ${authProbe?.url ?? '<no-probe-url>'} → ${authProbe?.auth_state ?? '<no-state>'} (${authProbe?.reason ?? '<no-reason>'})`;
+  } else if (lastFailedResult && bodyHasStaleNonceCode(lastFailedResult)) {
+    // Body carries a token-rotation code (e.g. {error:"stale_nonce"}) — the
+    // account session is intact, the saved token-bearing field rotated. Wins
+    // over the 401/403 auth blanket below so we don't mislabel it needs-reauth.
+    kind = 'stale_nonce';
+    failure_signal =
+      `HTTP ${lastFailedResult.status} on ${endpoint ?? '<unknown endpoint>'} — ` +
+      `response carries a token-rotation code, account session intact`;
   } else if (
     lastFailedResult &&
     looksLikeAuthFailure(lastFailedResult, lastFailedResult.finalUrl ?? '')
@@ -1197,6 +1257,37 @@ export function classifyAutoExecDiagnosis(
   };
 }
 
+// Stamp the agent-facing `error` + recovery flags on a failure body from the
+// (possibly probe-corrected) diagnosis kind. Single source of truth so every
+// surface that holds a diagnosis — finalizeCascadeFailure and the start-session
+// probe reclass — renders consistent error/needs_reauth/needs_rediscovery, never
+// a body that says auth_failed while diagnosis says stale_nonce.
+export function applyDiagnosisToBody(
+  body: Record<string, unknown>,
+  diagnosis: AutoExecDiagnosis,
+): void {
+  delete body.needs_reauth;
+  delete body.needs_rediscovery;
+  switch (diagnosis.kind) {
+    case 'auth_failed':
+      body.error = 'auth_failed';
+      body.needs_reauth = true;
+      break;
+    case 'stale_nonce':
+      body.error = 'stale_nonce';
+      body.needs_rediscovery = true;
+      break;
+    case 'endpoint_stale':
+      body.error = 'endpoint_stale';
+      body.needs_rediscovery = true;
+      break;
+    default:
+      // needs_rediscovery / unknown / prereq_returned_undefined: generic failure.
+      body.error = 'all_strategies_failed';
+      body.needs_rediscovery = true;
+  }
+}
+
 // params_used echoes the original caller args, not identity-merged or
 // generator-augmented versions — the LLM can only fix what it typed, not what
 // the runtime injected.
@@ -1222,53 +1313,38 @@ export function finalizeCascadeFailure(
     authProbe,
   );
 
-  if (lastFailedResult && looksLikeAuthFailure(lastFailedResult, lastFailedResult.finalUrl ?? '')) {
-    return {
-      status: lastFailedResult.status || 401,
-      body: {
-        error: 'auth_failed',
-        needs_reauth: true,
-        original_status: lastFailedResult.status,
-        original_body: lastFailedResult.body,
-        final_url: lastFailedResult.finalUrl,
-        params_used: args,
-        params_doc: paramsDoc,
-        recovery_ref: recoveryRef,
-        diagnosis,
-      },
-    };
-  }
-
-  if (lastFailedResult && looksLikeStaleEndpoint(lastFailedResult)) {
-    return {
-      status: lastFailedResult.status,
-      body: {
-        error: 'endpoint_stale',
-        needs_rediscovery: true,
-        original_status: lastFailedResult.status,
-        original_body: lastFailedResult.body,
-        final_url: lastFailedResult.finalUrl,
-        tier: (lastFailedStrategy as { strategy?: string } | null)?.strategy,
-        params_used: args,
-        params_doc: paramsDoc,
-        recovery_ref: recoveryRef,
-        diagnosis,
-      },
-    };
-  }
-
-  return {
-    status: 0,
-    body: {
-      error: 'all_strategies_failed',
-      details: errors,
-      needs_rediscovery: true,
-      params_used: args,
-      params_doc: paramsDoc,
-      recovery_ref: recoveryRef,
-      diagnosis,
-    },
+  // The body's error/flags are derived from diagnosis.kind (single source of
+  // truth) so they never contradict it. A 401 whose body says {error:stale_nonce}
+  // now ships as stale_nonce + needs_rediscovery, not auth_failed + needs_reauth.
+  const body: Record<string, unknown> = {
+    original_status: lastFailedResult?.status,
+    original_body: lastFailedResult?.body,
+    final_url: lastFailedResult?.finalUrl,
+    params_used: args,
+    params_doc: paramsDoc,
+    recovery_ref: recoveryRef,
+    diagnosis,
   };
+  if (diagnosis.kind === 'endpoint_stale') {
+    body.tier = (lastFailedStrategy as { strategy?: string } | null)?.strategy;
+  }
+  // The generic-failure class carries the full error list for inline inspection.
+  if (
+    diagnosis.kind !== 'auth_failed' &&
+    diagnosis.kind !== 'stale_nonce' &&
+    diagnosis.kind !== 'endpoint_stale'
+  ) {
+    body.details = errors;
+  }
+  applyDiagnosisToBody(body, diagnosis);
+
+  let status = 0;
+  if (diagnosis.kind === 'auth_failed' || diagnosis.kind === 'stale_nonce') {
+    status = lastFailedResult?.status || 401;
+  } else if (diagnosis.kind === 'endpoint_stale') {
+    status = lastFailedResult?.status ?? 0;
+  }
+  return { status, body };
 }
 
 // notes.params is the contract for "what the caller must pass" —
@@ -1281,6 +1357,11 @@ function findMissingParams(strategy: skills.Strategy, args: Record<string, unkno
   if (!params || typeof params !== 'object') return [];
   const missing: string[] = [];
   for (const key of Object.keys(params)) {
+    // Generator outputs (`__gen.X`) are minted at execute time from the
+    // `generated` block, not caller-supplied — exclude them even when the
+    // literal_provenance audit nudged the agent into declaring them under
+    // notes.params. Mirrors findUnsatisfiedPlaceholders in save-strategy.ts.
+    if (key.startsWith('__gen.')) continue;
     const v = args[key];
     if (v === undefined || v === null || v === '') missing.push(key);
   }

@@ -48,12 +48,15 @@ export type { AuditAnswers } from '../gate';
 
 // Per-parameter documentation. The LLM writes this on discovery and the runtime
 // echoes it back verbatim in execute() error bodies so the LLM can diagnose
-// shape mismatches without re-discovering. Runtime never validates or enforces
-// `kind` — it's purely informational context for the agent.
+// shape mismatches without re-discovering. Most kinds (`id` / `enum` / `text`)
+// are informational, but the save-time audit DOES enforce grounding for the
+// shape-marker kinds (`slug` / `email` / `url` / `uuid`): they imply "value
+// from a known set" and require a `source: "capability:<list>"` — see
+// ENUM_SHAPE_MARKER_KINDS in runtime/src/gate/save-audit.ts.
 export interface ParamDoc {
   description: string;
-  // Loose enum — the runtime treats it as opaque. Common values for
-  // tab-complete but the LLM can write a novel kind and nothing breaks.
+  // Loose enum — a novel kind value won't break execution. But the shape-marker
+  // kinds (slug/email/url/uuid) are enforced at save time (see above).
   kind?: 'id' | 'slug' | 'email' | 'url' | 'uuid' | 'enum' | 'text';
   // Where the value comes from: "identities.<platform>.username", "URL slug",
   // "response.id from GET /api/users", free-form prose, etc.

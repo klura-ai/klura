@@ -1187,6 +1187,78 @@ function invokeWarningAcker(
  * (`{{__gen.X}}`) are excluded — those resolve from `generated` definitions
  * at execute time, not from caller args.
  */
+const PLACEHOLDER_RE = /\{\{(\w+(?:\.\w+)*)\}\}/g;
+
+/** Collect `{{placeholder}}` names (excluding `__gen.*`) from any string nested
+ *  inside `value` (string / array / object). Used to read a prereq's inputs. */
+function collectPlaceholderNames(value: unknown, out: Set<string>): void {
+  if (typeof value === 'string') {
+    let m: RegExpExecArray | null;
+    PLACEHOLDER_RE.lastIndex = 0;
+    while ((m = PLACEHOLDER_RE.exec(value)) !== null) {
+      const n = m[1];
+      if (n && !n.startsWith('__gen.')) out.add(n);
+    }
+  } else if (Array.isArray(value)) {
+    for (const v of value) collectPlaceholderNames(v, out);
+  } else if (value && typeof value === 'object') {
+    for (const v of Object.values(value as Record<string, unknown>))
+      collectPlaceholderNames(v, out);
+  }
+}
+
+/**
+ * The set of prereq-bound placeholder names that the prereq chain can actually
+ * mint at execute() time given `baseSatisfiable` (the keys verifyArgs supplies).
+ *
+ * A prereq output is *runnable* when every `{{...}}` input token in its
+ * producing prereq (url / expression / args) is itself satisfiable — from
+ * baseSatisfiable or from another runnable prereq's output. Fixpoint closure,
+ * bounded by node count (cycle-safe). A capability/lookup prereq whose input
+ * (e.g. `{{query}}`) is neither declared nor exampled is NOT runnable, so its
+ * output stays "unsatisfied" and post-save validation still skips — we never
+ * inject a stub value to force a false pass.
+ */
+function computeRunnablePrereqBinds(data: Strategy, baseSatisfiable: Set<string>): Set<string> {
+  const prereqs = (data as { prerequisites?: unknown }).prerequisites;
+  if (!Array.isArray(prereqs)) return new Set();
+  const nodes = prereqs
+    .filter((p): p is Record<string, unknown> => !!p && typeof p === 'object')
+    .map((p) => {
+      const outputs = new Set<string>();
+      if (typeof p.binds === 'string' && p.binds) outputs.add(p.binds);
+      if (p.vars && typeof p.vars === 'object' && !Array.isArray(p.vars)) {
+        for (const k of Object.keys(p.vars as Record<string, unknown>)) outputs.add(k);
+      }
+      const inputs = new Set<string>();
+      collectPlaceholderNames(p.url, inputs);
+      collectPlaceholderNames(p.expression, inputs);
+      collectPlaceholderNames(p.args, inputs);
+      for (const o of outputs) inputs.delete(o); // a prereq doesn't feed itself
+      return { outputs, inputs };
+    });
+  const satisfiable = new Set(baseSatisfiable);
+  const runnable = new Set<string>();
+  let changed = true;
+  let guard = 0;
+  while (changed && guard++ <= nodes.length) {
+    changed = false;
+    for (const node of nodes) {
+      if ([...node.outputs].every((o) => runnable.has(o))) continue;
+      if ([...node.inputs].every((i) => satisfiable.has(i))) {
+        for (const o of node.outputs) {
+          if (!runnable.has(o)) {
+            runnable.add(o);
+            satisfiable.add(o);
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+  return runnable;
+}
+
 function findUnsatisfiedPlaceholders(data: Strategy, args: Record<string, unknown>): Set<string> {
   const argKeys = new Set(
     Object.keys(args).filter((k) => {
@@ -1194,6 +1266,12 @@ function findUnsatisfiedPlaceholders(data: Strategy, args: Record<string, unknow
       return v !== undefined && v !== null && v !== '';
     }),
   );
+  // Prereq-bound placeholders the chain can mint for real at execute() time are
+  // not "unsatisfied" — excluding them lets verifySavedStrategy actually run the
+  // chain (the canonical signed-fetch / lookup shape). Bound to argKeys (the same
+  // set verifyArgs supplies) so a prereq whose own inputs are undeclared stays
+  // unsatisfied and validation still skips. See computeRunnablePrereqBinds.
+  const runnableBinds = computeRunnablePrereqBinds(data, argKeys);
   const missing = new Set<string>();
   // \w+ avoids the unbounded-non-close-brace pattern that sonarjs flags as
   // backtracking-friendly. Placeholder names in klura are
@@ -1206,6 +1284,7 @@ function findUnsatisfiedPlaceholders(data: Strategy, args: Record<string, unknow
       const name = m[1];
       if (!name) continue;
       if (name.startsWith('__gen.')) continue;
+      if (runnableBinds.has(name)) continue;
       if (!argKeys.has(name)) missing.add(name);
     }
   }

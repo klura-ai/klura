@@ -126,6 +126,7 @@ export const literalProvenanceClassifier: Classifier<Strategy, SaveStrategyCtx, 
           item,
           effective[item.path] as Parameters<typeof validateLiteralAnswer>[2],
           ctx.observedParamValues,
+          ctx.capability,
         ),
       );
     }

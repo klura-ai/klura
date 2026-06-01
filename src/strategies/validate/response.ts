@@ -47,6 +47,77 @@ export function validateResponseShape(data: Record<string, unknown>, tier: strin
     );
   }
 
+  // --- Applicability guards (run BEFORE the Zod shape parse so a well-worded
+  // error wins over a raw shape error for the common misuses: extract on a JSON
+  // endpoint, a string-valued extract entry, format:"html" on a non-GET). The
+  // full Zod shape validation still runs below. ---
+  const format = response.format;
+  const hasExtract =
+    'extract' in response && response.extract !== undefined && response.extract !== null;
+
+  if (format !== undefined && format !== 'json' && format !== 'html') {
+    throw new Error(
+      `invalid_strategy: ${tier}.response.format = ${JSON.stringify(format)} must be "json" or "html" ` +
+        `(xml and other formats are not supported yet)`,
+    );
+  }
+
+  // recorded-path extract is HTML-only today (extracts from the live page DOM,
+  // which is always HTML). Reject non-html format before the generic
+  // extract-on-json guard so recorded-path keeps its specific message.
+  if (tier === 'recorded-path' && format !== undefined && format !== 'html') {
+    throw new Error(
+      `invalid_strategy: recorded-path.response.format must be "html" (got ${JSON.stringify(format)}). ` +
+        `recorded-path extracts run against the live page DOM after the last step — there's no JSON to parse. ` +
+        `For JSON endpoints, lift the strategy to api instead.`,
+    );
+  }
+
+  if (format !== 'html' && hasExtract) {
+    // json (explicit or default) with extract is a common misuse — agents
+    // sometimes set response.extract on a JSON endpoint. Reject loudly so they
+    // fix it instead of wondering why their extractors are ignored.
+    throw new Error(
+      `invalid_strategy: ${tier}.response.extract is only valid when response.format = "html" ` +
+        `(got format = ${format === undefined ? '"json" (default)' : JSON.stringify(format)}). ` +
+        `For JSON endpoints, remove the extract field and let execute() return the parsed body verbatim.`,
+    );
+  }
+
+  // The {id: "id"} footgun: agents write extract as a key→string map, but each
+  // entry must be {selector, attr?, multiple?}. Catch it before the raw Zod
+  // shape error so the corrected line is in front of the agent.
+  if (format === 'html' && hasExtract && isPlainObject(response.extract)) {
+    for (const [k, v] of Object.entries(response.extract)) {
+      if (typeof v === 'string') {
+        throw new Error(
+          `invalid_strategy: ${tier}.response.extract.${k} must be an object {selector, attr?, multiple?}, not a string. ` +
+            `You wrote ${k}: ${JSON.stringify(v)} — the corrected shape is ${k}: {selector: ${JSON.stringify(v)}}. ` +
+            `Example: extract: {title: {selector: "h1"}, ${k}: {selector: ${JSON.stringify(v)}}}.`,
+        );
+      }
+    }
+  }
+
+  // format === 'html' on fetch requires method = GET. recorded-path carries no
+  // method field; skip when response.from is set (no HTTP fires).
+  if (format === 'html' && tier === 'fetch' && !hasFrom) {
+    let methodStr = 'GET';
+    if (typeof data.method === 'string') {
+      methodStr = data.method;
+    } else if (typeof data.endpoint === 'string' && data.endpoint.includes(' ')) {
+      methodStr = data.endpoint.split(' ')[0] ?? 'GET';
+    }
+    const method = methodStr.toUpperCase();
+    if (method !== 'GET') {
+      throw new Error(
+        `invalid_strategy: fetch response.format = "html" requires a GET method (got "${method}"). ` +
+          `HTML extraction is only supported on read-shaped endpoints — the save-time probe fires the real ` +
+          `request to verify the selectors, which is unsafe for non-GET methods.`,
+      );
+    }
+  }
+
   const parsed = responseSchema.safeParse(response);
   if (!parsed.success) {
     const issues = zodErrorToIssues(parsed.error, `${tier}.response`);
@@ -76,12 +147,43 @@ export function validateResponseShape(data: Record<string, unknown>, tier: strin
     }
     const fromName = response.from as string;
     const prereqs = Array.isArray(data.prerequisites) ? data.prerequisites : [];
+    // Execution stores a prereq's value under tokens[binds ?? name] and reads it
+    // back by response.from, so response.from must reference the EFFECTIVE bind
+    // name (binds when set, else name).
+    const effectiveBind = (p: Record<string, unknown>): string => {
+      if (typeof p.binds === 'string' && p.binds.length > 0) return p.binds;
+      if (typeof p.name === 'string') return p.name;
+      return '';
+    };
     const named = prereqs.find(
-      (p): p is Record<string, unknown> => isPlainObject(p) && p.name === fromName,
+      (p): p is Record<string, unknown> => isPlainObject(p) && effectiveBind(p) === fromName,
     );
     if (!named) {
+      // Footgun: response.from references a prereq's NAME, but that prereq binds
+      // its value under a different key. Execution writes tokens[binds] and reads
+      // tokens[response.from] → the read misses → HTTP 500 at warm-execute.
+      const nameMatch = prereqs.find(
+        (p): p is Record<string, unknown> =>
+          isPlainObject(p) &&
+          p.name === fromName &&
+          typeof p.binds === 'string' &&
+          p.binds.length > 0 &&
+          p.binds !== fromName,
+      );
+      if (nameMatch) {
+        throw new Error(
+          `invalid_strategy: ${tier}.response.from = "${fromName}" matches a prereq's name, but that prereq binds its ` +
+            `value under "${nameMatch.binds as string}". At execute time the value is stored under the bind key, so ` +
+            `response.from must reference "${nameMatch.binds as string}" (not the prereq name). ` +
+            `Change response.from to "${nameMatch.binds as string}".`,
+        );
+      }
       const declared = prereqs
-        .map((p) => (isPlainObject(p) && typeof p.name === 'string' ? `"${p.name}"` : null))
+        .map((p) => {
+          if (!isPlainObject(p)) return null;
+          const eb = effectiveBind(p);
+          return eb ? `"${eb}"` : null;
+        })
         .filter((n): n is string => n !== null);
       const declaredList = declared.length > 0 ? declared.join(', ') : '(none)';
       throw new Error(
@@ -102,63 +204,9 @@ export function validateResponseShape(data: Record<string, unknown>, tier: strin
     }
   }
 
-  const format = response.format;
-  if (format !== undefined && format !== 'json' && format !== 'html') {
-    throw new Error(
-      `invalid_strategy: ${tier}.response.format = ${JSON.stringify(format)} must be "json" or "html" ` +
-        `(xml and other formats are not supported yet)`,
-    );
-  }
-
-  // recorded-path extract is HTML-only today (extracts from the live page DOM,
-  // which is always HTML). Reject format: 'json' on recorded-path so agents
-  // don't save a shape the executor will ignore.
-  if (tier === 'recorded-path' && format !== undefined && format !== 'html') {
-    throw new Error(
-      `invalid_strategy: recorded-path.response.format must be "html" (got ${JSON.stringify(format)}). ` +
-        `recorded-path extracts run against the live page DOM after the last step — there's no JSON to parse. ` +
-        `For JSON endpoints, lift the strategy to api instead.`,
-    );
-  }
-
-  const hasExtract =
-    'extract' in response && response.extract !== undefined && response.extract !== null;
-
-  if (format !== 'html') {
-    // json (explicit or default) with extract is a common misuse — agents
-    // sometimes set response.extract on a JSON endpoint. Reject loudly so they
-    // fix it instead of wondering why their extractors are ignored.
-    if (hasExtract) {
-      throw new Error(
-        `invalid_strategy: ${tier}.response.extract is only valid when response.format = "html" ` +
-          `(got format = ${format === undefined ? '"json" (default)' : JSON.stringify(format)}). ` +
-          `For JSON endpoints, remove the extract field and let execute() return the parsed body verbatim.`,
-      );
-    }
-    return;
-  }
-
-  // format === 'html' on fetch: require method = GET. recorded-path doesn't
-  // carry a method field — the restriction is on the HTTP request shape, not on
-  // DOM extracts after a DOM replay. Skip when response.from is set; HTTP
-  // doesn't fire at all in that case so method doesn't apply.
-  if (tier === 'fetch' && !hasFrom) {
-    let methodStr = 'GET';
-    if (typeof data.method === 'string') {
-      methodStr = data.method;
-    } else if (typeof data.endpoint === 'string' && data.endpoint.includes(' ')) {
-      methodStr = data.endpoint.split(' ')[0] ?? 'GET';
-    }
-    const method = methodStr.toUpperCase();
-
-    if (method !== 'GET') {
-      throw new Error(
-        `invalid_strategy: fetch response.format = "html" requires a GET method (got "${method}"). ` +
-          `HTML extraction is only supported on read-shaped endpoints — the save-time probe fires the real ` +
-          `request to verify the selectors, which is unsafe for non-GET methods.`,
-      );
-    }
-  }
+  // json (or absent) passthrough: nothing more to validate (extract on a
+  // non-html response was already rejected in the applicability guards above).
+  if (format !== 'html') return;
 
   if (
     !hasExtract ||

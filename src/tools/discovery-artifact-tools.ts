@@ -253,10 +253,31 @@ export async function saveVerifiedExpression(
   }
   const session = pool.getSession(args.session_id);
   const driver = pool.driverFor(args.session_id);
+  // Interpolate session-declared args into the expression's {{paramName}}
+  // tokens before verifying. Without this, an expression that references a
+  // declared binds_arg evaluates with the token unresolved (or `undefined`) and
+  // the verify throws — a guaranteed false failure. Mirrors the try_generator
+  // interpolation; only the declared binds_args are substituted.
+  const declaredForCap = session.declaredCapabilities?.find(
+    (d) => d.capability === args.capability,
+  );
+  const declaredArgs = (declaredForCap?.args ?? {}) as Record<string, unknown>;
+  let expressionToRun = args.expression;
+  for (const name of args.binds_args) {
+    const token = `{{${name}}}`;
+    if (!expressionToRun.includes(token)) continue;
+    const v = declaredArgs[name];
+    let s = '';
+    if (typeof v === 'string') s = v;
+    else if (typeof v === 'number' || typeof v === 'boolean' || typeof v === 'bigint')
+      s = String(v);
+    else if (v !== undefined && v !== null) s = JSON.stringify(v);
+    expressionToRun = expressionToRun.split(token).join(s);
+  }
   // Run the expression once to confirm it doesn't throw. We don't diff bytes
   // here (the agent has try_generator_in_page for that) — we just need "it's a
   // valid, non-throwing expression" before persisting.
-  const wrapped = wrapAgentExpression(args.expression);
+  const wrapped = wrapAgentExpression(expressionToRun);
   let result: unknown;
   try {
     result = await driver.evaluateExpression(session, wrapped, { timeoutMs: 5000 });

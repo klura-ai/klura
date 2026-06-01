@@ -5,7 +5,7 @@ import * as skills from '../strategies/skills';
 import { execute as executeStrategy } from '../execution';
 import type { ExecuteResult } from '../execution/types';
 import { pickProbeUrl, probeAuthState } from '../auth/probe';
-import { classifyAutoExecDiagnosis } from '../execution';
+import { classifyAutoExecDiagnosis, applyDiagnosisToBody } from '../execution';
 import { invokeCheckpointAndGate } from '../checkpoints';
 import { loadLogbook as loadLogbookForPlatform, readRecentAborts } from '../working-dir/logbook';
 import {
@@ -1050,6 +1050,10 @@ async function maybeAutoExecuteOnStart(
               probe,
             );
             body.diagnosis = reclass;
+            // Re-derive error/needs_reauth/needs_rediscovery from the corrected
+            // diagnosis so the body doesn't ship auth_failed+needs_reauth while
+            // the (probe-corrected) diagnosis says stale_nonce.
+            applyDiagnosisToBody(body, reclass);
           } catch {
             // Probe failed for an infrastructural reason — keep the
             // un-probed diagnosis. Don't let the probe failure cascade
@@ -1300,6 +1304,25 @@ export function dispatchExecuteGraphOutcome(
     return;
   }
 
+  // Recorded-path heal: when auto-execute paused on a failed step it registers
+  // a resume continuation in pausedExecutions and emits a recorded_step_failed
+  // checkpoint. Dispatching execute_failed here would route to terminal{failed}
+  // and stamp session.status='failed', making resume_execution inadmissible —
+  // the exact tool the checkpoint instructs the agent to call. Leave the session
+  // in its current (active, execute) state so the heal can proceed. (_checkpoint
+  // is read off er — hoisted by compactExecuteResultBody — or off the intact
+  // body before compaction.)
+  const erCp = (er as unknown as Record<string, unknown> | undefined)?._checkpoint;
+  let checkpoint: Record<string, unknown> | null = null;
+  if (erCp && typeof erCp === 'object') {
+    checkpoint = erCp as Record<string, unknown>;
+  } else if (body && typeof body._checkpoint === 'object' && body._checkpoint !== null) {
+    checkpoint = body._checkpoint as Record<string, unknown>;
+  }
+  if (checkpoint && checkpoint.kind === 'recorded_step_failed') {
+    return;
+  }
+
   // Failure shape: either the executor never ran (no saved strategy / args
   // missing) OR it ran and returned non-ok / threw. Both surface as
   // execute_failed with a summary for the failure-gate predicate to read.
@@ -1348,9 +1371,30 @@ export function dispatchExecuteGraphOutcome(
  * still attach a huge `body.original_body` (raw response captured for
  * diagnosis) that needs the same cap.
  */
+/** Did an execute_result actually succeed? body.ok === true OR a 2xx status.
+ *  Same dual signal dispatchExecuteGraphOutcome uses. Tolerant of the loose
+ *  shape on result.execute_result. */
+function executeResultLooksOk(er: { body?: unknown; status?: unknown } | undefined): boolean {
+  if (!er) return false;
+  const okBody =
+    typeof er.body === 'object' &&
+    er.body !== null &&
+    (er.body as Record<string, unknown>).ok === true;
+  const okStatus = typeof er.status === 'number' && er.status >= 200 && er.status < 300;
+  return okBody || okStatus;
+}
+
 export function compactExecuteResultBody(er: Record<string, unknown>): void {
   const body = er.body;
   if (body === null || body === undefined) return;
+
+  // Hoist _checkpoint to a sibling of body so it survives body truncation —
+  // a mid-execute checkpoint (e.g. recorded_step_failed) must reach the agent
+  // and downstream tooling even when the body is replaced by a marker string.
+  if (typeof body === 'object' && !Array.isArray(body)) {
+    const cp = (body as Record<string, unknown>)._checkpoint;
+    if (cp !== undefined && er._checkpoint === undefined) er._checkpoint = cp;
+  }
 
   if (typeof body === 'string') {
     if (body.length <= MAX_TOOL_OUTPUT_CHARS / 2) return;
@@ -1729,9 +1773,16 @@ export async function startSession(
   // Aligns with principles.md §"Respect the MCP output budget".
   if (result.executed === true && JSON.stringify(result).length > MAX_TOOL_OUTPUT_CHARS) {
     const a11yChars = result.a11y_total_chars;
-    result.a11yTree =
-      `<dropped: auto-exec succeeded; the page UI isn't load-bearing here. ` +
-      `Fetch the full ${a11yChars}-char tree via get_a11y_tree({session_id: "${session.id}", page: 1}) if you need it.>`;
+    // Only claim "succeeded" when the result actually succeeded (body.ok or
+    // 2xx). A failed auto-exec (e.g. a recorded_step_failed checkpoint) is still
+    // oversized; mislabeling it "succeeded" hides the failure from the agent.
+    const succeeded = executeResultLooksOk(
+      result.execute_result as { body?: unknown; status?: unknown } | undefined,
+    );
+    const fetchHint = `Fetch the full ${a11yChars}-char tree via get_a11y_tree({session_id: "${session.id}", page: 1}) if you need it.`;
+    result.a11yTree = succeeded
+      ? `<dropped: auto-exec succeeded; the page UI isn't load-bearing here. ${fetchHint}>`
+      : `<dropped: auto-exec ran but did NOT clearly succeed — read execute_result for the outcome. Page UI dropped for budget. ${fetchHint}>`;
     result.a11y_truncated = true;
   }
   // Body compaction runs regardless of `executed`-state — a failed auto-exec

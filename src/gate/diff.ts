@@ -91,8 +91,15 @@ function walk(a: unknown, b: unknown, path: string, out: string[]): void {
   const keys = new Set([...Object.keys(aRec), ...Object.keys(bRec)]);
   for (const k of [...keys].sort((x, y) => x.localeCompare(y))) {
     const childPath = path ? `${path}.${k}` : k;
-    const inA = Object.prototype.hasOwnProperty.call(aRec, k);
-    const inB = Object.prototype.hasOwnProperty.call(bRec, k);
+    // Treat an `undefined`-valued key as absent. A classifier hashFields slice
+    // returns a fixed key set with `undefined` for fields the strategy doesn't
+    // carry (e.g. frameFromPage/steps on a fetch strategy); the stored snapshot
+    // is JSON-cloned (which drops undefined) while the live slice keeps it, so a
+    // raw key-presence diff reports every such key as spuriously "(added)".
+    // undefined⇄absent is non-substantive; undefined⇄real-value is still a diff.
+    const inA = Object.prototype.hasOwnProperty.call(aRec, k) && aRec[k] !== undefined;
+    const inB = Object.prototype.hasOwnProperty.call(bRec, k) && bRec[k] !== undefined;
+    if (!inA && !inB) continue;
     if (!inA) {
       out.push(`${childPath} (added)`);
       continue;

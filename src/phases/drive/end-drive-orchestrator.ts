@@ -399,12 +399,22 @@ export async function endDrive(
   } = {},
   ctx: { progress?: (params: { stage: string }) => void } = {},
 ): Promise<
-  | { ok: true; auto_synthesized?: SynthLedgerEntry[] }
+  | { ok: true; auto_synthesized?: SynthLedgerEntry[]; already_closed?: boolean }
   | NonNullable<ReturnType<typeof computeReverseEngineerHandoff>>
   | EndDriveAuditRejection
 > {
   const progress = ctx.progress ?? ((): void => {});
   const session = pool.getSession(sessionId);
+
+  // Idempotent on an already-closed session: the warm fast-path auto-closes the
+  // session, then the auto-execute success hint tells the agent to call
+  // end_drive. The audit/synth already ran on the original close, so re-running
+  // it would be wrong (and would expect a strategy that's already committed).
+  // Return a clean no-op instead of rejecting a tool the runtime told the agent
+  // to call. (registry.checkAdmissibility lets end_drive through when closed.)
+  if (session.status === 'closed') {
+    return { ok: true, already_closed: true };
+  }
 
   // Resolve platform once. Explicit opts.platform wins; otherwise fall back
   // to whatever the session was opened with so callers don't have to remember

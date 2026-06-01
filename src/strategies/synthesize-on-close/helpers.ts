@@ -71,8 +71,8 @@ export function parseBodyForStrategy(body: string, contentTypeHeader: string): P
 /**
  * Best-effort pick of the page URL the session was on when the marker-XHR
  * was captured. Stamped on the synthesized strategy's
- * `notes.discovered_from_url` so a later session can try opening the same
- * URL directly instead of re-discovering from the site root. Hash + query
+ * `runtime_meta.discovered_from_url` so a later session can try opening the
+ * same URL directly instead of re-discovering from the site root. Hash + query
  * are preserved — SPAs route on both.
  *
  * Source of truth is `session.visitedUrls`, the ordered list of top-level

@@ -93,3 +93,17 @@ test('multiple diffs in stable, sorted order', () => {
   const b = { foo: 1, bar: 'new', nested: { x: 1, y: 9, z: 3 } };
   assert.deepEqual(diffPaths(a, b), ['bar', 'nested.y', 'nested.z (added)']);
 });
+
+test('undefined-valued key is treated as absent (no spurious add/remove)', () => {
+  // A classifier hashFields slice returns a fixed key set with `undefined` for
+  // fields the strategy doesn't carry; the stored snapshot is JSON-cloned
+  // (dropping undefined) while the live slice keeps it. undefined⇄absent must
+  // not surface as a diff.
+  assert.deepEqual(diffPaths({ a: 1, frameFromPage: undefined }, { a: 1 }), []);
+  assert.deepEqual(diffPaths({ a: 1 }, { a: 1, steps: undefined }), []);
+});
+
+test('undefined → real value is still a real add', () => {
+  assert.deepEqual(diffPaths({ a: 1, b: undefined }, { a: 1, b: 2 }), ['b (added)']);
+  assert.deepEqual(diffPaths({ a: 1, b: 2 }, { a: 1, b: undefined }), ['b (removed)']);
+});

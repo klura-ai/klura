@@ -17,6 +17,25 @@ import { detectUrlBypassedFilter } from './save-warnings-url-bypass';
 import type { Strategy } from '../strategies/skills';
 import type { ParamObservation } from '../response/session-observations';
 import { closestAllowedCandidates, formatCandidateList } from '../validators';
+import { escapeRegExp } from '../utils/regex';
+import { findLookupSegments, validateLookupPrereqsAreCapabilities } from './save-audit-lookup';
+
+// Re-exported so existing importers (save-warnings-lookup-sibling, tests) keep
+// resolving these from save-audit; the implementations live in save-audit-lookup.
+export { findLookupSegments, validateLookupPrereqsAreCapabilities };
+
+// `generated.<name>.code` paths: agent-authored JS that reads caller args via
+// `args.X` (not `{{X}}`), so the templated-vs-observed provenance rules for
+// URL/body/header literals don't apply.
+function isGeneratedCodePath(path: string): boolean {
+  return /^generated\.[\w-]+\.code$/.test(path);
+}
+
+// True when `code` references caller arg `name` as args.name / args["name"].
+function codeReferencesArg(code: string, name: string): boolean {
+  const n = escapeRegExp(name);
+  return new RegExp(`\\bargs\\s*(?:\\.\\s*${n}\\b|\\[\\s*['"]${n}['"]\\s*\\])`).test(code);
+}
 
 // ---------- Answer shapes the agent submits on call 2 ----------
 
@@ -66,19 +85,6 @@ export interface ObservedSiblingItem {
 
 // ---------- Capability-name parsing ----------
 
-// Segments in a capability slug that imply a lookup step. Not a
-// heuristic-gated reject — just a signal the runtime surfaces for the
-// agent to respond to.
-const LOOKUP_SEGMENT_REGEX = /(?:^|_)(by_[a-z]+|for_[a-z]+|lookup_[a-z]+)/g;
-
-export function findLookupSegments(capability: string): string[] {
-  const matches: string[] = [];
-  for (const m of capability.matchAll(LOOKUP_SEGMENT_REGEX)) {
-    if (m[1]) matches.push(m[1]);
-  }
-  return matches;
-}
-
 export function hasLookupShapedPrereq(data: Strategy): boolean {
   const prereqs = (data as Record<string, unknown>).prerequisites;
   if (!Array.isArray(prereqs)) return false;
@@ -87,81 +93,6 @@ export function hasLookupShapedPrereq(data: Strategy): boolean {
     const kind = (p as Record<string, unknown>).kind;
     return kind === 'capability' || kind === 'tag' || kind === 'fetch-extract';
   });
-}
-
-/** Canonicalize a URL to origin+pathname (ignoring query + fragment) so a
- *  prereq URL with a `{{placeholder}}` in the query matches a captured
- *  URL that had a concrete value there. Returns null when the string is
- *  not a valid URL (e.g. a template-only path). */
-function canonicalizeUrlPath(url: string): string | null {
-  try {
-    const u = new URL(url);
-    return `${u.origin}${u.pathname}`;
-  } catch {
-    return null;
-  }
-}
-
-/** Extract URL-like strings from a prereq. Covers fetch-extract's `url`,
- *  page-extract's `url`, and js-eval `expression` strings that contain
- *  `fetch('...')` or `fetch("...")` calls. js-eval expressions are parsed
- *  by naive regex — the only question is "does this prereq hit an
- *  endpoint we captured?" so partial extraction is fine: any hit triggers
- *  the check. */
-function extractPrereqUrlCandidates(prereq: Record<string, unknown>): string[] {
-  const out: string[] = [];
-  if (typeof prereq.url === 'string' && prereq.url.length > 0) out.push(prereq.url);
-  const expression = prereq.expression;
-  if (typeof expression === 'string') {
-    const fetchRe = /\bfetch\s*\(\s*(['"`])([^'"`]+)\1/g;
-    let m: RegExpExecArray | null;
-    while ((m = fetchRe.exec(expression)) !== null) {
-      if (m[2]) out.push(m[2]);
-    }
-  }
-  return out;
-}
-
-/**
- * Enforce lookup-as-capability for write strategies whose slug implies a
- * lookup. When the capability slug contains a `_by_<x>` / `_for_<x>` /
- * `lookup_<x>` segment AND a prereq hits an endpoint that was actually
- * observed in session traffic, that prereq MUST be routed as
- * `{kind: "capability"}` pointing at a separately-saved sibling — never
- * inlined as fetch-extract / js-eval / page-extract. Rationale: lookups
- * that are real HTTP endpoints are capabilities in their own right;
- * inlining them defeats reuse and hides a save worth tracking. Prereqs
- * that run purely against page state (page-extract / js-eval with no
- * fetch URL) do not trip this check — they're genuinely page-local.
- */
-export function validateLookupPrereqsAreCapabilities(
-  capability: string,
-  data: Strategy,
-  capturedEndpointPaths: Set<string>,
-): string[] {
-  if (findLookupSegments(capability).length === 0) return [];
-  if (capturedEndpointPaths.size === 0) return [];
-  const prereqs = (data as Record<string, unknown>).prerequisites;
-  if (!Array.isArray(prereqs)) return [];
-  const issues: string[] = [];
-  prereqs.forEach((raw, idx) => {
-    if (!raw || typeof raw !== 'object') return;
-    const p = raw as Record<string, unknown>;
-    const kind = typeof p.kind === 'string' ? p.kind : '';
-    if (kind === 'capability' || kind === 'tag') return; // already routed correctly
-    const urlCandidates = extractPrereqUrlCandidates(p);
-    for (const url of urlCandidates) {
-      const canon = canonicalizeUrlPath(url);
-      if (canon === null) continue;
-      if (!capturedEndpointPaths.has(canon)) continue;
-      const lookupName = typeof p.name === 'string' && p.name.length > 0 ? p.name : 'lookup';
-      issues.push(
-        `prerequisites[${idx}] (kind:"${kind}") hits ${canon} which was observed in session traffic — capability "${capability}" has a lookup-implying slug (_by_/_for_/_lookup_) and its lookup endpoints must be saved as their own sibling capability first, then chained via {kind: "capability", capability: "<saved-slug>", args: {...}, vars: {<name>: "<dot.path>"}}. Split: (1) save_strategy("${lookupName}", ...) with the fetch against ${canon}; (2) save_strategy("${capability}", ...) with a capability prereq pointing at it. Inline fetch-extract / js-eval / page-extract for endpoints that exist on their own is rejected.`,
-      );
-      break; // one issue per prereq is enough
-    }
-  });
-  return issues;
 }
 
 // ---------- Consistency checks ----------
@@ -354,6 +285,7 @@ export function validateLiteralAnswer(
   item: LiteralItem,
   answer: LiteralClassification | undefined,
   observedParamValues?: Record<string, ParamObservation[]>,
+  capability?: string,
 ): string[] {
   if (answer === undefined) {
     return [
@@ -380,6 +312,10 @@ export function validateLiteralAnswer(
     // the observed_property_keys / observed_literal_values detectors, applied
     // to the literal_provenance classifier so the agent can't escape grounding
     // via "static" when click→XHR observations exist for the value.
+    // Generator code is agent-authored and may legitimately embed an observed
+    // literal (e.g. a canonical slug copied from traffic) inside an alias map —
+    // the code blob is provenance-opaque, so don't force grounding on it.
+    if (isGeneratedCodePath(item.path)) return [];
     const matches = findClickObservedValuesIn(item.value, observedParamValues);
     if (matches.length > 0) {
       // Navigate-URL exemption: when the literal is a navigate step's url AND
@@ -404,6 +340,30 @@ export function validateLiteralAnswer(
     return [];
   }
   if (answer === 'single_entity') {
+    // single_entity is the narrow "intentionally frozen to one entity" escape.
+    // It's illegal when the capability slug implies a lookup (_by_/_for_/lookup_)
+    // or any param is declared kind:"slug" — those declare parameterization, so
+    // freezing the value to one entity is a misclassification (the dynamic-enum
+    // bug: a `find_*_by_cuisine` strategy hardcoded to ?category=italian).
+    const lookupSlug = capability ? findLookupSegments(capability).length > 0 : false;
+    const hasSlugParam = (() => {
+      const params = (data as { notes?: { params?: Record<string, unknown> } }).notes?.params;
+      if (!params || typeof params !== 'object') return false;
+      return Object.values(params).some(
+        (p) => p && typeof p === 'object' && (p as { kind?: unknown }).kind === 'slug',
+      );
+    })();
+    if (lookupSlug || hasSlugParam) {
+      const why = lookupSlug
+        ? `capability "${capability ?? ''}" has a lookup-implying slug`
+        : 'a notes.params entry is kind:"slug"';
+      return [
+        `literal_provenance["${item.path}"] = "single_entity" is not allowed here: ${why} — ` +
+          `that declares the value is parameterized (caller-resolved), not frozen to one entity. ` +
+          `Reclassify as {caller_input: "<param>"} (template the value) or {prereq_output: "<binds>"} ` +
+          `(resolve it via a lookup capability prereq).`,
+      ];
+    }
     if (literalInAnyExample(data, item.value)) return [];
     return [
       `literal_provenance["${item.path}"] = "single_entity" but no notes.params.*.example ` +
@@ -416,7 +376,13 @@ export function validateLiteralAnswer(
   if ('caller_input' in answer) {
     const name = answer.caller_input;
     const problems: string[] = [];
-    if (!fieldContainsPlaceholder(item.value, name)) {
+    // Generator code reads caller args as `args.X`, not `{{X}}`. Accept the
+    // arg reference so the agent isn't forced to add a fake `{{X}}` comment
+    // just to satisfy the textual placeholder check.
+    const referenced =
+      fieldContainsPlaceholder(item.value, name) ||
+      (isGeneratedCodePath(item.path) && codeReferencesArg(item.value, name));
+    if (!referenced) {
       problems.push(
         `literal_provenance["${item.path}"] = {caller_input: "${name}"} but {{${name}}} does not appear in the field value ${JSON.stringify(
           item.value,

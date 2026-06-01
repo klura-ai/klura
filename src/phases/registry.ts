@@ -14,6 +14,7 @@ import { LIFT_SPEC } from './lift';
 import { EXECUTE_SPEC } from './execute';
 import { GRAPHS, graphFor } from '../graphs';
 import { UNIVERSAL_TOOLS } from './tool-catalog';
+import { TOOL_NAMES } from '../vocab';
 
 const PHASES: Record<SessionPhase, PhaseSpec> = {
   drive: DRIVE_SPEC,
@@ -65,6 +66,15 @@ export function currentSpec(session: Session): PhaseSpec {
  *  current phase spec with the active graph's per-phase config. */
 export function checkAdmissibility(session: Session, toolName: string): AdmissibilityResult {
   if (UNIVERSAL_TOOLS.has(toolName)) return { ok: true };
+  // end_drive is idempotent on an already-closed session: the auto-execute
+  // success hint instructs the agent to call it, and a warm fast-path session
+  // is already terminal{closed} by then. Let it through (the orchestrator
+  // returns {ok:true, already_closed:true}) rather than reject a tool the
+  // runtime itself told the agent to call. A 'failed' session is NOT exempt —
+  // it genuinely shouldn't auto-close clean.
+  if (toolName === TOOL_NAMES.endDrive && session.status === 'closed') {
+    return { ok: true };
+  }
   if (session.status === 'closed' || session.status === 'failed') {
     return {
       ok: false,

@@ -53,6 +53,22 @@ test('finalizeCascadeFailure: 404 → endpoint_stale with needs_rediscovery and 
   assert.deepStrictEqual(body.params_doc, baseStrategy.notes.params);
 });
 
+test('finalizeCascadeFailure: 401 with body {error:"stale_nonce"} → stale_nonce + needs_rediscovery, not auth_failed', () => {
+  const args = { to: 'bob', text: 'hello' };
+  const lastResult = {
+    status: 401,
+    body: { error: 'stale_nonce' },
+    finalUrl: 'http://localhost:9999/api/send',
+  };
+  const result = finalizeCascadeFailure(args, ['page-script: HTTP 401'], lastResult, baseStrategy);
+  const body = result.body;
+  assert.strictEqual(body.error, 'stale_nonce');
+  assert.strictEqual(body.needs_rediscovery, true);
+  // Token rotation is agent-recoverable — must NOT demand human re-auth.
+  assert.strictEqual(body.needs_reauth, undefined);
+  assert.strictEqual(result.status, 401);
+});
+
 test('finalizeCascadeFailure: 401 → auth_failed with needs_reauth, not endpoint_stale', () => {
   const args = { to: 'bob', text: 'hello' };
   const lastResult = {

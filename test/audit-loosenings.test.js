@@ -10,7 +10,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 const { collectScannedFields } = await import('../dist/strategies/validate/helpers.js');
-const { validateLiteralAnswer } = await import('../dist/gate/save-audit.js');
+const { validateLiteralAnswer, validateLookupPrereqsAreCapabilities } = await import(
+  '../dist/gate/save-audit.js'
+);
 const { firstObservableUrl } = await import('../dist/strategies/verify-observed.js');
 const { validateNoOpaqueUserParams } = await import(
   '../dist/strategies/validate/opaque-params.js'
@@ -276,4 +278,104 @@ test('F: single_entity rejects examples shorter than min-length floor (anti-chea
     {},
   );
   assert.notEqual(issues.length, 0, '2-char example does not satisfy single_entity');
+});
+
+// ---------- G. single_entity rejected for lookup-shaped / slug-param capabilities (F9a) ----------
+
+test('G: single_entity rejected when capability slug implies a lookup', () => {
+  const data = {
+    strategy: 'fetch',
+    endpoint: '/api/order/12345',
+    notes: { params: { order_id: { kind: 'text', example: '12345' } } },
+  };
+  const issues = validateLiteralAnswer(
+    data,
+    { path: 'endpoint', value: '/api/order/12345' },
+    'single_entity',
+    {},
+    'get_order_by_id',
+  );
+  assert.notEqual(issues.length, 0);
+  assert.match(issues[0], /not allowed here|lookup-implying/);
+});
+
+test('G: single_entity rejected when a notes.params entry is kind:"slug"', () => {
+  const data = {
+    strategy: 'fetch',
+    endpoint: '/api/restaurants?category=italian',
+    notes: { params: { cuisine: { kind: 'slug', example: 'italian' } } },
+  };
+  const issues = validateLiteralAnswer(
+    data,
+    { path: 'endpoint', value: '/api/restaurants?category=italian' },
+    'single_entity',
+    {},
+    'find_top_restaurants_by_cuisine',
+  );
+  assert.notEqual(issues.length, 0);
+  assert.match(issues[0], /not allowed here|kind:"slug"/);
+});
+
+test('G: single_entity still accepted for a genuine fixed-entity capability', () => {
+  const data = {
+    strategy: 'fetch',
+    endpoint: '/api/company/granat',
+    notes: { params: { company: { kind: 'text', example: 'granat' } } },
+  };
+  const issues = validateLiteralAnswer(
+    data,
+    { path: 'endpoint', value: '/api/company/granat' },
+    'single_entity',
+    {},
+    'get_company_profile',
+  );
+  assert.deepEqual(issues, []);
+});
+
+// ---------- H. lookup-prereq network-call guard (F9d) ----------
+
+test('H: pure-DOM js-eval prereq is NOT flagged as an inline lookup', () => {
+  const data = {
+    strategy: 'fetch',
+    endpoint: '/api/restaurants?category={{cuisine}}',
+    prerequisites: [
+      {
+        kind: 'js-eval',
+        name: 'norm',
+        url: 'https://site.example.com/',
+        binds: 'cuisine',
+        expression: "return document.querySelector('h1').textContent.toLowerCase();",
+      },
+    ],
+  };
+  // The page-context url coincides with a captured path, but the expression
+  // makes no network call → not a lookup.
+  const issues = validateLookupPrereqsAreCapabilities(
+    'find_top_restaurants_by_cuisine',
+    data,
+    new Set(['https://site.example.com/']),
+  );
+  assert.deepEqual(issues, []);
+});
+
+test('H: js-eval prereq with a real fetch() to a captured endpoint IS flagged', () => {
+  const data = {
+    strategy: 'fetch',
+    endpoint: '/api/send',
+    prerequisites: [
+      {
+        kind: 'js-eval',
+        name: 'lookup',
+        url: 'https://site.example.com/',
+        binds: 'member_id',
+        expression: "const r = await fetch('https://site.example.com/api/search?q=x'); return (await r.json()).id;",
+      },
+    ],
+  };
+  const issues = validateLookupPrereqsAreCapabilities(
+    'send_message_by_name',
+    data,
+    new Set(['https://site.example.com/api/search']),
+  );
+  assert.notEqual(issues.length, 0);
 });

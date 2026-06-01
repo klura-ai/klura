@@ -21,6 +21,34 @@ import {
 } from '../../gate/save-warnings';
 import { findObservedKeys, findObservedLiterals } from '../../response/observation-trace';
 
+// Matches the structural path tokens an ack reason can name, mirroring the
+// shapes `collectStructuralPaths` emits (save-warnings-mutating-verification.ts).
+// Used to catch a reason that *claims* an anchor the saved strategy doesn't
+// carry — even when a valid shape tag is co-present, a fabricated path is a lie.
+// Kept as separate simple patterns (not one big alternation) to stay clear of
+// the ReDoS / regex-complexity lint thresholds; segment char-classes exclude
+// `.` so a token stops at its segment boundary.
+const CLAIMED_PATH_RES: readonly RegExp[] = [
+  /response\.extract\.[\w-]+/g,
+  /response\.extract/g,
+  /response\.from/g,
+  /prerequisites\[\d+\]\.name=[\w-]+/g,
+  /prerequisites\[\d+\]/g,
+  /frameFromPage\.expression/g,
+  /frameFromPage/g,
+  /headers\.[\w-]+/g,
+  /body\.[\w-]+/g,
+  /steps\[\d+\]/g,
+];
+
+function extractClaimedPaths(answer: string): string[] {
+  const out = new Set<string>();
+  for (const re of CLAIMED_PATH_RES) {
+    for (const m of answer.matchAll(re)) out.add(m[0]);
+  }
+  return [...out];
+}
+
 // ---------- parameterization_disclosure_required ----------
 
 export const parameterizationDisclosureClassifier: Classifier<Strategy, SaveStrategyCtx, unknown> =
@@ -135,6 +163,25 @@ export const mutatingVerificationClassifier: Classifier<Strategy, SaveStrategyCt
         : 'unknown';
     const validPaths: string[] = Array.isArray(ctx?.valid_paths) ? ctx.valid_paths : [];
     const out: string[] = [];
+    // A named structural path must actually exist on the saved strategy. This
+    // fires even when a recognized shape tag is co-present: a tag doesn't make a
+    // fabricated anchor real. Closes the "transaction-shape: response.extract.X"
+    // loophole where the strategy carries no response.extract at all.
+    const fabricated = extractClaimedPaths(answer).filter((p) => !validPaths.includes(p));
+    if (fabricated.length > 0) {
+      const real =
+        validPaths.length > 0
+          ? validPaths.slice(0, 12).join(', ')
+          : '(none — the saved strategy carries no structural confirmation surface)';
+      const named = fabricated.map((p) => `"${p}"`).join(', ');
+      out.push(
+        `mutating_verification_required: the reason names ${named}, ` +
+          `which ${fabricated.length === 1 ? 'is not a real path' : 'are not real paths'} on the saved strategy. ` +
+          `Reference an anchor that actually exists (${real}), or — if the action has no structural confirmation surface — ` +
+          `use a shape tag that doesn't claim one (fire-and-forget / rpc-read / intrinsic-to-caller).`,
+      );
+      return out;
+    }
     const shapeTagsUsed = VERIFICATION_SHAPE_TAGS.filter((t) => answer.includes(t));
     const matchedPaths = [...validPaths]
       .sort((a, b) => b.length - a.length)

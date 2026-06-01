@@ -112,7 +112,7 @@ test('notes.save_warnings_acked is forwarded to the audit (regression)', () => {
       token: firstToken,
       answers: {
         mutating_verification_required:
-          'transaction-shape: response.extract grounds the verification (test default)',
+          'transaction-shape: server returns a confirmation field (test default)',
         literal_provenance: {
           endpoint: 'static',
           'prerequisites[0].url': 'static',

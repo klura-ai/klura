@@ -17,7 +17,7 @@ import {
 import { correlateUiAction } from '../response/action-correlator';
 import { asNonEmptyBoundedString, ValidationError } from '../validators';
 import { captureAndAppendForms } from './_internals';
-import { graphConfig } from '../phases/registry';
+import { graphConfig, currentPhase } from '../phases/registry';
 import { maybeFireSurfaceChanged } from '../phases/surface-changed';
 import { readInitialNavStatus } from './start-session';
 import { detectOriginBlocked } from '../phases/origin-blocked-detector';
@@ -25,6 +25,7 @@ import { snapVisibilityAnomalies } from '../phases/visibility';
 import type { OriginBlockedAdvisory } from '../phases/origin-blocked-detector';
 import type { BrowserDriver, PageOpts } from '../drivers/interface';
 import type { Session } from '../drivers/types/session';
+import type { SessionPhase } from '../phases/types';
 import type { CheckpointEnvelope } from '../checkpoints';
 
 /** Run the origin-blocked detector on a freshly-navigated page. Extracted
@@ -109,6 +110,11 @@ export interface ActionResult {
     name: string;
     _v: 'o' | 'f' | 's';
   }>;
+  /** Current FSM phase after this action. A click can auto-transition
+   *  DRIVE→TRIAGE (a navigation crossing to an unplanned surface); stamping
+   *  the phase here lets the agent see the move on the action that triggered
+   *  it, instead of discovering it via the next call's tool_not_admissible. */
+  phase?: SessionPhase;
 }
 
 /**
@@ -771,6 +777,7 @@ export async function performAction(
       a11y_total_chars: 0,
       a11y_truncated: false,
       url: currentUrl,
+      phase: currentPhase(session),
       ...navStatusField,
       ...subPagesField,
       ...checkpointField,
@@ -818,6 +825,7 @@ export async function performAction(
     a11y_total_chars: trimmed.total_chars,
     a11y_truncated: trimmed.truncated,
     url: currentUrl,
+    phase: currentPhase(session),
     ...navStatusField,
     ...originBlockedField,
     visibility_anomalies: visibilityAnomalies,

@@ -626,6 +626,10 @@ function shouldRunTriageAcknowledgment(p: EndDrivePayload): boolean {
   // Triage handoff will fire — that path already routes the agent into triage,
   // no need for an additional gate.
   if (p.triageWouldFire) return false;
+  // NOTE: the all-saved/no-candidate case is DELIBERATELY still gated here —
+  // triage is a runtime-mandated review point; the agent does not get to decide
+  // "this was a one-off, no triage needed." (See the triage-acknowledgment-gate
+  // tests + the always-save / triage-is-planning design.)
   return true;
 }
 

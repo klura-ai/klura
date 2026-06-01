@@ -802,11 +802,23 @@ export function rejectionToErrorMessage(
   // top-level acks: {kind: reason} map. Render the contract that fits the
   // tool so the agent doesn't see contradictory hints in the same response.
   const isSaveStrategy = toolName === 'save_strategy';
-  lines.push(
-    isSaveStrategy
-      ? `  → To commit: call ${toolName} again with {audit_token, audit_answers} and embed notes.save_warnings_acked: [{kind, reason}] on the strategy for any warnings (fix the issues above).`
-      : `  → To commit: call ${toolName} again with {audit_token, audit_answers, acks} (fix the issues above).`,
-  );
+  // unacked_warnings is a Stage-1 rejection — no audit_token is minted (see the
+  // `reason: 'unacked_warnings'` branch above). Telling the agent to resend an
+  // audit_token it was never issued drives sentinel-token invention. Render the
+  // ack-only retry for this class.
+  if (rejection.reason === 'unacked_warnings') {
+    lines.push(
+      isSaveStrategy
+        ? `  → To commit: call ${toolName} again embedding notes.save_warnings_acked: [{kind, reason}] on the strategy for each warning above — no audit_token is needed for this rejection class (none was issued).`
+        : `  → To commit: call ${toolName} again with {acks: {<kind>: "<reason>"}} for each warning above — no audit_token is needed for this rejection class (none was issued).`,
+    );
+  } else {
+    lines.push(
+      isSaveStrategy
+        ? `  → To commit: call ${toolName} again with {audit_token, audit_answers} and embed notes.save_warnings_acked: [{kind, reason}] on the strategy for any warnings (fix the issues above).`
+        : `  → To commit: call ${toolName} again with {audit_token, audit_answers, acks} (fix the issues above).`,
+    );
+  }
   lines.push(
     `  → DO NOT end your turn after this rejection — the rejection IS the iteration loop, not a stop signal. Expect 1-3 retries before the save lands.`,
   );

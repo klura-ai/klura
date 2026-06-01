@@ -63,7 +63,7 @@ const WARNING_CLASSIFIER_KINDS = new Set([
 
 const DEFAULT_WARNING_ANSWERS = {
   mutating_verification_required:
-    'transaction-shape: response.extract grounds the verification (test default)',
+    'transaction-shape: server returns a confirmation field (test default)',
   parameterization_disclosure_required:
     'method anchor — test strategy has no caller axis (parameterization gate not under test here)',
 };
@@ -358,7 +358,7 @@ test('hash scoping: rewriting prereq.expression keeps the audit token valid', ()
   
 
   const verifyAnswer =
-    'transaction-shape: response.extract grounds the verification (test default)';
+    'transaction-shape: server returns a confirmation field (test default)';
   const first = saveStrategyAudit.process(baseStrategy, ctx, {});
   assert.equal(first.status, 'rejected');
   assert.equal(first.rejection.reason, 'pending');
@@ -407,7 +407,7 @@ test('hash scoping: changing the endpoint DOES invalidate the audit token', () =
   
 
   const verifyAnswer =
-    'transaction-shape: response.extract grounds the verification (test default)';
+    'transaction-shape: server returns a confirmation field (test default)';
   const first = saveStrategyAudit.process(strategy, ctx, {});
   const token = first.rejection.token;
 
@@ -464,7 +464,7 @@ test('hash scoping: adding notes.save_warnings_acked keeps the audit token valid
   };
   
   const verifyAnswer =
-    'transaction-shape: response.extract grounds the verification (test default)';
+    'transaction-shape: server returns a confirmation field (test default)';
   const first = saveStrategyAudit.process(strategy, ctx, {});
   const token = first.rejection.token;
 
@@ -1834,6 +1834,35 @@ test('verify-required: answer referencing fabricated path → classifier rejecte
   assert.ok(
     issues.some((i) => /reason must name the verification approach/.test(i)),
     `expected anti-canned rejection; got ${JSON.stringify(issues)}`,
+  );
+});
+
+test('verify-required: valid tag + fabricated response.extract path → classifier rejected', () => {
+  // The loophole: a recognized shape tag used to carry the ack even when the
+  // reason names a path the strategy doesn't have. A fabricated anchor is a lie
+  // regardless of the tag — reject it.
+  const strategy = {
+    strategy: 'page-script',
+    baseUrl: 'https://site.example.com',
+    endpoint: '/api/send',
+    method: 'POST',
+    headers: {},
+    body: { text: '{{text}}' },
+    notes: {
+      params: { text: { description: 'body', kind: 'text', example: 'hi' } },
+      anchor_type: 'unknown',
+    },
+  };
+  const result = runWarningClassifier(strategy, verifyCtx(), {
+    mutating_verification_required: 'transaction-shape: response.extract.message_id grounds it',
+    literal_provenance: { endpoint: 'static' },
+    observed_siblings: {},
+  });
+  assert.equal(result.status, 'rejected');
+  const issues = result.rejection.classifier_issues ?? [];
+  assert.ok(
+    issues.some((i) => /is not a real path|are not real paths/.test(i)),
+    `expected fabricated-path rejection; got ${JSON.stringify(issues)}`,
   );
 });
 

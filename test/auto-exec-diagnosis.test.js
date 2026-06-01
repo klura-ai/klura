@@ -162,6 +162,37 @@ test('attempted_endpoint is populated from strategy when available', () => {
   assert.equal(d.attempted_tier, 'page-script');
 });
 
+test('401 + body {error:"stale_nonce"} + no probe → kind=stale_nonce (body code wins over auth blanket)', () => {
+  const d = classifyAutoExecDiagnosis(
+    ['page-script: HTTP 401'],
+    { status: 401, body: { error: 'stale_nonce' }, finalUrl: '' },
+    { strategy: 'page-script', endpoint: '/api/send' },
+  );
+  assert.equal(d.kind, 'stale_nonce');
+});
+
+test('401 + GraphQL body extensions.code CSRF_INVALID → kind=stale_nonce', () => {
+  const d = classifyAutoExecDiagnosis(
+    ['page-script: HTTP 401'],
+    {
+      status: 401,
+      body: { errors: [{ extensions: { code: 'CSRF_INVALID' } }] },
+      finalUrl: '',
+    },
+    { strategy: 'page-script', endpoint: '/api/send' },
+  );
+  assert.equal(d.kind, 'stale_nonce');
+});
+
+test('401 + no stale code + no probe → kind=auth_failed (blanket still applies)', () => {
+  const d = classifyAutoExecDiagnosis(
+    ['page-script: HTTP 401'],
+    { status: 401, body: { error: 'something_else' }, finalUrl: '' },
+    { strategy: 'page-script', endpoint: '/api/send' },
+  );
+  assert.equal(d.kind, 'auth_failed');
+});
+
 test('multiple prereq failures all get extracted', () => {
   const errors = [
     'page-script: prerequisite "get_nonce" (js-eval): undefined',

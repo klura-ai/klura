@@ -106,23 +106,32 @@ function harvestStrategyTemplates(strategy: unknown): string[] {
  *  `loadStrategy` disk reads (cached by skills.ts). */
 export function collectUnsavedHotXhrEndpoints(
   intercepted: ReadonlyArray<InterceptedLike> | undefined,
-  _sessionSavedCapabilities: ReadonlyArray<SavedCapLike> | undefined,
+  sessionSavedCapabilities: ReadonlyArray<SavedCapLike> | undefined,
   platform: string,
 ): Array<{ method: string; urlPath: string; sampleUrl: string }> {
   const savedPatterns: RegExp[] = [];
   if (platform) {
-    // Walk every non-archived capability on disk for this platform — prior
-    // sessions' saves are equally "covered" from the gate's perspective.
+    // Capability names to subtract: every non-archived cap on disk (prior
+    // sessions are equally "covered") PLUS this session's in-flight saves. The
+    // latter matters because a capability saved during THIS end_drive flow may
+    // not yet be reflected in readPlatformSkillInfo's cache — without it the
+    // gate flags an endpoint the agent just saved in the same call.
+    const capNames = new Set<string>();
     let platformInfo: { capabilities?: Array<{ name?: string }> };
     try {
       platformInfo = readPlatformSkillInfo(platform) as never;
     } catch {
       platformInfo = { capabilities: [] };
     }
-    const caps = platformInfo.capabilities ?? [];
-    for (const cap of caps) {
-      const name = cap.name;
-      if (typeof name !== 'string' || name.length === 0) continue;
+    for (const cap of platformInfo.capabilities ?? []) {
+      if (typeof cap.name === 'string' && cap.name.length > 0) capNames.add(cap.name);
+    }
+    for (const cap of sessionSavedCapabilities ?? []) {
+      if (typeof cap.capability === 'string' && cap.capability.length > 0) {
+        capNames.add(cap.capability);
+      }
+    }
+    for (const name of capNames) {
       const strat = loadStrategy(platform, name);
       if (!strat) continue;
       const templates = harvestStrategyTemplates(strat);
