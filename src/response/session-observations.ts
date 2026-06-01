@@ -74,8 +74,16 @@ export interface ParamObservationSource {
    *     verbatim (no human-friendly name available). Closes the gap
    *     where the agent navigated multiple categories without explicit
    *     clicks (typed URL, followed link, browser back/forward).
+   *   - `page_link` — the value appeared as a `?param=value` query in a
+   *     LINK TARGET visible on the page (a `<a href>` tile/option), with
+   *     the link's accessible name as the label. The value comes from the
+   *     URL query (stable, structural); the page literally offered it as a
+   *     selectable destination. Closes the gap where category values are
+   *     presented only as landing-page link tiles the agent reads but
+   *     never clicks (goes straight to the API). Anti-fabrication holds: a
+   *     value the page doesn't link to is never recorded.
    */
-  kind: 'ui_click' | 'api_response' | 'url_variance';
+  kind: 'ui_click' | 'api_response' | 'url_variance' | 'page_link';
   /** Human-visible label — element text for `ui_click`, response-field
    *  value for `api_response`, value-verbatim for `url_variance`. This
    *  is what the agent's warm-execute fuzzy-match compares against
@@ -261,6 +269,77 @@ export function harvestUrlVarianceObservations(
         });
       }
     }
+  }
+}
+
+/**
+ * Pure function: harvest `page_link` observations from a captured a11y tree.
+ * Links render as `- link "<name>":` with an indented child `- /url: <href>`
+ * (Playwright `ariaSnapshot()` live path + the `htmlToAriaLikeTree` fallback,
+ * `drivers/playwright.ts`). For each link with a `?param=value` query in its
+ * target, emit an observation: `value` from the URL query (stable, structural),
+ * `label` from the link's accessible name. The page literally offers the value
+ * as a selectable destination — so it's legitimate enum ground-truth even when
+ * the agent never clicked the tile. Anti-fabrication holds: a value the page
+ * doesn't link to is never produced here.
+ *
+ * No ≥2-distinct gate (unlike url_variance): each rendered link is per-value
+ * evidence; the "is this really an enum" ≥2 requirement is enforced separately
+ * on the agent's DECLARED observed_values in validateEnumParam. No caller-input
+ * suppression: a page-rendered `<a href>` is not typed input.
+ *
+ * Matching is on the structural `- /url:` token the runtime itself emits, not
+ * page prose (respects `runtime/docs/principles.md` §"Crisp vs fuzzy").
+ */
+export function deriveLinkUrlObservations(rawTree: string, baseUrl: string): ParamObservation[] {
+  if (typeof rawTree !== 'string' || rawTree.length === 0) return [];
+  const out: ParamObservation[] = [];
+  const linkRe = /^(\s*)-\s+link\s+"((?:[^"\\]|\\.)*)"/;
+  const urlRe = /^(\s*)-\s+\/url:\s+(\S.*)$/;
+  let lastLink: { indent: number; name: string } | null = null;
+  for (const line of rawTree.split('\n')) {
+    const lm = linkRe.exec(line);
+    if (lm) {
+      lastLink = { indent: (lm[1] ?? '').length, name: lm[2] ?? '' };
+      continue;
+    }
+    const um = urlRe.exec(line);
+    // Pair a `/url:` with its enclosing link (the most recent link at lesser
+    // indent — ariaSnapshot emits /url: as a direct child of the link).
+    if (!um || !lastLink || (um[1] ?? '').length <= lastLink.indent) continue;
+    const href = (um[2] ?? '').trim();
+    let parsed: URL;
+    try {
+      parsed = new URL(href, baseUrl || undefined);
+    } catch {
+      continue; // relative href with no base, javascript:/mailto:/fragment, etc.
+    }
+    for (const [name, value] of parsed.searchParams) {
+      if (!name || !value) continue;
+      out.push({
+        param_name: name,
+        value,
+        source: { kind: 'page_link', label: lastLink.name },
+        observed_at: Date.now(),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Record every `page_link` observation derived from a captured a11y tree.
+ * Idempotent across repeated harvests — `recordParamObservation` dedupes on
+ * (value, label, source.kind) and caps per param.
+ */
+export function harvestLinkUrlObservations(
+  sessionId: string,
+  rawTree: string,
+  baseUrl: string,
+): void {
+  if (!sessionId || typeof rawTree !== 'string') return;
+  for (const obs of deriveLinkUrlObservations(rawTree, baseUrl)) {
+    recordParamObservation(sessionId, obs);
   }
 }
 

@@ -13,6 +13,7 @@ import {
   recordRawCapture,
   recordParamObservation,
   deriveUiClickObservations,
+  harvestLinkUrlObservations,
 } from '../response/session-observations';
 import { correlateUiAction } from '../response/action-correlator';
 import { asNonEmptyBoundedString, ValidationError } from '../validators';
@@ -784,6 +785,10 @@ export async function performAction(
     };
   }
   const rawTree = await driver.getAccessibilityTree(session, pageOpts);
+  // Harvest page_link enum observations from the RAW tree — covers values that
+  // only appear as link tiles rendered after a fetch (e.g. dynamic-enum's
+  // client-rendered categories) without requiring the agent to click each one.
+  harvestLinkUrlObservations(sessionId, rawTree, currentUrl);
   const trimmed = trimA11yTree(rawTree, DEFAULT_A11Y_BUDGET);
   session.extractedContentBytes = (session.extractedContentBytes ?? 0) + trimmed.tree.length;
 

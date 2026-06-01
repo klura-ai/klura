@@ -1026,6 +1026,136 @@ test('static-on-click-observed: accepts templated endpoint with grounded observe
   );
 });
 
+test('page_link grounding: enum grounded from page-link observations commits (the enum-grounding regression)', () => {
+  // Cuisine values offered only as landing-page link tiles (never clicked),
+  // harvested as source.kind:"page_link". The agent grounds with the real
+  // values + themed labels → save commits. This is the bug that plagued
+  // enum-grounding: the agent could see the tiles but couldn't ground them.
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'http://127.0.0.1:5000',
+    endpoint: '/api/restaurants?category={{cuisine}}',
+    method: 'GET',
+    headers: {},
+    notes: {
+      params: {
+        cuisine: {
+          kind: 'enum',
+          observed_values: [
+            { value: 'italian', label: 'Taste the pride of Napoli' },
+            { value: 'mexican', label: 'Taco Tuesdays' },
+          ],
+        },
+      },
+    },
+  };
+  const pageLinkObs = [
+    { param_name: 'category', value: 'italian', source: { kind: 'page_link', label: 'Taste the pride of Napoli' }, observed_at: 1 },
+    { param_name: 'category', value: 'mexican', source: { kind: 'page_link', label: 'Taco Tuesdays' }, observed_at: 2 },
+  ];
+  const result = runAudit(
+    {
+      // non-lookup slug — isolates the enum-grounding behavior from the
+      // unrelated capability_name_justification (lookup-segment) gate.
+      capability: 'list_top_restaurants',
+      observedSiblings: [],
+      observedParamValues: { category: pageLinkObs },
+      capturedEndpointPaths: new Set(['http://127.0.0.1:5000/api/restaurants']),
+    },
+    strategy,
+    { literal_provenance: { endpoint: { caller_input: 'cuisine' } }, observed_siblings: {} },
+  );
+  assert.equal(
+    result.status,
+    'committed',
+    `expected committed; got ${JSON.stringify(result.rejection || result)}`,
+  );
+});
+
+test('page_link grounding: a value the page never linked to is still REJECTED (anti-fabrication preserved)', () => {
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'http://127.0.0.1:5000',
+    endpoint: '/api/restaurants?category={{cuisine}}',
+    method: 'GET',
+    headers: {},
+    notes: {
+      params: {
+        cuisine: {
+          kind: 'enum',
+          observed_values: [
+            { value: 'italian', label: 'Taste the pride of Napoli' },
+            { value: 'narnian', label: 'Invented cuisine' }, // not a page link
+          ],
+        },
+      },
+    },
+  };
+  const result = runAudit(
+    {
+      capability: 'find_top_restaurants_by_cuisine',
+      observedSiblings: [],
+      observedParamValues: {
+        category: [
+          { param_name: 'category', value: 'italian', source: { kind: 'page_link', label: 'Taste the pride of Napoli' }, observed_at: 1 },
+          { param_name: 'category', value: 'mexican', source: { kind: 'page_link', label: 'Taco Tuesdays' }, observed_at: 2 },
+        ],
+      },
+      capturedEndpointPaths: new Set(['http://127.0.0.1:5000/api/restaurants']),
+    },
+    strategy,
+    { literal_provenance: { endpoint: { caller_input: 'cuisine' } }, observed_siblings: {} },
+  );
+  assert.equal(result.status, 'rejected');
+  const issues = result.rejection.classifier_issues || [];
+  assert.ok(
+    issues.some((i) => /narnian.*not observed|not observed.*narnian/s.test(i)),
+    `expected fabricated-value reject; got ${JSON.stringify(issues)}`,
+  );
+});
+
+test('page_link grounding: a paraphrased label is still REJECTED (pair check preserved)', () => {
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'http://127.0.0.1:5000',
+    endpoint: '/api/restaurants?category={{cuisine}}',
+    method: 'GET',
+    headers: {},
+    notes: {
+      params: {
+        cuisine: {
+          kind: 'enum',
+          observed_values: [
+            { value: 'italian', label: 'Italian' }, // page label is "Taste the pride of Napoli"
+            { value: 'mexican', label: 'Taco Tuesdays' },
+          ],
+        },
+      },
+    },
+  };
+  const result = runAudit(
+    {
+      capability: 'find_top_restaurants_by_cuisine',
+      observedSiblings: [],
+      observedParamValues: {
+        category: [
+          { param_name: 'category', value: 'italian', source: { kind: 'page_link', label: 'Taste the pride of Napoli' }, observed_at: 1 },
+          { param_name: 'category', value: 'mexican', source: { kind: 'page_link', label: 'Taco Tuesdays' }, observed_at: 2 },
+        ],
+      },
+      capturedEndpointPaths: new Set(['http://127.0.0.1:5000/api/restaurants']),
+    },
+    strategy,
+    { literal_provenance: { endpoint: { caller_input: 'cuisine' } }, observed_siblings: {} },
+  );
+  assert.equal(result.status, 'rejected');
+  const issues = result.rejection.classifier_issues || [];
+  assert.ok(
+    issues.some((i) => /FABRICATED|actual label/i.test(i)),
+    `expected fabricated-label reject; got ${JSON.stringify(issues)}`,
+  );
+});
+
 test('enum-shape guard: single observed_value rejects with steer toward kind:"text" / capability source', () => {
   // Defense-in-depth pair to the listing-detector ≥2 guard: at save time,
   // a kind:"enum" param with <2 distinct observed_values is structurally

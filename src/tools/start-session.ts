@@ -17,6 +17,7 @@ import {
   type StrategyTier,
 } from '../strategies/policy';
 import { buildPlatformMapSummary, type PlatformMapSummary } from '../response/platform-map-summary';
+import { harvestLinkUrlObservations } from '../response/session-observations';
 import { detectOriginBlocked, isResolvableChallengeShape } from '../phases/origin-blocked-detector';
 import type { VisibilityAnomaly } from '../phases/visibility';
 import { snapVisibilityAnomalies } from '../phases/visibility';
@@ -1683,6 +1684,10 @@ export async function startSession(
   // detection fires on a JS-challenge shape that auto-resolves.
   let trimmed = trimA11yTree(rawTree, DEFAULT_A11Y_BUDGET);
   let currentUrl = await driver.getUrl(session).catch(() => url);
+  // Harvest page_link enum observations from the RAW tree (pre-trim, so link
+  // tiles dropped by trimming still count). Lets the agent ground a category
+  // enum from page-offered link targets without having to click each tile.
+  harvestLinkUrlObservations(session.id, rawTree, currentUrl);
   session.extractedContentBytes = (session.extractedContentBytes ?? 0) + trimmed.tree.length;
   let navStatus = readInitialNavStatus(session, url, currentUrl);
   const iframes: ReadonlyArray<{ src: string }> =
@@ -1709,6 +1714,7 @@ export async function startSession(
     const rawTreeAfter = await driver.getAccessibilityTree(session);
     const trimmedAfter = trimA11yTree(rawTreeAfter, DEFAULT_A11Y_BUDGET);
     const currentUrlAfter = await driver.getUrl(session).catch(() => currentUrl);
+    harvestLinkUrlObservations(session.id, rawTreeAfter, currentUrlAfter);
     const navStatusAfter = readInitialNavStatus(session, url, currentUrlAfter);
     const iframesAfter: ReadonlyArray<{ src: string }> =
       typeof driver.listTopLevelIframes === 'function'
