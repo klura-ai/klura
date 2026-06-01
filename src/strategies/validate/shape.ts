@@ -25,6 +25,50 @@ import { validateCacheShape } from './cache';
 import { validateProvidesShape } from './provides';
 import { validateFetchPrereqKinds } from './fetch-prereq-kinds';
 
+const EXPRESSION_PLACEHOLDER_RE = /\{\{(\w+(?:\.\w+)*)\}\}/g;
+
+// A js-eval/page-script prereq's `expression` body is NOT `{{}}`-templated at
+// execute time — only `prerequisites[].url` and `prerequisites[].args_template`
+// are interpolated. A `{{name}}` in the expression matching a declared param is
+// a mis-templating: it runs verbatim (e.g. the fetch body posts the literal
+// text "{{name}}"), the call may still return 2xx, and post-save validation
+// can't tell the submitted content was wrong. Catch it at save time and steer
+// the agent to args_template + args.X. (Only declared-param names are flagged so
+// a legitimate mustache-template string the expression builds for the page is
+// not a false positive.)
+function validateExpressionNotTemplated(
+  tier: string,
+  i: number,
+  prereq: Record<string, unknown>,
+  data: Record<string, unknown>,
+): void {
+  const expr = prereq.expression;
+  if (typeof expr !== 'string' || expr.length === 0) return;
+  const params = (data.notes as { params?: Record<string, unknown> } | undefined)?.params;
+  if (!params || typeof params !== 'object') return;
+  const declared = new Set(Object.keys(params));
+  if (declared.size === 0) return;
+  const bad: string[] = [];
+  for (const m of expr.matchAll(EXPRESSION_PLACEHOLDER_RE)) {
+    const name = m[1];
+    if (!name) continue;
+    const base = name.split('.')[0];
+    if (base && declared.has(base) && !bad.includes(name)) bad.push(name);
+  }
+  const first = bad[0];
+  if (!first) return;
+  const base = first.split('.')[0];
+  throw new Error(
+    `invalid_strategy: ${tier}.prerequisites[${i}].expression references {{${first}}}, but expression ` +
+      `bodies are NOT {{}}-templated — only prerequisites[].url and prerequisites[].args_template are ` +
+      `interpolated at execute time. As written the expression runs verbatim and emits the literal text ` +
+      `"{{${first}}}" (the call may still return 2xx, so post-save validation can't catch it). Read caller ` +
+      `args as args.${base} inside the expression and pass them in via args_template — e.g. ` +
+      `{kind:"js-eval", args_template:{${base}:"{{${base}}}"}, expression:"...args.${base}..."}. ` +
+      `Flagged: ${bad.map((b) => '{{' + b + '}}').join(', ')}.`,
+  );
+}
+
 export function validateStrategyShape(data: unknown): asserts data is Strategy {
   if (!isPlainObject(data)) {
     throw new Error('invalid_strategy: expected an object');
@@ -124,6 +168,7 @@ export function validateStrategyShape(data: unknown): asserts data is Strategy {
         }
       }
       validatePrereqShape(tier, i, rawPrereq);
+      validateExpressionNotTemplated(tier, i, rawPrereq, data);
     });
   }
 

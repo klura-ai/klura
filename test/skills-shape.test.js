@@ -1162,3 +1162,68 @@ test('single deep-shape error keeps the compact single-line format (no bullets)'
     },
   );
 });
+
+// ---- js-eval prereq expression must not use {{}} templating ----
+
+test('js-eval prereq expression with {{param}} matching a declared param is rejected', () => {
+  expectReject(
+    {
+      strategy: 'page-script',
+      origin: 'http://x.test',
+      response: { from: 'r' },
+      prerequisites: [
+        {
+          kind: 'js-eval',
+          name: 'r',
+          url: 'http://x.test/',
+          binds: 'r',
+          expression:
+            "const resp = await fetch('/submit', {method:'POST', body: new URLSearchParams({name:'{{name}}'})}); return {status:'ok'};",
+          return_shape: { kind: 'object', required_keys: ['status'] },
+        },
+      ],
+      notes: { params: { name: { kind: 'text', description: 'sender' } } },
+    },
+    /expression bodies are NOT \{\{\}\}-templated.*args_template/s,
+  );
+});
+
+test('js-eval prereq reading args.name with args_template is accepted', () => {
+  validateStrategyShape({
+    strategy: 'page-script',
+    origin: 'http://x.test',
+    response: { from: 'r' },
+    prerequisites: [
+      {
+        kind: 'js-eval',
+        name: 'r',
+        url: 'http://x.test/',
+        binds: 'r',
+        args_template: { name: '{{name}}' },
+        expression:
+          "const resp = await fetch('/submit', {method:'POST', body: new URLSearchParams({name:args.name})}); return {status:'ok'};",
+        return_shape: { kind: 'object', required_keys: ['status'] },
+      },
+    ],
+    notes: { params: { name: { kind: 'text', description: 'sender' } } },
+  });
+});
+
+test('js-eval expression containing {{x}} NOT matching any declared param is allowed (mustache passthrough)', () => {
+  validateStrategyShape({
+    strategy: 'page-script',
+    origin: 'http://x.test',
+    response: { from: 'r' },
+    prerequisites: [
+      {
+        kind: 'js-eval',
+        name: 'r',
+        url: 'http://x.test/',
+        binds: 'r',
+        expression: "return {status:'ok', template: 'Hello {{unrelated_mustache}}'};",
+        return_shape: { kind: 'object', required_keys: ['status'] },
+      },
+    ],
+    notes: { params: { name: { kind: 'text', description: 'sender' } } },
+  });
+});
