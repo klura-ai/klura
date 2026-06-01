@@ -13,18 +13,10 @@ import {
   recordObservedCapability,
 } from '../../working-dir/logbook';
 import { inferObservedCapabilitiesFromGraph } from '../../working-dir/url-graph';
+import { deleteJournal } from '../../working-dir/capture-journal';
 import { buildSessionSummary, countPerformActionCalls } from './session-summary';
 import { inferObservedCapabilitiesFromTriage } from './triage-inference';
-import type {
-  CaptureEvent,
-  HttpRequestPayload,
-  LiftAttemptPayload,
-  PerformActionPayload,
-  SessionMetaPayload,
-  ToolCallPayload,
-  WsFramePayload,
-} from '../../working-dir/schema';
-import { sha256 as sha256Bytes } from '../../working-dir/bundle-archive';
+import { buildCaptureEvents } from './build-capture-events';
 import { loadCapabilityPolicy as loadCapabilityPolicyFull } from '../../strategies/policy';
 import { buildAndMergeArtifact, writeArtifact } from '../../strategies/discovery-artifact';
 import { clearStartersForSession } from '../../response/starter-cache';
@@ -37,31 +29,14 @@ import { endDriveAudit, buildEndDrivePayload } from '../../audit/drive/end-drive
 import { rejectionToErrorMessage } from '../../audit';
 import { graphConfig, currentGraph } from '../registry';
 
-function outcomeForTier(tier: string): SessionMetaPayload['outcome'] {
-  if (tier === 'page-script') return 'page_script_saved';
-  if (tier === 'fetch') return 'fetch_saved';
-  if (tier === 'recorded-path') return 'recorded_path_saved';
-  return 'no_save';
-}
-
-function serializePostData(postData: unknown): string | null {
-  if (postData === null || postData === undefined) return null;
-  if (typeof postData === 'string') return postData;
-  try {
-    return JSON.stringify(postData);
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Adapter between the live agent-driven session and the working-dir's
- * CaptureEvent stream. Runs at end_drive. Reads driver-held network log +
- * WS frames + session.performActionHistory + session.artifactAccumulator,
- * reshapes into CaptureEvent[], calls ingestCaptureEvents. This is the ONLY
- * place session/pool state touches runtime/src/working-dir/ — the working-dir
- * modules themselves accept the capture-event stream and know nothing about
- * live sessions.
+ * CaptureEvent stream. Runs at end_drive. Pulls the driver-held network log +
+ * WS frames, hands them with the session to `buildCaptureEvents` (the single
+ * reshape shared with the capture-journal checkpoint), and folds the result via
+ * `ingestCaptureEvents`. This is the ONLY place session/pool state touches
+ * runtime/src/working-dir/ at close — the working-dir modules accept the
+ * capture-event stream and know nothing about live sessions.
  *
  * Best-effort: any error here is swallowed by the caller. A flush failure must
  * not turn a clean close into an error.
@@ -78,221 +53,9 @@ async function flushSessionToWorkingDir(
     driver.getInterceptedWebSocketFrames(session).catch(() => []),
   ]);
 
-  const endedAt = Date.now();
-  const startedAt = (session as unknown as { startedAt?: number }).startedAt ?? endedAt;
-  const declared = session.declaredCapabilities ?? [];
-  const primaryCapability = declared[0]?.capability;
-  const primaryArgs = declared[0]?.args;
-
-  // Determine session outcome from the mix of explicit saves + auto-synth.
-  // Precedence: page-script > fetch > recorded-path > no_save. Takes the best
-  // tier that landed, matching how execute() cascades.
-  const savedTiers = new Set<string>();
-  for (const s of session.savedCapabilities ?? []) savedTiers.add(s.tier);
-  for (const a of autoSynthesized) savedTiers.add(a.tier);
-  let outcome: SessionMetaPayload['outcome'] = 'no_save';
-  if (savedTiers.has('page-script')) {
-    outcome = 'page_script_saved';
-  } else if (savedTiers.has('fetch')) {
-    outcome = 'fetch_saved';
-  } else if (savedTiers.has('recorded-path')) {
-    outcome = 'recorded_path_saved';
-  }
-
-  const events: CaptureEvent[] = [];
-  const baseTs = endedAt;
-  const push = (
-    at: number,
-    kind: CaptureEvent['kind'],
-    payload: unknown,
-    capability?: string,
-  ): void => {
-    events.push({ at, session_id: sessionId, platform, capability, kind, payload });
-  };
-
-  push(baseTs, 'session_meta', {
-    started_at: startedAt,
-    ended_at: endedAt,
-    capability: primaryCapability,
-    args: primaryArgs,
-    outcome,
-  } satisfies SessionMetaPayload);
-
-  for (const r of requests) {
-    const postData = serializePostData(r.postData);
-    const payload: HttpRequestPayload = {
-      method: r.method,
-      url: r.url,
-      headers: r.headers,
-      postData,
-      status: r.status ?? undefined,
-    };
-    const ct = Object.entries(r.headers).find(([k]) => k.toLowerCase() === 'content-type')?.[1];
-    if (typeof ct === 'string') payload.contentType = ct.split(';')[0]?.trim();
-    if (r.responseBody !== undefined && r.responseBody !== null) {
-      payload.responseBody = r.responseBody;
-      if (typeof r.responseBody === 'string') payload.responseSize = r.responseBody.length;
-    }
-    push(typeof r.timestamp === 'number' ? r.timestamp : baseTs, 'http_request', payload);
-  }
-
-  for (const f of wsFrames) {
-    const payload: WsFramePayload = {
-      direction: f.direction,
-      url: f.url,
-      payload: typeof f.payload === 'string' ? f.payload : '',
-      encoding:
-        typeof f.payload === 'string' && /^[A-Za-z0-9+/=]+$/.test(f.payload) ? 'binary' : 'text',
-    };
-    push(typeof f.timestamp === 'number' ? f.timestamp : baseTs, 'ws_frame', payload);
-  }
-
-  for (const nav of session.domNavigations ?? []) {
-    push(nav.at, 'dom_navigation', {
-      url: nav.url,
-      ...(nav.title !== undefined ? { title: nav.title } : {}),
-      ...(nav.via !== undefined ? { via: nav.via } : {}),
-    });
-  }
-
-  for (const f of session.domFormsObserved ?? []) {
-    push(f.at, 'dom_form_observed', {
-      url: f.url,
-      action: f.action,
-      method: f.method,
-      fields: f.fields,
-    });
-  }
-
-  for (const a of session.performActionHistory ?? []) {
-    const payload: PerformActionPayload = { action: a.action };
-    if (a.selector !== undefined) payload.selector = a.selector;
-    if (a.value !== undefined) payload.value = a.value;
-    if ('key' in a && typeof (a as { key?: unknown }).key === 'string') {
-      payload.key = (a as { key: string }).key;
-    }
-    if ('url' in a && typeof (a as { url?: unknown }).url === 'string') {
-      payload.url = (a as { url: string }).url;
-    }
-    push(a.at, 'perform_action', payload);
-  }
-
-  const acc = session.artifactAccumulator;
-  if (acc) {
-    const emit = (
-      list: Array<{ at: string }> | undefined,
-      tool: string,
-      detailFor?: (entry: { at: string }) => Record<string, unknown> | undefined,
-    ): void => {
-      if (!list) return;
-      for (const e of list) {
-        const ts = Date.parse(e.at);
-        const payload: ToolCallPayload = {
-          tool,
-          args_digest: digestEntry(e),
-          outcome: 'ok',
-          detail: detailFor?.(e),
-        };
-        push(Number.isFinite(ts) ? ts : baseTs, 'tool_call', payload);
-      }
-    };
-    emit(acc.inspectWsFrameCalls, 'inspect_ws_frame', (e) => {
-      const x = e as { ws_i?: number; starter_present?: boolean };
-      return { ws_i: x.ws_i, starter_present: x.starter_present };
-    });
-    emit(acc.tryGeneratorCalls, 'try_generator', (e) => {
-      const x = e as { ok?: boolean };
-      return { ok: x.ok };
-    });
-    emit(acc.getJsSourceCalls, 'get_js_source', (e) => {
-      const x = e as { url?: string; line?: number };
-      return { url: x.url, line: x.line };
-    });
-    emit(acc.findInPageCalls, 'find_in_page', (e) => {
-      const x = e as { matches_count?: number };
-      return { matches_count: x.matches_count };
-    });
-    emit(acc.jsEvalCalls, 'js_eval');
-    emit(acc.searchJsSourceCalls, 'search_js_source', (e) => {
-      const x = e as { url?: string };
-      return { url: x.url };
-    });
-    emit(acc.readJsFunctionCalls, 'read_js_function', (e) => {
-      const x = e as { url?: string; line?: number };
-      return { url: x.url, line: x.line };
-    });
-    emit(acc.listLoadedScriptsCalls, 'list_loaded_scripts');
-    emit(acc.setBreakpointCalls, 'set_breakpoint', (e) => {
-      const x = e as { line?: number };
-      return { line: x.line };
-    });
-    emit(acc.evaluateOnFrameCalls, 'evaluate_on_frame', (e) => {
-      const x = e as { ok?: boolean };
-      return { ok: x.ok };
-    });
-    emit(acc.getSendEncoderCalls, 'get_send_encoder');
-    emit(acc.getAttributeCalls, 'get_attribute');
-    emit(acc.getNetworkLogCalls, 'get_network_log');
-  }
-
-  // Lift-attempt events: one per tier that landed (either agent-saved or
-  // auto-synth). Logbook appends one attempt per (capability, session).
-  const attemptsByCapability = new Map<string, LiftAttemptPayload>();
-  for (const a of autoSynthesized) {
-    const key = a.capability;
-    const tierOutcome: LiftAttemptPayload['outcome'] = outcomeForTier(a.tier);
-    const prior = attemptsByCapability.get(key);
-    // Keep the best (highest-tier) outcome per capability.
-    if (!prior || tierRank(tierOutcome) > tierRank(prior.outcome)) {
-      attemptsByCapability.set(key, {
-        outcome: tierOutcome,
-        rounds_spent: 0, // auto-synth doesn't consume LLM rounds
-        notes: a.reason,
-      });
-    }
-  }
-  for (const s of session.savedCapabilities ?? []) {
-    const tierOutcome: LiftAttemptPayload['outcome'] = outcomeForTier(s.tier);
-    const prior = attemptsByCapability.get(s.capability);
-    if (!prior || tierRank(tierOutcome) > tierRank(prior.outcome)) {
-      attemptsByCapability.set(s.capability, {
-        outcome: tierOutcome,
-        rounds_spent: 0,
-      });
-    }
-  }
-  for (const [capability, payload] of attemptsByCapability) {
-    push(endedAt, 'lift_attempt', payload, capability);
-  }
+  const events = buildCaptureEvents(session, requests, wsFrames, autoSynthesized);
 
   ingestCaptureEvents(platform, sessionId, events);
-}
-
-function tierRank(o: LiftAttemptPayload['outcome']): number {
-  switch (o) {
-    case 'fetch_saved':
-      return 4;
-    case 'page_script_saved':
-      return 3;
-    case 'recorded_path_saved':
-      return 2;
-    case 'user_deferred':
-      return 1;
-    case 'error':
-    case 'no_save':
-    default:
-      return 0;
-  }
-}
-
-function digestEntry(e: unknown): string {
-  const x = e as { args_digest?: string };
-  if (typeof x.args_digest === 'string') return x.args_digest;
-  try {
-    return sha256Bytes(JSON.stringify(e)).slice(0, 16);
-  } catch {
-    return '0000000000000000';
-  }
 }
 
 // Diagnostic-only env-var hatch (intentional exception to the
@@ -810,6 +573,10 @@ export async function endDrive(
     } catch {
       /* swallow */
     }
+    // The clean-close fold above is authoritative and complete, so the
+    // durability journal is now redundant. Drop it so orphan-recovery on a
+    // later start_session never re-folds a session that closed cleanly.
+    deleteJournal(session.id);
   }
 
   // session_summary: verbatim ground truth for the agent's retrospective.

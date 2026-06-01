@@ -654,6 +654,12 @@ export class Pool implements BrowserPool {
     return this._sessions.size;
   }
 
+  /** Ids of every live session. Used by capture-journal recovery to skip
+   *  folding a journal whose session is still writing. */
+  get activeSessionIds(): string[] {
+    return [...this._sessions.keys()];
+  }
+
   get idleSince(): number {
     return Math.floor((Date.now() - this._lastActivity) / 1000);
   }

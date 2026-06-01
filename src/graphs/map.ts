@@ -38,6 +38,7 @@ export const MAP_GRAPH: Graph = {
   config: {
     gateMutatingActions: true,
     skipAutoSynth: true,
+    journalCaptures: true,
     inferObservedCapabilitiesAtClose: true,
     skipDeclarationGuard: true,
     // actions=5: a mapping session that touched 5+ pages without persisting any

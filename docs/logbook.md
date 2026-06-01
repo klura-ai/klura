@@ -196,7 +196,7 @@ For the full schema, the `platform_map` teaser shape on `start_session`, and wor
 
 ## Writers
 
-The only writer is `end_drive`, via the capture-event adapter in `runtime/src/index.ts` that reshapes live session state into a `CaptureEvent[]` stream. The working-dir module (`runtime/src/working-dir/`) consumes that stream — it has zero dependency on runtime Session / pool / driver / MCP types. The asymmetry is deliberate: the adapter knows about both layers, the working-dir module doesn't.
+`end_drive` is the authoritative writer, via the capture-event adapter (`buildCaptureEvents` in `runtime/src/phases/drive/build-capture-events.ts`) that reshapes live session state into a `CaptureEvent[]` stream. The working-dir module (`runtime/src/working-dir/`) consumes that stream — it has zero dependency on runtime Session / pool / driver / MCP types. The asymmetry is deliberate: the adapter knows about both layers, the working-dir module doesn't.
 
 Per close, the adapter emits:
 
@@ -210,6 +210,17 @@ Per close, the adapter emits:
 - One `lift_attempt` event (outcome + rounds spent).
 
 The working-dir module partitions the stream into the session archive, updates `logbook.json` (per-capability counters, lift_attempts ledger, recency stats), and recomputes derived signals.
+
+### Durability: the capture journal
+
+`end_drive` is the only point that folds the captures into the logbook from live memory — so a session that exits without it (`max_turns`, agent-SDK crash, SIGTERM) would otherwise lose everything it captured. The capture journal closes that gap. On graphs that set `journalCaptures` (discover + map), the capture-producing tools (`perform_action`, `start_session`, `js_eval`) snapshot the session's `CaptureEvent[]` — rebuilt from the same `buildCaptureEvents` reshape, so it has fidelity parity with a clean close — to a per-session file under `workdir/_journals/<session_id>.json`, rewritten atomically (`tmp`→`rename`) at each boundary.
+
+The snapshot is folded into the logbook via the same idempotent `ingestCaptureEvents`, on recovery rather than at close:
+
+- **Clean close.** `end_drive` folds from live memory (authoritative), then deletes the journal — nothing reads it.
+- **Recovery.** The next `start_session` for any platform, and once at pool startup, calls `recoverOrphanedJournals` (`runtime/src/working-dir/recover-journals.ts`): it folds every journal whose session is no longer live and deletes it. A still-live session's journal is skipped so a concurrent writer is never folded mid-flight. Journals too old to ever be re-mapped are swept on the startup pass.
+
+Recovery is event-driven (a session opening, the pool booting), never a timer. The fold is idempotent and the journal is deleted only after the logbook write commits, so a crash mid-recovery just re-folds harmlessly on the next pass. The journal is additive shadow state: warm/execute graphs (which run a saved strategy and have nothing to recover) write none, and a missing journal falls through to the unchanged in-memory close fold.
 
 `last_verified_at` is one such derived signal. On each flush the writer reads `health.json` and folds the freshest successful-execute timestamp across every saved tier of the session's capability into the capability entry (`last_verified_tier` names the tier that produced it). It is the single "this skill was last re-verified on `<date>`" value — downstream consumers read it instead of walking per-tier health. The raw per-tier `lastSuccess` stays in `health.json` (see `health.md`); the logbook only mirrors the max. It stays absent until a tier has executed cleanly at least once.
 

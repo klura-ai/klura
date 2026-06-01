@@ -18,6 +18,7 @@ import {
 import { correlateUiAction } from '../response/action-correlator';
 import { asNonEmptyBoundedString, ValidationError } from '../validators';
 import { captureAndAppendForms } from './_internals';
+import { checkpointCaptureJournal } from '../phases/drive/build-capture-events';
 import { graphConfig, currentPhase } from '../phases/registry';
 import { maybeFireSurfaceChanged } from '../phases/surface-changed';
 import { readInitialNavStatus } from './start-session';
@@ -750,6 +751,11 @@ export async function performAction(
   // dynamic form injection). foldFormsIntoLogbook dedups at flush time
   // by (url, action, method).
   await captureAndAppendForms(session, driver);
+
+  // Durability checkpoint: snapshot the (now response-enriched) capture stream
+  // to the session journal so a crash/max_turns before end_drive still recovers
+  // this session's archive. No-op on graphs that don't journal (warm/execute).
+  await checkpointCaptureJournal(session);
 
   // Surface-changed checkpoint: when the page is now on a path-distinct
   // URL that no triage plan covers and the session is past triage entry,

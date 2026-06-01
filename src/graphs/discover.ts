@@ -23,6 +23,7 @@ export const DISCOVER_GRAPH: Graph = {
   ],
   config: {
     obligationStyle: 'lift_required',
+    journalCaptures: true,
     // Fire the end_drive re_persistence detector when the agent did heavy RE
     // work (breakpoint / source-read / frame-eval / inline-script-via-full-
     // network-log) but persisted nothing AND a declared capability is still

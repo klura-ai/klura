@@ -44,6 +44,8 @@ import {
 import type { Session, SessionOptions } from '../drivers/types/session';
 import { graphConfig } from '../phases/registry';
 import { dispatch } from '../phases/state-machine';
+import { checkpointCaptureJournal } from '../phases/drive/build-capture-events';
+import { recoverOrphanedJournals } from '../working-dir/recover-journals';
 import { asIdentifierSlug, asObject, ValidationError } from '../validators';
 import {
   captureAndAppendForms,
@@ -1529,11 +1531,27 @@ function validatePlatformSlugShape(platform: string | undefined): void {
   }
 }
 
+/** Fold capture journals left behind by sessions that never reached end_drive.
+ *  Skips any still-live session so a concurrent writer is never folded
+ *  mid-flight. Best-effort — recovery must never block a session start. */
+function recoverOrphanedCaptureJournals(): void {
+  try {
+    recoverOrphanedJournals({ activeSessionIds: new Set(pool.activeSessionIds) });
+  } catch {
+    /* swallow */
+  }
+}
+
 export async function startSession(
   url: string,
   opts: StartSessionOptions = {},
 ): Promise<StartSessionResult> {
   applyPermanentPolicyFromStart(opts);
+
+  // Recover capture journals orphaned by a prior session that never reached
+  // end_drive (max_turns, crash, SIGTERM). Event-driven: folding happens when
+  // the next session opens, not on a timer.
+  recoverOrphanedCaptureJournals();
 
   // Earliest possible slug-vs-args check: when the agent declares a
   // capability slug AND args together, the slug must not contain any of
@@ -1689,6 +1707,10 @@ export async function startSession(
   // enum from page-offered link targets without having to click each tile.
   harvestLinkUrlObservations(session.id, rawTree, currentUrl);
   session.extractedContentBytes = (session.extractedContentBytes ?? 0) + trimmed.tree.length;
+  // Durability checkpoint: snapshot the initial landing captures to the session
+  // journal so a crash before end_drive still recovers them. No-op on graphs
+  // that don't journal (warm/execute).
+  await checkpointCaptureJournal(session);
   let navStatus = readInitialNavStatus(session, url, currentUrl);
   const iframes: ReadonlyArray<{ src: string }> =
     typeof driver.listTopLevelIframes === 'function'

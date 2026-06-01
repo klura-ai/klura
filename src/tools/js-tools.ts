@@ -16,6 +16,7 @@ import { guardLargeResult, MAX_TOOL_OUTPUT_CHARS } from '../response/response-si
 import { wrapAgentExpression } from '../response/js-eval-wrapper';
 import { recordObservations } from '../response/observation-trace';
 import { maybeFireSurfaceChanged } from '../phases/surface-changed';
+import { checkpointCaptureJournal } from '../phases/drive/build-capture-events';
 import type { CheckpointEnvelope } from '../checkpoints';
 
 export interface GetJsSourceArgs {
@@ -460,6 +461,10 @@ export async function jsEval(args: JsEvalArgs): Promise<
     } catch {
       // Surface-map is diagnostic — never fail js_eval because of it.
     }
+    // Durability checkpoint: a js_eval that fired XHRs / drove a SPA nav has now
+    // enriched the capture buffers; snapshot them so a crash before end_drive
+    // still recovers this RE work. No-op on graphs that don't journal.
+    await checkpointCaptureJournal(session);
     return {
       ok: true,
       ...guarded,

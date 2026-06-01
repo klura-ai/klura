@@ -8,6 +8,7 @@
 // the agent-facing barrel; runtime-state.ts is the daemon's shared backbone.
 
 import { createPool } from '../pool/pool';
+import { JOURNAL_SWEEP_MAX_AGE_MS, recoverOrphanedJournals } from '../working-dir/recover-journals';
 import { TokenCache } from '../strategies/tokens';
 import { defaultCapabilityCache } from '../cache/capability-cache';
 import { ListenerManager } from '../listeners';
@@ -36,6 +37,19 @@ registerInterruptionDefaults();
 registerCheckpointDefaults();
 
 export const pool = createPool();
+
+// One-shot recovery at daemon/pool startup: fold any capture journals left
+// behind by sessions that crashed in a prior process, and sweep journals too
+// old to ever be re-mapped. No live sessions exist at module load, so the
+// active-id set is empty. Best-effort — a recovery failure must not block boot.
+try {
+  recoverOrphanedJournals({
+    activeSessionIds: new Set<string>(),
+    maxAgeMs: JOURNAL_SWEEP_MAX_AGE_MS,
+  });
+} catch {
+  /* startup recovery is best-effort */
+}
 
 // Inject the viewer opener into both the interruption and checkpoint
 // default-handover handlers so they can spin up a remote viewer inline

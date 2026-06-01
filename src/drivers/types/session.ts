@@ -90,6 +90,10 @@ export interface BrowserPool {
   /** Number of currently-active klura sessions. */
   readonly activeSessions: number;
 
+  /** Ids of every currently-active klura session. Capture-journal recovery
+   *  reads this to skip folding a journal whose session is still writing. */
+  readonly activeSessionIds: string[];
+
   /** Seconds since the most recent pool activity. */
   readonly idleSince: number;
 

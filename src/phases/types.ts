@@ -84,6 +84,12 @@ export interface GraphConfig {
   /** When true, end-drive does not auto-synthesize a recorded-path
    *  fallback strategy from perform_action history. Map graph turns this on. */
   skipAutoSynth?: boolean;
+  /** When true, capture-producing tools snapshot the session's capture stream
+   *  to a durability journal at each boundary, so a session that never reaches
+   *  end_drive (max_turns, crash, SIGTERM) recovers its archive on the next
+   *  start_session. Discover + map turn this on; warm/execute leave it off
+   *  (a saved-strategy run has nothing to recover). */
+  journalCaptures?: boolean;
   /** When true, end-drive infers observed capabilities from declared
    *  args + captured XHR bodies even when `declaredCapabilities` is empty.
    *  Map graph turns this on. */
