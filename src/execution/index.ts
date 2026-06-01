@@ -564,6 +564,9 @@ export async function execute(
     // SKILL.md nudge to "match observed_values" was bypassed; the runtime
     // surfaces the option set so the caller cannot proceed without picking
     // from it (or asking the user to disambiguate).
+    // Normalize case-only enum-arg drift ("Italian" → observed "italian") so
+    // the request carries the API's exact value and the check below matches.
+    normalizeEnumArgCasing(strategy, mergedArgs);
     const unobserved = findUnobservedEnumArgs(strategy, mergedArgs);
     if (unobserved.length > 0) {
       const argList = unobserved.map((u) => `${u.param}="${u.value}"`).join(', ');
@@ -1515,6 +1518,37 @@ async function validateEnumArgsAgainstSourceCapability(
     issues.push({ param: key, value: v, observed_values: fresh });
   }
   return issues;
+}
+
+// Case-only normalization for enum args: if a caller's value matches an
+// observed value case-insensitively but not exactly (the agent title-cased a
+// lowercase slug — "Italian" vs observed "italian"), rewrite it to the observed
+// casing IN PLACE so the outgoing request carries the API's exact value and the
+// unobserved-enum check below matches. Case is the ONLY normalization — typos /
+// synonyms / wrong-but-close values still flag, so the agent must fuzzy-match
+// via the label rather than guess. Skipped when two observed values collide
+// case-insensitively (ambiguous → let it flag). Per principles.md §"Crisp vs
+// fuzzy": exact case-folded equality is crisp, not prose matching.
+export function normalizeEnumArgCasing(
+  strategy: skills.Strategy,
+  args: Record<string, unknown>,
+): void {
+  const params = (strategy as { notes?: { params?: Record<string, unknown> } }).notes?.params;
+  if (!params || typeof params !== 'object') return;
+  for (const [key, spec] of Object.entries(params)) {
+    if (!spec || typeof spec !== 'object') continue;
+    const s = spec as Record<string, unknown>;
+    if (s.kind !== 'enum' || !Array.isArray(s.observed_values)) continue;
+    const v = args[key];
+    if (typeof v !== 'string' || v.length === 0) continue;
+    const values = s.observed_values
+      .map((o) => (o && typeof o === 'object' ? (o as Record<string, unknown>).value : undefined))
+      .filter((x): x is string => typeof x === 'string');
+    if (values.includes(v)) continue; // already exact — nothing to do
+    const lower = v.toLowerCase();
+    const ciMatches = values.filter((ov) => ov.toLowerCase() === lower);
+    if (ciMatches.length === 1) args[key] = ciMatches[0];
+  }
 }
 
 function findUnobservedEnumArgs(
