@@ -714,6 +714,33 @@ function validateEnumParam(
     }
   });
 
+  // When any entry was wrong (bad value or paraphrased label), surface the
+  // COMPLETE observed set once so the agent pastes the whole grounded array in
+  // a SINGLE retry instead of fixing entries one-at-a-time (the 26-save thrash).
+  // Prefer a themed label (one that differs from the value) per value so the
+  // warm-execute intent fuzzy-match keeps its bridge.
+  if (issues.length > 0 && observations.length > 0) {
+    const byValue = new Map<string, string[]>();
+    for (const o of observations) {
+      const labels = byValue.get(o.value) ?? [];
+      if (!labels.includes(o.source.label)) labels.push(o.source.label);
+      byValue.set(o.value, labels);
+    }
+    const MAX_SHOWN = 25;
+    const entries = [...byValue.entries()];
+    const shown = entries.slice(0, MAX_SHOWN).map(([v, labels]) => {
+      const best = labels.find((l) => l !== v) ?? labels[0] ?? v;
+      return `    { "value": ${JSON.stringify(v)}, "label": ${JSON.stringify(best)} }`;
+    });
+    const more =
+      entries.length > MAX_SHOWN ? `\n    … +${entries.length - MAX_SHOWN} more observed` : '';
+    issues.push(
+      `notes.params.${paramName}.observed_values — copy this COMPLETE observed set VERBATIM in one edit ` +
+        `(every value the page offered + its real label, including emoji/themed wording; do not paraphrase labels or drop entries):\n` +
+        `[\n${shown.join(',\n')}${more}\n]`,
+    );
+  }
+
   return issues;
 }
 

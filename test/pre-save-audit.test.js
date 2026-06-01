@@ -1156,6 +1156,49 @@ test('page_link grounding: a paraphrased label is still REJECTED (pair check pre
   );
 });
 
+test('page_link grounding: a label-mismatch rejection surfaces the COMPLETE observed set to paste in one edit', () => {
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'http://127.0.0.1:5000',
+    endpoint: '/api/restaurants?category={{cuisine}}',
+    method: 'GET',
+    headers: {},
+    notes: {
+      params: {
+        cuisine: {
+          kind: 'enum',
+          observed_values: [
+            { value: 'italian', label: 'Italian' }, // wrong label
+            { value: 'mexican', label: 'Mexican' }, // wrong label
+          ],
+        },
+      },
+    },
+  };
+  const result = runAudit(
+    {
+      capability: 'list_top_restaurants',
+      observedSiblings: [],
+      observedParamValues: {
+        category: [
+          { param_name: 'category', value: 'italian', source: { kind: 'page_link', label: 'Taste the pride of Napoli' }, observed_at: 1 },
+          { param_name: 'category', value: 'mexican', source: { kind: 'page_link', label: 'Taco-tuesday? \u{1F32E}' }, observed_at: 2 },
+        ],
+      },
+      capturedEndpointPaths: new Set(['http://127.0.0.1:5000/api/restaurants']),
+    },
+    strategy,
+    { literal_provenance: { endpoint: { caller_input: 'cuisine' } }, observed_siblings: {} },
+  );
+  assert.equal(result.status, 'rejected');
+  const issues = result.rejection.classifier_issues || [];
+  const paste = issues.find((i) => /copy this COMPLETE observed set VERBATIM in one edit/.test(i));
+  assert.ok(paste, `expected consolidated paste-set; got ${JSON.stringify(issues)}`);
+  // it lists BOTH values with their themed labels, ready to paste
+  assert.match(paste, /"value": "italian", "label": "Taste the pride of Napoli"/);
+  assert.match(paste, /"value": "mexican", "label": "Taco-tuesday/);
+});
+
 test('enum-shape guard: single observed_value rejects with steer toward kind:"text" / capability source', () => {
   // Defense-in-depth pair to the listing-detector ≥2 guard: at save time,
   // a kind:"enum" param with <2 distinct observed_values is structurally
