@@ -50,8 +50,8 @@ Browser agents pay for the UI on every run. Klura pays once.
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/klura-ai/klura/v0.2.2/hero-dark.gif">
-    <img alt="klura: one run, lift, then execute the saved skill directly" src="https://raw.githubusercontent.com/klura-ai/klura/v0.2.2/hero-light.gif" width="900">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/klura-ai/klura/main/hero-dark.gif">
+    <img alt="klura: one run, lift, then execute the saved skill directly" src="https://raw.githubusercontent.com/klura-ai/klura/main/hero-light.gif" width="900">
   </picture>
 </p>
 
