@@ -244,6 +244,14 @@ export interface PlatformLogbook {
       captured_actions_count: number;
       phase_at_abort: string;
     }>;
+    /**
+     * XHR endpoint paths the agent acked as noise at `end_drive` (telemetry /
+     * sensor traffic that isn't a capability and doesn't match the tracking
+     * path filter). Persisted per platform so the `unsaved_xhr_endpoints` gate
+     * subtracts them in future sessions instead of re-prompting for the same
+     * paths every close. Path-only (no host/query), deduped.
+     */
+    acked_noise_endpoints?: string[];
   };
   /**
    * Platform-level record of "sibling capabilities the agent saw across

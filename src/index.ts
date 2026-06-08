@@ -123,7 +123,7 @@ export {
 } from './tools/perform-action';
 export type { ActionResult } from './tools/perform-action';
 
-export { saveStrategy } from './tools/save-strategy';
+export { saveStrategy, updateStrategy } from './tools/save-strategy';
 
 export { submitTriagePlan } from './tools/submit-triage-plan';
 export type { SubmitTriagePlanArgs, SubmitTriagePlanResult } from './tools/submit-triage-plan';

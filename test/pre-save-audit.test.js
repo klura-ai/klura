@@ -837,6 +837,131 @@ test('static-on-click-observed: rejects "static" when literal matches a ui_click
   assert.match(hit, /\{\{lang\}\}/);
 });
 
+// Entry/origin-URL exemption: a fixed prerequisite url that equals a click-
+// observed value (the referrer/auth-redirect mechanic — e.g. the entry origin
+// captured as a `next`/referrer param value) is NOT a selectable enum option.
+// Full-value equality on a prereq url must accept "static" rather than demand
+// templating. Regression for the substring-match false positive that rejected
+// `https://www.ebay.com/` and forced a trailing-slash workaround.
+test('static-on-click-observed: accepts "static" prereq url that equals a click-observed value', () => {
+  const strategy = {
+    strategy: 'page-script',
+    baseUrl: 'https://site.example.com',
+    endpoint: '/api/send',
+    method: 'POST',
+    headers: { 'x-nonce': '{{nonce}}' },
+    body: { text: '{{text}}' },
+    prerequisites: [
+      {
+        name: 'get_nonce',
+        kind: 'js-eval',
+        url: 'https://site.example.com/',
+        expression: 'window.__app.me.o.nonce',
+        binds: 'nonce',
+        return_shape: { kind: 'string' },
+      },
+    ],
+    notes: { params: { text: { description: 'body', kind: 'text', example: 'hi' } } },
+  };
+  const result = runAudit(
+    {
+      capability: 'send_message',
+      observedSiblings: [],
+      // The entry origin shows up verbatim as a click-observed referrer value —
+      // full-value equality with the prereq url, NOT a pickable choice.
+      observedParamValues: {
+        next: [
+          {
+            param_name: 'next',
+            value: 'https://site.example.com/',
+            source: { kind: 'ui_click', label: 'Sign in' },
+            observed_at: 1,
+          },
+        ],
+      },
+      capturedEndpointPaths: new Set(),
+    },
+    strategy,
+    {
+      mutating_verification_required:
+        'transaction-shape: server returns a confirmation field (test default)',
+      literal_provenance: {
+        endpoint: 'static',
+        'prerequisites[0].url': 'static',
+      },
+      observed_siblings: {},
+    },
+  );
+  const issues = result.rejection?.classifier_issues || [];
+  const staticOnClick = issues.find((i) => /static.*UI click/.test(i));
+  assert.ok(
+    !staticOnClick,
+    `prereq url full-equality with a click-observed value must be exempt; got: ${JSON.stringify(staticOnClick)}`,
+  );
+  assert.equal(
+    result.status,
+    'committed',
+    `expected committed; got ${JSON.stringify(result.rejection || result)}`,
+  );
+});
+
+// Negative companion: a prereq url where the click-observed value is a PROPER
+// substring (a real enum slot in the url) must still reject — the exemption is
+// full-value-equality only, so the templatable-enum escape hatch stays closed.
+test('static-on-click-observed: rejects "static" prereq url with a proper-substring click match', () => {
+  const strategy = {
+    strategy: 'page-script',
+    baseUrl: 'https://site.example.com',
+    endpoint: '/api/send',
+    method: 'POST',
+    headers: { 'x-nonce': '{{nonce}}' },
+    body: { text: '{{text}}' },
+    prerequisites: [
+      {
+        name: 'get_nonce',
+        kind: 'js-eval',
+        url: 'https://site.example.com/feed?category=italian',
+        expression: 'window.__app.me.o.nonce',
+        binds: 'nonce',
+        return_shape: { kind: 'string' },
+      },
+    ],
+    notes: { params: { text: { description: 'body', kind: 'text', example: 'hi' } } },
+  };
+  const result = runAudit(
+    {
+      capability: 'send_message',
+      observedSiblings: [],
+      observedParamValues: {
+        category: [
+          {
+            param_name: 'category',
+            value: 'italian',
+            source: { kind: 'ui_click', label: 'Italian' },
+            observed_at: 1,
+          },
+        ],
+      },
+      capturedEndpointPaths: new Set(),
+    },
+    strategy,
+    {
+      mutating_verification_required:
+        'transaction-shape: server returns a confirmation field (test default)',
+      literal_provenance: {
+        endpoint: 'static',
+        'prerequisites[0].url': 'static',
+      },
+      observed_siblings: {},
+    },
+  );
+  assert.equal(result.status, 'rejected');
+  const issues = result.rejection.classifier_issues || [];
+  const hit = issues.find((i) => /static.*UI click/.test(i));
+  assert.ok(hit, `expected static-on-click reject for proper substring, got: ${JSON.stringify(issues)}`);
+  assert.match(hit, /italian/);
+});
+
 // text_kind_justification escape hatch is closed when every observation for
 // the param is a UI click (no captured non-click traffic supports the
 // "free-form text" claim). Forces kind:"enum" instead of "I'll just call it
@@ -966,6 +1091,76 @@ test('text_kind_justification: accepted when substantive AND references an obser
     result.status,
     'committed',
     `expected committed; got ${JSON.stringify(result.rejection || result)}`,
+  );
+});
+
+// Single-affordance free-text: a search box submitted via ONE button click
+// produces one distinct click label. That is not a multi-option picker, so the
+// justification path is OPEN (not forced to enum) — the agent attests free-text
+// referencing the single observed label, no fake non-click traffic needed.
+test('text_kind_justification: single click affordance (1 distinct label) → justification path open, commits', () => {
+  const just =
+    'The q param is a free-text search box — the value is whatever the caller types; the "Search" button is the single affordance that fires this XHR with the typed term, not a fixed option set.';
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'https://example.test',
+    endpoint: '/api/search?q={{q}}',
+    method: 'GET',
+    headers: {},
+    notes: { params: { q: { kind: 'text', text_kind_justification: just } } },
+  };
+  const result = runAudit(
+    {
+      capability: 'search_things',
+      observedSiblings: [],
+      observedParamValues: {
+        // Two clicks of the SAME affordance (one distinct label "Search"),
+        // different typed values — the search-box signature.
+        q: [
+          { param_name: 'q', value: 'blum hinge', source: { kind: 'ui_click', label: 'Search' }, observed_at: 1 },
+          { param_name: 'q', value: 'onyx plate', source: { kind: 'ui_click', label: 'Search' }, observed_at: 2 },
+        ],
+      },
+      capturedEndpointPaths: new Set(['https://example.test/api/search']),
+    },
+    strategy,
+    { literal_provenance: { endpoint: { caller_input: 'q' } }, observed_siblings: {} },
+  );
+  assert.equal(
+    result.status,
+    'committed',
+    `expected committed; got ${JSON.stringify(result.rejection || result)}`,
+  );
+});
+
+test('text_kind_justification: single affordance still needs a substantive justification', () => {
+  // Hatch is open for the single-label case, but a missing/canned justification
+  // must still reject — the cardinality relaxation doesn't drop the anti-canned bar.
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'https://example.test',
+    endpoint: '/api/search?q={{q}}',
+    method: 'GET',
+    headers: {},
+    notes: { params: { q: { kind: 'text' } } }, // no text_kind_justification
+  };
+  const result = runAudit(
+    {
+      capability: 'search_things',
+      observedSiblings: [],
+      observedParamValues: {
+        q: [{ param_name: 'q', value: 'blum hinge', source: { kind: 'ui_click', label: 'Search' }, observed_at: 1 }],
+      },
+      capturedEndpointPaths: new Set(['https://example.test/api/search']),
+    },
+    strategy,
+    { literal_provenance: { endpoint: { caller_input: 'q' } }, observed_siblings: {} },
+  );
+  assert.equal(result.status, 'rejected');
+  const issues = result.rejection.classifier_issues || [];
+  assert.ok(
+    issues.some((i) => /text_kind_justification/.test(i)),
+    `expected justification-required reject, got: ${JSON.stringify(issues)}`,
   );
 });
 
@@ -1461,7 +1656,12 @@ test('user_confirmation: agent_prompt missing target → fact-check rejects', ()
   }
 });
 
-test('user_confirmation: agent_prompt buries warnings → fact-check rejects', () => {
+test('user_confirmation: open warnings ride required_facts; prompt need not echo an English warning word', () => {
+  // Durability + open warnings are conveyed in natural language, so the runtime
+  // surfaces them structurally on `required_facts` rather than grepping the
+  // agent's free-text prompt for an English synonym (which broke for non-
+  // English prose — "varning", etc.). A prompt that covers the crisp facts
+  // (slug/tier/host) commits even without an English warning keyword.
   unregisterSaveConfirmationDecider('pre-save-audit-test-default-approve');
   try {
     const ctx = minimalCtx();
@@ -1475,6 +1675,15 @@ test('user_confirmation: agent_prompt buries warnings → fact-check rejects', (
       },
     };
     const first = saveStrategyAudit.process(strategy, ctx, {});
+    assert.equal(first.rejection.reason, 'pending');
+    // Structural surface: the open warning kind is on required_facts, locale-
+    // independent — the runtime owns it, not the agent's paraphrase.
+    const facts = first.rejection.items?.user_confirmation?.required_facts;
+    assert.ok(facts, 'required_facts present');
+    assert.ok(
+      (facts.warning_kinds ?? []).includes('mutating_verification_required'),
+      `required_facts.warning_kinds must surface the open warning; got ${JSON.stringify(facts.warning_kinds)}`,
+    );
     const token = first.rejection.token;
     const result = saveStrategyAudit.process(strategy, ctx, {
       token,
@@ -1482,7 +1691,7 @@ test('user_confirmation: agent_prompt buries warnings → fact-check rejects', (
         literal_provenance: { endpoint: 'static' },
         observed_siblings: {},
         user_confirmation: {
-          // Mentions all required facts but NOT a warning synonym.
+          // Covers slug/tier/host; no English "warning"/"flagged"/etc. word.
           agent_prompt:
             'Saving page-script list_items at site.example.com (dom-anchored). Save it?',
           user_decision: 'approve',
@@ -1490,11 +1699,10 @@ test('user_confirmation: agent_prompt buries warnings → fact-check rejects', (
         },
       },
     });
-    assert.equal(result.status, 'rejected');
-    const issues = result.rejection.classifier_issues || [];
-    assert.ok(
-      issues.some((i) => /open warning/.test(i)),
-      `expected warning-acknowledgement fact-check rejection; got ${JSON.stringify(issues)}`,
+    assert.equal(
+      result.status,
+      'committed',
+      `expected committed (fact-covering prompt, no warning keyword required); got ${JSON.stringify(result.rejection || result)}`,
     );
   } finally {
     reRegisterDefaultApprove();

@@ -160,10 +160,38 @@ test('key_press(Enter) that triggers form-submit nav → dom_navigation tagged v
   const restore = patchPool(session, driver);
   try {
     driver.state.pushPendingNav('https://site.example/search?q=thai');
-    await performAction(session.id, 'key_press', 'Enter');
+    await performAction(session.id, 'key_press', '', 'Enter');
 
     assert.equal(session.domNavigations.length, 1);
     assert.equal(session.domNavigations[0].via, 'submit');
+  } finally {
+    restore();
+  }
+});
+
+test('key_press without a value rejects (the key name is required, not the selector)', async () => {
+  const driver = makeFakeDriver();
+  const session = makeSession({ id: 'sess-keypress-noval' });
+  const restore = patchPool(session, driver);
+  try {
+    await assert.rejects(
+      () => performAction(session.id, 'key_press', '#gh-ac'),
+      /key_press action requires a value/,
+    );
+  } finally {
+    restore();
+  }
+});
+
+test('key_press with a selector-shaped value trips the shape guard', async () => {
+  const driver = makeFakeDriver();
+  const session = makeSession({ id: 'sess-keypress-selval' });
+  const restore = patchPool(session, driver);
+  try {
+    await assert.rejects(
+      () => performAction(session.id, 'key_press', '', 'textbox[placeholder="Search"]'),
+      /which looks like a selector/,
+    );
   } finally {
     restore();
   }

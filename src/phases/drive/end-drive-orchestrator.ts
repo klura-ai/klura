@@ -11,6 +11,7 @@ import {
   clearObservedSessionTracking,
   readObservedCapabilities,
   recordObservedCapability,
+  appendAckedNoiseEndpoints,
 } from '../../working-dir/logbook';
 import { inferObservedCapabilitiesFromGraph } from '../../working-dir/url-graph';
 import { deleteJournal } from '../../working-dir/capture-journal';
@@ -278,6 +279,21 @@ export async function endDrive(
   }
 
   session.endDriveAttempts = (session.endDriveAttempts ?? 0) + 1;
+
+  // The unsaved_xhr_endpoints gate cleared — if the agent acked some paths as
+  // noise, persist them per platform so future sessions don't re-prompt for the
+  // same telemetry. Only paths the agent named verbatim in the ack reason are
+  // suppressed (matches the detector's anti-canned naming requirement); unnamed
+  // paths re-surface next session.
+  if (platform) {
+    const noiseAck = opts.acks?.unsaved_xhr_endpoints;
+    if (typeof noiseAck === 'string' && noiseAck.length > 0) {
+      const acked = (auditPayload.unsavedHotXhrEndpoints ?? [])
+        .map((e) => e.urlPath)
+        .filter((urlPath) => noiseAck.includes(urlPath));
+      if (acked.length > 0) appendAckedNoiseEndpoints(platform, acked);
+    }
+  }
 
   // Debugger cleanup runs FIRST, before any driver work that touches the page.
   // A session that left the debugger paused (breakpoint hit, pauseOnExceptions,

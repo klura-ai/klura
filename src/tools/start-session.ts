@@ -19,6 +19,7 @@ import {
 import { buildPlatformMapSummary, type PlatformMapSummary } from '../response/platform-map-summary';
 import { harvestLinkUrlObservations } from '../response/session-observations';
 import { detectOriginBlocked, isResolvableChallengeShape } from '../phases/origin-blocked-detector';
+import { ESCALATION_ABORT_KINDS, type AbortKind } from './abort_session';
 import type { VisibilityAnomaly } from '../phases/visibility';
 import { snapVisibilityAnomalies } from '../phases/visibility';
 
@@ -100,7 +101,7 @@ function populatePlatformResponseFields(result: StartSessionResult, platform: st
 const ESCALATION_THRESHOLD = 3;
 const ESCALATION_WINDOW_HOURS = 24;
 
-function computeAbortEscalation(
+export function computeAbortEscalation(
   aborts: ReadonlyArray<{
     kind?: string;
     host?: string;
@@ -112,6 +113,9 @@ function computeAbortEscalation(
   for (const a of aborts) {
     if (a.hours_since > ESCALATION_WINDOW_HOURS) continue;
     const kind = a.kind ?? 'other';
+    // Only genuine persistent blocks escalate; benign exits (a saved capability
+    // covered the task, user stopped, site dead) are not "try harder" patterns.
+    if (!ESCALATION_ABORT_KINDS.has(kind as AbortKind)) continue;
     const host = a.host;
     const key = `${kind}|${host ?? ''}`;
     const entry = groups.get(key);

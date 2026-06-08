@@ -306,8 +306,6 @@ interface RequiredFacts {
   warning_kinds: string[];
 }
 
-const WARNING_ACK_SYNONYMS = ['warning', 'flagged', 'issue', 'concern'];
-
 function extractRequiredFacts(data: Strategy, ctx: SaveStrategyCtx): RequiredFacts {
   const s = data as Record<string, unknown>;
   const tier = typeof s.strategy === 'string' ? s.strategy : 'unknown';
@@ -548,32 +546,13 @@ function checkPromptFacts(prompt: string, facts: RequiredFacts): string[] {
       );
     }
   }
-  if (facts.tier === 'page-script' && facts.anchor_type) {
-    // Either the literal anchor_type value, or the generic word "anchor"
-    // (e.g. "module-anchored", "unclassified anchor"). Allows the agent to
-    // describe `unknown` as "unclassified" or "fragile" without naming the
-    // raw enum value.
-    const hasAnchorWord = /anchor|fragile|durable|unclassified|module|protocol/i.test(prompt);
-    const hasAnchorType = prompt.includes(facts.anchor_type);
-    if (!hasAnchorWord && !hasAnchorType) {
-      out.push(
-        `user_confirmation.agent_prompt must convey the anchor classification (notes.anchor_type "${facts.anchor_type}") — durability of a page-script strategy is load-bearing for the user's approval.`,
-      );
-    }
-  }
-  if (facts.warning_kinds.length > 0) {
-    const lower = prompt.toLowerCase();
-    const acknowledgesWarning = WARNING_ACK_SYNONYMS.some((s) => lower.includes(s));
-    if (!acknowledgesWarning) {
-      out.push(
-        `user_confirmation.agent_prompt must acknowledge the open warning(s) [${facts.warning_kinds
-          .map((k) => `"${k}"`)
-          .join(
-            ', ',
-          )}] — burying flagged concerns defeats the user-confirmation gate. Mention "warning" / "flagged" / "issue" / "concern" or name a kind verbatim.`,
-      );
-    }
-  }
+  // Durability (anchor_type) and open warnings are load-bearing too, but they
+  // are conveyed in natural language — recognizing them in the agent's free
+  // prose is a fuzzy, multilingual task that belongs with the LLM, not a
+  // keyword bank (a "DOM-förankrad" prompt is just as valid as "dom-anchored").
+  // The runtime surfaces them structurally instead: anchor_type and
+  // warning_kinds ride `required_facts` (locale-independent), which the agent
+  // composes its prompt from. See runtime/docs/principles.md §"Crisp vs fuzzy".
   return out;
 }
 
@@ -609,7 +588,7 @@ export const userConfirmationClassifier: Classifier<Strategy, SaveStrategyCtx, u
     return {
       required_facts: facts,
       agent_note:
-        'UNATTENDED-FIRST: if no human is reachable, the embedder (test harness, autonomous runner) should register a SaveConfirmationDecider that auto-resolves this gate — the runtime calls it and uses its verdict; no agent loop is needed. ATTENDED PATH (only when a human IS in the loop): compose a 1-3 sentence prompt to the user explaining what is about to be saved. Use your own voice — match the user\'s tone. The prompt MUST mention every fact in `required_facts`: the capability slug verbatim, the tier verbatim, the target host (or path), the anchor classification when tier is page-script, and at least the word "warning" / "flagged" / "issue" / "concern" when `warning_kinds` is non-empty. End with an explicit yes/no ask. Submit your prompt as `audit_answers.user_confirmation.agent_prompt`; submit the user\'s reply as `user_quote` and their decision as `user_decision`. Do NOT reuse the user\'s reply to a prior ack_checkpoint (triage_plan, surface_changed) or any earlier turn — the runtime cannot detect recycled replies, so freshness is on you. Self-resolving the gate by recycling a reply defeats the gate\'s purpose.',
+        "UNATTENDED-FIRST: if no human is reachable, the embedder (test harness, autonomous runner) should register a SaveConfirmationDecider that auto-resolves this gate — the runtime calls it and uses its verdict; no agent loop is needed. ATTENDED PATH (only when a human IS in the loop): compose a 1-3 sentence prompt to the user explaining what is about to be saved. Use your own voice — match the user's tone. The prompt MUST mention every fact in `required_facts`: the capability slug verbatim, the tier verbatim, the target host (or path), the anchor classification (`required_facts.anchor_type`) when tier is page-script, and the open warning(s) (`required_facts.warning_kinds`) when non-empty — convey durability and warnings in your own words, in whatever language you are speaking to the user. End with an explicit yes/no ask. Submit your prompt as `audit_answers.user_confirmation.agent_prompt`; submit the user's reply as `user_quote` and their decision as `user_decision`. Do NOT reuse the user's reply to a prior ack_checkpoint (triage_plan, surface_changed) or any earlier turn — the runtime cannot detect recycled replies, so freshness is on you. Self-resolving the gate by recycling a reply defeats the gate's purpose.",
       debug_prompt: composeUserPrompt(data, ctx),
     };
   },

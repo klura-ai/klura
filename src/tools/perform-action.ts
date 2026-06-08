@@ -347,6 +347,20 @@ function mineSelectorCandidatesFromA11yTree(tree: string, failedSelector: string
   return candidates.map((c) => c.selector);
 }
 
+// key_press fires on the focused element and has no target selector — its key
+// name rides `value`. Validate it's present and isn't a selector pasted into
+// the key slot (e.g. `textbox[placeholder="Search"]`): keyboard.press would
+// otherwise throw a cryptic "Unknown key" downstream. Throws with a concrete
+// fix-path on misuse.
+function assertKeyName(value: string | undefined): asserts value is string {
+  if (!value) throw new Error('key_press action requires a value (the key name, e.g. "Enter")');
+  if (/[[\]=]/.test(value) || /\s\s+/.test(value)) {
+    throw new Error(
+      `key_press takes a keyboard name (e.g. "Enter", "Tab", "Escape", "Control+End") and fires on the currently-focused element — it has no target-element arg. You passed ${JSON.stringify(value)} as the key, which looks like a selector.\n\nIf you want to send a key to a specific field, use two steps:\n  1. perform_action({action: "click", selector: ${JSON.stringify(value)}})   // focuses it\n  2. perform_action({action: "key_press", value: "Enter"})    // presses on focused field\n\nOr if you meant to type text into it:\n  perform_action({action: "type", selector: ${JSON.stringify(value)}, value: "<text>"})\n\nOr to just click it:\n  perform_action({action: "click", selector: ${JSON.stringify(value)}})`,
+    );
+  }
+}
+
 export async function performAction(
   sessionId: string,
   action: string,
@@ -360,7 +374,11 @@ export async function performAction(
     if (typeof action !== 'string' || action.length === 0) {
       throw new ValidationError('action', 'must be a non-empty string');
     }
-    asNonEmptyBoundedString(selector, 'selector');
+    // key_press fires on the focused element and has no target selector — its
+    // key name rides `value`. Every other action needs a non-empty selector.
+    if (action !== 'key_press') {
+      asNonEmptyBoundedString(selector, 'selector');
+    }
     if (value !== undefined) {
       asNonEmptyBoundedString(value, 'value');
     }
@@ -624,18 +642,8 @@ export async function performAction(
       break;
     }
     case 'key_press':
-      // Shape guard — agents sometimes pass a CSS/a11y selector into the
-      // `key` slot (e.g. `textbox[placeholder="Search"]` instead of
-      // `Enter`). keyboard.press expects a keyboard name and presses on
-      // whatever has focus — there is no target-element arg. Catch the
-      // misuse with a concrete fix-path before Playwright throws a
-      // cryptic "Unknown key" downstream.
-      if (/[[\]=]/.test(selector) || /\s\s+/.test(selector)) {
-        throw new Error(
-          `key_press takes a keyboard name (e.g. "Enter", "Tab", "Escape", "Control+End") and fires on the currently-focused element — it has no target-element arg. You passed ${JSON.stringify(selector)}, which looks like a selector.\n\nIf you want to send a key to a specific field, use two steps:\n  1. perform_action({action: "click", selector: ${JSON.stringify(selector)}})   // focuses it\n  2. perform_action({action: "key_press", selector: "Enter"})    // presses on focused field\n\nOr if you meant to type text into it:\n  perform_action({action: "type", selector: ${JSON.stringify(selector)}, value: "<text>"})\n\nOr to just click it:\n  perform_action({action: "click", selector: ${JSON.stringify(selector)}})`,
-        );
-      }
-      await driver.keyPress(session, selector, pageOpts);
+      assertKeyName(value);
+      await driver.keyPress(session, value, pageOpts);
       break;
     case 'scroll': {
       const sp = selector.split(',').map(Number);

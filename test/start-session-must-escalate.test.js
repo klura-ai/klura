@@ -101,3 +101,48 @@ test('escalation: distinct kinds do not coalesce', () => {
   // Two origin_blocked + one site_dead — no group hits 3.
   assert.ok([...groups.values()].every((c) => c < 3));
 });
+
+// Direct tests of the real helper (block-class filter). These exercise
+// computeAbortEscalation itself, not a mirror of its logic.
+const { computeAbortEscalation } = await import('../dist/tools/start-session.js');
+
+test('escalation: 3x existing_capability_covers (benign reads) → no advisory', () => {
+  const aborts = [
+    { kind: 'existing_capability_covers', host: 'example.com', hours_since: 1 },
+    { kind: 'existing_capability_covers', host: 'example.com', hours_since: 2 },
+    { kind: 'existing_capability_covers', host: 'example.com', hours_since: 3 },
+  ];
+  assert.equal(
+    computeAbortEscalation(aborts),
+    undefined,
+    'benign existing_capability_covers reads must not escalate',
+  );
+});
+
+test('escalation: 3x origin_blocked → advisory fires (block class)', () => {
+  const aborts = [
+    { kind: 'origin_blocked', host: 'example.com', hours_since: 1 },
+    { kind: 'origin_blocked', host: 'example.com', hours_since: 2 },
+    { kind: 'origin_blocked', host: 'example.com', hours_since: 3 },
+  ];
+  const result = computeAbortEscalation(aborts);
+  assert.ok(result, 'origin_blocked repeats must escalate');
+  assert.equal(result.kind, 'origin_blocked');
+  assert.equal(result.same_root_cause_count, 3);
+});
+
+test('escalation: benign kinds do not dilute / mask a real block', () => {
+  // 3 benign + 3 blocks interleaved → still escalates on the blocks only.
+  const aborts = [
+    { kind: 'existing_capability_covers', host: 'example.com', hours_since: 1 },
+    { kind: 'origin_blocked', host: 'example.com', hours_since: 2 },
+    { kind: 'user_stop', host: 'example.com', hours_since: 3 },
+    { kind: 'origin_blocked', host: 'example.com', hours_since: 4 },
+    { kind: 'site_dead', host: 'example.com', hours_since: 5 },
+    { kind: 'origin_blocked', host: 'example.com', hours_since: 6 },
+  ];
+  const result = computeAbortEscalation(aborts);
+  assert.ok(result, 'three origin_blocked among benign kinds must still escalate');
+  assert.equal(result.kind, 'origin_blocked');
+  assert.equal(result.same_root_cause_count, 3);
+});

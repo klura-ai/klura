@@ -1362,6 +1362,48 @@ function buildValidationTarget(data: Strategy): { method: string; url: string } 
   return { method, url };
 }
 
+/**
+ * Amend an already-saved strategy. klura's lifecycle has *create* (discover →
+ * lift → save) and *repair* (auto-execute fails → stale → re-lift) but no way
+ * to improve a *healthy* saved strategy — editing the JSON on disk would
+ * bypass the save audit. `update_strategy` closes that gap: it re-runs the
+ * SAME full `saveStrategyAudit` + probe + commit as `save_strategy` (delegates
+ * to it), so an amend clears exactly the bar a create does. The only
+ * difference is the precondition — a saved strategy must already exist — and
+ * that it's admissible from the normal driving phases (drive/execute), not
+ * lift-only, so the agent can improve a working strategy without forcing a
+ * re-discovery. Triage-coupled gates skip naturally off the live session phase
+ * (the surface was already triaged at create time); the payload-level gates
+ * (literal_provenance, enum grounding, mutating verification, user_confirmation)
+ * all run against the amended body.
+ */
+export async function updateStrategy(
+  platform: string,
+  capability: string,
+  data: Strategy,
+  changelog?: string,
+  sessionId?: string,
+  audit?: { token?: string; answers?: AuditAnswers },
+): ReturnType<typeof saveStrategy> {
+  const existing = skills.loadStrategies(platform, capability);
+  if (existing.length === 0) {
+    throw new SaveStrategyRejection(
+      `no_saved_strategy_to_update: ${platform}/${capability} has no saved strategy to amend. ` +
+        `update_strategy improves an EXISTING strategy; to create the first one, run the ` +
+        `discover → lift → save_strategy flow.`,
+      newTimings(),
+    );
+  }
+  return saveStrategy(
+    platform,
+    capability,
+    data,
+    changelog ?? 'update_strategy amend',
+    sessionId,
+    audit,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Tool registry metadata
 // ---------------------------------------------------------------------------
@@ -1421,6 +1463,62 @@ export const TOOL_DEFS: ToolDef[] = [
         );
       }
       return saveStrategy(
+        args.platform,
+        args.capability,
+        args.strategy,
+        args.changelog,
+        args.session_id,
+        {
+          token: args.audit_token,
+          answers: args.audit_answers,
+        },
+      );
+    },
+  },
+
+  {
+    name: TOOL_NAMES.updateStrategy,
+    description:
+      "Improve an ALREADY-SAVED strategy without re-discovery. Use when you have a better/enriched expression for a healthy capability (e.g. add fields to a page-script). Loads the saved strategy, applies your full replacement `strategy` body, and re-runs the SAME save-time audit + probe + commit as save_strategy (incl. user_confirmation) — an amend is held to a create's bar, so editing the JSON by hand is never needed. Load the current body via get_strategy, edit, resubmit. Rejects if no saved strategy exists yet (use save_strategy to create the first one). Admissible from drive/execute — no need to re-enter lift.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        platform: { type: 'string' },
+        capability: { type: 'string' },
+        strategy: {
+          type: 'object',
+          description:
+            'Full replacement strategy body (same shape save_strategy takes). This REPLACES the saved strategy for {platform, capability}; supply the complete body (load the current one via get_strategy, then edit). Same schema/audit as save_strategy.',
+        },
+        changelog: {
+          type: 'string',
+          description: 'Human-readable summary of what changed (logged to history)',
+        },
+        session_id: {
+          type: 'string',
+          description:
+            'Active session id (REQUIRED). Supplies the live audit context + the pool the post-save probe needs — the amend runs the same audit a create does, so without it the save would be unverified.',
+        },
+        audit_token: {
+          type: 'string',
+          description: 'Echo the audit_token returned on the prior update_strategy rejection.',
+        },
+        audit_answers: {
+          type: 'object',
+          description:
+            'Classification answers per the checklist from the prior rejection — same shape as save_strategy.audit_answers.',
+        },
+      },
+      required: ['platform', 'capability', 'strategy', 'session_id'],
+    },
+    handler: (args: any) => {
+      if (typeof args.session_id !== 'string' || args.session_id.trim().length === 0) {
+        throw new Error(
+          'invalid_strategy: update_strategy requires session_id — the amend runs the full ' +
+            'save-time audit + probe, which need a live session. Pass the session_id from start_session.',
+        );
+      }
+      return updateStrategy(
         args.platform,
         args.capability,
         args.strategy,

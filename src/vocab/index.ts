@@ -83,6 +83,7 @@ export const TOOL_NAMES = {
   resume: 'resume',
   resumeExecution: 'resume_execution',
   saveStrategy: 'save_strategy',
+  updateStrategy: 'update_strategy',
   saveVerifiedExpression: 'save_verified_expression',
   searchJsSource: 'search_js_source',
   setBreakpoint: 'set_breakpoint',

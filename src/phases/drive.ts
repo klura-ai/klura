@@ -16,6 +16,7 @@ import {
   LOGBOOK_WRITE,
   MAP_LIFT_INITIATOR,
   READ_ONLY_DIAGNOSTIC,
+  STRATEGY_AMEND,
   unionSets,
 } from './tool-catalog';
 
@@ -26,6 +27,7 @@ const ALLOWED = unionSets(
   DISCOVERY_ARTIFACT,
   LOGBOOK_WRITE,
   MAP_LIFT_INITIATOR,
+  STRATEGY_AMEND,
   ESCAPE_VALVE,
 );
 

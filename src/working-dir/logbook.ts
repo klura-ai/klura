@@ -332,6 +332,31 @@ export function appendAbortEvent(platform: string, input: AbortEventInput): void
   writeLogbook(logbook);
 }
 
+/**
+ * Append acked-as-noise XHR endpoint paths to the platform-wide log, deduped.
+ * The `unsaved_xhr_endpoints` end-drive gate reads these in future sessions and
+ * subtracts them so the same telemetry/sensor paths aren't re-prompted every
+ * close. Defensive-init: pre-existing logbooks (no field) are upgraded in
+ * place, same pattern as `abort_events`.
+ */
+export function appendAckedNoiseEndpoints(platform: string, paths: readonly string[]): void {
+  const clean = paths.filter((p) => typeof p === 'string' && p.length > 0);
+  if (clean.length === 0) return;
+  const logbook = loadLogbook(platform);
+  const wide = logbook.platform_wide;
+  const existing = Array.isArray(wide.acked_noise_endpoints) ? wide.acked_noise_endpoints : [];
+  wide.acked_noise_endpoints = Array.from(new Set([...existing, ...clean]));
+  writeLogbook(logbook);
+}
+
+/** Read the platform's acked-as-noise XHR endpoint paths (empty if none).
+ *  Used by the unsaved_xhr gate to subtract previously-acked noise. */
+export function readAckedNoiseEndpoints(platform: string): string[] {
+  const logbook = loadLogbook(platform);
+  const wide = logbook.platform_wide;
+  return Array.isArray(wide.acked_noise_endpoints) ? wide.acked_noise_endpoints : [];
+}
+
 /** Computed-enrichment shape on each abort_event the readRecentAborts
  *  caller gets. `hours_since` saves the caller from parsing ISO
  *  timestamps to calibrate freshness. */

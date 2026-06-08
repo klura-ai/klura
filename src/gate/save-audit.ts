@@ -257,25 +257,39 @@ function literalInAnyExample(data: Strategy, literal: string): boolean {
   return false;
 }
 
-// Click-observed exemption for navigate destination URLs. The static-on-click-
+// Click-observed exemption for fixed entry/origin URLs. The static-on-click-
 // observed rejection treats "value appears in any captured ui_click value" as
 // "value is a selectable enum option." That logic is right for URL params,
-// body fields, and headers — places where the click-observed value is one of
-// several pickable options the user steers between. It's wrong for a navigate
-// step's destination URL: the URL IS the entry point of the flow, not a
-// choice. Common false positive: site auth flows redirect through
-// `?next=<entry-url>`, the entry URL gets picked up as a click-observed value
-// of the `next` param, and the navigate step's literal URL then trips the
-// rejection. Exemption: when the literal is a `navigate` step's `url` AND the
-// observed value equals the literal verbatim, accept `static`.
+// body fields, headers, and the capability endpoint — places where the click-
+// observed value is one of several pickable options the user steers between.
+// It's wrong for a fixed entry point of the flow, which is not a choice:
+//   - a `navigate` step's destination URL, and
+//   - a prerequisite's `url` (the setup/entry fetch).
+// Common false positives: auth flows redirect through `?next=<entry-url>`, so
+// the entry URL gets picked up as a click-observed value of the `next` param;
+// and a fixed origin like `https://www.ebay.com/` equals a click-observed
+// referrer value carried in a tracking param. Exemption: when the literal is
+// one of these entry/origin URLs AND the observed value equals the literal
+// verbatim (full-value equality, not a proper substring), accept `static`.
+// The endpoint/baseUrl is deliberately NOT exempted — it carries the
+// capability's parameterized target, where a proper-substring match (e.g.
+// `italian` in `?category=italian`) must still force templating.
 const NAVIGATE_URL_PATH_RE = /^steps\[(\d+)\]\.url$/;
-function isNavigateStepUrl(data: Strategy, path: string): boolean {
-  const m = NAVIGATE_URL_PATH_RE.exec(path);
-  if (!m || !m[1]) return false;
-  const idx = Number(m[1]);
-  const steps = (data as { steps?: unknown }).steps;
-  if (!Array.isArray(steps)) return false;
-  const step: unknown = steps[idx];
+const WSOPEN_NAVIGATE_URL_PATH_RE = /^wsOpen\.steps\[(\d+)\]\.url$/;
+const PREREQ_URL_PATH_RE = /^prerequisites\[(\d+)\]\.url$/;
+function isEntryOrOriginUrl(data: Strategy, path: string): boolean {
+  // A prerequisite url is an entry/setup fetch, not a pickable capability
+  // target — the path role alone establishes it.
+  if (PREREQ_URL_PATH_RE.test(path)) return true;
+  // A navigate step url (live page or wsOpen) is the flow entry point.
+  const navMatch = NAVIGATE_URL_PATH_RE.exec(path) ?? WSOPEN_NAVIGATE_URL_PATH_RE.exec(path);
+  if (!navMatch || !navMatch[1]) return false;
+  const idx = Number(navMatch[1]);
+  const stepsRoot = path.startsWith('wsOpen.')
+    ? (data as { wsOpen?: { steps?: unknown } }).wsOpen?.steps
+    : (data as { steps?: unknown }).steps;
+  if (!Array.isArray(stepsRoot)) return false;
+  const step: unknown = stepsRoot[idx];
   if (!step || typeof step !== 'object') return false;
   return (step as Record<string, unknown>).action === 'navigate';
 }
@@ -318,12 +332,13 @@ export function validateLiteralAnswer(
     if (isGeneratedCodePath(item.path)) return [];
     const matches = findClickObservedValuesIn(item.value, observedParamValues);
     if (matches.length > 0) {
-      // Navigate-URL exemption: when the literal is a navigate step's url AND
-      // every match is a full-value equality (not a substring of a longer
-      // literal), the click-observed pairing is just the auth-redirect
-      // mechanic (`?next=<entry-url>`), not a selectable enum option. Accept
-      // `static`. See the comment on isNavigateStepUrl above.
-      if (isNavigateStepUrl(data, item.path) && matches.every((m) => m.value === item.value)) {
+      // Entry/origin-URL exemption: when the literal is a navigate step's url
+      // or a prerequisite url AND every match is a full-value equality (not a
+      // substring of a longer literal), the click-observed pairing is just the
+      // auth-redirect mechanic (`?next=<entry-url>`) or a referrer/origin
+      // coincidence, not a selectable enum option. Accept `static`. See the
+      // comment on isEntryOrOriginUrl above.
+      if (isEntryOrOriginUrl(data, item.path) && matches.every((m) => m.value === item.value)) {
         return [];
       }
       return matches.map(
@@ -853,35 +868,44 @@ function validateCallerInputParamKind(
         .map((l) => JSON.stringify(l))
         .join(', ')}]`;
 
-    if (!hasNonClickObservation) {
-      // No structural evidence the param is ever NOT click-derived. The
-      // text_kind_justification path is closed for this param — there's no
-      // honest justification a "search box that ALSO fires this XHR" exists
-      // because the runtime never observed one.
+    // A real multi-option picker exposes several options (several distinct
+    // labels). A single distinct label across all click observations is one
+    // affordance — typically a search/submit button ("Search") whose value is
+    // the caller's typed term, not a fixed option set. Distinct-label
+    // cardinality is the crisp signal: >= 2 distinct labels with no non-click
+    // traffic is a genuine enum and the justification path stays closed; a
+    // single affordance opens the justification path (the agent attests
+    // free-text, referencing the one observed label).
+    const singleAffordance = labels.length === 1;
+    if (!hasNonClickObservation && !singleAffordance) {
+      // >= 2 distinct click labels and no non-click traffic — a genuine
+      // multi-option picker. The text_kind_justification path is closed.
       if (typeof just !== 'string' || just.trim().length === 0) {
         issues.push(
-          `${baseReject}\n\nThe text_kind_justification escape hatch is NOT available for this param — every observation in this session was a UI click. There is no captured non-click traffic for "${paramName}" that would justify "free-form text." Reclassify as kind: "enum".`,
+          `${baseReject}\n\nThe text_kind_justification escape hatch is NOT available for this param — every observation was a UI click across ${labels.length} distinct option labels, the shape of a multi-option picker. Reclassify as kind: "enum".`,
         );
       } else {
         issues.push(
-          `${baseReject}\n\nYou supplied text_kind_justification = ${JSON.stringify(just.slice(0, 200))} but every observation for "${paramName}" in this session was a UI click — there is no captured non-click traffic that supports "free-form text." Reclassify as kind: "enum"; the justification path is not available here.`,
+          `${baseReject}\n\nYou supplied text_kind_justification = ${JSON.stringify(just.slice(0, 200))} but every observation was a UI click across ${labels.length} distinct option labels (a multi-option picker, not free text). Reclassify as kind: "enum"; the justification path is not available here.`,
         );
       }
       return issues;
     }
 
-    // Structural evidence exists (the param fires from non-click traffic too).
-    // Justification path is open, but tighten the bar to stop canned excuses.
+    // Justification path is open — either the param also fires from non-click
+    // traffic, OR all clicks came from a single affordance (one distinct
+    // label), which is not proof of an option set. Tighten the bar to stop
+    // canned excuses: substantive, references the observed label.
     if (typeof just !== 'string' || just.trim().length === 0) {
       issues.push(
-        `${baseReject}\n\nIf taking the text_kind_justification path, set notes.params.${paramName}.text_kind_justification to a >= ${TEXT_KIND_MIN_CHARS}-char sentence that names at least one observed click label verbatim AND describes the non-click traffic shape that makes "${paramName}" genuinely free-form (e.g. "search endpoint fires from typed input + suggestion-tile clicks; clicked tile labels include " + one of [${labels
+        `${baseReject}\n\nIf taking the text_kind_justification path, set notes.params.${paramName}.text_kind_justification to a >= ${TEXT_KIND_MIN_CHARS}-char sentence that names at least one observed label verbatim AND explains why "${paramName}" is genuinely free-form (e.g. "a search box — the value is the caller's typed term and the " + one of [${labels
           .slice(0, 3)
           .map((l) => JSON.stringify(l))
-          .join(', ')}]).`,
+          .join(', ')}] affordance fires the XHR with it").`,
       );
     } else if (just.trim().length < TEXT_KIND_MIN_CHARS) {
       issues.push(
-        `${baseReject}\n\ntext_kind_justification = ${JSON.stringify(just)} is too short (< ${TEXT_KIND_MIN_CHARS} chars) — a substantive justification names at least one observed click label verbatim AND describes the non-click traffic shape. A canned "this is a slug accepted as free-form" doesn't pass.`,
+        `${baseReject}\n\ntext_kind_justification = ${JSON.stringify(just)} is too short (< ${TEXT_KIND_MIN_CHARS} chars) — a substantive justification names at least one observed label verbatim AND explains why the param is genuinely free-form. A canned "this is a slug accepted as free-form" doesn't pass.`,
       );
     } else if (!labels.some((l) => just.includes(l))) {
       issues.push(

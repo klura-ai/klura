@@ -47,6 +47,15 @@ export const ABORT_KIND_VALUES: readonly AbortKind[] = [
   'other',
 ];
 
+/** Abort kinds that represent a genuine persistent block worth escalating to
+ *  the human operator when they repeat. Only these count toward
+ *  `must_escalate` (see computeAbortEscalation in start-session). The others
+ *  are benign exits — `existing_capability_covers` is a successful "use the
+ *  saved strategy" read, `user_stop` is intentional, `site_dead`/`other` are
+ *  not "try the same approach harder" situations the escalation advisory
+ *  addresses. */
+export const ESCALATION_ABORT_KINDS: ReadonlySet<AbortKind> = new Set(['origin_blocked']);
+
 export interface AbortSessionArgs {
   session_id: string;
   reason: string;

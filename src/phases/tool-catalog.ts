@@ -97,6 +97,12 @@ export const TRIAGE_AND_LIFT_WRITE: ReadonlySet<string> = new Set([
   'submit_triage_plan',
 ]);
 
+/** Amend an already-saved strategy. Admissible from drive + execute + lift so
+ *  the agent can improve a healthy capability without re-entering lift. The
+ *  tool rejects when no saved strategy exists and runs the full save audit, so
+ *  phase admissibility can stay liberal. */
+export const STRATEGY_AMEND: ReadonlySet<string> = new Set(['update_strategy']);
+
 /** Map-graph lift initiator. Opens a triage+lift cycle on an already-observed
  *  capability without ending the map session. Admissible from drive (first
  *  lift) and lift (subsequent capability after a save) — NOT triage (an

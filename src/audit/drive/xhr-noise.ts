@@ -7,6 +7,7 @@
 import { loadStrategy } from '../../strategies/skills';
 import { escapeRegExp } from '../../utils/regex';
 import { readPlatformSkillInfo } from '../../strategies/skills-list-helpers';
+import { readAckedNoiseEndpoints } from '../../working-dir/logbook';
 
 interface InterceptedLike {
   status?: number | null;
@@ -64,6 +65,20 @@ function endpointTemplateToRegex(template: string): RegExp {
  *  catches page-script strategies that fire `fetch("/api/items/{{id}}")`
  *  from inside an iframe — the saved strategy reaches that path even though
  *  its top-level `endpoint` field is absent. */
+// Scan a js-eval / page-script expression body for quoted URLs and push them.
+// Common shapes: fetch('/api/x'), fetch(`/api/x`), navigate('/foo'). Walks for
+// `('` / `("` / `(\`` URL openers and grabs the path until the matching closer
+// or interpolation. Conservative: only matches paths that start with `/`,
+// skipping data: / blob: / absolute https:// URLs. A fresh regex per call
+// avoids lastIndex carryover across expressions.
+function pushQuotedUrls(expression: string, out: string[]): void {
+  const urlRe = /['"`](\/[^'"`?#]{0,200})['"`?#]/g;
+  let m: RegExpExecArray | null;
+  while ((m = urlRe.exec(expression)) !== null) {
+    if (m[1] && m[1].length > 1) out.push(m[1]);
+  }
+}
+
 function harvestStrategyTemplates(strategy: unknown): string[] {
   if (!strategy || typeof strategy !== 'object') return [];
   const s = strategy as Record<string, unknown>;
@@ -71,16 +86,14 @@ function harvestStrategyTemplates(strategy: unknown): string[] {
   if (typeof s.endpoint === 'string' && s.endpoint.length > 0) out.push(s.endpoint);
   const prereqs = Array.isArray(s.prerequisites) ? s.prerequisites : [];
   for (const p of prereqs) {
-    if (p && typeof p === 'object' && typeof (p as { url?: unknown }).url === 'string') {
-      const u = (p as { url: string }).url;
-      if (u.length > 0) out.push(u);
-    }
+    if (!p || typeof p !== 'object') continue;
+    const pr = p as { url?: unknown; expression?: unknown };
+    if (typeof pr.url === 'string' && pr.url.length > 0) out.push(pr.url);
+    // js-eval prereqs hold their JS in `expression` — scan it too, else a
+    // prereq that does fetch('/sch/i.html') reads as an unsaved XHR.
+    if (typeof pr.expression === 'string') pushQuotedUrls(pr.expression, out);
   }
-  // Scan js-eval / page-script expression bodies for quoted URLs. Common
-  // shapes: fetch('/api/x'), fetch(`/api/x`), navigate('/foo'). The regex
-  // walks for `('` / `("` / `(\`` URL openers and grabs the path until the
-  // matching closer or interpolation. Conservative: only matches paths that
-  // start with `/`, skipping data: / blob: / absolute https:// URLs.
+  // Top-level page-script expression (frameFromPage / body).
   const expression = (() => {
     const fromPage = s.frameFromPage as { expression?: unknown } | undefined;
     if (fromPage && typeof fromPage.expression === 'string') return fromPage.expression;
@@ -88,13 +101,7 @@ function harvestStrategyTemplates(strategy: unknown): string[] {
     if (body && typeof body.expression === 'string') return body.expression;
     return null;
   })();
-  if (typeof expression === 'string') {
-    const urlRe = /['"`](\/[^'"`?#]{0,200})['"`?#]/g;
-    let m: RegExpExecArray | null;
-    while ((m = urlRe.exec(expression)) !== null) {
-      if (m[1] && m[1].length > 1) out.push(m[1]);
-    }
-  }
+  if (typeof expression === 'string') pushQuotedUrls(expression, out);
   return out;
 }
 
@@ -144,6 +151,9 @@ export function collectUnsavedHotXhrEndpoints(
       }
     }
   }
+  // Noise paths the agent acked in prior sessions on this platform — subtract
+  // them so the gate doesn't re-prompt for the same telemetry every close.
+  const ackedNoise = platform ? new Set(readAckedNoiseEndpoints(platform)) : new Set<string>();
   const out: Array<{ method: string; urlPath: string; sampleUrl: string }> = [];
   const seen = new Set<string>();
   const MAX = 20;
@@ -161,6 +171,7 @@ export function collectUnsavedHotXhrEndpoints(
     }
     const urlPath = parsed.pathname;
     if (looksLikeTracking(urlPath)) continue;
+    if (ackedNoise.has(urlPath)) continue;
     if (savedPatterns.some((re) => re.test(urlPath))) continue;
     const method = typeof req.method === 'string' ? req.method.toUpperCase() : 'GET';
     const key = `${method} ${urlPath}`;

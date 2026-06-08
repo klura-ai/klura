@@ -12,6 +12,9 @@ const ALLOWED: ReadonlySet<string> = new Set([
   // Strategy invocation lifecycle the agent can drive while inside execute.
   'end_drive',
   'get_screenshot',
+  // Amend the saved strategy in place when execute surfaced a better shape —
+  // runs the full save audit; no need to re-enter discovery.
+  'update_strategy',
   // Auth recovery via the human-in-the-loop primitive.
   'start_remote_session',
   'stop_remote_session',

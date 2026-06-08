@@ -21,6 +21,7 @@ process.on('exit', () => {
 
 const { collectUnsavedHotXhrEndpoints } = await import('../dist/audit/drive/xhr-noise.js');
 const skills = await import('../dist/strategies/skills.js');
+const { appendAckedNoiseEndpoints } = await import('../dist/working-dir/logbook.js');
 
 function writeStrategy(platform, capability, subdir, body) {
   const dir = path.join(TMP, 'skills', platform, subdir);
@@ -107,6 +108,68 @@ test('sub-bug 3b: quoted URLs inside js-eval expressions are subtracted', () => 
   ];
   const result = collectUnsavedHotXhrEndpoints(intercepted, [], platform);
   assert.equal(result.length, 0, `URL inside fetch() expression must subtract; got: ${JSON.stringify(result)}`);
+});
+
+test('sub-bug 3c: quoted URLs inside a js-eval PREREQ expression are subtracted', () => {
+  const platform = 'test-xhr-jseval-prereq';
+  writeStrategy(platform, 'send_message', 'scripts', {
+    strategy: 'page-script',
+    endpoint: '/api/send',
+    method: 'POST',
+    prerequisites: [
+      {
+        name: 'prime',
+        kind: 'js-eval',
+        url: 'https://example.com/',
+        expression: 'await fetch("/sch/i.html"); return window.__nonce',
+        binds: 'nonce',
+      },
+    ],
+  });
+  skills.invalidatePlatformCache?.(platform);
+  const intercepted = [
+    { method: 'GET', url: 'https://example.com/sch/i.html', status: 200 },
+    { method: 'POST', url: 'https://example.com/api/send', status: 200 },
+  ];
+  const result = collectUnsavedHotXhrEndpoints(intercepted, [], platform);
+  assert.equal(
+    result.length,
+    0,
+    `URL inside a js-eval prereq expression must subtract; got: ${JSON.stringify(result)}`,
+  );
+});
+
+test('#5A: acked noise endpoints persist per platform and subtract next session', () => {
+  const platform = 'test-xhr-acked-noise';
+  writeStrategy(platform, 'list_orders', 'fetch', {
+    strategy: 'fetch',
+    endpoint: '/api/orders',
+    method: 'GET',
+  });
+  skills.invalidatePlatformCache?.(platform);
+  const intercepted = [
+    { method: 'GET', url: 'https://example.com/vendor/sensor-collect.json', status: 200 },
+    { method: 'GET', url: 'https://example.com/api/orders', status: 200 },
+  ];
+  // Session 1: the sensor path is not a saved strategy and slips the tracking
+  // filter, so it surfaces as unsaved.
+  const before = collectUnsavedHotXhrEndpoints(intercepted, [], platform);
+  assert.deepEqual(before.map((r) => r.urlPath), ['/vendor/sensor-collect.json']);
+
+  // Agent acks it as noise → persisted.
+  appendAckedNoiseEndpoints(platform, ['/vendor/sensor-collect.json']);
+
+  // Session 2: same noise no longer surfaces.
+  const after = collectUnsavedHotXhrEndpoints(intercepted, [], platform);
+  assert.equal(after.length, 0, `acked noise must not re-surface; got: ${JSON.stringify(after)}`);
+
+  // A genuinely-new path still surfaces despite the persisted ack.
+  const withNew = collectUnsavedHotXhrEndpoints(
+    [...intercepted, { method: 'GET', url: 'https://example.com/api/refunds', status: 200 }],
+    [],
+    platform,
+  );
+  assert.deepEqual(withNew.map((r) => r.urlPath), ['/api/refunds']);
 });
 
 test('genuinely-unsaved XHR still surfaces', () => {

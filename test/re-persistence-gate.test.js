@@ -244,13 +244,21 @@ test('declaration_required: ackReason "none" — no ack-through path', () => {
   const payload = makePayload({
     declaredCapabilityCount: 0,
     writeActions: [{ action: 'type', value_preview: 'hi' }],
-    heavyReCallCount: 0,
+    actionCallCount: 1, // make the warning actually fire so we test the
+    heavyReCallCount: 0, // no-ack-through path, not the unemitted-ack path
     jsEvalCallCount: 0,
   });
   const result = endDriveAudit.process(payload, {}, {
     acks: { capability_declaration_required: 'I have my reasons' },
   });
   assert.equal(result.status, 'rejected');
+  // It blocks because the detector is ackReason:'none', not because the ack
+  // referenced an unemitted kind.
+  const nonAckable = result.rejection.non_ackable_warning_kinds ?? [];
+  assert.ok(
+    nonAckable.includes('capability_declaration_required'),
+    `expected non-ackable block; got ${JSON.stringify(result.rejection)}`,
+  );
 });
 
 test('declaration_required: endDriveAttempts >= 2 → guard releases (force-tear-down attempt)', () => {

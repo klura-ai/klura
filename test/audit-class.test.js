@@ -74,7 +74,10 @@ test('detector ack with empty reason → ack_issue', () => {
   assert.match(r.rejection.ack_issues[0], /requires a non-empty reason/);
 });
 
-test('detector ack referencing unemitted kind → ack_issue', () => {
+test('detector ack referencing unemitted kind → no-op (pre-ack tolerated)', () => {
+  // Acking a kind no detector emitted is a no-op, not a hard error: agents may
+  // pre-ack a warning they expect; if it never fires there's nothing to
+  // suppress, so the audit proceeds as if the ack were absent.
   const audit = new Audit({
     kind: 'test',
     detectors: [
@@ -83,8 +86,21 @@ test('detector ack referencing unemitted kind → ack_issue', () => {
     classifiers: [],
   });
   const r = audit.process({}, {}, { acks: { typo: 'reason here' } });
+  assert.equal(r.status, 'committed');
+});
+
+test('pre-ack does not suppress a warning that DOES fire (typo still blocks)', () => {
+  // A misspelled ack for a warning that actually fired leaves the real warning
+  // unacked, so the save still blocks — typo protection survives indirectly.
+  const audit = new Audit({
+    kind: 'test',
+    detectors: [
+      { kind: 'flagger', detect: () => [{ kind: 'flagger', message: 'flagged' }], ackReason: 'required' },
+    ],
+    classifiers: [],
+  });
+  const r = audit.process({}, {}, { acks: { flaggerr: 'typo reason' } });
   assert.equal(r.status, 'rejected');
-  assert.match(r.rejection.ack_issues[0], /no detector emitted a warning with that kind/);
 });
 
 test('ackReason: "none" detector cannot be acked through', () => {
