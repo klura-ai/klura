@@ -27,6 +27,7 @@ import {
   wouldReverseEngineerHandoffFire,
 } from './drive-to-triage-handoff';
 import { endDriveAudit, buildEndDrivePayload } from '../../audit/drive/end-drive';
+import { collectRecurringCoveredReads } from '../../audit/drive/xhr-noise';
 import { rejectionToErrorMessage } from '../../audit';
 import { graphConfig, currentGraph } from '../registry';
 
@@ -137,6 +138,30 @@ function countPersistCalls(session: ReturnType<typeof pool.getSession>): number 
     sumBuckets(acc.notes) +
     sumBuckets(acc.agentResumePointers)
   );
+}
+
+/** Format the recurring-read graduation advisory for the end_drive ok-response.
+ *  Returns one line per covered gateway hit >= threshold this session (see
+ *  collectRecurringCoveredReads), capped to 3. Empty when nothing qualifies or
+ *  no platform. */
+function buildRecurringReadAdvisory(
+  session: ReturnType<typeof pool.getSession>,
+  platform: string | undefined,
+): string[] | undefined {
+  if (!platform) return undefined;
+  const lines = collectRecurringCoveredReads(
+    session.intercepted,
+    platform,
+    session.savedCapabilities,
+  )
+    .slice(0, 3)
+    .map(
+      (r) =>
+        `Recurring read: ${r.method} ${r.urlPath} hit ${r.count}× this session, already covered by saved capability "${r.coveredBy}". ` +
+        `If your operation is the same, call execute("${r.coveredBy}", …) next time instead of js_eval. ` +
+        `If it differs (a distinct query/shape multiplexed onto the same path), it's a new capability — declare_capability + save_strategy for it so future runs execute() instead of re-deriving the read.`,
+    );
+  return lines.length > 0 ? lines : undefined;
 }
 
 export type EndDriveAuditRejection = {
@@ -610,6 +635,10 @@ export async function endDrive(
     countPerformActionCalls(session),
   );
 
+  // Recurring-read advisory — computed before teardown clears session state.
+  // Non-blocking nudge for covered gateways the session re-read via js_eval.
+  const recurringReadAdvisory = buildRecurringReadAdvisory(session, platform);
+
   await pool.endDrive(sessionId);
   clearStartersForSession(sessionId);
   clearSessionObservations(sessionId);
@@ -626,6 +655,7 @@ export async function endDrive(
       reason?: string;
       retry_hint: string;
     }>;
+    recurring_read_advisory?: string[];
     _diagnostics?: {
       synth: typeof synthDiag;
       declared_capabilities?: Array<{ capability: string; args: Record<string, string> }>;
@@ -633,6 +663,8 @@ export async function endDrive(
   } = { ok: true, session_summary: sessionSummary };
   if (autoSynthesized.length > 0) result.auto_synthesized = autoSynthesized;
   if (artifactWrites.length > 0) result.artifacts_updated = artifactWrites;
+  // Unconditional assign (undefined when none) — JSON omits it, no extra branch.
+  result.recurring_read_advisory = recurringReadAdvisory;
 
   // If end-drive skipped RE mode because user policy caps the tier, tell
   // the agent WHY close succeeded without a handoff.

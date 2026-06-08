@@ -181,3 +181,98 @@ export function collectUnsavedHotXhrEndpoints(
   }
   return out;
 }
+
+/** Minimum same-endpoint read count in one session before the recurring-read
+ *  advisory fires. Mirrors the recorded-path graduation observation threshold —
+ *  three hits is the "this is a stable operation, not a one-off" line. */
+export const RECURRING_READ_THRESHOLD = 3;
+
+/** Non-blocking close-time signal: endpoints this session hit repeatedly that
+ *  ARE already covered by a saved strategy on the platform — but by a sibling
+ *  capability, not one saved THIS session. This is the gap the
+ *  `unsaved_xhr_endpoints` gate can't see: that gate stays silent precisely
+ *  because the path is covered (e.g. a generic search gateway like `/sch/i.html`
+ *  that many distinct operations multiplex onto), so an agent can re-derive the
+ *  same read via js_eval every session without ever graduating it into its own
+ *  executable capability. The runtime can't decide whether the recurring read
+ *  is a distinct capability worth saving or just a one-off on a covered
+ *  gateway — that's the LLM's call — so this only surfaces the fork as an
+ *  advisory. Uncovered recurring reads are intentionally excluded: the
+ *  blocking `unsaved_xhr_endpoints` gate already owns those.
+ *
+ *  Crisp throughout: buckets the captured 2xx network log by method + pathname
+ *  (no fuzzy matching), counts, and names the covering capability via the same
+ *  path-coverage regex the gate uses. */
+export function collectRecurringCoveredReads(
+  intercepted: ReadonlyArray<InterceptedLike> | undefined,
+  platform: string,
+  savedThisSession: ReadonlyArray<SavedCapLike> | undefined,
+): Array<{ method: string; urlPath: string; count: number; coveredBy: string }> {
+  if (!platform) return [];
+  // Build capability → coverage-regexes from disk (prior + this-session saves).
+  const capPatterns: Array<{ name: string; patterns: RegExp[] }> = [];
+  let platformInfo: { capabilities?: Array<{ name?: string }> };
+  try {
+    platformInfo = readPlatformSkillInfo(platform) as never;
+  } catch {
+    platformInfo = { capabilities: [] };
+  }
+  const capNames = new Set<string>();
+  for (const cap of platformInfo.capabilities ?? []) {
+    if (typeof cap.name === 'string' && cap.name.length > 0) capNames.add(cap.name);
+  }
+  for (const name of capNames) {
+    const strat = loadStrategy(platform, name);
+    if (!strat) continue;
+    const patterns: RegExp[] = [];
+    for (const tmpl of harvestStrategyTemplates(strat)) {
+      try {
+        patterns.push(endpointTemplateToRegex(tmpl));
+      } catch {
+        /* skip malformed template */
+      }
+    }
+    if (patterns.length > 0) capPatterns.push({ name, patterns });
+  }
+  if (capPatterns.length === 0) return [];
+
+  // Capabilities graduated THIS session — a bucket they cover is already saved,
+  // so no nudge.
+  const savedNames = new Set(
+    (savedThisSession ?? [])
+      .map((s) => s.capability)
+      .filter((c): c is string => typeof c === 'string' && c.length > 0),
+  );
+
+  // Bucket the captured 2xx XHR/Fetch log by method + origin+pathname.
+  const buckets = new Map<string, { method: string; urlPath: string; count: number }>();
+  for (const req of intercepted ?? []) {
+    const status = req.status;
+    if (typeof status !== 'number' || status < 200 || status >= 300) continue;
+    if (req.isNavigation === true) continue;
+    if (typeof req.url !== 'string') continue;
+    let parsed: URL;
+    try {
+      parsed = new URL(req.url);
+    } catch {
+      continue;
+    }
+    const urlPath = parsed.pathname;
+    if (looksLikeTracking(urlPath)) continue;
+    const method = typeof req.method === 'string' ? req.method.toUpperCase() : 'GET';
+    const key = `${method} ${parsed.origin}${urlPath}`;
+    const entry = buckets.get(key);
+    if (entry) entry.count += 1;
+    else buckets.set(key, { method, urlPath, count: 1 });
+  }
+
+  const out: Array<{ method: string; urlPath: string; count: number; coveredBy: string }> = [];
+  for (const b of buckets.values()) {
+    if (b.count < RECURRING_READ_THRESHOLD) continue;
+    const covering = capPatterns.find((cp) => cp.patterns.some((re) => re.test(b.urlPath)));
+    if (!covering) continue; // uncovered → owned by the blocking gate, not this advisory
+    if (savedNames.has(covering.name)) continue; // graduated this session → no nudge
+    out.push({ method: b.method, urlPath: b.urlPath, count: b.count, coveredBy: covering.name });
+  }
+  return out;
+}

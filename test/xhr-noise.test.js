@@ -19,7 +19,8 @@ process.on('exit', () => {
   }
 });
 
-const { collectUnsavedHotXhrEndpoints } = await import('../dist/audit/drive/xhr-noise.js');
+const { collectUnsavedHotXhrEndpoints, collectRecurringCoveredReads, RECURRING_READ_THRESHOLD } =
+  await import('../dist/audit/drive/xhr-noise.js');
 const skills = await import('../dist/strategies/skills.js');
 const { appendAckedNoiseEndpoints } = await import('../dist/working-dir/logbook.js');
 
@@ -187,4 +188,76 @@ test('genuinely-unsaved XHR still surfaces', () => {
   const result = collectUnsavedHotXhrEndpoints(intercepted, [], platform);
   const paths = result.map((r) => r.urlPath);
   assert.deepEqual(paths, ['/api/products/search']);
+});
+
+// ---- recurring-read advisory (covered-gateway graduation nudge) ----
+
+test('recurring reads: covered gateway hit >=threshold → advisory names the covering capability', () => {
+  const platform = 'test-recurring-covered';
+  // A saved capability that path-covers /sch/i.html (eBay-style search gateway).
+  writeStrategy(platform, 'find_sellers', 'scripts', {
+    strategy: 'page-script',
+    frameFromPage: { expression: 'return fetch("/sch/i.html?_ssn=a&_nkw=b").then(r=>r.text())' },
+  });
+  skills.invalidatePlatformCache?.(platform);
+  // Three reads of the same gateway path (different queries) this session.
+  const intercepted = [
+    { method: 'GET', url: 'https://example.com/sch/i.html?_ssn=x&_nkw=hinge', status: 200 },
+    { method: 'GET', url: 'https://example.com/sch/i.html?_ssn=y&_nkw=plate', status: 200 },
+    { method: 'GET', url: 'https://example.com/sch/i.html?_ssn=z&_nkw=onyx', status: 200 },
+  ];
+  const out = collectRecurringCoveredReads(intercepted, platform, []);
+  assert.equal(out.length, 1, `expected one recurring covered bucket; got ${JSON.stringify(out)}`);
+  assert.equal(out[0].urlPath, '/sch/i.html');
+  assert.equal(out[0].count, 3);
+  assert.equal(out[0].coveredBy, 'find_sellers');
+  assert.ok(RECURRING_READ_THRESHOLD === 3);
+});
+
+test('recurring reads: below threshold → no advisory', () => {
+  const platform = 'test-recurring-below';
+  writeStrategy(platform, 'find_sellers', 'scripts', {
+    strategy: 'page-script',
+    frameFromPage: { expression: 'return fetch("/sch/i.html").then(r=>r.text())' },
+  });
+  skills.invalidatePlatformCache?.(platform);
+  const intercepted = [
+    { method: 'GET', url: 'https://example.com/sch/i.html?_nkw=a', status: 200 },
+    { method: 'GET', url: 'https://example.com/sch/i.html?_nkw=b', status: 200 },
+  ];
+  assert.deepEqual(collectRecurringCoveredReads(intercepted, platform, []), []);
+});
+
+test('recurring reads: uncovered path is excluded (owned by the blocking gate)', () => {
+  const platform = 'test-recurring-uncovered';
+  writeStrategy(platform, 'list_orders', 'fetch', {
+    strategy: 'fetch',
+    endpoint: '/api/orders',
+    method: 'GET',
+  });
+  skills.invalidatePlatformCache?.(platform);
+  // /api/search is hit 3x but NO saved capability covers it.
+  const intercepted = [
+    { method: 'GET', url: 'https://example.com/api/search?q=a', status: 200 },
+    { method: 'GET', url: 'https://example.com/api/search?q=b', status: 200 },
+    { method: 'GET', url: 'https://example.com/api/search?q=c', status: 200 },
+  ];
+  assert.deepEqual(collectRecurringCoveredReads(intercepted, platform, []), []);
+});
+
+test('recurring reads: suppressed when the covering capability was saved this session', () => {
+  const platform = 'test-recurring-graduated';
+  writeStrategy(platform, 'search_listings', 'scripts', {
+    strategy: 'page-script',
+    frameFromPage: { expression: 'return fetch("/sch/i.html").then(r=>r.text())' },
+  });
+  skills.invalidatePlatformCache?.(platform);
+  const intercepted = [
+    { method: 'GET', url: 'https://example.com/sch/i.html?_nkw=a', status: 200 },
+    { method: 'GET', url: 'https://example.com/sch/i.html?_nkw=b', status: 200 },
+    { method: 'GET', url: 'https://example.com/sch/i.html?_nkw=c', status: 200 },
+  ];
+  // Graduated this session → no nudge.
+  const saved = [{ capability: 'search_listings', at: Date.now(), tier: 'page-script' }];
+  assert.deepEqual(collectRecurringCoveredReads(intercepted, platform, saved), []);
 });
