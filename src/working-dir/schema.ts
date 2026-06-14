@@ -12,6 +12,24 @@
 // state into CaptureEvents at end_drive time. Keep the asymmetry: the
 // adapter knows about both layers, these modules don't.
 
+/**
+ * Machine-actionable abort classification persisted on `abort_events[].kind`.
+ * Canonical home is here (the disk schema) — the tool layer
+ * (`tools/abort_session`) re-exports it and owns the runtime value list +
+ * escalation policy. Keeping the type here respects this module's
+ * zero-runtime-layer-dependency rule.
+ */
+export type AbortKind =
+  | 'origin_blocked'
+  | 'anti_bot'
+  | 'captcha'
+  | 'auth_required'
+  | 'age_gate'
+  | 'existing_capability_covers'
+  | 'user_stop'
+  | 'site_dead'
+  | 'other';
+
 // ---------------------------------------------------------------------------
 // Capture event stream — the only input shape these modules accept.
 // ---------------------------------------------------------------------------
@@ -236,7 +254,7 @@ export interface PlatformLogbook {
       reason: string;
       /** Optional machine-actionable classification (added in v0.3.3).
        *  Historical entries lack this field; readers default to "other". */
-      kind?: 'origin_blocked' | 'existing_capability_covers' | 'user_stop' | 'site_dead' | 'other';
+      kind?: AbortKind;
       /** Host of the requested URL the session aborted on. Lets the
        *  start_session pre-nav check match by host without parsing
        *  free-text reason. */

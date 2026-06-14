@@ -95,8 +95,12 @@ test('map_session_no_observations: third-attempt force-tear-down releases', () =
 
 const { ABORT_KIND_VALUES } = await import('../dist/tools/abort_session.js');
 
-test('abort_session: ABORT_KIND_VALUES enum is exported with the five canonical kinds', () => {
+test('abort_session: ABORT_KIND_VALUES enum is exported with the canonical kinds', () => {
   assert.deepStrictEqual([...ABORT_KIND_VALUES].sort(), [
+    'age_gate',
+    'anti_bot',
+    'auth_required',
+    'captcha',
     'existing_capability_covers',
     'origin_blocked',
     'other',

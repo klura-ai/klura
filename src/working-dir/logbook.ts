@@ -24,6 +24,7 @@ import {
   ValidationError,
 } from '../validators';
 import { didYouMeanSuffix } from '../utils/string-distance';
+import type { AbortKind } from './schema';
 
 function emptyLogbook(platform: string): PlatformLogbook {
   const now = new Date().toISOString();
@@ -296,7 +297,7 @@ export interface AbortEventInput {
   /** Optional machine-actionable kind discriminator. Older callers omit
    *  this; historical ledger entries also lack it. Readers default to
    *  `'other'` when absent. */
-  kind?: 'origin_blocked' | 'existing_capability_covers' | 'user_stop' | 'site_dead' | 'other';
+  kind?: AbortKind;
   /** Host that was aborted on. Lets the start_session pre-nav check
    *  match historical aborts to the requested URL by host without
    *  parsing free-text `reason`. */
@@ -364,7 +365,7 @@ export interface AbortEventRead {
   at: string;
   session_id: string;
   reason: string;
-  kind?: 'origin_blocked' | 'existing_capability_covers' | 'user_stop' | 'site_dead' | 'other';
+  kind?: AbortKind;
   host?: string;
   captured_actions_count: number;
   phase_at_abort: string;

@@ -32,15 +32,18 @@ const REASON_MIN_LENGTH = 20;
  *  parsing free-text `reason`. Backwards-compatible: optional, defaults to
  *  `'other'` on the wire so older callers and historical ledger entries
  *  without the field don't crash readers. */
-export type AbortKind =
-  | 'origin_blocked'
-  | 'existing_capability_covers'
-  | 'user_stop'
-  | 'site_dead'
-  | 'other';
+// Canonical AbortKind type lives in the persistence schema (it's persisted on
+// abort_events[].kind); re-exported here so tool-layer callers keep importing
+// it from abort_session. This module owns the runtime value list + escalation.
+export type { AbortKind } from '../working-dir/schema';
+import type { AbortKind } from '../working-dir/schema';
 
 export const ABORT_KIND_VALUES: readonly AbortKind[] = [
   'origin_blocked',
+  'anti_bot',
+  'captcha',
+  'auth_required',
+  'age_gate',
   'existing_capability_covers',
   'user_stop',
   'site_dead',
@@ -54,7 +57,13 @@ export const ABORT_KIND_VALUES: readonly AbortKind[] = [
  *  saved strategy" read, `user_stop` is intentional, `site_dead`/`other` are
  *  not "try the same approach harder" situations the escalation advisory
  *  addresses. */
-export const ESCALATION_ABORT_KINDS: ReadonlySet<AbortKind> = new Set(['origin_blocked']);
+export const ESCALATION_ABORT_KINDS: ReadonlySet<AbortKind> = new Set([
+  'origin_blocked',
+  'anti_bot',
+  'captcha',
+  'auth_required',
+  'age_gate',
+]);
 
 export interface AbortSessionArgs {
   session_id: string;
@@ -272,7 +281,11 @@ export const TOOL_DEF: ToolDef = {
           `Machine-actionable classification (optional; defaults to "other"). Future sessions ` +
           `read this off recent_aborts to short-circuit known-blocked starts without re-parsing ` +
           `English. Pick the one that matches:\n` +
-          `  - "origin_blocked": anti-bot wall / captcha / region gate refused the session\n` +
+          `  - "anti_bot": bot-detection wall / fingerprint gate refused the session\n` +
+          `  - "captcha": an interactive captcha challenge blocks progress\n` +
+          `  - "auth_required": login/MFA needed and the primed session wasn't enough\n` +
+          `  - "age_gate": an age-verification gate blocks progress\n` +
+          `  - "origin_blocked": generic origin refusal (HTTP failure / region gate) when no more specific kind above fits\n` +
           `  - "existing_capability_covers": klura already has a strategy for this task\n` +
           `  - "user_stop": user explicitly said stop\n` +
           `  - "site_dead": site is permanently down or doesn't expose the surface anymore\n` +

@@ -1,6 +1,7 @@
 import type { BrowserDriver } from '../interface';
 import type { InterceptedRequest } from './network';
 import type { WebSocketFrame } from './websocket';
+import type { AbortKind } from '../../working-dir/schema';
 
 export interface SessionOptions {
   storageState?: string;
@@ -470,7 +471,7 @@ export interface Session {
    */
   pendingAbort?: {
     reason: string;
-    kind: 'origin_blocked' | 'existing_capability_covers' | 'user_stop' | 'site_dead' | 'other';
+    kind: AbortKind;
     phase_at_abort: string;
     captured_actions_count: number;
   };
