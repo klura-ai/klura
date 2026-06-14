@@ -191,6 +191,7 @@ export function ingestCaptureEvents(
       outcome: la.payload.outcome,
       rounds_spent: la.payload.rounds_spent,
       notes: la.payload.notes,
+      sessions_total_at_attempt: logbook.sessions_total,
     });
     refreshRecencyStats(entry, logbook.sessions_total);
   }

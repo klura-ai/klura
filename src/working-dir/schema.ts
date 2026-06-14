@@ -406,6 +406,10 @@ export interface CapabilityLogbookEntry {
     outcome: LiftAttemptPayload['outcome'];
     rounds_spent: number;
     notes?: string;
+    /** Platform-wide `sessions_total` at the moment this attempt was recorded.
+     *  Lets `sessions_since_last_attempt` be computed as a true delta against the
+     *  current total rather than approximated from an unrelated counter. */
+    sessions_total_at_attempt?: number;
   }>;
   /**
    * Strategy life-cycle events for this capability — discovered, rediscovered,

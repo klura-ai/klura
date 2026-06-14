@@ -138,12 +138,18 @@ export function refreshRecencyStats(
   }
   // sessions_since_last_attempt tracks how many platform sessions have happened
   // since the recorded attempt — tells the agent "has the environment drifted
-  // since I tried?" The logbook bumps sessions_total on each session flush; we
-  // store the delta.
-  entry.sessions_since_last_attempt = Math.max(
-    0,
-    sessionsTotalAcrossPlatform - entry.sessions_contributed,
-  );
+  // since I tried?" The logbook bumps sessions_total on each session flush, and
+  // each lift_attempt snapshots the total at attempt time, so the delta is the
+  // true count of intervening sessions. Absent snapshot → leave it unknown
+  // rather than report a wrong number.
+  if (typeof last.sessions_total_at_attempt === 'number') {
+    entry.sessions_since_last_attempt = Math.max(
+      0,
+      sessionsTotalAcrossPlatform - last.sessions_total_at_attempt,
+    );
+  } else {
+    delete entry.sessions_since_last_attempt;
+  }
 }
 
 /**
