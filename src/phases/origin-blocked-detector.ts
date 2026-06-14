@@ -230,10 +230,10 @@ function composeRecommendedAction(signals: ReadonlyArray<OriginBlockedSignal>): 
       `\`evaluate_in_iframe_chain\` / \`evaluate_in_worker\` to fire the request from inside ` +
       `the imitating context. Same shape as \`inspect_ws_frame\` + \`try_generator\` for binary ` +
       `WS — third RE-toolkit axis, runtime hosts the context, you compose the JS.`,
-    `Wait + re-snap: some JS challenges auto-resolve in 5-10 s. start_session already does ` +
-      `one wait+resnap pass on the resolvable-challenge shape — if you don't see the advisory ` +
-      `clear, poll \`get_a11y_tree\` + \`get_network_log\` for another ~10 s before treating ` +
-      `the response as terminal.`,
+    `Wait + re-snap: some JS challenges auto-resolve in 5-10 s. start_session does one ` +
+      `automatic wait+resnap pass ONLY when the challenge redirected cross-host; a same-host ` +
+      `JS challenge gets no auto-pass, so poll \`get_a11y_tree\` + \`get_network_log\` yourself ` +
+      `for another ~10 s before treating the response as terminal.`,
     `Try alternate entry paths on the same host: many sites 403 the bare root \`/\` but ` +
       `serve API / typeahead / category sub-paths without a challenge. \`get_network_log\` + ` +
       `\`perform_action({action:"navigate"})\` to candidate sub-paths is cheap; the captures ` +
