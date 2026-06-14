@@ -28,6 +28,7 @@ import {
 } from './drive-to-triage-handoff';
 import { endDriveAudit, buildEndDrivePayload } from '../../audit/drive/end-drive';
 import { collectRecurringCoveredReads } from '../../audit/drive/xhr-noise';
+import { collectDataLoadCandidates } from '../../strategies/synthesize-on-close/data-loads';
 import { rejectionToErrorMessage } from '../../audit';
 import { graphConfig, currentGraph } from '../registry';
 
@@ -120,6 +121,34 @@ function countHeavyReToolCalls(session: ReturnType<typeof pool.getSession>): num
  *  re_persistence rejection for context, but never the trigger on its own. */
 function countJsEvalCalls(session: ReturnType<typeof pool.getSession>): number {
   return session.artifactAccumulator?.jsEvalCalls.length ?? 0;
+}
+
+/**
+ * Filter the agent's acked `unsaved_xhr_endpoints` paths down to the ones safe
+ * to persist as platform-wide noise. A path that is a DECLARED capability's
+ * data-load candidate is a real endpoint the agent is about to save in LIFT —
+ * NEVER noise, even when named in the ack ("this IS the X capability").
+ * Persisting it would poison the acked_noise ledger and blind future sessions
+ * to a real capability endpoint, so it's subtracted here.
+ */
+function ackedNoisePathsToPersist(
+  session: ReturnType<typeof pool.getSession>,
+  noiseAck: string,
+  unsavedHotXhrEndpoints: ReadonlyArray<{ urlPath: string }>,
+): string[] {
+  const declaredCandidatePaths = new Set<string>();
+  for (const d of session.declaredCapabilities ?? []) {
+    for (const c of collectDataLoadCandidates(session, d.capability, session.intercepted, 10)) {
+      try {
+        declaredCandidatePaths.add(new URL(c.url).pathname);
+      } catch {
+        /* skip unparseable */
+      }
+    }
+  }
+  return unsavedHotXhrEndpoints
+    .map((e) => e.urlPath)
+    .filter((urlPath) => noiseAck.includes(urlPath) && !declaredCandidatePaths.has(urlPath));
 }
 
 /**
@@ -313,9 +342,11 @@ export async function endDrive(
   if (platform) {
     const noiseAck = opts.acks?.unsaved_xhr_endpoints;
     if (typeof noiseAck === 'string' && noiseAck.length > 0) {
-      const acked = (auditPayload.unsavedHotXhrEndpoints ?? [])
-        .map((e) => e.urlPath)
-        .filter((urlPath) => noiseAck.includes(urlPath));
+      const acked = ackedNoisePathsToPersist(
+        session,
+        noiseAck,
+        auditPayload.unsavedHotXhrEndpoints ?? [],
+      );
       if (acked.length > 0) appendAckedNoiseEndpoints(platform, acked);
     }
   }
