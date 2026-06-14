@@ -59,16 +59,26 @@ function trimTrailingSlashes(value: string): string {
 // like `"token":"{{csrf_token}}"` after raw substitution becomes
 // `"token":"...+\"` — the backslash escapes the closing quote, producing
 // unterminated-string at JSON.parse.
+/** Encode a value destined for a URL PATH: encode each `/`-delimited segment
+ *  with encodeURIComponent but keep the `/` separators, so a value that is
+ *  itself a path (e.g. `/items` minted by a page-extract prereq) keeps its
+ *  structure instead of collapsing to `%2Fitems`. Query-position values still
+ *  use full encodeURIComponent (a `/` there is data, and `&`/`=` must escape). */
+function encodePathSegments(s: string): string {
+  return s.split('/').map(encodeURIComponent).join('/');
+}
+
 export function interpolateVars(
   s: string,
   args: Record<string, unknown>,
-  encode = false,
+  encode: boolean | 'path' = false,
   jsonEscape = false,
 ): string {
   return replacePlaceholders(s, (path, match) => {
     const value = lookupPlaceholderPath(args, path);
     if (value === undefined) return match;
     const str = typeof value === 'string' ? value : JSON.stringify(value);
+    if (encode === 'path') return encodePathSegments(str);
     if (encode) return encodeURIComponent(str);
     if (jsonEscape) {
       // JSON.stringify yields a quoted, fully-escaped JSON string
@@ -95,15 +105,22 @@ export function resolveVariables<T>(step: T, args: Record<string, unknown>): T {
 }
 
 function resolveEndpoint(baseUrl: string, template: string, args: Record<string, unknown>): string {
-  // Support both `:key` (REST style) and `{{key}}` (template style),
-  // URL-encoded.
-  let resolved = template;
+  // Support both `:key` (REST style) and `{{key}}` (template style). Encode
+  // position-aware: tokens in the PATH keep `/` separators (a value that is a
+  // path, e.g. `/items` from a page-extract, must not become `%2Fitems`);
+  // tokens in the QUERY use full encodeURIComponent (`&`/`=`/`/` are data there).
+  const qIdx = template.indexOf('?');
+  let pathPart = qIdx === -1 ? template : template.slice(0, qIdx);
+  let queryPart = qIdx === -1 ? '' : template.slice(qIdx); // keeps the leading '?'
   for (const [key, value] of Object.entries(args)) {
     if (typeof value === 'string' || typeof value === 'number') {
-      resolved = resolved.split(`:${key}`).join(encodeURIComponent(String(value)));
+      pathPart = pathPart.split(`:${key}`).join(encodePathSegments(String(value)));
+      queryPart = queryPart.split(`:${key}`).join(encodeURIComponent(String(value)));
     }
   }
-  resolved = resolveSecrets(interpolateVars(resolved, args, true));
+  const resolved = resolveSecrets(
+    interpolateVars(pathPart, args, 'path') + interpolateVars(queryPart, args, true),
+  );
   // Also interpolate placeholders in baseUrl. Agents legitimately embed
   // per-caller slugs in the origin path (e.g. `https://host/@{{username}}`)
   // when a site's API uses the canonical user page URL as its "base." Per docs,

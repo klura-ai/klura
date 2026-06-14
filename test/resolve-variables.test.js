@@ -7,7 +7,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { resolveVariables, interpolateVars } = await import('../dist/execution/vars.js');
+const { resolveVariables, interpolateVars, prepareRequest } = await import(
+  '../dist/execution/vars.js'
+);
+
+test("interpolateVars: encode='path' preserves / separators (path-position value)", () => {
+  assert.equal(interpolateVars('{{p}}', { p: '/items' }, 'path'), '/items');
+  assert.equal(interpolateVars('{{p}}', { p: 'a b' }, 'path'), 'a%20b');
+});
+
+test('prepareRequest: path token keeps / (no %2F); query token is component-encoded', () => {
+  const r = prepareRequest(
+    { method: 'GET', baseUrl: 'https://api.example.test', endpoint: '{{path}}?q={{q}}' },
+    { path: '/items', q: 'a&b' },
+  );
+  assert.equal(r.url, 'https://api.example.test/items?q=a%26b');
+});
 
 test('resolveVariables: plain string substitution — happy path', () => {
   const out = resolveVariables({ a: '{{name}}', b: 'hi' }, { name: 'alice' });
