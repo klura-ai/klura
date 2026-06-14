@@ -19,6 +19,7 @@ import type { ParamObservation } from '../response/session-observations';
 import { closestAllowedCandidates, formatCandidateList } from '../validators';
 import { escapeRegExp } from '../utils/regex';
 import { findLookupSegments, validateLookupPrereqsAreCapabilities } from './save-audit-lookup';
+import { secretLiteralProvenanceIssue } from './credential-secrets';
 
 // Re-exported so existing importers (save-warnings-lookup-sibling, tests) keep
 // resolving these from save-audit; the implementations live in save-audit-lookup.
@@ -309,6 +310,12 @@ export function validateLiteralAnswer(
         `Use the path as the answer key, NOT the value.`,
     ];
   }
+  // Secret-named literal can never be frozen. A `static` / `single_entity`
+  // classification on a credential-secret field whose value is a literal (not a
+  // {{placeholder}}) would persist the secret to disk and replay it on every
+  // warm execute. Force parameterization.
+  const secretIssue = secretLiteralProvenanceIssue(item, answer);
+  if (secretIssue) return [secretIssue];
   if (answer === 'static') {
     // Reject static-on-templated: if the field contains any {{placeholder}},
     // the value isn't static per-caller. Forces the agent to split the

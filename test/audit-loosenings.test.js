@@ -162,6 +162,65 @@ test('C: navigate step still rejects static when click value is a substring (not
   assert.notEqual(issues.length, 0, 'substring (not equal) match still rejects');
 });
 
+// ---------- C2. credential-secret literals can't be frozen ----------
+
+test('C2: literal password in prereq args rejects static (must parameterize)', () => {
+  const data = {
+    strategy: 'fetch',
+    baseUrl: 'https://example.com',
+    endpoint: '/api/items',
+    prerequisites: [
+      { kind: 'tag', tag: 'auth', args: { username: 'alice', password: 'wonderland' } },
+    ],
+  };
+  const issues = validateLiteralAnswer(
+    data,
+    { path: 'prerequisites[0].args.password', value: 'wonderland' },
+    'static',
+  );
+  assert.notEqual(issues.length, 0, 'literal password classified static is rejected');
+  assert.match(issues[0], /credential secret/);
+});
+
+test('C2: literal secret rejects single_entity too', () => {
+  const data = { strategy: 'fetch', baseUrl: 'https://x.com', endpoint: '/a', body: { api_key: 'sk_live_abc' } };
+  const issues = validateLiteralAnswer(
+    data,
+    { path: 'body.api_key', value: 'sk_live_abc' },
+    'single_entity',
+  );
+  assert.notEqual(issues.length, 0, 'literal api_key classified single_entity is rejected');
+  assert.match(issues[0], /credential secret/);
+});
+
+test('C2: templated secret ({{password}}) is accepted (caller_input)', () => {
+  const data = {
+    strategy: 'fetch',
+    baseUrl: 'https://x.com',
+    endpoint: '/a',
+    prerequisites: [{ kind: 'tag', tag: 'auth', args: { password: '{{password}}' } }],
+    notes: { params: { password: { kind: 'string', example: 'hunter2' } } },
+  };
+  const issues = validateLiteralAnswer(
+    data,
+    { path: 'prerequisites[0].args.password', value: '{{password}}' },
+    { caller_input: 'password' },
+  );
+  assert.deepEqual(issues, [], 'a templated {{password}} bound to a declared param is fine');
+});
+
+test('C2: non-secret identifier (username) is NOT force-rejected on static', () => {
+  // Only the secret half of a credential pair is forced; usernames/emails can
+  // be legitimately frozen for a single-account strategy.
+  const data = { strategy: 'fetch', baseUrl: 'https://x.com', endpoint: '/a', body: { username: 'bot_account' } };
+  const issues = validateLiteralAnswer(
+    data,
+    { path: 'body.username', value: 'bot_account' },
+    'static',
+  );
+  assert.deepEqual(issues, [], 'username static is not force-rejected by the secret rule');
+});
+
 // ---------- D. firstObservableUrl resolves placeholders ----------
 
 test('D: firstObservableUrl resolves {{name}} via notes.params.<name>.example', () => {
