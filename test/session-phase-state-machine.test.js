@@ -125,6 +125,19 @@ test('admissibility: phase-scoped tool rejected outside its phase', () => {
   assert.match(r.reason, /not available in phase 'drive'/);
 });
 
+test('admissibility: recorded_step_failed heal tools admit in execute phase', () => {
+  // A `recorded_step_failed` checkpoint fires inside an auto-execute, so the
+  // documented recovery (inspect → patch_step → resume_execution) has to be
+  // admissible in execute — otherwise the failed step is never re-run.
+  const session = { id: 'sess_exec_heal', graph: 'execute' };
+  forceTransition(session, 'execute');
+  assert.equal(currentPhase(session), 'execute');
+  for (const tool of ['patch_step', 'resume_execution']) {
+    const r = checkAdmissibility(session, tool);
+    assert.ok(r.ok, `${tool} must be admissible in execute (recorded_step_failed heal flow)`);
+  }
+});
+
 test('admissibility: end_drive admitted in lift as the abandon path', () => {
   // Drive → triage → lift via the canonical sequence. end_drive must be
   // admissible from lift so the agent can bail out of an audit loop without

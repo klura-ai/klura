@@ -957,6 +957,13 @@ export async function saveStrategy(
           ? (data as { strategy: string }).strategy
           : 'unknown';
       session.savedCapabilities.push({ capability, at: Date.now(), tier });
+      // A committed save/update supersedes the stale-strategy flag set when
+      // auto-execute failed at start_session. Without this clear, the flag
+      // persists and the end_drive reverse-engineer handoff keeps routing the
+      // capability through LIFT even though a fresh strategy just landed —
+      // contradicting STRATEGY_AMEND's drive-tier amend contract (the agent
+      // sees both "saved" and "stale_existing_strategy: true" at once).
+      session.staleStrategyCapabilities?.delete(capability);
     } catch {
       // Session may already be torn down (programmatic save from a test, etc.)
     }
@@ -1054,10 +1061,32 @@ export async function saveStrategy(
         } else if (resolution.status === 'continue') {
           // Unattended host (no interactive consenter) pre-consented by
           // resolving the checkpoint to `continue` instead of handing over.
-          // Run the verification inline now — there is no later ack — and fold
-          // the result into this response. A non-2xx archives the strategy.
           session.pendingPostSaveValidation = undefined;
-          postSaveValidation = await verifySavedStrategy(platform, capability, verifyArgs, pool);
+          if (mutating) {
+            // A blanket `continue` from a non-interactive decider is NOT the
+            // Tier-2 user OK the consent prompt requires for a mutating action.
+            // Re-running the saved strategy end-to-end repeats the real side
+            // effect (a second form submit / message / order / email). Record
+            // the save as unverified instead of double-firing; an interactive
+            // session can re-validate later.
+            skills.stampRuntimeMeta(platform, capability, { post_save_validation: 'declined' });
+            postSaveValidation = {
+              ok: true,
+              status: 0,
+              archived: false,
+              message:
+                `post_save_validation skipped: \`${capability}\` is mutating-shaped and the host ` +
+                `pre-consented non-interactively. Re-running end-to-end would repeat the real ` +
+                `side effect, so the runtime did not re-fire it. The save stands, recorded ` +
+                `unverified (runtime_meta.post_save_validation: "declined") — re-validate in an ` +
+                `interactive session.`,
+            };
+          } else {
+            // Read/idempotent (Tier 1): run the verification inline now — there
+            // is no later ack — and fold the result into this response. A
+            // non-2xx archives the strategy.
+            postSaveValidation = await verifySavedStrategy(platform, capability, verifyArgs, pool);
+          }
         }
       }
     } catch {

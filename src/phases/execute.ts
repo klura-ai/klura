@@ -12,6 +12,16 @@ const ALLOWED: ReadonlySet<string> = new Set([
   // Strategy invocation lifecycle the agent can drive while inside execute.
   'end_drive',
   'get_screenshot',
+  // Recorded-path step heal: a `recorded_step_failed` checkpoint fires inside
+  // an auto-execute (graph: 'execute'), so the documented recovery — inspect →
+  // patch_step → resume_execution — has to be admissible right here, in the
+  // phase where the checkpoint surfaced. Both tools are precondition-guarded
+  // (patch_step rejects with no recorded-path step to patch; resume_execution
+  // throws with no paused execution), so admitting them stays liberal like
+  // update_strategy below. Without them the failed step is never re-run: the
+  // patch lands on disk while the mutating action never fires.
+  'patch_step',
+  'resume_execution',
   // Amend the saved strategy in place when execute surfaced a better shape —
   // runs the full save audit; no need to re-enter discovery.
   'update_strategy',
