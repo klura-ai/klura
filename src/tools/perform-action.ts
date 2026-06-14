@@ -239,7 +239,7 @@ async function isStructurallySafeMapAction(
 /**
  * When the supplied selector is neither valid CSS nor a klura a11y form,
  * playwright surfaces "is not a valid selector" inside a SyntaxError.
- * Agents have been inventing pseudo-shorthands like `link:Messenger`
+ * Agents have been inventing pseudo-shorthands like `link:Inbox`
  * thinking it's a klura dialect — this hint names the structural
  * mismatch and points at the closest valid form. Empty string when
  * the trace doesn't carry the pattern. Exported for unit tests.
@@ -249,7 +249,7 @@ export function buildInvalidSelectorDialectHint(msg: string, selector: string): 
   return (
     `\n\nYour selector \`${selector}\` is not valid CSS AND not a klura a11y form. ` +
     `klura accepts two dialects:\n` +
-    `  - **a11y role+name** (the canonical klura form): \`role "name"\` — e.g. \`button "Submit"\`, \`link "Messenger"\`, \`textbox "Search"\` (note the space and double-quotes around the name).\n` +
+    `  - **a11y role+name** (the canonical klura form): \`role "name"\` — e.g. \`button "Submit"\`, \`link "Inbox"\`, \`textbox "Search"\` (note the space and double-quotes around the name).\n` +
     `  - **a11y role+attr**: \`role[attr="value"]\` — e.g. \`searchbox[name="q"]\`, \`button[aria-label="Close"]\`.\n` +
     `  - **standard CSS**: same shapes you'd use in querySelector — \`button.primary\`, \`#login\`, \`[data-testid="submit"]\`.\n` +
     `If you wrote \`role:name\` or \`role-name\`, that's not valid in either dialect. Pick the role+name form (role + space + double-quoted name) from the closest-candidates list below.`
@@ -706,7 +706,7 @@ export async function performAction(
   // pass, warm execute latency drops meaningfully.
   await driver.delay(session, 150);
 
-  // a11y tree is typically 2-4s on heavy DOMs (Messenger, GitHub) — a
+  // a11y tree is typically 2-4s on heavy DOMs (large SPA chats / dashboards) — a
   // meaningful chunk of per-round latency when the agent's next call is going
   // to be `get_network_log` or `get_screenshot` anyway. Callers that know they
   // won't use the tree can pass `returnTree: false` to skip the tree read; url

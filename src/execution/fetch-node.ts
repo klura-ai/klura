@@ -566,7 +566,7 @@ export async function executeFetchNode(
     // applyHtmlExtract to convert raw HTML into the strategy's structured
     // row shape. Dropping it here silently degrades every html-extract
     // fetch into "return the raw body" — the symptom that first surfaced
-    // with the amazon search_products row-group extract.
+    // with a search-results row-group extract.
     response: strategy.response,
   };
   return await fireRequestFromNode(fireStrategy, mergedArgs, platform, { identity });

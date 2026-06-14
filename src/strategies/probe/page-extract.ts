@@ -131,7 +131,7 @@ export async function probeOnePrereqFromNode(
   // looks as Chrome-like as warm execution will. If the site already accepts
   // the browser navigate, the HTTP-layer match should be close enough for the
   // probe; TLS-layer gap is accepted as a known false negative — if cheerio
-  // can't parse the response because Cloudflare blocked us at the TLS level, we
+  // can't parse the response because an edge/CDN blocked us at the TLS level, we
   // stamp 'browser' which is correct.
   const profile = getDeviceProfile();
   const hints = resolveClientHints(profile);

@@ -28,7 +28,7 @@ export interface HealthStatus {
    * Node transport failure counters, keyed by protocol ('http' | 'websocket').
    * Separate counters so a flaky HTTP-Node site doesn't carry over to its ws
    * strategies and vice versa. Counts only transport-shaped failures
-   * (Cloudflare, TLS, HTTP/2 protocol errors, ws handshake drops), not normal
+   * (CDN/edge refusals, TLS, HTTP/2 protocol errors, ws handshake drops), not normal
    * API errors. After NODE_TRANSPORT_FAIL_THRESHOLD consecutive failures within
    * a single protocol, the runtime demotes the strategy from `fetch` to
    * `page-script` so future warm runs skip the Node attempt entirely. A

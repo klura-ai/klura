@@ -41,8 +41,8 @@ test('rejection names the storage-state and skill-dir paths', async () => {
 
 test('rejection suggests second-level domain pattern', async () => {
   await assert.rejects(
-    () => startSession('https://www.reddit.com', { capability: 'submit_post' }),
-    /platform = the second-level domain.*messenger.*reddit/s,
+    () => startSession('https://www.example.com', { capability: 'submit_post' }),
+    /platform = the second-level domain.*acme/s,
   );
 });
 

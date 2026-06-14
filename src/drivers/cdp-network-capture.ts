@@ -182,7 +182,7 @@ export async function attachCdpNetworkCapture(cdp: CDPLike, sink: RawIntercepted
     // thinks this request is, not a pathname-substring heuristic. The
     // prior shape skipped every GET whose pathname lacked `/api/`, which
     // ate real signal on sites using `/ajax/`, `/storelocator/`,
-    // `/inventory/`, `/search/`, etc. (a bauhaus.se discovery session
+    // `/inventory/`, `/search/`, etc. (a retail discovery session
     // saw 3 fetches dropped this way). Keep agent-relevant types:
     // XHR/Fetch (the load-bearing data calls), EventSource (SSE),
     // Document (navigation; tagged isNavigation below), Preflight (CORS

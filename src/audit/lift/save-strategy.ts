@@ -590,8 +590,8 @@ const unobservedUrlDetector: Detector<Strategy, SaveStrategyCtx> = {
 // request must appear in the saved strategy template too, either templated
 // as {{X}} or hardcoded with static provenance. The "captured but dropped"
 // shape is the canonical save-quality regression behind HTTP 4xx at warm
-// time — Stack Exchange requires `site=stackoverflow` on every call, and a
-// strategy that dropped it returns HTTP 400. ackReason: 'required' — agents
+// time — e.g. a search endpoint that requires a `site=<value>` scope param on
+// every call, and a strategy that dropped it returns HTTP 400. ackReason: 'required' — agents
 // can ack tracking-only params (`utm_*`, `gclid`, etc.) or server-tolerated
 // optional params with a one-sentence justification.
 const urlParamCompletenessDetector: Detector<Strategy, SaveStrategyCtx> = {

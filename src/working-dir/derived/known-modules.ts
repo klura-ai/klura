@@ -10,9 +10,9 @@
 // signer / transport / builder, the logbook surfaces "previous successful saves
 // on this platform used these modules: [...]" — the agent probes those names
 // FIRST via js_eval instead of enumerating dozens of training-prior guesses.
-// Observed in the 2026-04-21T09-18 messenger run: 30 rounds burned on
-// module-name guesses before landing on LSMqttChannel. That name now lives in
-// the saved strategy on disk; this file extracts it so the next session gets it
+// Observed in a WS-chat discovery run: 30 rounds burned on module-name guesses
+// before landing on the page's transport module. That name now lives in the
+// saved strategy on disk; this file extracts it so the next session gets it
 // for free.
 //
 // Pure: reads the platform's skills/<subdir>/<cap>.json files, no I/O
@@ -41,8 +41,8 @@ const MODULE_REF_PATTERNS: Array<{ re: RegExp; source: 'require' | 'global' }> =
 ];
 
 interface KnownModule {
-  /** Module identifier as it appears in the source (e.g. "LSMqttChannel",
-   *  or "signRequest" for a top-level global). */
+  /** Module identifier as it appears in the source (e.g. a transport-module
+   *  name, or "signRequest" for a top-level global). */
   name: string;
   /** How the identifier is referenced — loader call vs top-level global. */
   source: 'require' | 'global';

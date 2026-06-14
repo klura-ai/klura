@@ -18,7 +18,7 @@ import {
 
 /**
  * Upper bound on js-eval prereq expressions. Sized for real-world signer /
- * nonce-minter code — the TikTok X-Bogus signer + its base64 wrappers
+ * nonce-minter code — a real request signer + its base64 wrappers
  * comfortably fits, and binary-frame builders need a few KB of bit-twiddling
  * and TextEncoder glue. Smaller token-minting one-liners are well under this
  * cap.

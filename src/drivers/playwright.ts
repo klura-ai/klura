@@ -2157,7 +2157,7 @@ export class PlaywrightDriver extends BrowserDriver {
     // handlers reject the subsequent keyboard events and the editor stays empty
     // — even though document.activeElement is correct.
     //
-    // For an EMPTY Lexical root (e.g. Reddit's post body editor before first
+    // For an EMPTY Lexical root (e.g. a rich-text post body editor before first
     // interaction), Chromium's focus() heuristic places the Selection on
     // document.body instead of descending into the editable, so we have to set
     // the Range ourselves. `selectNodeContents(el)` + `collapse(false)` creates
@@ -2181,7 +2181,7 @@ export class PlaywrightDriver extends BrowserDriver {
                       @typescript-eslint/no-unsafe-assignment,
                       @typescript-eslint/no-unsafe-return */
     // Drill into contenteditable descendants (light + shadow DOM) so a selector
-    // aimed at a web-component wrapper like `shreddit-composer` still hits the
+    // aimed at a custom-element composer wrapper still hits the
     // real Lexical root. `el.focus()` on a non-editable wrapper silently falls
     // through to <body>, `selectNodeContents(wrapper)` creates a Range around a
     // non-editable node, and keyboard.type goes nowhere — no throw, just a
@@ -2460,7 +2460,7 @@ export class PlaywrightDriver extends BrowserDriver {
    * The `wsI` the agent passes is an index into `session.wsFrames[]` (sent AND
    * received frames). The page-side encoder cache is keyed by a separate
    * counter that increments only on sent calls. Those diverge whenever received
-   * frames arrive (most Messenger-style chats do this ~2 frames received per 1
+   * frames arrive (most WS-based chats do this ~2 frames received per 1
    * sent). We look up the target frame in the host-side buffer to get its
    * payload fingerprint, then search the page-side cache by that fingerprint —
    * aligns the two indexing contexts. Returns null only when the fingerprint

@@ -39,8 +39,8 @@ const DETAIL_LIST_MAX_PAGE_SIZE = 20;
 // Each entry is "request side + small responseBody preview". If the whole
 // narrowed set doesn't fit the tool-output budget, we greedy-pack the entries
 // we can fit into a single page and stamp has_more / total_pages so the caller
-// can page the remainder. Real-world heavy-header sites (Facebook / Meta
-// graphql carries 30+ sec-ch-ua-*, friendly-name, lsd, long session IDs — 2-4
+// can page the remainder. Real-world heavy-header sites (large GraphQL APIs
+// carry 30+ sec-ch-ua-*, friendly-name, csrf, long session IDs — 2-4
 // KB of headers per entry) don't fit the whole filtered set in one response, so
 // without pagination they'd fall all the way back to summary and give up the
 // classifier signal. With pagination they still get full headers and postData
@@ -539,7 +539,7 @@ export function shapeNetworkLog(
   //   - Explicit `full: true` without `i` / `ws_i` — the caller wants
   //     multi-entry detail. Raw-unbounded detail-list was a footgun
   //     (blew MCP's 25KB cap on response-body-heavy captures, observed
-  //     2026-04-21T09 messenger run: 107KB payload, fell through to
+  //     a chat-send run: 107KB payload, fell through to
   //     file-dump + Read, burning rounds); detail-lite packs safely.
   //     Single-entry fetches via `{i, full: true}` stay unbounded —
   //     the caller picked exactly one entry, so there's no budget

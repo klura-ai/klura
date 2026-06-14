@@ -596,7 +596,7 @@ async function executeSteps(
 
       // between_steps interrupts: fire on the step-completion edge. If a
       // challenge became visible as a side-effect of this step (e.g. the
-      // Publish click revealed an hCaptcha iframe), the matching predicate
+      // Publish click revealed a captcha iframe), the matching predicate
       // fires the handler here before moving to the next step. Never polled —
       // this is the edge we already had.
       firedInterrupts.push(

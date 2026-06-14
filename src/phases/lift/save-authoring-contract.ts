@@ -263,8 +263,8 @@ export function composeSaveAuthoringContract(
   // data-load URL must appear in the saved fetch / page-script template,
   // either templated as {{X}} or hardcoded with static provenance. Dropping
   // a captured param commonly returns 4xx at warm-execute (the server
-  // received it at discovery and may require it — Stack Exchange
-  // `site=stackoverflow` is the canonical example). Audit is
+  // received it at discovery and may require it — e.g. a required
+  // `site=<value>` scope param on a search endpoint). Audit is
   // `captured_query_param_missing_from_strategy` (ackReason: 'required'
   // for tracking-only / server-tolerated optionals).
   for (let i = 0; i < dataLoads.length; i += 1) {

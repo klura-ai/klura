@@ -3,7 +3,7 @@
 // The motivating problem: agents looking at a binary envelope (MQTT PUBLISH
 // header + nested JSON body, Thrift framed, etc.) face a cold- start commit
 // cost — writing a 30-line generator from scratch BEFORE any feedback signal.
-// Across 5 recent messenger discovery runs, four folded to recorded-path
+// Across 5 recent WS-chat discovery runs, four folded to recorded-path
 // without calling try_generator once. The fold-vs-iterate decision happened
 // before iteration 1 because iteration 1 looked expensive.
 //

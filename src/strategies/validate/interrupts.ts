@@ -118,7 +118,7 @@ export function validateInterrupts(data: Record<string, unknown>): void {
     }
 
     // Unknown top-level fields on the entry itself (e.g. the observed
-    // `after_step: 6` / stray top-level `prompt` leak from a wikipedia field
+    // `after_step: 6` / stray top-level `prompt` leak from a field-edit
     // run).
     for (const k of Object.keys(entry)) {
       if (!INTERRUPT_ENTRY_ALLOWED_KEYS.has(k)) {

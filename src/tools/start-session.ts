@@ -1610,7 +1610,7 @@ export async function startSession(
         `Platform keys the on-disk skill dir (\`~/.klura/skills/<platform>/...\`) and the storage-state file ` +
         `(\`~/.klura/storage-state/<platform>.json\`); without it, end_drive cannot save and cookies cannot ` +
         `be reloaded next session. Re-call start_session with \`platform: "<slug>"\`. Common pattern: ` +
-        `platform = the second-level domain (\`messenger\` for messenger.com, \`reddit\` for reddit.com).`,
+        `platform = the second-level domain (e.g. \`acme\` for acme.com).`,
     );
   }
 
@@ -1794,8 +1794,8 @@ export async function startSession(
 
   // When auto-exec succeeded, the agent doesn't need the page UI — the data
   // is in execute_result. The a11y tree + the result body together routinely
-  // exceed MAX_TOOL_OUTPUT_CHARS for non-trivial APIs (hackernews search
-  // returns ~38 KB of hits; messenger send returns the whole conversation
+  // exceed MAX_TOOL_OUTPUT_CHARS for non-trivial APIs (a search API can
+  // return ~38 KB of hits; a chat-send can return the whole conversation
   // page). Past the SDK's truncation threshold the harness sees a
   // `<persisted-output>` marker instead of the structured result, so
   // executed:true / execute_result.status are invisible to downstream
@@ -1996,7 +1996,7 @@ export const TOOL_DEF: ToolDef = {
       platform: {
         type: 'string',
         description:
-          'Platform slug — keys the on-disk skill dir (`~/.klura/skills/<platform>/`) and storage-state file (`~/.klura/storage-state/<platform>.json`). REQUIRED when `capability` is set; optional in pure-exploration mode (no capability declared). Common pattern: second-level domain (`messenger` for messenger.com, `reddit` for reddit.com).',
+          'Platform slug — keys the on-disk skill dir (`~/.klura/skills/<platform>/`) and storage-state file (`~/.klura/storage-state/<platform>.json`). REQUIRED when `capability` is set; optional in pure-exploration mode (no capability declared). Common pattern: second-level domain (e.g. `acme` for acme.com).',
       },
       capability: {
         type: 'string',

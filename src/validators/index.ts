@@ -165,7 +165,7 @@ export function asPlatformSlug(value: unknown, field: string): string {
   if (!PLATFORM_SLUG_RE.test(s)) {
     throw new ValidationError(
       field,
-      `= ${JSON.stringify(s)} must be kebab-case like 'facebook-messenger' or 'hackernews' (lowercase letters / digits / dashes only, starts with a letter, 1-64 chars)`,
+      `= ${JSON.stringify(s)} must be kebab-case like 'acme-store' or 'my-platform' (lowercase letters / digits / dashes only, starts with a letter, 1-64 chars)`,
     );
   }
   return s;

@@ -145,7 +145,7 @@ export function classifyDataLoadXhr(
     signals.push('body_gte_500_bytes');
   }
 
-  // GET bonus. POSTs qualify (GraphQL, Facebook-style POST-for-reads), but GETs
+  // GET bonus. POSTs qualify (GraphQL, RPC-style POST-for-reads), but GETs
   // are more often the clean data-load primitive.
   if (req.method.toUpperCase() === 'GET') {
     score += 1;
