@@ -104,6 +104,49 @@ export function resolveVariables<T>(step: T, args: Record<string, unknown>): T {
   return JSON.parse(json) as T;
 }
 
+// Resolve the query-string portion of an endpoint (the `?...` tail), dropping
+// any `key={{placeholder}}` segment whose templated value resolves to empty or
+// unset. A query parameter is droppable by construction — unlike a path segment
+// — so an OPTIONAL param the caller omitted (or passed as ""), e.g. a
+// `?cuisine={{cuisine}}` filter, should disappear from the URL rather than be
+// left as a literal `{{cuisine}}` (broken) or an empty `cuisine=` the server may
+// reject as a missing-value. Segments with no placeholder (static `key=val`, or
+// an intentional empty `key=`) and path-position tokens are untouched — a
+// missing PATH param is a real error and stays loud.
+function resolveQueryString(queryPart: string, args: Record<string, unknown>): string {
+  const leading = queryPart.startsWith('?') ? '?' : '';
+  const raw = leading ? queryPart.slice(1) : queryPart;
+  if (raw.length === 0) return queryPart;
+  const resolveSegmentPart = (template: string): { resolved: string; hadPlaceholder: boolean } => {
+    let hadPlaceholder = false;
+    const resolved = replacePlaceholders(template, (path) => {
+      hadPlaceholder = true;
+      const v = lookupPlaceholderPath(args, path);
+      if (v === undefined) return '';
+      return encodeURIComponent(typeof v === 'string' ? v : JSON.stringify(v));
+    });
+    return { resolved, hadPlaceholder };
+  };
+  const kept: string[] = [];
+  for (const segment of raw.split('&')) {
+    if (segment.length === 0) continue;
+    const eq = segment.indexOf('=');
+    if (eq === -1) {
+      const { resolved, hadPlaceholder } = resolveSegmentPart(segment);
+      // A bare flag that was entirely an unset placeholder drops; a static flag
+      // or a non-empty resolution stays.
+      if (!hadPlaceholder || resolved.length > 0) kept.push(resolved);
+      continue;
+    }
+    const { resolved: key } = resolveSegmentPart(segment.slice(0, eq));
+    const { resolved: value, hadPlaceholder } = resolveSegmentPart(segment.slice(eq + 1));
+    if (hadPlaceholder && value.length === 0) continue; // optional param omitted/empty → drop
+    kept.push(`${key}=${value}`);
+  }
+  if (kept.length === 0) return '';
+  return `${leading}${kept.join('&')}`;
+}
+
 function resolveEndpoint(baseUrl: string, template: string, args: Record<string, unknown>): string {
   // Support both `:key` (REST style) and `{{key}}` (template style). Encode
   // position-aware: tokens in the PATH keep `/` separators (a value that is a
@@ -119,7 +162,7 @@ function resolveEndpoint(baseUrl: string, template: string, args: Record<string,
     }
   }
   const resolved = resolveSecrets(
-    interpolateVars(pathPart, args, 'path') + interpolateVars(queryPart, args, true),
+    interpolateVars(pathPart, args, 'path') + resolveQueryString(queryPart, args),
   );
   // Also interpolate placeholders in baseUrl. Agents legitimately embed
   // per-caller slugs in the origin path (e.g. `https://host/@{{username}}`)
