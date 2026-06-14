@@ -541,6 +541,32 @@ function lookupLastRecordedPathStepId(platform: string, capability: string): str
   return typeof id === 'string' ? id : undefined;
 }
 
+/**
+ * True when the strategy declares an auth-providing prerequisite — `{kind:
+ * "tag", tag: "auth"}` or `{kind: "capability"}` pointing at a capability that
+ * `provides: ["auth"]`. The save-time post-save probe re-fires the full prereq
+ * chain cold; an auth prereq's login needs credentials the probe can't supply
+ * (they're caller-input on the login, not on this dependent capability's args),
+ * so the chain 401s and a WORKING strategy gets archived — which trains the
+ * agent to drop the auth prereq as a workaround. We skip the probe for these
+ * (stamping unverified) instead, the same way unsatisfied placeholders skip it.
+ */
+function strategyHasAuthPrereq(data: Strategy, platform: string): boolean {
+  const prereqs = (data as { prerequisites?: unknown }).prerequisites;
+  if (!Array.isArray(prereqs)) return false;
+  let authCaps: Set<string> | null = null;
+  for (const p of prereqs) {
+    if (!p || typeof p !== 'object') continue;
+    const pp = p as { kind?: unknown; tag?: unknown; capability?: unknown };
+    if (pp.kind === 'tag' && pp.tag === 'auth') return true;
+    if (pp.kind === 'capability' && typeof pp.capability === 'string') {
+      if (authCaps === null) authCaps = new Set(skills.findCapabilitiesProviding(platform, 'auth'));
+      if (authCaps.has(pp.capability)) return true;
+    }
+  }
+  return false;
+}
+
 // eslint-disable-next-line sonarjs/cognitive-complexity
 export async function saveStrategy(
   platform: string,
@@ -1034,6 +1060,25 @@ export async function saveStrategy(
             `args nor notes.params.*.example can satisfy. Re-running with undefined args would produce ` +
             `false-negative failures. Either declare these args via start_session({args}) or add ` +
             `notes.params.<name>.example values; then re-save.`,
+        };
+      } else if (strategyHasAuthPrereq(data, platform)) {
+        // Auth-prereq strategies can't be probed cold — the login the prereq
+        // resolves to needs credentials that aren't on this capability's args.
+        // Re-firing it would 401 and archive a working strategy, training the
+        // agent to drop the auth prereq. Stamp unverified; a later authed
+        // session (live cookie jar) validates it.
+        session.pendingPostSaveValidation = undefined;
+        skills.stampRuntimeMeta(platform, capability, { post_save_validation: 'declined' });
+        postSaveValidation = {
+          ok: true,
+          status: 0,
+          archived: false,
+          message:
+            `post_save_validation skipped: \`${capability}\` declares an auth prerequisite whose ` +
+            `credentials can't be supplied at save-time probe (they're caller-input on the login, ` +
+            `not on this capability). Re-running cold would 401 and wrongly archive a working ` +
+            `strategy. Saved unverified (runtime_meta.post_save_validation: "declined") — it ` +
+            `validates on the next execute in an authenticated session.`,
         };
       } else {
         session.pendingPostSaveValidation = { platform, capability, args: verifyArgs };
