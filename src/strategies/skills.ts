@@ -182,11 +182,14 @@ export interface RuntimeMeta {
   /**
    * Outcome of the post-commit 2xx verification (the `post_save_validation_consent`
    * checkpoint). `passed` — `execute()` returned 2xx. `declined` — the user
-   * declined the verification fire; the strategy stands but is unverified. A
+   * declined the verification fire; the strategy stands but is unverified.
+   * `skipped` — the runtime structurally couldn't probe (e.g. the strategy
+   * declares an auth prerequisite whose credentials aren't available at save-time
+   * probe); the strategy stands and self-validates on the next authed execute. A
    * non-2xx result is not recorded here: the strategy is archived to
    * `.broken.json` instead, so the archive itself is the failure record.
    */
-  post_save_validation?: 'passed' | 'declined';
+  post_save_validation?: 'passed' | 'declined' | 'skipped';
 }
 
 export interface Strategy {

@@ -551,7 +551,7 @@ function lookupLastRecordedPathStepId(platform: string, capability: string): str
  * agent to drop the auth prereq as a workaround. We skip the probe for these
  * (stamping unverified) instead, the same way unsatisfied placeholders skip it.
  */
-function strategyHasAuthPrereq(data: Strategy, platform: string): boolean {
+export function strategyHasAuthPrereq(data: Strategy, platform: string): boolean {
   const prereqs = (data as { prerequisites?: unknown }).prerequisites;
   if (!Array.isArray(prereqs)) return false;
   let authCaps: Set<string> | null = null;
@@ -1068,7 +1068,7 @@ export async function saveStrategy(
         // agent to drop the auth prereq. Stamp unverified; a later authed
         // session (live cookie jar) validates it.
         session.pendingPostSaveValidation = undefined;
-        skills.stampRuntimeMeta(platform, capability, { post_save_validation: 'declined' });
+        skills.stampRuntimeMeta(platform, capability, { post_save_validation: 'skipped' });
         postSaveValidation = {
           ok: true,
           status: 0,
@@ -1077,7 +1077,7 @@ export async function saveStrategy(
             `post_save_validation skipped: \`${capability}\` declares an auth prerequisite whose ` +
             `credentials can't be supplied at save-time probe (they're caller-input on the login, ` +
             `not on this capability). Re-running cold would 401 and wrongly archive a working ` +
-            `strategy. Saved unverified (runtime_meta.post_save_validation: "declined") — it ` +
+            `strategy. Saved unverified (runtime_meta.post_save_validation: "skipped") — it ` +
             `validates on the next execute in an authenticated session.`,
         };
       } else {
