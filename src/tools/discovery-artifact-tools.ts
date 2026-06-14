@@ -177,19 +177,40 @@ export function recordObservedCapability(args: RecordObservedCapabilityArgs): {
 }
 
 /**
+ * A recorded observation is a graduation candidate when its capture shows a
+ * successful read. Two structural signals qualify, because agents record
+ * evidence in two shapes:
+ *  - a numeric 2xx `status` (the explicit success signal), or
+ *  - an `endpoint` plus a captured `response_shape` with no error status —
+ *    the common `{source, request_i, endpoint, headers, response_shape}` shape
+ *    that omits `status` entirely. A failed capture wouldn't carry a body
+ *    `response_shape`, so its presence alongside an endpoint stands in for the
+ *    2xx the agent didn't transcribe.
+ * A numeric `status` outside 2xx always disqualifies, even when a
+ * `response_shape` is present (4xx/5xx bodies have shapes too).
+ */
+function evidenceLooksLiftable(evidence: { source: string; [k: string]: unknown }): boolean {
+  const status = evidence.status;
+  if (typeof status === 'number') return status >= 200 && status < 300;
+  const hasEndpoint = typeof evidence.endpoint === 'string' && evidence.endpoint.length > 0;
+  const responseShape = evidence.response_shape;
+  const hasResponseShape = !!responseShape && typeof responseShape === 'object';
+  return hasEndpoint && hasResponseShape;
+}
+
+/**
  * Compose the in-session lift nudge when the evidence shape + session
  * graph make graduation a real next move. Returns `null` (no hint) when:
  *  - no session_id (programmatic / unattended call without session context)
- *  - evidence has no 2xx status (graduation candidates need a working
- *    capture to lift)
+ *  - evidence shows a non-success capture (graduation candidates need a
+ *    working capture to lift) — see `evidenceLooksLiftable`
  *  - session is not on the map graph (`lift_observed_capability` is the
  *    map-graph-only tool — see runtime/src/tools/lift-observed-capability.ts)
  *  - the session has already terminated (no remaining lift budget)
  */
 function composeLiftNudgeHint(args: RecordObservedCapabilityArgs): string | null {
   if (!args.session_id) return null;
-  const status = (args.evidence as { status?: unknown }).status;
-  if (typeof status !== 'number' || status < 200 || status >= 300) return null;
+  if (!evidenceLooksLiftable(args.evidence)) return null;
   let session: import('../drivers/types/session').Session;
   try {
     session = pool.getSession(args.session_id);
@@ -199,7 +220,7 @@ function composeLiftNudgeHint(args: RecordObservedCapabilityArgs): string | null
   if (session.graph !== 'map') return null;
   if (session.status === 'closed') return null;
   return (
-    `Captured 2xx evidence for observed slug "${args.name}" — you can graduate it in-session ` +
+    `Captured a successful read for observed slug "${args.name}" — you can graduate it in-session ` +
     `via \`lift_observed_capability({session_id: "${args.session_id}", name: "${args.name}"})\` ` +
     `now, rather than leaving it as a breadcrumb. Lifting walks the slug through triage + ` +
     `save_strategy in this session; closing without lifting forces the next session to ` +

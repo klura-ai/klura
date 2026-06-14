@@ -83,7 +83,7 @@ test('non-2xx evidence (e.g. 403) → no _hint (not a graduation candidate)', ()
   }
 });
 
-test('no status in evidence → no _hint', () => {
+test('no status, no endpoint/response_shape (bare inferred) → no _hint', () => {
   const session = { id: 'sess-nudge-4', graph: 'map', status: 'active', platform: 'p' };
   const restore = patchPool(session);
   try {
@@ -91,6 +91,54 @@ test('no status in evidence → no _hint', () => {
       platform: 'p',
       name: 'list_orders',
       evidence: { source: 'inferred' },
+      why_not_lifted: 'separate_capability',
+      session_id: session.id,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result._hint, undefined);
+  } finally {
+    restore();
+  }
+});
+
+test('no status but endpoint + response_shape → _hint (success inferred structurally)', () => {
+  const session = { id: 'sess-nudge-4b', graph: 'map', status: 'active', platform: 'p' };
+  const restore = patchPool(session);
+  try {
+    const result = recordObservedCapability({
+      platform: 'p',
+      name: 'list_orders',
+      evidence: {
+        source: 'get_network_log',
+        request_i: 7,
+        endpoint: '/api/orders',
+        headers: { 'content-type': 'application/json' },
+        response_shape: { orders: [{ id: 'string' }] },
+      },
+      why_not_lifted: 'separate_capability',
+      session_id: session.id,
+    });
+    assert.equal(result.ok, true);
+    assert.ok(result._hint);
+    assert.match(result._hint, /lift_observed_capability/);
+  } finally {
+    restore();
+  }
+});
+
+test('explicit non-2xx status wins over a present response_shape → no _hint', () => {
+  const session = { id: 'sess-nudge-4c', graph: 'map', status: 'active', platform: 'p' };
+  const restore = patchPool(session);
+  try {
+    const result = recordObservedCapability({
+      platform: 'p',
+      name: 'list_orders',
+      evidence: {
+        source: 'get_network_log',
+        endpoint: '/api/orders',
+        response_shape: { error: 'forbidden' },
+        status: 403,
+      },
       why_not_lifted: 'separate_capability',
       session_id: session.id,
     });
