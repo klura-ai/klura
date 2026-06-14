@@ -24,6 +24,8 @@ import {
   persistWarningsOnRuntimeMeta,
 } from '../audit/lift/save-strategy';
 import { rejectionToErrorMessage } from '../audit';
+import type { AuditRejection } from '../audit';
+import { trackRejectionAndMaybeBounce } from '../audit/lift/save-rejection-bounce';
 import { getRegisteredSaveConfirmationDecider } from '../audit/lift/save-confirmation-decider';
 import {
   getRegisteredSaveWarningAcker,
@@ -667,6 +669,24 @@ export async function saveStrategy(
     throw new SaveStrategyRejection(message, { ...timings });
   };
 
+  // Reject an audit rejection, escalating to a structural_dead_end bounce when
+  // the same (capability, rejection-family) has failed too many times this
+  // session — so the agent stops iterating cosmetic edits against a detector
+  // false-positive / schema contradiction and defers, switches tier, or aborts.
+  const rejectAudit = (rejection: AuditRejection): never => {
+    const normal = rejectionToErrorMessage('save_strategy', rejection);
+    let session = null;
+    if (sessionId) {
+      try {
+        session = pool.getSession(sessionId);
+      } catch {
+        session = null;
+      }
+    }
+    const bounce = trackRejectionAndMaybeBounce(session, capability, rejection, normal);
+    return rejectWithTimings(bounce ?? normal);
+  };
+
   // Track every save attempt on the session — including ones that throw on
   // audit rejection or validation. close-session reads this counter against
   // savedCapabilities to refuse a clean close when the agent hammered save
@@ -952,7 +972,7 @@ export async function saveStrategy(
       // `save_attempted_none_landed` Detector to refuse close, leaving
       // the agent with no clean exit on a session that did no new work.
       decrementOnDuplicateOnlyRejection(sessionId, preAudit.rejection.warnings);
-      rejectWithTimings(rejectionToErrorMessage('save_strategy', preAudit.rejection));
+      rejectAudit(preAudit.rejection);
     }
   }
 
@@ -1025,7 +1045,7 @@ export async function saveStrategy(
     });
     timings.audit_postcheck_ms = Date.now() - tAuditPostStart;
     if (finalAudit.status === 'rejected') {
-      rejectWithTimings(rejectionToErrorMessage('save_strategy', finalAudit.rejection));
+      rejectAudit(finalAudit.rejection);
     } else {
       persistWarningsOnRuntimeMeta(data, finalAudit.warnings);
     }

@@ -513,6 +513,18 @@ export interface Session {
    */
   saveAttemptCount?: number;
   /**
+   * Per-`(capability, rejection-family)` count of how many times save_strategy
+   * has been rejected this session with the same rejection family (the audit
+   * `reason` + the set of warning/classifier kinds that fired). Keyed by
+   * `${capability}::${familyKey}`. Drives the structural-dead-end hard bounce:
+   * after the 3rd same-family rejection the runtime stops returning the same
+   * audit prose and forces the agent to defer / switch tier / abort, instead of
+   * iterating cosmetic edits against a detector false-positive or schema
+   * contradiction. Switching tier changes which detectors fire, so it yields a
+   * fresh family key (and a fresh budget).
+   */
+  saveRejectionFamilyCounts?: Record<string, number>;
+  /**
    * Capabilities the agent declared at session-open (via `start_session`
    * with `{capability, args}`) or mid-session (via `declare_capability`).
    * Runtime uses these to:
