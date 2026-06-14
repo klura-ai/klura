@@ -477,8 +477,8 @@ export interface MissingCapturedQueryParam {
  * Catches the "captured-but-not-templated" failure mode where the agent
  * saved a strategy that worked at discovery time (when the browser
  * included the param) but breaks at warm-execute because the server
- * actually required it (Stack Exchange `/2.3/search/advanced` requires
- * `site=stackoverflow`; Algolia search requires `tags=story` to scope; …).
+ * actually required it (e.g. a search endpoint that requires a `site=<value>`
+ * scope param, or a `tags=<value>` filter, on every call).
  *
  * Match is canonical (origin + pathname). Multiple captures with the same
  * canonical URL dedupe by param name — the first observed value wins as
@@ -519,6 +519,14 @@ export function findMissingCapturedQueryParams(
     strategyHostKey = `${u.protocol}//${u.hostname.toLowerCase()}`;
   } catch {
     return [];
+  }
+  // Params declared in the top-level `params` block (template defaults / static
+  // params) cover captured wire params too — the strategy carries them even
+  // though they aren't spelled inline in the endpoint string. Without this, a
+  // param the agent declared in `params: {...}` is falsely reported "missing".
+  const declaredParams = (data as { params?: unknown }).params;
+  if (declaredParams && typeof declaredParams === 'object' && !Array.isArray(declaredParams)) {
+    for (const k of Object.keys(declaredParams as Record<string, unknown>)) strategyParams.add(k);
   }
   // Match on host + path SHAPE, not exact path. A path-templated endpoint
   // (`/search/{{q}}`) percent-encodes to `/search/%7B%7Bq%7D%7D`, which never

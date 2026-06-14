@@ -35,6 +35,20 @@ test('captured param hardcoded as static in strategy → no warning', () => {
   assert.deepEqual(findMissingCapturedQueryParams(strategy, observed), []);
 });
 
+test('captured param declared in the top-level params block → no warning', () => {
+  // The agent put query params in the strategy's `params` block (template
+  // defaults / static params) rather than inline in the endpoint. The detector
+  // must count those as covered, not "missing". (kohls loop + platform-map.)
+  const strategy = {
+    ...fetchStrategy('/v1/search?q={{query}}'),
+    params: { site: 'stackoverflow', pagesize: '3' },
+  };
+  const observed = [
+    'https://api.example.test/v1/search?q=typescript&site=stackoverflow&pagesize=3',
+  ];
+  assert.deepEqual(findMissingCapturedQueryParams(strategy, observed), []);
+});
+
 test('captured param dropped from strategy → warning fires (the stackoverflow #9 repro)', () => {
   const strategy = fetchStrategy('/2.3/search/advanced?q={{query}}');
   const observed = [

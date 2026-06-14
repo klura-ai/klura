@@ -45,6 +45,7 @@
 
 export type OriginBlockedSignal =
   | 'http_failure'
+  | 'http_legal_block'
   | 'cross_host_redirect'
   | 'shape_anomaly'
   | 'challenge_iframe_shape'
@@ -100,6 +101,11 @@ export function detectOriginBlocked(input: {
   const signals: OriginBlockedSignal[] = [];
   const isHttpFailure = typeof input.navStatus === 'number' && input.navStatus >= 400;
   if (isHttpFailure) signals.push('http_failure');
+  // HTTP 451 (RFC 7725 "Unavailable For Legal Reasons") is a legal/geo block,
+  // not a bot gate — keyed to the request's egress region, not its session
+  // shape. Flag it distinctly so the advisory steers to egress-change / remote
+  // viewer instead of the bot-evasion playbook (which never unblocks a 451).
+  if (input.navStatus === 451) signals.push('http_legal_block');
   if (finalHost !== requestedHost) signals.push('cross_host_redirect');
 
   const a11y = typeof input.a11yTree === 'string' ? input.a11yTree : null;
@@ -172,6 +178,23 @@ function countSemanticLandmarks(a11yTree: string): number {
  *  the mission. abort_session is the documented last resort, never the
  *  primary recommendation. */
 function composeRecommendedAction(signals: ReadonlyArray<OriginBlockedSignal>): string {
+  // 451 legal/geo block short-circuits the bot-evasion playbook. The refusal is
+  // keyed to the request's egress region/jurisdiction, not its session shape, so
+  // alternate paths / same-origin fetch / wait+resnap / JS-challenge RE cannot
+  // change the outcome — pointing the agent at them wastes rounds (and reads as
+  // a false promise of bypass).
+  if (signals.includes('http_legal_block')) {
+    return (
+      `LEGAL / GEO BLOCK — HTTP 451 (RFC 7725 "Unavailable For Legal Reasons"). This is NOT a ` +
+      `bot-detection gate: the refusal is keyed to the request's egress region/jurisdiction, not ` +
+      `your session shape. The bot-evasion moves (alternate paths, same-origin fetch, wait+resnap, ` +
+      `JS-challenge RE) do NOT apply — they cannot change a region decision. The only things that ` +
+      `change the outcome: an egress IP from a non-blocked region (different network / proxy), or ` +
+      `start_remote_session handed to a person in an allowed region. If neither is available, ` +
+      `abort_session({kind: "origin_blocked", reason}) is the correct exit — note in the reason that ` +
+      `the block is region-conditional so the next session knows it's not a transient challenge.`
+    );
+  }
   const heads: string[] = [];
   if (signals.includes('challenge_iframe_shape')) {
     heads.push(

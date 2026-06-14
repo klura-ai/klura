@@ -31,6 +31,21 @@ test('http_failure alone fires (same host 4xx)', () => {
   assert.equal(adv.signals.length, 1);
 });
 
+test('HTTP 451 emits http_legal_block + a legal/geo advisory (not the bot-evasion playbook)', () => {
+  const adv = detectOriginBlocked({
+    requestedUrl: 'https://www.example.test/',
+    finalUrl: 'https://www.example.test/',
+    navStatus: 451,
+  });
+  assert.ok(adv);
+  assert.ok(adv.signals.includes('http_legal_block'));
+  assert.ok(adv.signals.includes('http_failure')); // 451 >= 400
+  // The advisory must steer to egress/region, NOT the bot-detection moves.
+  assert.match(adv.recommended_action, /LEGAL \/ GEO BLOCK|451/);
+  assert.match(adv.recommended_action, /egress/i);
+  assert.doesNotMatch(adv.recommended_action, /Try these first/);
+});
+
 test('cross_host_redirect + shape_anomaly fires (iframe-dominated proxy landing)', () => {
   const adv = detectOriginBlocked({
     requestedUrl: 'https://www.example.test/',
