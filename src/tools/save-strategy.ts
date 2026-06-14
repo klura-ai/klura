@@ -261,11 +261,14 @@ export async function saveStrategyFromCapture(args: {
     );
   }
 
-  // Stamp the page URL the session is on at save time so a later session can
-  // try opening it directly instead of re-discovering from the root. The
-  // stamp is best-effort — if the driver refuses / throws, the field stays
-  // unstamped and revisit flows fall back to root + re-discovery.
-  const discoveredFromUrl = await readCurrentUrl(args.session_id);
+  // Stamp where the capability was discovered so a later session can re-open it
+  // directly instead of re-discovering from root. Prefer the captured request's
+  // own Referer (the page the mechanism lived on) over the current page URL,
+  // which at save time is often a post-submit redirect / landing page. Best-
+  // effort — if neither resolves, the field stays unstamped and revisit flows
+  // fall back to root + re-discovery.
+  const discoveredFromUrl =
+    refererFromHeaders(req.headers) ?? (await readCurrentUrl(args.session_id));
   const notesBlock: Record<string, unknown> = {};
   const runtimeMetaBlock: Record<string, unknown> = {};
   if (discoveredFromUrl) runtimeMetaBlock.discovered_from_url = discoveredFromUrl;
@@ -567,6 +570,61 @@ export function strategyHasAuthPrereq(data: Strategy, platform: string): boolean
   return false;
 }
 
+/** Extract a usable http(s) Referer URL from a captured request's headers
+ *  (header name casing varies by transport). Returns undefined otherwise. */
+export function refererFromHeaders(headers: unknown): string | undefined {
+  if (!headers || typeof headers !== 'object') return undefined;
+  const h = headers as Record<string, unknown>;
+  const ref = h.referer ?? h.Referer ?? h.REFERER;
+  return typeof ref === 'string' && /^https?:\/\//i.test(ref) ? ref : undefined;
+}
+
+/**
+ * Pick the URL a saved strategy was "discovered from" by evidence rather than by
+ * whatever page the browser happens to sit on at save time. The Referer of the
+ * captured request that fired the strategy's own endpoint is the page the
+ * mechanism actually lived on — for a form-POST that's the form page, not the
+ * post-submit redirect landing; for an XHR it's the real page, not the
+ * start_session URL. Matches by origin + the static (pre-`{{token}}`) path
+ * prefix so a templated endpoint still finds its capture. Returns undefined when
+ * no captured request matches (caller falls back to the current page URL).
+ */
+export function discoveredFromUrlForStrategy(
+  data: Strategy,
+  intercepted: ReadonlyArray<{ url?: string; headers?: unknown }>,
+): string | undefined {
+  const obj = data as Record<string, unknown>;
+  const baseUrl = typeof obj.baseUrl === 'string' ? obj.baseUrl : '';
+  const endpoint = typeof obj.endpoint === 'string' ? obj.endpoint : '';
+  if (!baseUrl || !endpoint) return undefined;
+  const endpointPath = endpoint.split('?')[0] ?? endpoint;
+  let targetOrigin: string;
+  let targetPathPrefix: string;
+  try {
+    const u = new URL(baseUrl);
+    targetOrigin = u.origin;
+    const combined = u.pathname.replace(/\/$/, '') + endpointPath;
+    const ph = combined.indexOf('{{');
+    targetPathPrefix = ph >= 0 ? combined.slice(0, ph) : combined;
+  } catch {
+    return undefined;
+  }
+  for (const entry of intercepted) {
+    if (typeof entry.url !== 'string') continue;
+    let parsed: URL;
+    try {
+      parsed = new URL(entry.url);
+    } catch {
+      continue;
+    }
+    if (parsed.origin !== targetOrigin) continue;
+    if (!parsed.pathname.startsWith(targetPathPrefix)) continue;
+    const ref = refererFromHeaders(entry.headers);
+    if (ref) return ref;
+  }
+  return undefined;
+}
+
 // eslint-disable-next-line sonarjs/cognitive-complexity
 export async function saveStrategy(
   platform: string,
@@ -713,10 +771,15 @@ export async function saveStrategy(
   }
 
   // ---- Stamp runtime_meta.discovered_from_url ----
-  // Audit's unobserved_url detector reads this — set before audit runs.
+  // Audit's unobserved_url detector reads this — set before audit runs. Prefer
+  // the Referer of the captured request that fired this strategy's endpoint (the
+  // page the mechanism lived on) over the current page URL, which at save time
+  // is frequently a post-submit redirect / the start_session URL.
   if (sessionId) {
     try {
-      const url = await readCurrentUrl(sessionId);
+      const intercepted = pool.getSession(sessionId).intercepted;
+      const url =
+        discoveredFromUrlForStrategy(data, intercepted) ?? (await readCurrentUrl(sessionId));
       if (url) {
         const meta = (data as { runtime_meta?: Record<string, unknown> }).runtime_meta ?? {};
         meta.discovered_from_url = url;
