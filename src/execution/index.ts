@@ -339,7 +339,31 @@ export async function resolveCapabilityPrereq(
 
   const bound: Record<string, unknown> = {};
   for (const [name, path] of Object.entries(varsMap)) {
-    bound[name] = path.length === 0 ? subResult.body : walkJsonPath(subResult.body, path);
+    if (path.length === 0) {
+      bound[name] = subResult.body;
+      continue;
+    }
+    const extracted = walkJsonPath(subResult.body, path);
+    // A non-optional prereq var that resolves to undefined means the dot-path is
+    // wrong (or the field is absent this run). Binding it would stringify to ''
+    // and silently fire the request with an empty value — e.g. a recipient id
+    // dropping to `/conversations//messages`, delivering to the wrong target.
+    // Fail loud and name the available keys so the path gets fixed.
+    if (extracted === undefined && !prereq.optional) {
+      const keys =
+        subResult.body && typeof subResult.body === 'object'
+          ? Object.keys(subResult.body as Record<string, unknown>).slice(0, 12)
+          : [];
+      const bodyPreview = JSON.stringify(subResult.body ?? {}).slice(0, 200);
+      throw new Error(
+        `prereq "${prereq.name}" (kind:"capability", target=${targetPlatform}/${targetCap}): ` +
+          `var "${name}" path "${path}" resolved to undefined against the prereq response — the ` +
+          `request would fire with an empty value and silently hit the wrong endpoint. ` +
+          `Top-level response keys: [${keys.join(', ')}]. Body: ${bodyPreview}. ` +
+          `Fix the dot-path (array indices accept results.0.id or results[0].id).`,
+      );
+    }
+    bound[name] = extracted;
   }
   return bound;
 }
@@ -369,7 +393,15 @@ function interpolateCapabilityArgs(
 
 export function walkJsonPath(root: unknown, path: string): unknown {
   if (typeof path !== 'string' || path.length === 0) return root;
-  const segments = path.split('.');
+  // Accept numeric bracket indexing (`results[0].id`) in addition to pure dot
+  // segments (`results.0.id`) — the same idiomatic JS accessor syntax that
+  // fetch-extract's `extractByPath` already supports. Normalizing here keeps
+  // capability-prereq `vars` paths consistent with fetch-extract paths so the
+  // LLM's natural `[0]` doesn't silently resolve to undefined.
+  const segments = path
+    .replace(/\[(\d+)\]/g, '.$1')
+    .split('.')
+    .filter((s) => s.length > 0);
   let cur: unknown = root;
   for (const seg of segments) {
     if (cur === null || cur === undefined) return undefined;

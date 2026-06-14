@@ -61,6 +61,23 @@ test('walkJsonPath: missing segment returns undefined', () => {
   assert.strictEqual(walkJsonPath(tree, 'nope'), undefined);
 });
 
+test('walkJsonPath: bracket array index (idiomatic JS) matches dot index', () => {
+  // The LLM reaches for results[0].id (learned from fetch-extract / plain JS);
+  // it must resolve identically to results.0.id, not silently return undefined.
+  const tree = { results: [{ id: 'a' }, { id: 'b' }] };
+  assert.strictEqual(walkJsonPath(tree, 'results[0].id'), 'a');
+  assert.strictEqual(walkJsonPath(tree, 'results[1].id'), 'b');
+  assert.strictEqual(
+    walkJsonPath(tree, 'results[0].id'),
+    walkJsonPath(tree, 'results.0.id'),
+  );
+});
+
+test('walkJsonPath: numeric bracket mixed with dot segments', () => {
+  const tree = { data: { items: [{ node: { id: 'x' } }] } };
+  assert.strictEqual(walkJsonPath(tree, 'data.items[0].node.id'), 'x');
+});
+
 test('walkJsonPath: empty path returns root', () => {
   const tree = { a: 1 };
   assert.strictEqual(walkJsonPath(tree, ''), tree);
