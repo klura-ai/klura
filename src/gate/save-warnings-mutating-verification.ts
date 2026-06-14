@@ -130,7 +130,7 @@ export function detectMutatingStrategyVerificationApproach(data: Strategy): Save
         `Answer via audit_answers.mutating_verification_required: "<approach + structural anchor>". ` +
         `The reason must name WHAT verifies success, by structural element of the saved strategy. ` +
         `Examples by shape:\n` +
-        `  • transaction-shape (server returns confirmation): "transaction-shape: response.extract.message_id pulls the server-issued id"\n` +
+        `  • transaction-shape (server returns confirmation): for a JSON endpoint the confirmation IS the returned body — execute() returns it verbatim, so reference the body field (e.g. "transaction-shape: the response body returns {ok:true, id} — the server-issued id confirms the write"). response.extract is HTML-only; use response.extract.<field> only when response.format="html".\n` +
         `  • chat-shape (read back our own outbound): "chat-shape: frameFromPage.expression polls thread DOM for the typed text appearing as outbound before returning"\n` +
         `  • dom-poll (fragile but sometimes the only signal): "dom-poll: verify_sent js-eval prereq polls .toast-success for 2s after publish"\n` +
         `  • intrinsic-to-caller (the next capability IS the verification): "intrinsic-to-caller — caller's next move is read_messages"\n` +

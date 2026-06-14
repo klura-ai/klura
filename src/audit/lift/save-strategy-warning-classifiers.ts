@@ -222,7 +222,7 @@ export const mutatingVerificationClassifier: Classifier<Strategy, SaveStrategyCt
       {
         choice: 'transaction-shape',
         rationale:
-          'server returns a confirmation field — reference the path (e.g. "transaction-shape: response.extract.message_id pulls the server-issued id").',
+          'server returns a confirmation field. For JSON the body IS the confirmation (execute returns it verbatim) — reference the body field (e.g. "transaction-shape: response body returns {ok:true,id} confirming the write"). Use response.extract.<field> only for response.format="html".',
       },
       {
         choice: 'chat-shape',
