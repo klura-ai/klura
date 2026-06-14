@@ -1,6 +1,7 @@
 import { pool } from '../runtime-state';
 import { computeSessionObligation } from '../session-obligations';
 import type { Session } from '../drivers/types/session';
+import { TOOL_NAMES } from '../vocab';
 
 // Signer-discovery tool-floor list. The three tools whose zero-use during
 // LIFT is strong evidence that the agent never actually looked for the
@@ -76,14 +77,38 @@ export function getUnusedSignerDiscoveryTools(session: Session): string[] {
 }
 
 /**
+ * LIFT-flow tools whose OWN response is the authoritative next-step guide:
+ * the save_strategy rejection envelope, the end_drive triage handoff, the
+ * triage-plan relay, the capability-declaration ack, the update_strategy
+ * re-audit. The sticky obligation banner ("you haven't saved — call X next")
+ * is redundant on these and actively harmful: prepended to a save_strategy
+ * rejection it pushes the actionable audit text below the fold, and it repeats
+ * verbatim across every retry of the same save. The agent is already inside the
+ * flow the banner points at — suppress it so the tool's own envelope is what
+ * the agent reads. The banner's real target is read / perform_action responses,
+ * where nothing else reminds the agent a save is still owed.
+ */
+const OBLIGATION_SUPPRESSED_TOOLS = new Set<string>([
+  TOOL_NAMES.saveStrategy,
+  TOOL_NAMES.updateStrategy,
+  TOOL_NAMES.endDrive,
+  TOOL_NAMES.submitTriagePlan,
+  TOOL_NAMES.declareCapability,
+]);
+
+/**
  * Compute the LIFT obligation for a session — a sticky reminder surfaced
  * on tool responses when mutating actions have happened but no strategy is
  * saved (and end_drive hasn't completed). Returns null if no obligation
- * applies. See `runtime/src/session-obligations/index.ts` for the full rationale.
+ * applies, or when `toolName` is a LIFT-flow tool whose own response already
+ * carries the next-step guidance (see `OBLIGATION_SUPPRESSED_TOOLS`). See
+ * `runtime/src/session-obligations/index.ts` for the full rationale.
  */
 export function getSessionObligation(
   sessionId: string,
+  toolName?: string,
 ): ReturnType<typeof computeSessionObligation> | null {
+  if (toolName && OBLIGATION_SUPPRESSED_TOOLS.has(toolName)) return null;
   let session;
   try {
     session = pool.getSession(sessionId);
@@ -97,7 +122,6 @@ export function getSessionObligation(
 // Tool registry metadata
 // ---------------------------------------------------------------------------
 
-import { TOOL_NAMES } from '../vocab';
 import type { ToolDef } from '../tools/types';
 import { endDrive } from '../phases/drive/end-drive-orchestrator';
 import { ackCheckpoint } from '../checkpoints/api';

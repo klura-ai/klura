@@ -279,7 +279,7 @@ async function createKluraMcpServer() {
       // paper over.
       if (args && args.session_id) {
         try {
-          const obligation = klura.getSessionObligation(args.session_id);
+          const obligation = klura.getSessionObligation(args.session_id, name);
           if (obligation && result && typeof result === 'object' && !Array.isArray(result)) {
             result = { ...result, _session_obligation: obligation };
           }
@@ -299,16 +299,19 @@ async function createKluraMcpServer() {
       };
     } catch (err) {
       // Attach the LIFT obligation to error responses too. Without this, every
-      // save_strategy / end_drive rejection drops the "MUST be end_drive"
-      // anchor exactly when the agent most needs it — agents reading just the
-      // bare error treat the failure as a one-off shape complaint and end the
-      // turn after the user-facing goal looks done.
-      let obligationLine = '';
+      // perform_action / read rejection drops the "save still owed" anchor
+      // exactly when the agent might otherwise end the turn after the
+      // user-facing goal looks done. It rides as a SEPARATE TRAILING block, not
+      // prepended into the message string — a save_strategy rejection's audit
+      // text must stay on top so it isn't pushed below the fold (the banner is
+      // also suppressed entirely on the LIFT-flow tools via getSessionObligation,
+      // so it won't fire on a save_strategy rejection in the first place).
+      let obligationBlock = null;
       if (args && args.session_id) {
         try {
-          const obligation = klura.getSessionObligation(args.session_id);
+          const obligation = klura.getSessionObligation(args.session_id, name);
           if (obligation && obligation.message) {
-            obligationLine = `[klura obligation]: ${obligation.message}\n\n`;
+            obligationBlock = { type: 'text', text: `[klura obligation]: ${obligation.message}` };
           }
         } catch {
           /* non-fatal */
@@ -326,11 +329,14 @@ async function createKluraMcpServer() {
       const msg = typeof err.message === 'string' ? err.message : String(err);
       if (/^invalid_[a-z_]+:/.test(msg)) {
         return {
-          content: [{ type: 'text', text: `${obligationLine}${msg}` }],
+          content: [{ type: 'text', text: msg }, ...(obligationBlock ? [obligationBlock] : [])],
         };
       }
       return {
-        content: [{ type: 'text', text: `${obligationLine}Error: ${msg}` }],
+        content: [
+          { type: 'text', text: `Error: ${msg}` },
+          ...(obligationBlock ? [obligationBlock] : []),
+        ],
         isError: true,
       };
     } finally {
