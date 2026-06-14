@@ -41,7 +41,10 @@ test('page-script: session already on target origin → zero navigates before fe
   })();
 
   const jsEvalCache = {
-    get: (_p, name) => (name === 'auth_token' ? { value: 'cached', expiresAt: null } : null),
+    // Cache keys are `${bindsTo} ${expression-hash}` — match by binding prefix
+    // so the stub hits regardless of the expression-hash suffix.
+    get: (_p, name) =>
+      name.startsWith('auth_token') ? { value: 'cached', expiresAt: null } : null,
     set() {},
     schedule() {},
     cancel() {},

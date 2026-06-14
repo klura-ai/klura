@@ -25,7 +25,8 @@ test.after(() => {
 function makePool({ driver, jsEvalCacheValue }) {
   const jsEvalCache = {
     get(_platform, bindsTo) {
-      if (bindsTo === 'auth_token' && jsEvalCacheValue) {
+      // Cache keys are `${bindsTo} ${expression-hash}` — match by binding prefix.
+      if (bindsTo.startsWith('auth_token') && jsEvalCacheValue) {
         return { value: jsEvalCacheValue, expiresAt: null };
       }
       return null;

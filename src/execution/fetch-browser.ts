@@ -231,11 +231,12 @@ async function runJsEvalBrowserPrereq(
     return;
   }
 
-  // Cacheable mint-and-reuse path. Cache is keyed on (platform, bindsTo) and
-  // ignores the args_template field by construction (per-call prereqs return
-  // above before this point), so a cache hit always carries the same shape the
-  // strategy would mint from scratch.
-  const cached = readJsEvalCache(pool, platform, bindsTo);
+  // Cacheable mint-and-reuse path. Cache is keyed on (platform, bindsTo,
+  // expression-hash) and ignores the args_template field by construction
+  // (per-call prereqs return above before this point), so a cache hit always
+  // carries the same shape the strategy would mint from scratch — and a changed
+  // expression keys to a fresh slot rather than replaying a stale value.
+  const cached = readJsEvalCache(pool, platform, bindsTo, expression);
   if (cached) {
     tokens[bindsTo] = cached;
     return;

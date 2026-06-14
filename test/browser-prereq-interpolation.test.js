@@ -103,7 +103,8 @@ test('cache-hit js-eval prereq returns cached value without driving the page', a
 
   const jsEvalCache = {
     get(_platform, bindsTo) {
-      if (bindsTo === 'auth_token') {
+      // Cache keys are `${bindsTo} ${expression-hash}` — match by binding prefix.
+      if (bindsTo.startsWith('auth_token')) {
         return { value: 'cached-token-xyz', expiresAt: null };
       }
       return null;

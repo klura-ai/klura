@@ -150,9 +150,13 @@ export async function probeOneJsEvalPrereq(
     }
 
     // Login-wall soft-warn — the expression typically reads from page globals
-    // that exist on the authenticated route; on /login they will not.
+    // that exist on the authenticated route; on /login they will not. Only fire
+    // when the navigation REDIRECTED into a login wall the prereq didn't ask
+    // for: a prereq whose own url is a login route (e.g. /login/gmail-start, an
+    // OAuth consent page) lands there by design, and flagging it would skip the
+    // very expression that mints the token from that page.
     const finalUrl = await tryGetUrl(driver, session);
-    if (isLoginWallUrl(finalUrl)) {
+    if (isLoginWallUrl(finalUrl) && !isLoginWallUrl(prereq.url)) {
       warnings.push(
         `prerequisite "${prereq.name}" (js-eval) navigated to ${prereq.url} but landed on a login wall ` +
           `at ${finalUrl}. Storage-state may be stale or missing — re-login via start_remote_session and ` +

@@ -313,6 +313,8 @@ test('js-eval cacheable mode (no args_template) still uses cache + omits args/fr
   assert.ok(eval_);
   assert.ok(!('args' in eval_.options), 'options.args should be absent for cacheable prereqs');
   assert.ok(!('frame' in eval_.options), 'options.frame should be absent when not declared');
-  // Cache should now hold the minted value.
-  assert.strictEqual(cacheStore.get('example:tok')?.value, 'cacheable-mint-of-good-length');
+  // Cache should now hold the minted value. The cache key is
+  // `${platform}:${bindsTo} ${expression-hash}`, so match by binding prefix.
+  const cached = [...cacheStore.entries()].find(([k]) => k.startsWith('example:tok'));
+  assert.strictEqual(cached?.[1]?.value, 'cacheable-mint-of-good-length');
 });

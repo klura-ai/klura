@@ -51,7 +51,14 @@ function looksLikeTracking(urlPath: string): boolean {
  *  `URL.pathname` (no query), so leaving the query in the regex makes it
  *  unmatchable. The agent's "covered by saved strategy" check is path-level. */
 function endpointTemplateToRegex(template: string): RegExp {
-  const pathOnly = template.split('?')[0] ?? template;
+  // Strip a leading `scheme://host[:port]` origin. Prereq `url` fields are
+  // often absolute (`http://host/checkout`) while the request side keys
+  // coverage against `URL.pathname` (path-only). An origin left in the
+  // template makes the regex unmatchable against a bare path, so a prereq URL
+  // fails to cover the endpoint it explicitly visits. Coverage is path-level
+  // by design (see collectUnsavedHotXhrEndpoints).
+  const originStripped = template.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]+/i, '');
+  const pathOnly = originStripped.split('?')[0] ?? originStripped;
   const escaped = escapeRegExp(pathOnly);
   // After escape, `\{\{[^}]+\}\}` is the literal placeholder. Restore as
   // wildcard segments (any chars except `/` to keep the path-segment shape).

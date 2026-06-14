@@ -8,10 +8,31 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import { JsEvalCacheImpl } from '../dist/strategies/js-eval-cache.js';
+import { readJsEvalCache, writeJsEvalCache } from '../dist/execution/js-eval.js';
 
 function waitMs(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+test('cache key includes the expression: a changed expression misses the stale value (no replay)', () => {
+  const pool = { jsEvalCache: new JsEvalCacheImpl() };
+  const v1 = { name: 'n', binds: 'nonce', expression: '__app_c.d.nonce' };
+  const v2 = { name: 'n', binds: 'nonce', expression: '__app_s.cz.nonce' };
+
+  // Mint under expression v1; same expression reads back (hit).
+  writeJsEvalCache(pool, 'plat', 'nonce', 'OLD-NONCE', v1);
+  assert.strictEqual(readJsEvalCache(pool, 'plat', 'nonce', v1.expression), 'OLD-NONCE');
+
+  // A changed expression (deploy drift / update_strategy re-derivation) must
+  // NOT replay the old value — the classic stale-nonce → 401 spiral.
+  assert.strictEqual(readJsEvalCache(pool, 'plat', 'nonce', v2.expression), null);
+
+  // Minting under the new expression keys to its own slot; both coexist without
+  // cross-contamination.
+  writeJsEvalCache(pool, 'plat', 'nonce', 'NEW-NONCE', v2);
+  assert.strictEqual(readJsEvalCache(pool, 'plat', 'nonce', v2.expression), 'NEW-NONCE');
+  assert.strictEqual(readJsEvalCache(pool, 'plat', 'nonce', v1.expression), 'OLD-NONCE');
+});
 
 test('get returns null when nothing is cached', () => {
   const c = new JsEvalCacheImpl();
