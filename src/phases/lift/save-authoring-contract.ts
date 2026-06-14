@@ -355,7 +355,7 @@ function redactListingValues(l: ListingCandidate): ListingCandidate {
   };
 }
 
-function inferTier(intercepted: ReadonlyArray<InterceptedRequest>): 'fetch' | 'page-script' {
+export function inferTier(intercepted: ReadonlyArray<InterceptedRequest>): 'fetch' | 'page-script' {
   for (const req of intercepted) {
     for (const [k, v] of Object.entries(req.headers)) {
       if (k.toLowerCase() === 'cookie' && typeof v === 'string' && v.length > 0) {
@@ -364,6 +364,13 @@ function inferTier(intercepted: ReadonlyArray<InterceptedRequest>): 'fetch' | 'p
     }
   }
   return 'fetch';
+}
+
+const TIER_RANK: Record<string, number> = { fetch: 0, 'page-script': 1, 'recorded-path': 2 };
+
+/** Speed-ordered rank of a strategy tier (fetch fastest = 0). Unknown → 0. */
+export function tierRank(tier: string): number {
+  return TIER_RANK[tier] ?? 0;
 }
 
 function collectArgValuesAsRejectTokens(args: Record<string, unknown>): {

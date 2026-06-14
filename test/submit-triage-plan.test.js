@@ -24,7 +24,11 @@ function patchPool(session) {
   };
 }
 
-function triageSession({ urls = ['https://shop.example.com/checkout'], cookieNames = [], platform } = {}) {
+function triageSession({
+  urls = ['https://shop.example.com/checkout'],
+  cookieNames = [],
+  platform,
+} = {}) {
   const session = {
     id: 'sess_stp_' + Math.random().toString(36).slice(2, 8),
     // Per-test platform so logbooks don't share state across tests.
@@ -113,7 +117,9 @@ test('cite-validation: justification with no overlap rejects', async () => {
       submitTriagePlan({
         session_id: session.id,
         capability: 'complete_checkout',
-        ...plan({ tier_justification: 'this site uses behavioral fingerprinting that scores each request' }),
+        ...plan({
+          tier_justification: 'this site uses behavioral fingerprinting that scores each request',
+        }),
       }),
       /must reference at least one verbatim artifact/,
     );
@@ -149,6 +155,48 @@ test('surface-binding side effect: observed URLs bound to the surface label', as
     assert.ok(session.surfaceMap, 'surfaceMap allocated');
     assert.equal(session.surfaceMap.get('https://shop.example.com/checkout'), 'checkout');
     assert.equal(session.surfaceMap.get('https://shop.example.com/checkout/payment'), 'checkout');
+  } finally {
+    restore();
+  }
+});
+
+// ---- tier_above_inferred_floor advisory ----
+
+test('tier_above_inferred_floor: page-script declared but fetch inferred → warning', async () => {
+  // No cookie REQUEST header on any capture → inferTier returns "fetch".
+  const session = triageSession();
+  const restore = patchPool(session);
+  try {
+    const r = await submitTriagePlan({
+      session_id: session.id,
+      capability: 'complete_checkout',
+      ...plan({ expected_tier: 'page-script' }),
+    });
+    assert.equal(r.ok, true);
+    const w = (r.triage_warnings ?? []).find((x) => x.kind === 'tier_above_inferred_floor');
+    assert.ok(w, 'tier_above_inferred_floor warning present');
+    assert.equal(w.context.inferred_tier, 'fetch');
+    assert.equal(w.context.expected_tier, 'page-script');
+    // Relay message names both tiers and steers to the lighter one first.
+    assert.match(r.message, /try fetch FIRST/);
+  } finally {
+    restore();
+  }
+});
+
+test('tier_above_inferred_floor: fetch declared + fetch inferred → no warning', async () => {
+  const session = triageSession();
+  const restore = patchPool(session);
+  try {
+    const r = await submitTriagePlan({
+      session_id: session.id,
+      capability: 'complete_checkout',
+      ...plan({ expected_tier: 'fetch' }),
+    });
+    assert.equal(r.ok, true);
+    const w = (r.triage_warnings ?? []).find((x) => x.kind === 'tier_above_inferred_floor');
+    assert.equal(w, undefined, 'no tier warning when declared tier == inferred floor');
+    assert.match(r.message, /informational/);
   } finally {
     restore();
   }
@@ -291,14 +339,20 @@ test('per-surface history: re-submitting the same surface rotates the prior into
     const second = await submitTriagePlan({
       session_id: session.id,
       capability: 'complete_checkout',
-      ...plan({ tier_justification: '__sd_pix is the load-bearing cookie; switching to page-script.', expected_tier: 'page-script' }),
+      ...plan({
+        tier_justification: '__sd_pix is the load-bearing cookie; switching to page-script.',
+        expected_tier: 'page-script',
+      }),
     });
     assert.equal(second.ok, true);
     const lb = loadLogbook(session.platform);
     const entry = lb.per_capability['complete_checkout'];
     assert.equal(entry.triage_plans_by_surface['checkout'].expected_tier, 'page-script');
     assert.equal(entry.triage_plan_history_by_surface['checkout'].length, 1);
-    assert.equal(entry.triage_plan_history_by_surface['checkout'][0].expected_tier, 'recorded-path');
+    assert.equal(
+      entry.triage_plan_history_by_surface['checkout'][0].expected_tier,
+      'recorded-path',
+    );
   } finally {
     restore();
   }

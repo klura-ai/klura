@@ -34,6 +34,8 @@ import type { Session } from '../drivers/types/session';
 import { loadConfig } from '../config/handler';
 import {
   composeSaveAuthoringContract,
+  inferTier,
+  tierRank,
   type SaveAuthoringContract,
 } from '../phases/lift/save-authoring-contract';
 import {
@@ -229,7 +231,34 @@ export async function submitTriagePlan(rawArgs: unknown): Promise<SubmitTriagePl
       }),
     );
   }
-  const triageWarnings = triageAuditResult.warnings;
+  const triageWarnings = [...triageAuditResult.warnings];
+
+  // Tier-above-inferred-floor advisory. The cookie-based `inferTier` floor is
+  // the cheapest mechanism the captures suggest will work; nothing gates a plan
+  // that declares a HEAVIER tier than that floor, so an over-classified
+  // expected_tier (page-script when fetch would do) silently became the saved
+  // tier — the drift the cross-session-resume / drift-function-move fixtures
+  // stage. Surface the discrepancy as a non-blocking warning so the agent
+  // attempts the lighter tier first. Advisory, not a gate: the floor is a weak
+  // cookie-only signal; a signed token in a JS bundle legitimately needs
+  // page-script even with no cookie present.
+  const inferredTier = inferTier(session.intercepted);
+  const tierAboveFloor = tierRank(args.expected_tier) > tierRank(inferredTier);
+  if (tierAboveFloor) {
+    triageWarnings.push({
+      kind: 'tier_above_inferred_floor',
+      message:
+        `Your triage declared expected_tier="${args.expected_tier}", but the captures infer a "${inferredTier}" ` +
+        `floor (the lightest mechanism that should work — no auth cookie was seen on the relevant captures). ` +
+        `Nothing blocks saving the heavier tier, so an over-classified tier silently becomes the saved strategy ` +
+        `and a later session re-derives it instead of upgrading.`,
+      hint:
+        `Attempt the "${inferredTier}" tier FIRST in LIFT. If it genuinely doesn't work (e.g. a signed token ` +
+        `lives in a JS bundle, or the request 401/403s without page context), the heavier tier is justified — ` +
+        `proceed with "${args.expected_tier}". This is advisory, not a gate.`,
+      context: { expected_tier: args.expected_tier, inferred_tier: inferredTier },
+    });
+  }
 
   // Persist plan to logbook. Prior plan for the same surface moves into
   // per-surface history.
@@ -420,7 +449,9 @@ export async function submitTriagePlan(rawArgs: unknown): Promise<SubmitTriagePl
       `Triage plan committed and approved — entering LIFT for surface \`${args.surface_label}\`. ` +
       ackInstructionLine +
       `${liftBudgetLine} ` +
-      `Tier suggestion (${args.expected_tier}) is informational; aim T0 (fetch) → T1 (page-script) → T2 (recorded-path) in order anyway. ` +
+      (tierAboveFloor
+        ? `Your triage said expected_tier=${args.expected_tier}; the captures infer a lighter ${inferredTier} floor — try ${inferredTier} FIRST, fall back to ${args.expected_tier} only if it doesn't work. `
+        : `Tier suggestion (${args.expected_tier}) is informational; aim T0 (fetch) → T1 (page-script) → T2 (recorded-path) in order anyway. `) +
       `RE-active tools (try_generator, set_breakpoint, evaluate_on_frame, install_page_init_script) ` +
       `are now unlocked. ` +
       `If reality contradicts the verdict (e.g. T0 (fetch) attempts silently 403 on a "looks clean" surface), ` +
