@@ -169,6 +169,15 @@ export function collectScannedFields(data: Strategy): ScannedField[] {
           }
         }
       }
+      // Prereq `args` (passed to a capability prereq's sub-execute, or a js-eval
+      // prereq) carry literal values too — baked credentials (`{username, password}`)
+      // and other caller-input literals hide here. Scan them like `body` so
+      // literal_provenance forces a static-vs-caller_input classification instead
+      // of letting a typed-in secret land verbatim on disk.
+      const prArgs = pr.args;
+      if (prArgs && typeof prArgs === 'object' && !Array.isArray(prArgs)) {
+        emitFieldWithDescent(out, `prerequisites[${idx}].args`, prArgs, 0);
+      }
     });
   }
 

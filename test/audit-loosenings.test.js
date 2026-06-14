@@ -48,6 +48,26 @@ test('B: collectScannedFields skips recorded-path locator strings', () => {
   }
 });
 
+test('C: collectScannedFields scans prerequisites[*].args.* (credential blind spot)', () => {
+  const fields = collectScannedFields({
+    strategy: 'fetch',
+    baseUrl: 'https://api.example.test',
+    endpoint: '/items',
+    prerequisites: [
+      {
+        name: 'auth',
+        kind: 'capability',
+        capability: 'login',
+        args: { username: 'alice', password: 'wonderland' },
+      },
+    ],
+  });
+  const paths = fields.map((f) => f.path);
+  assert.ok(paths.includes('prerequisites[0].args.username'), `scanned: ${paths.join(', ')}`);
+  const pw = fields.find((f) => f.path === 'prerequisites[0].args.password');
+  assert.equal(pw?.value, 'wonderland');
+});
+
 test('B: collectScannedFields keeps recorded-path step.url and step.value', () => {
   const fields = collectScannedFields({
     strategy: 'recorded-path',
