@@ -402,7 +402,14 @@ const unreferencedPrereqBindingDetector: Detector<Strategy, SaveStrategyCtx> = {
 const recordedPathInlinesLookupDetector: Detector<Strategy, SaveStrategyCtx> = {
   kind: 'recorded_path_inlines_lookup',
   detect: (data, ctx) =>
-    asIssues(detectRecordedPathInlinesLookup(data, ctx.capturedEndpointPaths, ctx.capability)),
+    asIssues(
+      detectRecordedPathInlinesLookup(
+        data,
+        ctx.session?.intercepted ?? [],
+        ctx.session?.performActionHistory ?? [],
+        ctx.capability,
+      ),
+    ),
   ackReason: 'none',
 };
 

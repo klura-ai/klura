@@ -949,50 +949,6 @@ export function detectCapabilitySourceMissingPrereq(data: Strategy): SaveWarning
   return warnings;
 }
 
-export function detectRecordedPathInlinesLookup(
-  data: Strategy,
-  capturedEndpointPaths: Set<string>,
-  capability?: string,
-): SaveWarning[] {
-  if ((data as { strategy?: unknown }).strategy !== 'recorded-path') return [];
-  if (capturedEndpointPaths.size === 0) return [];
-  const lookupPathRe = /\/(search|lookup)(?:\/|\?|$)/i;
-  // Suppress when the capability itself IS a lookup (e.g. lookup_*).
-  if (typeof capability === 'string') {
-    if (/^lookup_/.test(capability)) return [];
-    if (/_search$/.test(capability)) return [];
-  }
-  const lookupHits: string[] = [];
-  for (const canon of capturedEndpointPaths) {
-    if (lookupPathRe.test(canon)) lookupHits.push(canon);
-  }
-  const sample = lookupHits[0];
-  if (sample === undefined) return [];
-  const capSlug = capability ?? 'this_capability';
-  const entityGuess = (() => {
-    try {
-      const segs = new URL(sample).pathname.split('/').filter((s) => s.length > 0);
-      const idx = segs.findIndex((s) => s === 'search' || s === 'lookup');
-      if (idx > 0) return (segs[idx - 1] ?? 'entity').replace(/s$/, '') || 'entity';
-    } catch {
-      /* template-only path */
-    }
-    return 'entity';
-  })();
-  return [
-    {
-      kind: 'recorded_path_inlines_lookup',
-      message:
-        `recorded-path strategy fired ${lookupHits.length} XHR(s) hitting ${sample} — that's a name→id lookup ` +
-        `conflated into ${capSlug}. The clicks that select a search result are the lookup; future capabilities ` +
-        `that need the same resolution have to redo your typing+clicking. Save GET ${sample} as its own ` +
-        `lookup_${entityGuess}_by_<key> capability (tier=fetch with response.extract pulling the ` +
-        `target id), then this capability becomes a fetch / page-script with a ` +
-        `{kind: "capability", capability: "lookup_${entityGuess}_by_<key>", vars: {"${entityGuess}_id": "<dot.path>"}} ` +
-        `prereq instead of the inline UI walk. See klura://reference#capability-prereq.`,
-      hint:
-        `Two-step lift: (1) save_strategy("lookup_${entityGuess}_by_<key>", fetch) for the GET ${sample}; ` +
-        `(2) re-save this capability as fetch / page-script with a capability prereq pointing at it.`,
-    },
-  ];
-}
+// detectRecordedPathInlinesLookup moved to ./save-warnings-recorded-path-lookup
+// (this file hit the 1000-line cap; the detector is self-contained).
+export { detectRecordedPathInlinesLookup } from './save-warnings-recorded-path-lookup';
