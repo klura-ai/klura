@@ -55,6 +55,40 @@ test('patchStep: patches by step id and persists', () => {
   assert.equal(patched.locators.css, 'button.new-send');
 });
 
+test('patchStep: default locators patch REPLACES the cascade (drops untouched keys)', () => {
+  seed('pstep-merge-default', 'send_message');
+  patchStep('pstep-merge-default', 'send_message', 'recorded-path', 'click_send', {
+    locators: { css: 'button.new-send' },
+  });
+  const strat = loadStrategies('pstep-merge-default', 'send_message').find(
+    (s) => s.strategy === 'recorded-path',
+  );
+  const patched = strat.steps.find((s) => s.id === 'click_send');
+  assert.equal(patched.locators.css, 'button.new-send');
+  assert.equal(patched.locators.a11y, undefined, 'flat overwrite drops the a11y alternative');
+});
+
+test('patchStep: merge_locators:true preserves untouched cascade keys', () => {
+  seed('pstep-merge-on', 'send_message');
+  const res = patchStep('pstep-merge-on', 'send_message', 'recorded-path', 'click_send', {
+    merge_locators: true,
+    locators: { css: 'button.new-send' },
+  });
+  assert.ok('ok' in res && res.ok === true);
+  const strat = loadStrategies('pstep-merge-on', 'send_message').find(
+    (s) => s.strategy === 'recorded-path',
+  );
+  const patched = strat.steps.find((s) => s.id === 'click_send');
+  assert.equal(patched.locators.css, 'button.new-send', 'new key applied');
+  assert.deepEqual(
+    patched.locators.a11y,
+    { role: 'button', name: 'Send' },
+    'untouched a11y alternative preserved',
+  );
+  // merge_locators is a control key, not persisted as a step field.
+  assert.equal(patched.merge_locators, undefined);
+});
+
 test('patchStep: 404 on unknown id lists known ids', () => {
   seed('pstep-2', 'send_message');
   const res = patchStep('pstep-2', 'send_message', 'recorded-path', 'click_publish', {

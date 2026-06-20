@@ -936,8 +936,22 @@ export function patchStep(
   }
 
   const step = steps[targetIndex] as Record<string, unknown>;
+  // Control key (not a step field): when `merge_locators: true`, a `locators`
+  // patch is shallow-merged onto the step's existing locator cascade instead of
+  // flat-replacing it, so alternatives the patch didn't mention survive. Opt-in
+  // — the default flat-overwrite is unchanged for callers who don't set it.
+  const mergeLocators = patch.merge_locators === true;
+  const isPlainObj = (v: unknown): v is Record<string, unknown> =>
+    !!v && typeof v === 'object' && !Array.isArray(v);
+  const appliedKeys: string[] = [];
   for (const [k, v] of Object.entries(patch)) {
-    step[k] = v;
+    if (k === 'merge_locators') continue;
+    if (mergeLocators && k === 'locators' && isPlainObj(v) && isPlainObj(step.locators)) {
+      step.locators = { ...step.locators, ...v };
+    } else {
+      step[k] = v;
+    }
+    appliedKeys.push(k);
   }
 
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
@@ -945,7 +959,7 @@ export function patchStep(
   appendStrategyEvent(platform, capability, {
     strategy: strategyType,
     kind: 'patched',
-    detail: `step "${stepId}": patched ${Object.keys(patch).join(', ')}`,
+    detail: `step "${stepId}": patched ${appliedKeys.join(', ')}`,
   });
 
   return { ok: true, path: filePath };
