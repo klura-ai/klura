@@ -62,9 +62,20 @@ export function buildPlatformMapSummary(platform: string): PlatformMapSummary | 
     return null;
   }
 
-  const sorted = [...observedAll].sort(
-    (a, b) => Date.parse(b.last_observed_at) - Date.parse(a.last_observed_at),
-  );
+  // Rank genuine network/UI observations above auto-inferred graph-map
+  // breadcrumbs (`view_*` page-visits, form_post). Every auto-inferred entry
+  // shares the same end_drive flush timestamp, so a pure last_observed_at sort
+  // lets a wall of `view_*` page-visits crowd out the real `login` /
+  // `add_to_cart` observations in the top-N teaser. Within each group, keep
+  // most-recent-first.
+  const isAutoInferred = (o: { evidence?: { source?: unknown } }): boolean =>
+    o.evidence?.source === 'auto_inferred_graph_map';
+  const sorted = [...observedAll].sort((a, b) => {
+    const ai = isAutoInferred(a);
+    const bi = isAutoInferred(b);
+    if (ai !== bi) return ai ? 1 : -1;
+    return Date.parse(b.last_observed_at) - Date.parse(a.last_observed_at);
+  });
   const truncated = sorted.length > OBSERVED_CAP_LIMIT;
   const top = sorted.slice(0, OBSERVED_CAP_LIMIT).map((o) => ({
     name: o.name,

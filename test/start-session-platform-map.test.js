@@ -112,6 +112,31 @@ test('more than 5 observed_capabilities → top 5 by recency, hint set', () => {
   assert.ok(!names.includes('cap_1'));
 });
 
+test('auto_inferred_graph_map breadcrumbs rank below genuine observations despite being newer', () => {
+  const platform = 'pm-rank';
+  // Genuine network observation recorded FIRST (older timestamp).
+  recordObservedCapability(platform, {
+    name: 'login',
+    evidence: { source: 'network' },
+    why_not_lifted: 'separate_capability',
+  });
+  let start = Date.now();
+  while (Date.now() - start < 5) { /* spin so timestamps differ */ }
+  // Auto-inferred page-visit breadcrumbs recorded AFTER (newer timestamp) —
+  // these all share the end_drive flush timestamp in production.
+  for (const name of ['view_orders', 'view_signup', 'view_checkout']) {
+    recordObservedCapability(platform, {
+      name,
+      evidence: { source: 'auto_inferred_graph_map', kind: 'page_visit' },
+      why_not_lifted: 'separate_capability',
+    });
+  }
+  const summary = buildPlatformMapSummary(platform);
+  assert.ok(summary);
+  // The genuine observation tops the list even though it's the oldest entry.
+  assert.equal(summary.observed_capabilities[0].name, 'login');
+});
+
 test('url_graph + forms_seen + observed_capabilities → all three counts present', () => {
   const platform = 'pm-full';
 
