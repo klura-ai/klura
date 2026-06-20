@@ -389,11 +389,11 @@ test('unreferenced_prereq_binding: skips when response.from matches the prereq.n
   assert.deepStrictEqual(warnings, []);
 });
 
-test('unreferenced_prereq_binding: still fires when response.from matches binds but NOT name (drift case)', () => {
-  // Old skip-condition matched on binds — that misses the validator's
-  // actual rule. With from = binds but != name, the validator rejects
-  // the save AND the warning should still fire so the agent fixes the
-  // root cause (use name, not binds).
+test('unreferenced_prereq_binding: clean when response.from matches binds (validator accepts binds ?? name)', () => {
+  // The response validator accepts `from === binds ?? name`, so a prereq that
+  // binds "cart_id" and is consumed via response.from:"cart_id" is a legit,
+  // executable shape — the warning must NOT fire even though `from` != the
+  // prereq's `name`. (The detector skip mirrors the validator's actual rule.)
   const warnings = detectUnreferencedPrereqBinding({
     strategy: 'page-script',
     baseUrl: 'https://www.example.com',
@@ -411,8 +411,7 @@ test('unreferenced_prereq_binding: still fires when response.from matches binds 
       },
     ],
   });
-  assert.strictEqual(warnings.length, 1);
-  assert.strictEqual(warnings[0].context.binds_name, 'cart_id');
+  assert.deepStrictEqual(warnings, []);
 });
 
 test('unreferenced_prereq_binding: skips when strategy has no prerequisites', () => {

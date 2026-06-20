@@ -51,17 +51,17 @@ export function detectUnreferencedPrereqBinding(data: Strategy): SaveWarning[] {
     }
     if (bindingNames.length === 0) continue;
 
-    // `response.from: "<prereqName>"` is a direct prereq-as-response
-    // consumer — the strategy's return value IS the prereq's bound
-    // value, no templating. The validator (strategies/validate/response.ts)
-    // checks `from === prereq.name`, NOT binds; skip the warning on the
-    // same axis the validator accepts so the hint we emit doesn't drift
-    // away from what the validator wants.
+    // `response.from` makes a prereq's value the strategy's return value (no
+    // templating). The response validator (strategies/validate/response.ts)
+    // accepts `from === binds ?? name`, so skip the warning on the SAME axis:
+    // either the prereq's name OR one of its binding names. Matching only the
+    // name (the old behavior) false-flagged the legitimate binds-renamed shape
+    // (`binds:"result"`, `response.from:"result"`, name="submit_req").
     const responseFrom = (obj.response as { from?: unknown } | null | undefined)?.from;
     if (
       typeof responseFrom === 'string' &&
-      typeof prereqName === 'string' &&
-      responseFrom === prereqName
+      ((typeof prereqName === 'string' && responseFrom === prereqName) ||
+        bindingNames.includes(responseFrom))
     ) {
       continue;
     }
