@@ -181,7 +181,13 @@ export function collectListingCandidates(
       if (o.source.kind !== 'ui_click') continue;
       if (typeof o.value === 'string' && o.value.length > 0) values.add(o.value);
     }
-    if (values.size === 0) continue;
+    // Require ≥2 distinct values, mirroring the audit-side gate
+    // (save-warnings.ts findListingUrlForValues). With only one observed value,
+    // a data-load for that one value (`GET /api/restaurants?category=italian`)
+    // whose response echoes it would self-match as a "listing" and inflate
+    // required_siblings; a real listing enumerates ≥2 options, and a single-value
+    // data-load can't contain the OTHER values, so the gate cleanly excludes it.
+    if (values.size < 2) continue;
     const valueList = [...values].map((v) => ({ value: v }));
     if (observedValuesAreIntegerRange(valueList)) continue;
     obsByParam.set(paramName, values);

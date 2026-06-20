@@ -134,3 +134,58 @@ test('collectDataLoadCandidates: body_truncated flag when over 400 chars', () =>
   assert.ok(cands[0].body_preview.length <= 400);
   assert.ok(cands[0].body_bytes > 400);
 });
+
+// --- collectListingCandidates ≥2-distinct gate (mirrors the audit side) ---
+
+function obs(param, ...values) {
+  return { [param]: values.map((v) => ({ value: v, source: { kind: 'ui_click', label: v } })) };
+}
+
+test('collectListingCandidates: single observed value → no listing (data-load self-match guard)', () => {
+  // A data-load for one category echoes that value; without the ≥2 gate it would
+  // pose as its own listing and inflate required_siblings.
+  const intercepted = [
+    {
+      method: 'GET',
+      url: 'https://example.com/api/restaurants?category=italian',
+      headers: {},
+      postData: null,
+      status: 200,
+      responseBody: JSON.stringify([{ name: 'Nonna', cuisine: 'italian' }]),
+    },
+    {
+      method: 'GET',
+      url: 'https://example.com/api/restaurants?category=italian',
+      headers: {},
+      postData: null,
+      status: 200,
+      responseBody: '[]',
+    },
+  ];
+  const cands = synth.collectListingCandidates(intercepted, obs('category', 'italian'));
+  assert.deepEqual(cands, []);
+});
+
+test('collectListingCandidates: ≥2 distinct observed values + real listing → one candidate', () => {
+  const intercepted = [
+    {
+      method: 'GET',
+      url: 'https://example.com/api/categories',
+      headers: {},
+      postData: null,
+      status: 200,
+      responseBody: JSON.stringify([{ slug: 'italian' }, { slug: 'mexican' }, { slug: 'sushi' }]),
+    },
+    {
+      method: 'GET',
+      url: 'https://example.com/api/restaurants?category=italian',
+      headers: {},
+      postData: null,
+      status: 200,
+      responseBody: '[]',
+    },
+  ];
+  const cands = synth.collectListingCandidates(intercepted, obs('category', 'italian', 'mexican'));
+  assert.equal(cands.length, 1);
+  assert.equal(cands[0].url, 'https://example.com/api/categories');
+});
