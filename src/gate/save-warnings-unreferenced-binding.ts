@@ -31,10 +31,25 @@ export function detectUnreferencedPrereqBinding(data: Strategy): SaveWarning[] {
     const p: unknown = prereqs[i];
     if (!p || typeof p !== 'object') continue;
     const kind = (p as { kind?: unknown }).kind;
-    if (kind !== 'js-eval') continue;
-    const binds = (p as { binds?: unknown }).binds;
-    if (typeof binds !== 'string' || binds.length === 0) continue;
     const prereqName = (p as { name?: unknown }).name;
+
+    // A prereq's "bindings" are the names it injects into the template scope:
+    // `binds` (single name) for js-eval, the `vars` map keys for capability /
+    // fetch-extract / page-extract. A capability prereq with NO vars is
+    // side-effect-only (e.g. an auth login leaving a cookie) — legitimate, never
+    // flagged. Any other kind, or a prereq with no bindings, is out of scope.
+    let bindingNames: string[];
+    if (kind === 'js-eval') {
+      const binds = (p as { binds?: unknown }).binds;
+      bindingNames = typeof binds === 'string' && binds.length > 0 ? [binds] : [];
+    } else if (kind === 'capability' || kind === 'fetch-extract' || kind === 'page-extract') {
+      const vars = (p as { vars?: unknown }).vars;
+      bindingNames =
+        vars && typeof vars === 'object' && !Array.isArray(vars) ? Object.keys(vars) : [];
+    } else {
+      bindingNames = [];
+    }
+    if (bindingNames.length === 0) continue;
 
     // `response.from: "<prereqName>"` is a direct prereq-as-response
     // consumer — the strategy's return value IS the prereq's bound
@@ -53,38 +68,42 @@ export function detectUnreferencedPrereqBinding(data: Strategy): SaveWarning[] {
 
     // Search corpus = the strategy minus this prereq, serialized. Template
     // engine accepts `{{name}}` with optional inner whitespace. Escape
-    // regex meta in the name (the schema allows alphanumeric + underscore
-    // for binds names, so escaping is defensive against future schema
-    // widening).
+    // regex meta in each name (the schema allows alphanumeric + underscore, so
+    // escaping is defensive against future schema widening). The prereq's
+    // output is "consumed" if ANY of its binding names is referenced.
     const trimmedPrereqs = (prereqs as unknown[]).filter((_, j) => j !== i);
     const corpus = JSON.stringify({ ...obj, prerequisites: trimmedPrereqs });
-    const escaped = escapeRegExp(binds);
-    const re = new RegExp(`\\{\\{\\s*${escaped}\\s*\\}\\}`);
-    if (re.test(corpus)) continue;
+    const anyReferenced = bindingNames.some((name) =>
+      new RegExp(`\\{\\{\\s*${escapeRegExp(name)}\\s*\\}\\}`).test(corpus),
+    );
+    if (anyReferenced) continue;
 
+    const namesLabel = bindingNames.map((n) => `{{${n}}}`).join(', ');
+    const bindDesc =
+      kind === 'js-eval'
+        ? `declares binds: "${bindingNames[0]}"`
+        : `declares vars [${bindingNames.join(', ')}]`;
     out.push({
       kind: 'unreferenced_prereq_binding',
       message:
-        `prerequisites[${i}] (kind: js-eval) declares binds: "${binds}" but {{${binds}}} ` +
+        `prerequisites[${i}] (kind: ${String(kind)}) ${bindDesc} but ${namesLabel} ` +
         `is not referenced anywhere in the strategy envelope (endpoint / baseUrl / body / ` +
         `headers / params / frameFromPage.expression / sibling prereq fields). The prereq ` +
         `runs and produces a value that the runtime never reads — either the prereq is doing ` +
-        `the real work via side effects (the fetch + parse happens inside the expression) and ` +
-        `the declared HTTP envelope is dead, or the binding name is misspelled at the call ` +
-        `site. Both shapes silently corrupt warm execute: the caller receives whatever the ` +
-        `dead envelope returns, not the prereq's value.`,
+        `the real work via side effects and the declared HTTP envelope is dead, or the binding ` +
+        `name is misspelled at the call site. Both shapes silently corrupt warm execute: the ` +
+        `caller receives whatever the dead envelope returns, not the prereq's value.`,
       hint:
-        `Pick one: (a) reference {{${binds}}} in body / endpoint / headers / a sibling ` +
-        `prereq's args_template / fetch_body if the binding should feed into the request; ` +
+        `Pick one: (a) reference ${namesLabel} in body / endpoint / headers / a sibling ` +
+        `prereq's args if the binding should feed into the request; ` +
         `(b) set response.from: "${typeof prereqName === 'string' ? prereqName : '<prereq.name>'}" ` +
-        `(the prereq's \`name\` field, NOT its \`binds\` value) if the prereq's return value IS ` +
-        `the strategy result — the strategy then skips its HTTP fire and returns the prereq's ` +
-        `bound value directly (canonical for DOM-extraction page-scripts); (c) ack via ` +
-        `notes.save_warnings_acked: [{kind: "unreferenced_prereq_binding", reason: "<one ` +
-        `sentence — e.g. binding intentionally drives a refresh-only side effect, the value ` +
-        `isn't consumed by warm callers>"}] when the binding genuinely has no consumer but the ` +
-        `prereq must still run.`,
-      context: { prereq_index: i, binds_name: binds },
+        `(the prereq's \`name\` field) if the prereq's return value IS the strategy result — the ` +
+        `strategy then skips its HTTP fire and returns the prereq's bound value directly; ` +
+        `(c) for a capability prereq that should run purely for its side effect (auth/refresh), ` +
+        `drop \`vars\` entirely so it's declared side-effect-only; ` +
+        `(d) ack via notes.save_warnings_acked: [{kind: "unreferenced_prereq_binding", ` +
+        `reason: "<one sentence>"}] when the binding genuinely has no consumer but must still run.`,
+      context: { prereq_index: i, binds_name: bindingNames.join(',') },
     });
   }
   return out;

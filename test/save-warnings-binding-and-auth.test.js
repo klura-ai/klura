@@ -218,7 +218,7 @@ test('unreferenced_prereq_binding: clean when {{name}} appears in a sibling prer
   const warnings = detectUnreferencedPrereqBinding({
     strategy: 'fetch',
     baseUrl: 'https://www.example.com',
-    endpoint: '/api/x',
+    endpoint: '/api/x?val={{x}}',
     method: 'GET',
     prerequisites: [
       {
@@ -261,7 +261,9 @@ test('unreferenced_prereq_binding: matches `{{ name }}` with whitespace', () => 
   assert.deepStrictEqual(warnings, []);
 });
 
-test('unreferenced_prereq_binding: ignores non-js-eval prereqs (capability/tag use vars, not binds)', () => {
+test('unreferenced_prereq_binding: side-effect-only prereqs (no vars) + tag are exempt', () => {
+  // A capability prereq with NO vars is side-effect-only (auth login leaving a
+  // cookie) — legitimate, never flagged. A tag prereq has no bindings.
   const warnings = detectUnreferencedPrereqBinding({
     strategy: 'fetch',
     baseUrl: 'https://www.example.com',
@@ -273,6 +275,63 @@ test('unreferenced_prereq_binding: ignores non-js-eval prereqs (capability/tag u
     ],
   });
   assert.deepStrictEqual(warnings, []);
+});
+
+test('unreferenced_prereq_binding: capability prereq with unreferenced vars fires', () => {
+  // The multi-surface-triage phantom-prereq shape: a capability prereq resolves
+  // `member_id` but {{member_id}} is never templated into the envelope.
+  const warnings = detectUnreferencedPrereqBinding({
+    strategy: 'fetch',
+    baseUrl: 'https://www.example.com',
+    endpoint: '/api/conversations/static/messages',
+    method: 'POST',
+    body: { text: '{{text}}' },
+    prerequisites: [
+      {
+        name: 'lookup',
+        kind: 'capability',
+        capability: 'lookup_member_by_name',
+        vars: { member_id: 'results.0.id' },
+      },
+    ],
+  });
+  assert.strictEqual(warnings.length, 1);
+  assert.strictEqual(warnings[0].kind, 'unreferenced_prereq_binding');
+  assert.match(warnings[0].message, /kind: capability/);
+  assert.match(warnings[0].message, /\{\{member_id\}\}/);
+});
+
+test('unreferenced_prereq_binding: capability prereq with referenced vars is clean', () => {
+  const warnings = detectUnreferencedPrereqBinding({
+    strategy: 'fetch',
+    baseUrl: 'https://www.example.com',
+    endpoint: '/api/conversations/{{member_id}}/messages',
+    method: 'POST',
+    body: { text: '{{text}}' },
+    prerequisites: [
+      {
+        name: 'lookup',
+        kind: 'capability',
+        capability: 'lookup_member_by_name',
+        vars: { member_id: 'results.0.id' },
+      },
+    ],
+  });
+  assert.deepStrictEqual(warnings, []);
+});
+
+test('unreferenced_prereq_binding: fetch-extract with unreferenced vars fires', () => {
+  const warnings = detectUnreferencedPrereqBinding({
+    strategy: 'fetch',
+    baseUrl: 'https://www.example.com',
+    endpoint: '/api/x',
+    method: 'GET',
+    prerequisites: [
+      { name: 'ex', kind: 'fetch-extract', url: 'https://www.example.com/seed', vars: { tok: 'data.t' } },
+    ],
+  });
+  assert.strictEqual(warnings.length, 1);
+  assert.match(warnings[0].message, /kind: fetch-extract/);
 });
 
 test('unreferenced_prereq_binding: per-prereq detection — fires only on the unreferenced one', () => {

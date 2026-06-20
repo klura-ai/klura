@@ -1879,6 +1879,7 @@ function uchsCtxWithUrls(...extra) {
 test('user_confirmation hash scoping (a): page-extract selector swap does NOT change user_confirmation slice', () => {
   const strategy = {
     ...minimalStrategy(),
+    endpoint: '/api/items/{{member_id}}',
     prerequisites: [
       {
         name: 'mid',
@@ -1990,6 +1991,7 @@ test('user_confirmation hash scoping (e): prereq removal invalidates user_confir
 test('user_confirmation hash scoping (f): prereq.kind change for same-name prereq invalidates user_confirmation slice', () => {
   const strategy = {
     ...minimalStrategy(),
+    endpoint: '/api/items/{{member_id}}',
     prerequisites: [
       {
         name: 'member_id',
@@ -2012,10 +2014,6 @@ test('user_confirmation hash scoping (f): prereq.kind change for same-name prere
         return_shape: { kind: 'string' },
       };
       return s;
-    },
-    undefined,
-    {
-      secondAcks: { unreferenced_prereq_binding: 'test fixture — member_id binding unused by design' },
     },
   );
   const diff = uchsAssertDiff(result, true, '(f) prereq.kind change');
@@ -2044,6 +2042,7 @@ test('user_confirmation hash scoping (g): body VALUE change does NOT change user
 test('user_confirmation hash scoping (h): prereq.url swap does NOT change user_confirmation slice', () => {
   const strategy = {
     ...minimalStrategy(),
+    endpoint: '/api/items/{{member_id}}',
     prerequisites: [
       {
         name: 'mid',
