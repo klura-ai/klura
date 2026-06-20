@@ -547,6 +547,39 @@ test('enum-shape marker kind (slug) on caller_input without source:capability �
   assert.match(hit, /no ack path/);
 });
 
+test('kind:"email" caller_input without source:capability → NOT marker-rejected (free-form format)', () => {
+  // An email recipient is intrinsically free-form — there's no list_emails
+  // capability that enumerates arbitrary addresses, so the enum-grounding
+  // requirement must not apply. Same for kind:"url".
+  for (const kind of ['email', 'url']) {
+    const strategy = {
+      strategy: 'fetch',
+      baseUrl: 'http://example.test',
+      endpoint: '/api/send',
+      method: 'POST',
+      body: { to: '{{recipient}}' },
+      response: { format: 'json' },
+      notes: { params: { recipient: { description: 'recipient', kind } } },
+    };
+    const result = runAudit(
+      {
+        capability: 'send_to_recipient',
+        observedSiblings: [],
+        observedParamValues: {},
+        capturedEndpointPaths: new Set(['http://example.test/api/send']),
+      },
+      strategy,
+      { literal_provenance: { body: { caller_input: 'recipient' } }, observed_siblings: {} },
+    );
+    const issues = result.rejection?.classifier_issues || [];
+    const markerHit = issues.find((i) => /caller_input param implies/.test(i));
+    assert.ok(
+      !markerHit,
+      `kind:"${kind}" must NOT trigger the enum-shape-marker rejection; got: ${JSON.stringify(issues).slice(0, 300)}`,
+    );
+  }
+});
+
 test('enum-shape marker kind (slug) WITH source:capability + matching prereq → marker-kind silent', () => {
   // The escape valve: declaring source:"capability:list_<entity>" defers
   // value resolution to a sibling list capability that fetches fresh

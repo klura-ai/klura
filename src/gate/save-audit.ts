@@ -808,8 +808,12 @@ function validateCallerInputParamKind(
   // kind:"id" is exempted because id-shaped values are typically
   // resolved by prereq output (lookup_X_by_Y), not by direct caller pick;
   // the lookup_sibling_not_referenced and lookup_embedded_in_prereq
-  // detectors already cover that case.
-  const ENUM_SHAPE_MARKER_KINDS: ReadonlyArray<string> = ['slug', 'email', 'url', 'uuid'];
+  // detectors already cover that case. kind:"email" and kind:"url" are
+  // exempted because they are intrinsically free-form formats, not enumerable
+  // sets — there is no `list_emails` capability shape that fits an arbitrary
+  // recipient address, so requiring source:"capability:<list>" is wrong for
+  // them. Only slug/uuid stay: those usually ARE drawn from an enumerable set.
+  const ENUM_SHAPE_MARKER_KINDS: ReadonlyArray<string> = ['slug', 'uuid'];
   if (ENUM_SHAPE_MARKER_KINDS.includes(kind)) {
     const sourceVal = declared.source;
     const hasCapabilitySource =
