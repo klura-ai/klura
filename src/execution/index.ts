@@ -1397,6 +1397,12 @@ function findMissingParams(strategy: skills.Strategy, args: Record<string, unkno
     // literal_provenance audit nudged the agent into declaring them under
     // notes.params. Mirrors findUnsatisfiedPlaceholders in save-strategy.ts.
     if (key.startsWith('__gen.')) continue;
+    // Params explicitly declared `optional: true` (e.g. a `?cuisine=` filter the
+    // caller may omit) are not "missing" when absent.
+    const doc = params[key];
+    if (doc && typeof doc === 'object' && (doc as { optional?: unknown }).optional === true) {
+      continue;
+    }
     const v = args[key];
     if (v === undefined || v === null || v === '') missing.push(key);
   }

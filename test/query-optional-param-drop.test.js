@@ -64,3 +64,19 @@ test('all-optional query dropping leaves a clean path (no trailing ?)', () => {
     'https://api.example.com/search',
   );
 });
+
+test('paramDocSchema accepts optional:true and rejects non-boolean', async () => {
+  const { notesParamsSchema } = await import('../dist/strategies/schemas/notes.js');
+  // optional:true validates
+  assert.equal(
+    notesParamsSchema.safeParse({ cuisine: { kind: 'text', optional: true } }).success,
+    true,
+  );
+  // optional defaults to absent (required) — omitting it still validates
+  assert.equal(notesParamsSchema.safeParse({ cuisine: { kind: 'text' } }).success, true);
+  // non-boolean optional rejects
+  assert.equal(
+    notesParamsSchema.safeParse({ cuisine: { kind: 'text', optional: 'yes' } }).success,
+    false,
+  );
+});

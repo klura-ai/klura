@@ -12,6 +12,12 @@ export const paramDocSchema = z
       ),
     source: z.string().max(PARAM_FIELD_MAX, 'is too long').optional(),
     example: z.string().max(PARAM_EXAMPLE_MAX, 'is too long').optional(),
+    optional: z
+      .boolean()
+      .optional()
+      .describe(
+        'true when this param is a filter the caller may omit (e.g. an optional `?cuisine=` query). Optional params are NOT reported as missing at execute time when absent, and the unsatisfied-placeholder check skips them. Omit (defaults to required).',
+      ),
     observed_values: z
       .array(
         z

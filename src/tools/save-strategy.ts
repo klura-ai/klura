@@ -1429,6 +1429,18 @@ function findUnsatisfiedPlaceholders(data: Strategy, args: Record<string, unknow
   // set verifyArgs supplies) so a prereq whose own inputs are undeclared stays
   // unsatisfied and validation still skips. See computeRunnablePrereqBinds.
   const runnableBinds = computeRunnablePrereqBinds(data, argKeys);
+  // Params declared `optional: true` are droppable at execute time (resolveEndpoint
+  // drops an empty/omitted optional query param), so an absent optional value is
+  // not "unsatisfied" — excluding it lets post-save validation run instead of skip.
+  const optionalParams = new Set<string>();
+  const paramsBlock = (data as { notes?: { params?: Record<string, unknown> } }).notes?.params;
+  if (paramsBlock && typeof paramsBlock === 'object') {
+    for (const [k, doc] of Object.entries(paramsBlock)) {
+      if (doc && typeof doc === 'object' && (doc as { optional?: unknown }).optional === true) {
+        optionalParams.add(k);
+      }
+    }
+  }
   const missing = new Set<string>();
   // \w+ avoids the unbounded-non-close-brace pattern that sonarjs flags as
   // backtracking-friendly. Placeholder names in klura are
@@ -1442,6 +1454,7 @@ function findUnsatisfiedPlaceholders(data: Strategy, args: Record<string, unknow
       if (!name) continue;
       if (name.startsWith('__gen.')) continue;
       if (runnableBinds.has(name)) continue;
+      if (optionalParams.has(name)) continue;
       if (!argKeys.has(name)) missing.add(name);
     }
   }
