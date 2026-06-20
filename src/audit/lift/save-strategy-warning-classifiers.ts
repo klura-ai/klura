@@ -16,6 +16,7 @@ import {
   detectParameterizationDisclosureRequired,
   collectExecutableJsStrings,
   VERIFICATION_SHAPE_TAGS,
+  CLAIMING_VERIFICATION_TAGS,
   FIRE_AND_FORGET_JUSTIFYING_NOUNS,
   NON_DOM_VERIFICATION_MARKERS,
 } from '../../gate/save-warnings';
@@ -213,6 +214,20 @@ export const mutatingVerificationClassifier: Classifier<Strategy, SaveStrategyCt
           `mutating_verification_required: anchor mismatch — strategy is ${anchorType}-anchored but verification is DOM-anchored (dom-poll). DOM polling becomes the fragility bottleneck — when the UI rewrites, verification breaks even though the underlying ${anchorType} call still works. Either re-anchor verification to ${anchorType}-tier surfaces (response.extract / window.require page-global readback / frameFromPage parsing the wire response), or down-classify notes.anchor_type to "dom".`,
         );
       }
+    }
+    // A claiming tag (transaction-shape / chat-shape / dom-poll) asserts the
+    // strategy can OBSERVE the side effect landing — but `validPaths` now carries
+    // only verification surfaces (response.extract / prereq / frameFromPage /
+    // steps; request-side body.*/headers.* are excluded). If none exist, the tag
+    // claims a confirmation surface the strategy doesn't have: a bare POST whose
+    // only structure is its request body can't verify anything. Steer to a
+    // no-surface tag instead. Runs after the anchor-mismatch check so a strategy
+    // with both problems surfaces the more specific mismatch too.
+    const claimingTagUsed = CLAIMING_VERIFICATION_TAGS.some((t) => answer.includes(t));
+    if (claimingTagUsed && validPaths.length === 0) {
+      out.push(
+        `mutating_verification_required: ${shapeTagsUsed.join(' / ')} claims the strategy can confirm the side effect, but it carries no verification surface (no response.extract, no prerequisite, no frameFromPage — only the request body, which can't verify a mutation). Either add a confirmation anchor (response.extract.<field> on the POST's response, or a follow-up read prereq) OR, if the action genuinely has no observable confirmation, use a no-surface tag: fire-and-forget / rpc-read / intrinsic-to-caller.`,
+      );
     }
     return out;
   },

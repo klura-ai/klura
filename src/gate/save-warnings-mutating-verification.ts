@@ -212,18 +212,10 @@ function collectStructuralPaths(data: Strategy): string[] {
     out.add('frameFromPage.expression');
   }
 
-  if (obj.headers && typeof obj.headers === 'object') {
-    for (const key of Object.keys(obj.headers as Record<string, unknown>)) {
-      out.add(`headers.${key}`);
-    }
-  }
-
-  const body = obj.body;
-  if (body && typeof body === 'object' && !Array.isArray(body)) {
-    for (const key of Object.keys(body as Record<string, unknown>)) {
-      out.add(`body.${key}`);
-    }
-  }
+  // NOTE: request-side anchors (`body.*`, `headers.*`) are deliberately NOT
+  // emitted. They describe what the strategy SENDS, not how a side effect is
+  // CONFIRMED — citing `body.name` as a mutating-verification anchor is
+  // meaningless. Only response/prereq/frame surfaces verify a mutation.
 
   if (Array.isArray(obj.steps)) {
     obj.steps.forEach((_, i) => {
@@ -249,6 +241,13 @@ export const VERIFICATION_SHAPE_TAGS = [
   'fire-and-forget',
   'rpc-read',
 ] as const;
+
+/** The subset of shape tags that CLAIM a structural confirmation surface exists
+ *  (the strategy can observe the side effect landing). They're only honest when
+ *  the saved strategy actually carries a verification anchor (response.extract /
+ *  prereq / frameFromPage). The remaining tags — intrinsic-to-caller /
+ *  fire-and-forget / rpc-read — legitimately have NO verification surface. */
+export const CLAIMING_VERIFICATION_TAGS = ['transaction-shape', 'chat-shape', 'dom-poll'] as const;
 
 /** Justifying nouns that must accompany `fire-and-forget`. The tag
  *  alone is too cheap; the agent has to name the kind of action that

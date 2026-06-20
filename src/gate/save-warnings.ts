@@ -31,6 +31,7 @@ import { detectPrereqBindKeyMismatch } from './save-warnings-bind-mismatch';
 import {
   detectMutatingStrategyVerificationApproach,
   VERIFICATION_SHAPE_TAGS,
+  CLAIMING_VERIFICATION_TAGS,
   FIRE_AND_FORGET_JUSTIFYING_NOUNS,
   NON_DOM_VERIFICATION_MARKERS,
 } from './save-warnings-mutating-verification';
@@ -52,6 +53,7 @@ export {
   detectUnreferencedPrereqBinding,
   detectLookupSiblingNotReferenced,
   VERIFICATION_SHAPE_TAGS,
+  CLAIMING_VERIFICATION_TAGS,
   FIRE_AND_FORGET_JUSTIFYING_NOUNS,
   NON_DOM_VERIFICATION_MARKERS,
 };

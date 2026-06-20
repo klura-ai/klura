@@ -2289,6 +2289,58 @@ test('verify-required: answer with transaction-shape literal tag → save commit
   assert.equal(result.status, 'committed', JSON.stringify(result));
 });
 
+test('verify-required: transaction-shape on a strategy with NO verification surface → rejected', () => {
+  // A bare POST whose only structure is its request body can't confirm a side
+  // effect — a claiming tag (transaction-shape) is dishonest there. The agent
+  // must add a real anchor or use a no-surface tag (fire-and-forget / rpc-read /
+  // intrinsic-to-caller).
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'https://site.example.com',
+    endpoint: '/api/send',
+    method: 'POST',
+    headers: {},
+    body: { name: '{{name}}', email: '{{email}}' },
+    notes: {
+      params: {
+        name: { kind: 'text', example: 'a' },
+        email: { kind: 'email', example: 'a@b.c' },
+      },
+      anchor_type: 'unknown',
+    },
+  };
+  const result = runWarningClassifier(strategy, verifyCtx(), {
+    mutating_verification_required: 'transaction-shape: the server confirms it',
+    literal_provenance: { endpoint: 'static' },
+    observed_siblings: {},
+  });
+  assert.equal(result.status, 'rejected');
+  const issues = result.rejection.classifier_issues ?? [];
+  assert.ok(
+    issues.some((i) => /carries no verification surface/.test(i)),
+    `expected no-verification-surface rejection; got ${JSON.stringify(issues)}`,
+  );
+});
+
+test('verify-required: no-surface POST + fire-and-forget (with noun) → save commits', () => {
+  // The escape valve for a genuinely unverifiable mutation.
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'https://site.example.com',
+    endpoint: '/api/send',
+    method: 'POST',
+    headers: {},
+    body: { event: '{{event}}' },
+    notes: { params: { event: { kind: 'text', example: 'x' } }, anchor_type: 'unknown' },
+  };
+  const result = runWarningClassifier(strategy, verifyCtx(), {
+    mutating_verification_required: 'fire-and-forget — analytics telemetry beacon, idempotent',
+    literal_provenance: { endpoint: 'static' },
+    observed_siblings: {},
+  });
+  assert.equal(result.status, 'committed', JSON.stringify(result));
+});
+
 test('verify-required: answer with fire-and-forget + telemetry noun → save commits', () => {
   const strategy = mutatingPostStrategy();
   const result = runWarningClassifier(strategy, verifyCtx(), {

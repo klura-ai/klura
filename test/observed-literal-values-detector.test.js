@@ -28,7 +28,11 @@ registerSaveConfirmationDecider({
   },
 });
 
-const VERIFY_ACK = 'transaction-shape: server returns a confirmation field (test default)';
+// A no-surface tag: these fixtures are bare POSTs with no response.extract /
+// prereq / frameFromPage, so a claiming tag (transaction-shape) would be
+// rejected for having nothing to verify. intrinsic-to-caller is the honest ack
+// for a send (the caller's next read confirms it).
+const VERIFY_ACK = 'intrinsic-to-caller — the caller next reads the sent message back';
 
 const BAKED = 'c958faf6168bed67ea86dabacee3f5b7';
 
