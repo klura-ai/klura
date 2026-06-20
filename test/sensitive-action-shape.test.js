@@ -15,9 +15,37 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { detectSensitiveActionShape } = await import(
+const { detectSensitiveActionShape, detectSensitiveFieldNames } = await import(
   '../dist/gate/save-warnings-sensitive-shape.js'
 );
+
+// --- detectSensitiveFieldNames: the perform_action-time form-field detector ---
+
+test('detectSensitiveFieldNames: card + cvv form fields → labels', () => {
+  const labels = detectSensitiveFieldNames([
+    { name: 'name', type: 'text' },
+    { name: 'card_number', type: 'text' },
+    { name: 'cvv', type: 'text' },
+  ]);
+  assert.deepEqual([...labels].sort(), ['card_number', 'cvv']);
+});
+
+test('detectSensitiveFieldNames: type:"password" counts even with a non-matching name', () => {
+  const labels = detectSensitiveFieldNames([{ name: 'secret', type: 'password' }]);
+  assert.deepEqual(labels, ['password_in_body']);
+});
+
+test('detectSensitiveFieldNames: ordinary form → empty', () => {
+  const labels = detectSensitiveFieldNames([
+    { name: 'q', type: 'search' },
+    { name: 'category', type: 'text' },
+  ]);
+  assert.deepEqual(labels, []);
+});
+
+test('detectSensitiveFieldNames: tolerates missing name/type', () => {
+  assert.deepEqual(detectSensitiveFieldNames([{}, { type: 'text' }, { name: '' }]), []);
+});
 
 test('v8 platform-map repro: body {address, card_number, exp, cvv} → fires', () => {
   const strategy = {

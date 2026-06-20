@@ -20,6 +20,7 @@ import { asNonEmptyBoundedString, ValidationError } from '../validators';
 import { captureAndAppendForms } from './_internals';
 import { checkpointCaptureJournal } from '../phases/drive/build-capture-events';
 import { graphConfig, currentPhase } from '../phases/registry';
+import { detectSensitiveFieldNames } from '../gate/save-warnings-sensitive-shape';
 import { maybeFireSurfaceChanged } from '../phases/surface-changed';
 import { readInitialNavStatus } from './start-session';
 import { detectOriginBlocked } from '../phases/origin-blocked-detector';
@@ -126,6 +127,52 @@ export interface ActionResult {
  * unknown or already closed. Used by `performAction` (and other page-aware
  * tools) so the agent gets a single consistent rejection shape.
  */
+/**
+ * Second-stage map-mode consent for SENSITIVE-shape surfaces. The session-wide
+ * `mapGateAcked` covers ordinary mutating actions, but a surface whose captured
+ * form carries card / cvv / ssn / bank / password fields must re-prompt even
+ * after that ack — submitting a real payment / credential / account change is
+ * exactly what observe-only map mode must not do silently. Returns the rejection
+ * message to throw (and stages the consent nonce), or null when there's nothing
+ * sensitive in scope / consent was already granted. Detection is over structural
+ * FIELD NAMES (crisp), never page prose.
+ */
+function buildSensitiveActionConsent(
+  session: Session,
+  action: string,
+  selector: string,
+  sessionId: string,
+): string | null {
+  if (!graphConfig(session).gateMutatingActions) return null;
+  if (!MUTATING_MAP_GATE_ACTIONS.has(action)) return null;
+  if (session.sensitiveActionAcked === true) return null;
+  const formFields = (session.domFormsObserved ?? []).flatMap((f) => f.fields);
+  const sensitive = detectSensitiveFieldNames(formFields);
+  if (sensitive.length === 0) return null;
+
+  if (!session.pendingActionConsents) session.pendingActionConsents = new Map();
+  const nonce = randomBytes(2).toString('hex');
+  session.pendingActionConsents.set(nonce, { action, selector, sensitive: true });
+  return [
+    'invalid_action: sensitive_action_consent_required',
+    '',
+    `This map surface carries sensitive-shape form fields (${sensitive.join(', ')}). A mutating ` +
+      `action here could submit a real payment / credential / account change on the user's behalf — ` +
+      `which observe-only map mode must NOT do silently, even though general map consent was already ` +
+      `granted. This second-stage gate is separate from the session-wide ack.`,
+    '',
+    'Only ack if the user explicitly authorized acting on this sensitive surface:',
+    '  ack_checkpoint({',
+    `    session_id: "${sessionId}",`,
+    `    checkpoint_token: "${nonce}",`,
+    '    user_response: "<one sentence: the user authorized THIS specific sensitive action>"',
+    '  })',
+    '',
+    'To decline (the safe default for exploration): ' +
+      'ack_checkpoint({session_id, checkpoint_token, cancelled: true, reason: "<why>"}).',
+  ].join('\n');
+}
+
 /**
  * Fold framenavigated-buffer entries (click / submit / SPA route changes the
  * explicit-navigate path doesn't see) into both `domNavigations` (url_graph edge
@@ -514,6 +561,11 @@ export async function performAction(
       throw new Error(lines.join('\n'));
     }
   }
+
+  // Second-stage consent: a sensitive-shape surface re-prompts even after the
+  // session-wide map ack (see buildSensitiveActionConsent).
+  const sensitiveConsent = buildSensitiveActionConsent(session, action, selector, sessionId);
+  if (sensitiveConsent !== null) throw new Error(sensitiveConsent);
 
   // Stamp the action's wall-clock time BEFORE dispatching — drivers await
   // navigation / settle inside click/type/etc, and captured XHRs land with

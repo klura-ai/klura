@@ -161,16 +161,27 @@ export async function ackCheckpoint(args: AckCheckpointArgs): Promise<AckCheckpo
           'action-consent ack requires a non-empty `user_response` — one sentence on what you intend to map and why the session is exploratory',
         );
       }
-      // Session-wide flip: one ack covers all subsequent mutating actions.
-      // The pending nonce is consumed but its (action, selector) is not
-      // recorded — the bool is the only state we read at gate-check time.
-      session.mapGateAcked = true;
+      // Sensitive-shape consent is a separate second-stage flag; the general
+      // map ack does NOT cover it (and vice versa). Flip the matching flag only.
       session.pendingActionConsents.delete(args.checkpoint_token);
+      if (pending.sensitive === true) {
+        session.sensitiveActionAcked = true;
+        return {
+          ok: true,
+          _hint:
+            'Sensitive-action consent granted. Subsequent sensitive-shape actions this session ' +
+            'admit without re-prompting. This is separate from the session-wide map ack.',
+        };
+      }
+      // Session-wide flip: one ack covers all subsequent ORDINARY mutating
+      // actions. Sensitive-shape surfaces still re-prompt via their own gate.
+      session.mapGateAcked = true;
       return {
         ok: true,
         _hint:
-          'Map session unlocked. All subsequent mutating actions in this session will admit ' +
-          'without re-prompting — the consent applies session-wide. End the session via ' +
+          'Map session unlocked. Ordinary mutating actions in this session will admit ' +
+          'without re-prompting — the consent applies session-wide. Sensitive-shape surfaces ' +
+          '(payment / credential / account-change forms) still prompt separately. End the session via ' +
           'end_drive when done; a fresh start_session({graph: "map"}) requires a new ack.',
       };
     }

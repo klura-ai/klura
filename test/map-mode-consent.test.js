@@ -257,6 +257,45 @@ test('map graph: session-wide ack (mapGateAcked=true) admits any subsequent muta
   }
 });
 
+test('map graph: sensitive-shape surface re-prompts even after the session-wide ack', async () => {
+  const { session, getClickCount, restore } = fakeSession({ graph: 'map' });
+  try {
+    // General map consent already granted...
+    session.mapGateAcked = true;
+    // ...but the current surface is a checkout form with card fields.
+    session.domFormsObserved = [
+      {
+        url: 'https://x.example/checkout',
+        action: '/checkout',
+        method: 'post',
+        fields: [
+          { name: 'card_number', type: 'text' },
+          { name: 'cvv', type: 'text' },
+        ],
+        at: Date.now(),
+      },
+    ];
+    let err;
+    try {
+      await performAction(session.id, 'click', 'button:has-text("Place order")');
+    } catch (e) {
+      err = e;
+    }
+    assert.ok(err, 'sensitive action must re-prompt despite mapGateAcked');
+    assert.match(err.message, /sensitive_action_consent_required/);
+    assert.match(err.message, /card_number/);
+    assert.equal(getClickCount(), 0, 'sensitive action did NOT dispatch');
+
+    // Second-stage consent granted → it admits.
+    session.sensitiveActionAcked = true;
+    const r = await performAction(session.id, 'click', 'button:has-text("Place order")');
+    assert.ok(r);
+    assert.equal(getClickCount(), 1, 'admits after sensitive consent');
+  } finally {
+    restore();
+  }
+});
+
 test('map graph: cancellation does NOT flip the session bool', async () => {
   // Consenting flips mapGateAcked; cancelling clears the pending nonce
   // but leaves mapGateAcked false so the next mutating action prompts

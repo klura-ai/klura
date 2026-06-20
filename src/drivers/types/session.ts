@@ -450,13 +450,24 @@ export interface Session {
    */
   mapGateAcked?: boolean;
   /**
+   * Separate, second-stage consent for SENSITIVE-shape actions (a surface whose
+   * captured form carries card_number / cvv / ssn / bank_account / password
+   * fields). The session-wide `mapGateAcked` deliberately does NOT cover these —
+   * firing a checkout/credential form is exactly what map mode shouldn't do
+   * silently — so a sensitive action re-prompts even after the general ack. One
+   * ack flips this for the rest of the session.
+   */
+  sensitiveActionAcked?: boolean;
+  /**
    * Mutating-action consent staging. Pending consents indexed by their
    * 4-char nonce — when `perform_action` raises the consent checkpoint, the
    * runtime stores `{action, selector}` here so `ack_checkpoint` can echo
-   * the nonce back, validate it, and flip `mapGateAcked` to true.
+   * the nonce back, validate it, and flip the matching consent flag to true.
+   * `sensitive` marks a second-stage sensitive-shape consent (flips
+   * `sensitiveActionAcked`); otherwise the ack flips `mapGateAcked`.
    * Cleared on cancellation (no flip) or on successful ack (flip + delete).
    */
-  pendingActionConsents?: Map<string, { action: string; selector: string }>;
+  pendingActionConsents?: Map<string, { action: string; selector: string; sensitive?: boolean }>;
   /**
    * Deferred post-save 2xx verification. `save_strategy` sets this when it
    * commits a strategy and emits the `post_save_validation_consent` checkpoint;

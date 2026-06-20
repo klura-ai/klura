@@ -76,6 +76,34 @@ const SENSITIVE_FIELD_PATTERNS: ReadonlyArray<{ label: string; regex: RegExp }> 
 ];
 
 /**
+ * Match a flat list of field names against the sensitive-shape patterns,
+ * returning the distinct matched labels (e.g. `['card_number', 'cvv']`). Shared
+ * by the save-time strategy detector and the perform_action-time map-mode gate —
+ * both reason over structural FIELD NAMES, never page prose (respects the
+ * crisp-vs-fuzzy admissibility test). A field with `type: "password"` also
+ * counts as a credential field regardless of its name.
+ */
+export function detectSensitiveFieldNames(
+  fields: ReadonlyArray<{ name?: string; type?: string }>,
+): string[] {
+  const labels = new Set<string>();
+  for (const f of fields) {
+    if (typeof f.type === 'string' && f.type.toLowerCase() === 'password') {
+      labels.add('password_in_body');
+    }
+    const name = f.name;
+    if (typeof name !== 'string' || name.length === 0) continue;
+    for (const { label, regex } of SENSITIVE_FIELD_PATTERNS) {
+      if (regex.test(name)) {
+        labels.add(label);
+        break;
+      }
+    }
+  }
+  return [...labels];
+}
+
+/**
  * Walk an object value emitting every key name encountered (recursive into
  * nested objects). Skips arrays' integer indices — only string keys count.
  * Returns a Set so the caller doesn't double-flag the same key path.
