@@ -120,6 +120,47 @@ test('absent snapshot → false, nothing folded', () => {
   assert.equal(flushFromJournal('no_such_session', { inferCaps: true }), false);
 });
 
+test('a navigation whose captured response was 404 infers no observed capability', () => {
+  const platform = 'flush-p404';
+  const sid = 'sess_f404';
+  const events = [
+    {
+      at: 1000,
+      session_id: sid,
+      platform,
+      kind: 'session_meta',
+      payload: { started_at: 900, ended_at: 1000, outcome: 'no_save' },
+    },
+    {
+      at: 1001,
+      session_id: sid,
+      platform,
+      kind: 'http_request',
+      payload: { method: 'GET', url: `https://${platform}/view_api`, status: 404 },
+    },
+    {
+      at: 1002,
+      session_id: sid,
+      platform,
+      kind: 'dom_navigation',
+      payload: { url: `https://${platform}/view_api`, via: 'nav' },
+    },
+    {
+      at: 1003,
+      session_id: sid,
+      platform,
+      kind: 'dom_navigation',
+      payload: { url: `https://${platform}/orders`, via: 'nav' },
+    },
+  ];
+  writeJournalSnapshot(sid, snap(sid, platform, events));
+  assert.equal(flushFromJournal(sid, { inferCaps: true }), true);
+  const lb = loadLogbook(platform);
+  const names = lb.observed_capabilities.map((c) => c.name);
+  assert.ok(!names.includes('view_api'), 'no phantom capability from the 404 nav');
+  assert.ok(names.includes('view_orders'), 'the 200 nav still infers a capability');
+});
+
 test('snapshot missing session_meta → synthesized, fold still succeeds (no infinite re-fold)', () => {
   const platform = 'flush-p3';
   const sid = 'sess_f3';

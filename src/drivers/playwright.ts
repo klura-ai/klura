@@ -921,6 +921,7 @@ export class PlaywrightDriver extends BrowserDriver {
       intercepted: [],
       intercepting: false,
       hasTouch: options.hasTouch === true,
+      isMobile: options.isMobile === true,
       wsFrames: [],
       subPages: [],
     };

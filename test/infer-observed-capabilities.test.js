@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { inferObservedCapabilitiesFromGraph } = await import(
+const { inferObservedCapabilitiesFromGraph, normalizeUrlForGraph } = await import(
   '../dist/working-dir/url-graph.js'
 );
 
@@ -96,4 +96,29 @@ test('GET form → no inference (only write methods generate write capabilities)
     [],
   );
   assert.equal(out.length, 0);
+});
+
+test('navigation to a 4xx/5xx URL is excluded (404 probe ≠ capability)', () => {
+  const failedUrls = new Set([
+    normalizeUrlForGraph('https://x.example/view_api'),
+    normalizeUrlForGraph('https://x.example/status'),
+  ]);
+  const out = inferObservedCapabilitiesFromGraph(
+    [nav('https://x.example/view_api'), nav('https://x.example/status'), nav('https://x.example/orders')],
+    [],
+    [],
+    failedUrls,
+  );
+  // Only the 200 /orders nav survives; the two dead-URL probes are dropped.
+  const names = out.map((e) => e.name);
+  assert.deepEqual(names, ['view_orders']);
+});
+
+test('failedUrls omitted → behaves exactly as before (no exclusion)', () => {
+  const out = inferObservedCapabilitiesFromGraph(
+    [nav('https://x.example/orders'), nav('https://x.example/cart')],
+    [],
+    [],
+  );
+  assert.equal(out.length, 2);
 });

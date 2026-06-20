@@ -102,3 +102,87 @@ test('viewer serialises WS input handlers — pointer ops never interleave', asy
   assert.ok(di >= 0 && ui >= 0, `expected down+up in ops, got [${ops.join(',')}]`);
   assert.ok(di < ui, `down must precede up, got [${ops.join(',')}]`);
 });
+
+// Modality is keyed on isMobile, not hasTouch. The default `desktop` preset
+// reports hasTouch:true (so touch clients can connect) but lays its page out for
+// a pointer — it must receive MOUSE input. Dispatching synthetic touch into it
+// makes hover moves throw at CDP and drops clicks on cursor drift.
+async function runClickStream(session) {
+  const ops = [];
+  const rec = (name) => async () => {
+    ops.push(name);
+  };
+  const driver = /** @type {any} */ ({
+    screenshotJpeg: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+    onFocusChange: async () => () => {},
+    onSubPagesChange: async () => () => {},
+    viewportSize: () => ({ width: 1280, height: 720 }),
+    setViewport: async () => {},
+    mouseDown: rec('down'),
+    mouseUp: rec('up'),
+    mouseMove: rec('move'),
+    mouseClick: rec('click'),
+    touchStart: rec('tdown'),
+    touchMove: rec('tmove'),
+    touchEnd: rec('tup'),
+    touchTap: rec('ttap'),
+    keyPress: rec('key'),
+    typeText: rec('type'),
+    scroll: rec('scroll'),
+  });
+  const id = `mod-${session.id}`;
+  const viewer = await startViewer(id, driver, session, {});
+  const ws = new WebSocket(
+    `ws://localhost:${viewer.port}/ws?token=${encodeURIComponent(viewer.token)}&v=${encodeURIComponent(viewer.integrity)}`,
+  );
+  await new Promise((res, rej) => {
+    ws.on('open', res);
+    ws.on('error', rej);
+  });
+  ws.send(JSON.stringify({ type: 'capabilities', hasTouch: false, screenWidth: 1280 }));
+  await sleep(80);
+  // Hover stream with no button down, then a still click.
+  for (const m of [
+    { type: 'pointer_move', x: 0.4, y: 0.5 },
+    { type: 'pointer_move', x: 0.5, y: 0.5 },
+    { type: 'pointer_down', x: 0.5, y: 0.5 },
+    { type: 'pointer_up', x: 0.5, y: 0.5 },
+  ]) {
+    ws.send(JSON.stringify(m));
+  }
+  await sleep(300);
+  ws.close();
+  await stopViewer(id);
+  return ops;
+}
+
+test('desktop touch-capable session dispatches MOUSE, not touch', async () => {
+  const ops = await runClickStream({
+    id: 'desktop',
+    hasTouch: true,
+    isMobile: false,
+    subPages: [],
+  });
+  assert.ok(ops.includes('down') && ops.includes('up'), `expected mouse down/up, got [${ops}]`);
+  assert.ok(
+    !ops.some((o) => o.startsWith('t')),
+    `desktop must not emit touch ops, got [${ops}]`,
+  );
+});
+
+test('mobile session dispatches touch, and hover moves never touchMove without a touch down', async () => {
+  const ops = await runClickStream({
+    id: 'mobile',
+    hasTouch: true,
+    isMobile: true,
+    subPages: [],
+  });
+  assert.ok(ops.includes('tdown') && ops.includes('tup'), `expected touch down/up, got [${ops}]`);
+  // The two hover pointer_moves arrived before pointer_down — they must NOT
+  // have produced touchMove calls (CDP would reject them with no active touch).
+  const firstDown = ops.indexOf('tdown');
+  assert.ok(
+    !ops.slice(0, firstDown).includes('tmove'),
+    `hover moves before touch-down must be dropped, got [${ops}]`,
+  );
+});

@@ -337,6 +337,10 @@ export function inferObservedCapabilitiesFromGraph(
   navigations: SessionNavigation[],
   formsObserved: SessionFormObservation[],
   existingCaps: ObservedPlatformCapability[],
+  /** Normalized URLs whose captured response was a 4xx/5xx. A navigation to a
+   *  dead URL (a 404 probe during exploration) is not a capability — inferring
+   *  one pollutes the platform map with phantom `view_*` entries. */
+  failedUrls?: ReadonlySet<string>,
 ): Array<{
   name: string;
   evidence: { source: string; [k: string]: unknown };
@@ -382,6 +386,7 @@ export function inferObservedCapabilitiesFromGraph(
     if (seenNavUrls.has(norm)) continue;
     seenNavUrls.add(norm);
     if (formCoveredUrls.has(norm)) continue;
+    if (failedUrls?.has(norm)) continue;
     const name = nameForNavigation(nav.url);
     if (!name || taken.has(name)) continue;
     out.push({

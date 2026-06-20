@@ -15,6 +15,7 @@ import { deleteJournal, readJournalSnapshot } from './capture-journal';
 import { ingestCaptureEvents } from './writer';
 import {
   inferObservedCapabilitiesFromGraph,
+  normalizeUrlForGraph,
   type SessionFormObservation,
   type SessionNavigation,
 } from './url-graph';
@@ -23,6 +24,7 @@ import type {
   CaptureEvent,
   DomFormObservedPayload,
   DomNavigationPayload,
+  HttpRequestPayload,
   SessionMetaPayload,
 } from './schema';
 
@@ -88,6 +90,7 @@ function inferObservedCapsFromEvents(platform: string, events: CaptureEvent[]): 
   try {
     const navigations: SessionNavigation[] = [];
     const forms: SessionFormObservation[] = [];
+    const failedUrls = new Set<string>();
     for (const ev of events) {
       if (ev.kind === 'dom_navigation') {
         const p = ev.payload as DomNavigationPayload;
@@ -98,10 +101,15 @@ function inferObservedCapsFromEvents(platform: string, events: CaptureEvent[]): 
       } else if (ev.kind === 'dom_form_observed') {
         const p = ev.payload as DomFormObservedPayload;
         forms.push({ url: p.url, action: p.action, method: p.method, fields: p.fields, at: ev.at });
+      } else if (ev.kind === 'http_request') {
+        const p = ev.payload as HttpRequestPayload;
+        if (typeof p.status === 'number' && p.status >= 400) {
+          failedUrls.add(normalizeUrlForGraph(p.url));
+        }
       }
     }
     const existing = readObservedCapabilities(platform);
-    const inferred = inferObservedCapabilitiesFromGraph(navigations, forms, existing);
+    const inferred = inferObservedCapabilitiesFromGraph(navigations, forms, existing, failedUrls);
     for (const entry of inferred) {
       try {
         recordObservedCapability(platform, {

@@ -326,12 +326,22 @@ export interface Session {
    */
   identity?: string;
   /**
-   * Whether this context was created with touch support enabled. Drivers should
-   * honor this when forwarding pointer events from the remote viewer: dispatch
-   * as touch events if true, mouse events otherwise. Set once at session
+   * Whether this context was created with touch support enabled — true even for
+   * the default desktop preset, which advertises touch so touch *clients* can
+   * connect via the remote viewer. Not the right signal for choosing remote-
+   * viewer input modality; use `isMobile` for that. Set once at session
    * creation; do not mutate.
    */
   hasTouch?: boolean;
+  /**
+   * Whether this context is mobile-emulated (narrow viewport, mobile UA, page
+   * laid out for touch). This is the signal the remote viewer keys on to decide
+   * input modality: dispatch synthetic touch when true, mouse when false. A
+   * touch-capable desktop (`hasTouch:true, isMobile:false`) lays out for a
+   * pointer and must receive mouse input. Set once at session creation; do not
+   * mutate.
+   */
+  isMobile?: boolean;
   /** Device profile name from the device registry, set at session creation. */
   device?: string;
   /**

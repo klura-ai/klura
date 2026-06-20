@@ -805,14 +805,22 @@ export async function startViewer(
     activePage: 'main',
   };
 
-  // Whether to dispatch pointer events as touches (true) or mouse (false). Read
-  // from the session at viewer-start time — cheap, and only ever needs to match
-  // the server browser's advertised capabilities, not the client's. A desktop
-  // client pressing into a touch-emulated server still dispatches as touch; a
-  // mobile client pressing into a desktop server still dispatches as mouse.
-  // Modality matches what the server browser tells the page it supports, which
-  // is the honest thing to do.
-  const touchMode = session.hasTouch === true;
+  // Whether to dispatch pointer events as touches (true) or mouse (false). Keyed
+  // on `isMobile`, not `hasTouch`: a mobile-emulated context lays its page out
+  // for touch and binds touch handlers, so synthetic touch is the honest input;
+  // a desktop context — even a touch-capable one like the default `desktop`
+  // preset (hasTouch:true so touch *clients* can connect) — lays out for a
+  // pointer, binds click/mousedown/hover, and expects mouse. Dispatching touch
+  // into a desktop page is lossy: hover never fires, and a desktop `mousemove`
+  // hover stream becomes touchMove-without-an-active-touch, which CDP rejects.
+  const touchMode = session.isMobile === true;
+
+  // Tracks whether a touch sequence is currently down. CDP rejects a touchMove
+  // that isn't bracketed by touchStart/touchEnd, so a hover-move (pointer_move
+  // with no button pressed) arriving on the touch path must be dropped rather
+  // than dispatched. Only relevant when touchMode is on and a desktop client
+  // (which emits hover moves) drives a mobile-emulated session.
+  let touchActive = false;
 
   wss.on('connection', (ws, req) => {
     const connUrl = new URL(req.url ?? '/', 'http://localhost');
@@ -1108,8 +1116,10 @@ export async function startViewer(
             // the server context's advertised touch support.
             case 'pointer_down':
             case 'mousedown':
-              if (useTouch) await driver.touchStart(session, x, y);
-              else await driver.mouseDown(session, x, y, pageOpts);
+              if (useTouch) {
+                await driver.touchStart(session, x, y);
+                touchActive = true;
+              } else await driver.mouseDown(session, x, y, pageOpts);
               break;
             case 'pointer_move': {
               // Catmull-Rom interpolation: buffer real waypoints and
@@ -1121,7 +1131,8 @@ export async function startViewer(
               moveHistory.push([event.x ?? 0, event.y ?? 0]);
               if (moveHistory.length > 4) moveHistory.shift();
               if (useTouch) {
-                await driver.touchMove(session, x, y);
+                // Drop hover moves: CDP rejects a touchMove with no touch down.
+                if (touchActive) await driver.touchMove(session, x, y);
               } else if (moveHistory.length < 2) {
                 await driver.mouseMove(session, x, y, undefined, pageOpts);
               } else {
@@ -1165,8 +1176,10 @@ export async function startViewer(
             }
             case 'pointer_up':
             case 'mouseup':
-              if (useTouch) await driver.touchEnd(session, x, y);
-              else await driver.mouseUp(session, x, y, pageOpts);
+              if (useTouch) {
+                await driver.touchEnd(session, x, y);
+                touchActive = false;
+              } else await driver.mouseUp(session, x, y, pageOpts);
               break;
             case 'tap':
             case 'click':
@@ -1177,8 +1190,9 @@ export async function startViewer(
             // Legacy names — kept so older viewer HTML caches don't break
             // during a soft reload. Same modality-aware dispatch.
             case 'mousemove':
-              if (useTouch) await driver.touchMove(session, x, y);
-              else await driver.mouseMove(session, x, y, undefined, pageOpts);
+              if (useTouch) {
+                if (touchActive) await driver.touchMove(session, x, y);
+              } else await driver.mouseMove(session, x, y, undefined, pageOpts);
               break;
 
             case 'keypress':

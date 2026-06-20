@@ -13,7 +13,10 @@ import {
   recordObservedCapability,
   appendAckedNoiseEndpoints,
 } from '../../working-dir/logbook';
-import { inferObservedCapabilitiesFromGraph } from '../../working-dir/url-graph';
+import {
+  inferObservedCapabilitiesFromGraph,
+  normalizeUrlForGraph,
+} from '../../working-dir/url-graph';
 import { deleteJournal } from '../../working-dir/capture-journal';
 import { buildSessionSummary, countPerformActionCalls } from './session-summary';
 import { inferObservedCapabilitiesFromTriage } from './triage-inference';
@@ -205,6 +208,20 @@ export type EndDriveAuditRejection = {
   persist_call_count: number;
   end_drive_attempts: number;
 };
+
+/** Normalized URLs whose captured response was a 4xx/5xx — dead-URL probes that
+ *  must not be inferred as observed capabilities. */
+function collectFailedNavUrls(
+  intercepted: ReadonlyArray<{ url?: string; status?: number | null }>,
+): Set<string> {
+  const failedUrls = new Set<string>();
+  for (const req of intercepted) {
+    if (typeof req.status === 'number' && req.status >= 400 && typeof req.url === 'string') {
+      failedUrls.add(normalizeUrlForGraph(req.url));
+    }
+  }
+  return failedUrls;
+}
 
 export async function endDrive(
   sessionId: string,
@@ -602,10 +619,14 @@ export async function endDrive(
   if (platform && graphConfig(session).inferObservedCapabilitiesAtClose) {
     try {
       const existing = readObservedCapabilities(platform);
+      // Navigations whose captured response was 4xx/5xx are dead-URL probes,
+      // not capabilities — exclude them so exploration 404s don't pollute the
+      // platform map with phantom `view_*` entries.
       const inferred = inferObservedCapabilitiesFromGraph(
         session.domNavigations ?? [],
         session.domFormsObserved ?? [],
         existing,
+        collectFailedNavUrls(session.intercepted),
       );
       for (const entry of inferred) {
         try {

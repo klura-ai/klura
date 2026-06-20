@@ -20,6 +20,7 @@ import { appendAbortEvent } from '../working-dir/logbook';
 import { clearStartersForSession } from '../response/starter-cache';
 import { clearForSession as clearSessionObservations } from '../response/session-observations';
 import { clearObservedSessionTracking } from '../working-dir/logbook';
+import { deleteJournal } from '../working-dir/capture-journal';
 import { invokeCheckpointAndGate, type CheckpointEnvelope } from '../checkpoints';
 import { TOOL_NAMES } from '../vocab';
 import { didYouMeanSuffix } from '../utils/string-distance';
@@ -246,6 +247,11 @@ export async function performAbortTeardown(
   clearStartersForSession(sessionId);
   clearSessionObservations(sessionId);
   clearObservedSessionTracking(sessionId);
+  // Drop the capture journal: a deliberate abort means these captures are
+  // unwanted. Left behind, the next start_session's orphan-recovery would fold
+  // the snapshot with inferCaps:true and stamp the very capabilities the abort
+  // discarded (e.g. 404-probe `view_*` entries) onto the platform logbook.
+  deleteJournal(sessionId);
 }
 
 export const TOOL_DEF: ToolDef = {
