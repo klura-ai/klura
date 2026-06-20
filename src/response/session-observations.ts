@@ -328,6 +328,86 @@ export function deriveLinkUrlObservations(rawTree: string, baseUrl: string): Par
 }
 
 /**
+ * Pure function: harvest enum observations for PATH-SEGMENT templated params.
+ *
+ * `deriveLinkUrlObservations` only grounds `?param=value` query slots. A param
+ * that lives in a path segment (`/users/{{recipient}}/reply`) never gets
+ * observed_values that way, forcing the agent into the `kind:"text"` escape
+ * hatch even when the page clearly enumerates the values (e.g. sidebar links
+ * `/users/alice/inbox`, `/users/bob/inbox`, `/users/charlie/inbox`).
+ *
+ * Given the strategy's endpoint template and the session's captured URLs
+ * (navigations + intercepted requests + link hrefs), for each `{{param}}` at a
+ * FIXED path position whose preceding segments are all static, group captured
+ * paths by their shape (the param position blanked out) and emit an observation
+ * per distinct value — but only for groups with ≥2 distinct values, the same
+ * "is this really an enum" structural signal `url_variance` already uses. The
+ * static-prefix + same-shape + ≥2-distinct guards keep stray routes
+ * (`/users/settings`) from being harvested as phantom enum values.
+ */
+export function derivePathSegmentObservations(
+  endpoint: string,
+  capturedUrls: ReadonlyArray<string>,
+  baseUrl: string,
+): ParamObservation[] {
+  const tmplPath = endpoint.split('?')[0] ?? endpoint;
+  const tmplSegs = tmplPath.split('/').filter((s) => s.length > 0);
+  const isPlaceholder = (s: string): boolean => /^\{\{\s*[\w.]+\s*\}\}$/.test(s);
+  const paramAt: Array<{ pos: number; name: string }> = [];
+  for (let i = 0; i < tmplSegs.length; i += 1) {
+    const seg = tmplSegs[i] ?? '';
+    const m = /^\{\{\s*([\w.]+)\s*\}\}$/.exec(seg);
+    if (m?.[1]) paramAt.push({ pos: i, name: m[1] });
+  }
+  if (paramAt.length === 0) return [];
+
+  const capturedSegs: string[][] = [];
+  for (const u of capturedUrls) {
+    if (typeof u !== 'string') continue;
+    try {
+      const p = new URL(u, baseUrl || undefined).pathname;
+      capturedSegs.push(p.split('/').filter((s) => s.length > 0));
+    } catch {
+      /* relative href with no base / non-URL — skip */
+    }
+  }
+
+  const out: ParamObservation[] = [];
+  for (const { pos, name } of paramAt) {
+    const prefix = tmplSegs.slice(0, pos);
+    // Only handle params whose preceding segments are all static — a templated
+    // earlier segment makes positional matching ambiguous.
+    if (prefix.some(isPlaceholder)) continue;
+    const groups = new Map<string, Set<string>>();
+    for (const segs of capturedSegs) {
+      if (segs.length <= pos) continue;
+      if (prefix.some((s, k) => segs[k] !== s)) continue;
+      const value = segs[pos];
+      if (!value || isPlaceholder(value)) continue;
+      const shape = segs.map((s, k) => (k === pos ? '*' : s)).join('/');
+      let bucket = groups.get(shape);
+      if (!bucket) {
+        bucket = new Set();
+        groups.set(shape, bucket);
+      }
+      bucket.add(value);
+    }
+    for (const values of groups.values()) {
+      if (values.size < 2) continue;
+      for (const value of values) {
+        out.push({
+          param_name: name,
+          value,
+          source: { kind: 'url_variance', label: value },
+          observed_at: Date.now(),
+        });
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * Record every `page_link` observation derived from a captured a11y tree.
  * Idempotent across repeated harvests — `recordParamObservation` dedupes on
  * (value, label, source.kind) and caps per param.

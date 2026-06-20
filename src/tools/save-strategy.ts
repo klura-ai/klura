@@ -36,6 +36,7 @@ import {
   getAllParamObservations,
   harvestUrlVarianceObservations,
   harvestUiClickObservationsForEntry,
+  derivePathSegmentObservations,
   type ParamObservation,
 } from '../response/session-observations';
 import { enumerateStringParams, readCurrentUrl } from './_internals';
@@ -846,7 +847,37 @@ export async function saveStrategy(
   }
 
   // ---- Build audit context ----
-  const observedParamValues = sessionId ? getAllParamObservations(sessionId) : undefined;
+  let observedParamValues = sessionId ? getAllParamObservations(sessionId) : undefined;
+  // Enrich with PATH-SEGMENT enum observations: query-slot grounding already
+  // rode `getAllParamObservations`, but a `{{param}}` living in a path segment
+  // (`/users/{{recipient}}/reply`) is grounded by matching the session's
+  // captured URLs against the endpoint template here. See
+  // derivePathSegmentObservations.
+  if (observedParamValues && sessionForAudit) {
+    const dataObj = data as Record<string, unknown>;
+    const endpoint = typeof dataObj.endpoint === 'string' ? dataObj.endpoint : '';
+    if (endpoint) {
+      const capturedUrls: string[] = [];
+      for (const r of sessionForAudit.intercepted) {
+        if (typeof r.url === 'string') capturedUrls.push(r.url);
+      }
+      for (const n of sessionForAudit.domNavigations ?? []) {
+        if (typeof n.url === 'string') capturedUrls.push(n.url);
+      }
+      const baseUrl = typeof dataObj.baseUrl === 'string' ? dataObj.baseUrl : '';
+      const pathObs = derivePathSegmentObservations(endpoint, capturedUrls, baseUrl);
+      if (pathObs.length > 0) {
+        const merged: Record<string, typeof pathObs> = {};
+        for (const [k, v] of Object.entries(observedParamValues)) merged[k] = [...v];
+        for (const obs of pathObs) {
+          const bucket = merged[obs.param_name] ?? [];
+          bucket.push(obs);
+          merged[obs.param_name] = bucket;
+        }
+        observedParamValues = merged;
+      }
+    }
+  }
   const auditCtx = {
     sessionId: sessionId ?? '',
     platform,
