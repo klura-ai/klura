@@ -430,13 +430,6 @@ export interface CapabilityLogbookEntry {
    */
   last_verified_at?: string;
   last_verified_tier?: 'fetch' | 'page-script' | 'recorded-path';
-  data_sufficiency: {
-    captures_of_target_endpoint: number;
-    field_stability_confidence: 'low' | 'medium' | 'high';
-    known_rotating_fields: string[];
-    known_stable_fields: string[];
-    ambiguous_fields: string[];
-  };
   last_lift_attempt_at?: string;
   days_since_last_attempt?: number;
   sessions_since_last_attempt?: number;

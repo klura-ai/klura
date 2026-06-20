@@ -54,13 +54,6 @@ function emptyCapabilityEntry(): CapabilityLogbookEntry {
     lift_attempts: [],
     strategy_events: [],
     current_tier: 'none',
-    data_sufficiency: {
-      captures_of_target_endpoint: 0,
-      field_stability_confidence: 'low',
-      known_rotating_fields: [],
-      known_stable_fields: [],
-      ambiguous_fields: [],
-    },
   };
 }
 
