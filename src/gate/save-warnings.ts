@@ -691,17 +691,17 @@ function findListingUrlForValues(
     if (req.responseBody === undefined || req.responseBody === null) continue;
     const bodyStr = bodyAsString(req.responseBody);
     if (bodyStr === null) continue;
-    // Skip HTML responses. The substring check below matches "italian"
-    // inside `data-category="italian"` on a page just as readily as inside
-    // a real JSON listing — the homepage HTML would then be flagged as the
-    // listing endpoint and the agent gets told to save it as a sibling
-    // `list_<entity>` capability, which is nonsense (it's a UI page, not a
-    // data endpoint). A real listing endpoint returns a JSON object or
-    // array; the `bodyAsString` upstream already serializes object bodies
-    // via JSON.stringify, so the JSON-shape check is the right
-    // discriminator. Raw HTML strings start with `<`.
+    // A JSON object/array body is an unambiguous listing — substring presence of
+    // every value is sufficient. An HTML body needs corroboration: the substring
+    // check alone matches "italian" inside `data-category="italian"` just as
+    // readily as a real listing, so an HTML page is only treated as the listing
+    // when one of the values is also used in a real captured request/navigation
+    // (the click→XHR proof the contract-side detector requires). This grounds
+    // SSR listings (the category index IS the homepage HTML) without flagging an
+    // arbitrary page that happens to carry the values as attributes.
     const trimmed = bodyStr.trimStart();
-    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) continue;
+    const isJsonBody = trimmed.startsWith('{') || trimmed.startsWith('[');
+    if (!isJsonBody && !valuesCorroboratedByRequest(intercepted, values, req.url)) continue;
     const allPresent = values.every(
       (v) => bodyStr.includes(`"${v}"`) || bodyStr.includes(JSON.stringify(v)),
     );
@@ -711,6 +711,30 @@ function findListingUrlForValues(
     return req.url;
   }
   return null;
+}
+
+/** True when one of `values` appears as a query value or path segment in some
+ *  captured request OTHER than `selfUrl` — the click→XHR proof that an HTML
+ *  page's substring match reflects a real navigable enum, not a stray
+ *  `data-*` attribute. */
+function valuesCorroboratedByRequest(
+  intercepted: ReadonlyArray<InterceptedRequest>,
+  values: string[],
+  selfUrl: string,
+): boolean {
+  const want = new Set(values);
+  for (const r of intercepted) {
+    if (r.url === selfUrl) continue;
+    let u: URL;
+    try {
+      u = new URL(r.url);
+    } catch {
+      continue;
+    }
+    for (const v of u.searchParams.values()) if (want.has(v)) return true;
+    for (const seg of u.pathname.split('/')) if (seg && want.has(seg)) return true;
+  }
+  return false;
 }
 
 function isListingAlreadySaved(

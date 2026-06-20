@@ -93,6 +93,27 @@ test('listing detector does NOT fire on an HTML page that contains the values as
   );
 });
 
+test('HTML listing IS flagged when a captured navigation corroborates the values (SSR listing)', () => {
+  // The agent clicked a category link → a real navigation to
+  // /top-restaurants?category=italian. That click→XHR proof means the homepage
+  // HTML genuinely IS the category listing, so it should be flagged (the JSON-
+  // only skip was hiding SSR listings the contract already promises to enforce).
+  const clickNav = {
+    method: 'GET',
+    url: 'http://example.test/top-restaurants?category=italian',
+    responseBody: '<html><body>results</body></html>',
+  };
+  const warnings = detectEnumParamListingUnfactored(
+    makeStrategy(),
+    { intercepted: [HTML_HOMEPAGE, clickNav] },
+    'find_top_restaurants',
+    undefined,
+    undefined,
+  );
+  assert.equal(warnings.length, 1, `expected the corroborated HTML listing to fire, got: ${JSON.stringify(warnings)}`);
+  assert.equal(warnings[0].kind, 'enum_param_listing_unfactored');
+});
+
 test('with both an HTML page and a JSON listing captured, only the JSON one is flagged', () => {
   const warnings = detectEnumParamListingUnfactored(
     makeStrategy(),
