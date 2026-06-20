@@ -816,15 +816,25 @@ export function rejectionToErrorMessage(
   lines.push(
     `  → DO NOT end your turn after this rejection — the rejection IS the iteration loop, not a stop signal. Expect 1-3 retries before the save lands.`,
   );
+  const retryClause =
+    rejection.reason === 'unacked_warnings'
+      ? `retry with the warning acks embedded immediately`
+      : `The audit_answers IS the commit; retry with {audit_token, audit_answers} immediately`;
   lines.push(
-    `  → Do NOT pause to ask the user for approval before retrying. Any real-world mutation (the message you sent, the form you submitted) already happened during drive — ${toolName} is internal bookkeeping for klura to persist the recipe. The audit_answers IS the commit; retry with {audit_token, audit_answers} immediately, don't send the user a "ready to save?" message in between.`,
+    `  → Do NOT pause to ask the user for approval before retrying. Any real-world mutation (the message you sent, the form you submitted) already happened during drive — ${toolName} is internal bookkeeping for klura to persist the recipe. ${retryClause}, don't send the user a "ready to save?" message in between.`,
   );
   lines.push(
     `  → Do NOT call ToolSearch for the schema. The expected_answer_shape lines below + the per-classifier remedy block ARE the canonical schema; they were composed from the live Zod definitions. Retry with corrections directly. ToolSearch returns the same prose you're already reading — the lookup is pure latency.`,
   );
-  lines.push(
-    `  → In unattended runs (no human present), retry with just {audit_token} and the embedder's registered decider auto-resolves user_confirmation. You still owe answers for any literal_provenance / capability_name_justification / observed_siblings items in the rejection.`,
-  );
+  // The unattended-retry guidance is about audit_token auto-resolving
+  // user_confirmation — irrelevant to unacked_warnings, which mints no token and
+  // has no user_confirmation classifier. Emitting it there contradicts the
+  // "no audit_token was issued" line above.
+  if (rejection.reason !== 'unacked_warnings') {
+    lines.push(
+      `  → In unattended runs (no human present), retry with just {audit_token} and the embedder's registered decider auto-resolves user_confirmation. You still owe answers for any literal_provenance / capability_name_justification / observed_siblings items in the rejection.`,
+    );
+  }
   if (toolName !== 'end_drive') {
     lines.push(
       `  → To abandon this draft: call end_drive — that flushes whatever else is pending.`,

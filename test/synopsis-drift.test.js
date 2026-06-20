@@ -168,7 +168,7 @@ test('responseSchema renders inline with from field + semantic guidance', async 
   const { responseSchema } = await import('../dist/strategies/schemas/response.js');
   const inline = renderZodSkeletonInline(responseSchema);
   // The new `from` field carries semantic guidance about when to use it.
-  assert.match(inline, /from\?: string {2}\/\/ name of a prereq whose bound value IS the strategy result/);
+  assert.match(inline, /from\?: string {2}\/\/ effective bind key of a prereq whose bound value IS the strategy result/);
   assert.match(inline, /strategy does NOT fire HTTP \/ WS \/ UI replay/);
   // Existing fields preserved.
   assert.match(inline, /format\?: "json" \| "html"/);

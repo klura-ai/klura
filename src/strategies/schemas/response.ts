@@ -54,7 +54,7 @@ export const responseSchema = z
       .min(1)
       .optional()
       .describe(
-        'name of a prereq whose bound value IS the strategy result. When set, the strategy does NOT fire HTTP / WS / UI replay — the prereq runs, its return value is parsed per `format` (default "json"), `extract` (if any) is applied, and the result is returned. Use this for "the data is already in the prereq" cases (e.g. a js-eval prereq that scrapes the live DOM) to avoid faking an HTTP target. The named prereq must be one of: js-eval, page-extract, fetch-extract, capability, tag.',
+        'effective bind key of a prereq whose bound value IS the strategy result — its `binds` field when set, falling back to `name` only when `binds` is unset (execution stores the value under `binds ?? name` and reads it back by this key). When set, the strategy does NOT fire HTTP / WS / UI replay — the prereq runs, its return value is parsed per `format` (default "json"), `extract` (if any) is applied, and the result is returned. Use this for "the data is already in the prereq" cases (e.g. a js-eval prereq that scrapes the live DOM) to avoid faking an HTTP target. The referenced prereq must be one of: js-eval, page-extract, fetch-extract, capability, tag.',
       ),
   })
   .loose();
