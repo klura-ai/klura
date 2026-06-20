@@ -126,6 +126,43 @@ export interface ActionResult {
  * unknown or already closed. Used by `performAction` (and other page-aware
  * tools) so the agent gets a single consistent rejection shape.
  */
+/**
+ * Fold framenavigated-buffer entries (click / submit / SPA route changes the
+ * explicit-navigate path doesn't see) into both `domNavigations` (url_graph edge
+ * attribution) and `visitedUrls` (so `paths_visited_this_session` reflects
+ * click-driven navigation, not just explicit `navigate` calls).
+ */
+function recordPendingNavigations(
+  session: Session,
+  pending: ReadonlyArray<{
+    at: number;
+    url: string;
+    title?: string;
+    via?: 'pushState' | 'replaceState' | 'popstate' | 'hashchange';
+  }>,
+  action: string,
+): void {
+  if (pending.length === 0) return;
+  if (!session.domNavigations) session.domNavigations = [];
+  let derivedVia: 'click' | 'submit' | 'nav';
+  if (action === 'click') derivedVia = 'click';
+  else if (action === 'type' || action === 'key_press' || action === 'fill_editor')
+    derivedVia = 'submit';
+  else derivedVia = 'nav';
+  session.visitedUrls ??= [];
+  for (const p of pending) {
+    session.domNavigations.push({
+      at: p.at,
+      url: p.url,
+      ...(p.title ? { title: p.title } : {}),
+      via: p.via ?? derivedVia,
+    });
+    if (typeof p.url === 'string' && p.url && p.url !== 'about:blank') {
+      session.visitedUrls.push(p.url);
+    }
+  }
+}
+
 export function resolvePageHandle(
   session: import('../drivers/types/session').Session,
   page?: string,
@@ -734,25 +771,7 @@ export async function performAction(
   // tool call so the url_graph edge attribution reflects what the agent
   // actually did.
   const pending = await driver.consumePendingNavs(session).catch(() => []);
-  if (pending.length > 0) {
-    if (!session.domNavigations) session.domNavigations = [];
-    let derivedVia: 'click' | 'submit' | 'nav';
-    if (action === 'click') {
-      derivedVia = 'click';
-    } else if (action === 'type' || action === 'key_press' || action === 'fill_editor') {
-      derivedVia = 'submit';
-    } else {
-      derivedVia = 'nav';
-    }
-    for (const p of pending) {
-      session.domNavigations.push({
-        at: p.at,
-        url: p.url,
-        ...(p.title ? { title: p.title } : {}),
-        via: p.via ?? derivedVia,
-      });
-    }
-  }
+  recordPendingNavigations(session, pending, action);
 
   // Snapshot any <form> currently in the DOM. Per-action capture covers
   // SPA route changes that introduced new forms (modal open, navigation,
