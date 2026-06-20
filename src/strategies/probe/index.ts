@@ -42,6 +42,11 @@ interface ProbeArgs {
   data: Record<string, unknown>;
   platform: string;
   pool: BrowserPool;
+  /** Identity of the live save-time session. The probe loads this identity's
+   *  storage state (cookies the agent just established via login this session)
+   *  rather than the default-identity path, so auth-gated reads probe against
+   *  fresh credentials instead of bouncing to a login wall. */
+  identity?: string;
 }
 
 /**
@@ -59,7 +64,12 @@ interface ProbeArgs {
  * selector via waitForSelector, then stop (subsequent steps depend on state
  * changes we deliberately skip)
  */
-export async function probeStrategySelectors({ data, platform, pool }: ProbeArgs): Promise<void> {
+export async function probeStrategySelectors({
+  data,
+  platform,
+  pool,
+  identity,
+}: ProbeArgs): Promise<void> {
   const prereqs = extractPageExtractPrereqs(data);
   const fetchPrereqs = extractFetchExtractPrereqs(data);
   const jsEvalPrereqs = extractJsEvalPrereqs(data);
@@ -103,10 +113,12 @@ export async function probeStrategySelectors({ data, platform, pool }: ProbeArgs
   // true` bypasses the pool's maxSessions cap so the probe doesn't get blocked
   // by the agent's active session count during discovery — save_strategy
   // validation is housekeeping, not user work.
-  const storageStatePath = skills.loadStorageStatePath(platform);
+  const storageStatePath =
+    skills.loadStorageStatePath(platform, identity) ?? skills.loadStorageStatePath(platform);
   const session = await pool.createSession({
     internal: true,
     platform,
+    ...(identity ? { identity } : {}),
     ...(storageStatePath ? { storageState: storageStatePath } : {}),
   });
 

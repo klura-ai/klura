@@ -983,11 +983,28 @@ export async function saveStrategy(
   if (hasProbeablePrereqs(data)) {
     timings.probe_skipped = false;
     const tProbeStart = Date.now();
+    // Snapshot the LIVE session's storage state to its identity path so the
+    // probe's internal session loads the cookies the agent established (e.g. a
+    // login earlier this same drive) instead of the stale on-disk state from a
+    // prior end_drive flush. Best-effort; the probe falls back to on-disk state.
+    let probeIdentity: string | undefined;
+    if (sessionId) {
+      try {
+        const liveSession = pool.getSession(sessionId);
+        probeIdentity = liveSession.identity;
+        await pool
+          .driverFor(sessionId)
+          .saveStorageState(liveSession, skills.storageStatePath(platform, liveSession.identity));
+      } catch {
+        /* best-effort — probe falls back to the last-flushed storage state */
+      }
+    }
     try {
       await probeStrategySelectors({
         data: data as unknown as Record<string, unknown>,
         platform,
         pool,
+        ...(probeIdentity ? { identity: probeIdentity } : {}),
       });
     } catch (err) {
       timings.probe_ms = Date.now() - tProbeStart;
