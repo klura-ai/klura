@@ -106,13 +106,6 @@ interface CapabilityLogbookEntry {
   current_tier: 'fetch' | 'page-script' | 'recorded-path' | 'none';
   last_verified_at?: string; // ISO timestamp
   last_verified_tier?: 'fetch' | 'page-script' | 'recorded-path';
-  data_sufficiency: {
-    captures_of_target_endpoint: number;
-    field_stability_confidence: 'low' | 'medium' | 'high';
-    known_rotating_fields: string[];
-    known_stable_fields: string[];
-    ambiguous_fields: string[];
-  };
   last_lift_attempt_at?: string;
   days_since_last_attempt?: number;
   sessions_since_last_attempt?: number;
@@ -242,7 +235,7 @@ Three agent-facing tools read the logbook:
 
 | Tool | What it returns |
 | --- | --- |
-| `get_platform_logbook({platform})` | The full `PlatformLogbook` — counters, lift_attempts, data_sufficiency for every capability. Useful when the agent wants to scan the whole platform's history. |
+| `get_platform_logbook({platform})` | The full `PlatformLogbook` — counters, lift_attempts, and the derived `field_stability` report for every capability. Useful when the agent wants to scan the whole platform's history. |
 | `get_strategy_events({platform, capability?, limit?})` | Most-recent-first slice of `strategy_events[]` across the platform (or narrowed to one capability). Useful for "what changed about this skill lately?" — discoveries, demotions, heals. |
 | `end_drive` RE handoff | For each unresolved capability, inlines `triage[<cap>]: { current_tier, prior_attempts, discovery_artifact? }` — cross-session facts only, no verdicts. The LLM reads the raw captures + `get_platform_logbook` + the artifact and decides whether to lift. Detail: `klura://reference#triage-protocol`. |
 | `start_session(...)` | When auto-executing a warm strategy that is below the LIFT threshold AND the logbook shows ≤ N prior failed attempts, returns `revisit_prompt` so the agent can ask the user whether to re-attempt the lift. |
