@@ -180,6 +180,22 @@ export function appendStrategyEvent(
     record.detail = event.detail;
   }
   entry.strategy_events.push(record);
+
+  // Keep `current_tier` in sync with the active strategy. Events that establish
+  // or change the live tier stamp it; archiving the active tier clears it back
+  // to 'none' (a later rediscovery / unarchive re-establishes it).
+  const TIER_VALUES: ReadonlyArray<CapabilityLogbookEntry['current_tier']> = [
+    'fetch',
+    'page-script',
+    'recorded-path',
+  ];
+  const eventTier = TIER_VALUES.find((t) => t === event.strategy);
+  if (event.kind === 'archived') {
+    if (entry.current_tier === event.strategy) entry.current_tier = 'none';
+  } else if (eventTier) {
+    entry.current_tier = eventTier;
+  }
+
   writeLogbook(logbook);
 }
 

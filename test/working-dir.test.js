@@ -190,3 +190,30 @@ test('loadLogbook rejects invalid schema and returns empty', () => {
   const logbook = loadLogbook(platform);
   assert.equal(logbook.sessions_total, 0, 'empty logbook, not the garbage on disk');
 });
+
+test('appendStrategyEvent keeps current_tier in sync with the active strategy', () => {
+  const platform = 'tier-sync';
+  const cap = 'send_message';
+  const tier = (p, c) => loadLogbook(p).per_capability[c].current_tier;
+
+  // discovered → current_tier reflects the saved tier (was stuck at 'none').
+  appendStrategyEvent(platform, cap, { strategy: 'page-script', kind: 'discovered' });
+  assert.equal(tier(platform, cap), 'page-script');
+
+  // tier_demote moves the live tier down.
+  appendStrategyEvent(platform, cap, { strategy: 'recorded-path', kind: 'tier_demote' });
+  assert.equal(tier(platform, cap), 'recorded-path');
+
+  // rediscovered upgrades it.
+  appendStrategyEvent(platform, cap, { strategy: 'fetch', kind: 'rediscovered' });
+  assert.equal(tier(platform, cap), 'fetch');
+
+  // archiving the active tier clears it back to 'none'.
+  appendStrategyEvent(platform, cap, { strategy: 'fetch', kind: 'archived' });
+  assert.equal(tier(platform, cap), 'none');
+
+  // archiving a NON-active tier leaves current_tier untouched.
+  appendStrategyEvent(platform, cap, { strategy: 'page-script', kind: 'discovered' });
+  appendStrategyEvent(platform, cap, { strategy: 'recorded-path', kind: 'archived' });
+  assert.equal(tier(platform, cap), 'page-script');
+});
