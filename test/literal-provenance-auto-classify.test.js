@@ -62,6 +62,46 @@ test('first save: items expose auto_classified for templated fields', () => {
   assert.deepEqual(endpoint.auto_classified, { caller_input: 'query' });
 });
 
+test('static literal echoing a start_session arg value gets an informational caller_arg_hint', () => {
+  const ctx = {
+    ...baseCtx,
+    session: {
+      declaredCapabilities: [
+        { capability: 'search_restaurants', args: { amount: '20' }, declared_at: 0 },
+      ],
+    },
+  };
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'http://127.0.0.1:3315',
+    endpoint: '/search?q={{query}}',
+    response: { format: 'html', extract: { items: { selector: 'a', multiple: true } } },
+    body: { amount: '20' }, // baked the caller's amount instead of templating it
+    notes: { params: { query: { kind: 'text', example: 'thai' } } },
+  };
+  const result = saveStrategyAudit.process(strategy, ctx, {});
+  assert.equal(result.status, 'rejected');
+  const items = result.rejection.items.literal_provenance;
+  const amt = items.find((i) => i.path === 'body.amount');
+  assert.ok(amt, `expected body.amount item; got ${JSON.stringify(items)}`);
+  assert.match(amt.caller_arg_hint ?? '', /matches the start_session arg "amount"/);
+});
+
+test('no caller_arg_hint when no static literal matches a caller arg value', () => {
+  const ctx = {
+    ...baseCtx,
+    session: {
+      declaredCapabilities: [
+        { capability: 'search_restaurants', args: { amount: '99' }, declared_at: 0 },
+      ],
+    },
+  };
+  const result = saveStrategyAudit.process(fetchStrategy(), ctx, {});
+  assert.equal(result.status, 'rejected');
+  const items = result.rejection.items.literal_provenance;
+  assert.ok(items.every((i) => i.caller_arg_hint === undefined), 'no spurious hints');
+});
+
 test('agent can omit literal_provenance for auto-classified items', () => {
   // Mint token first.
   const first = saveStrategyAudit.process(fetchStrategy(), baseCtx, {});

@@ -64,6 +64,42 @@ function literalItems(data: Strategy): LiteralItem[] {
   });
 }
 
+// Map each caller-supplied start_session arg VALUE → its arg name, so a static
+// literal that echoes a caller value can be flagged as a likely-baked caller
+// arg. Short values (< 2 chars) are skipped — too collision-prone to be signal.
+function collectCallerArgValues(ctx: SaveStrategyCtx): Map<string, string> {
+  const byValue = new Map<string, string>();
+  for (const d of ctx.session?.declaredCapabilities ?? []) {
+    for (const [name, val] of Object.entries(d.args)) {
+      if (typeof val === 'string' && val.trim().length >= 2 && !byValue.has(val.trim())) {
+        byValue.set(val.trim(), name);
+      }
+    }
+  }
+  return byValue;
+}
+
+// buildItems variant that annotates STATIC literals echoing a caller arg with an
+// informational hint. Kept separate from `literalItems` (used by hashFields) so
+// the hint — which depends on per-session args — never perturbs the token hash.
+function literalItemsForDisplay(data: Strategy, ctx: SaveStrategyCtx): LiteralItem[] {
+  const items = literalItems(data);
+  const argByValue = collectCallerArgValues(ctx);
+  if (argByValue.size === 0) return items;
+  return items.map((it) => {
+    if (it.auto_classified) return it; // already templated — nothing to nudge
+    const argName = argByValue.get(it.value.trim());
+    if (argName === undefined) return it;
+    return {
+      ...it,
+      caller_arg_hint:
+        `value "${it.value}" matches the start_session arg "${argName}". If it varies per caller, ` +
+        `classify {caller_input: "${argName}"} and template the field as {{${argName}}} — a baked ` +
+        `caller value makes the saved strategy wrong for every other caller.`,
+    };
+  });
+}
+
 // literal_provenance — for each scanned literal in URL / header / body /
 // recorded-path step values, agent classifies as
 // "static" | {caller_input: "<param>"} | {prereq_output: "<binds>"} | "single_entity".
@@ -83,7 +119,7 @@ export const literalProvenanceClassifier: Classifier<Strategy, SaveStrategyCtx, 
     'fed by an arg) or prereq_output (resolved by a fetch-extract / page-extract / capability prereq). When in doubt, ' +
     'parameterize. "single_entity" is rare — only when the strategy is intentionally fixed to one entity AND that entity ' +
     'appears as `notes.params.<x>.example`.',
-  buildItems: (data) => literalItems(data),
+  buildItems: (data, ctx) => literalItemsForDisplay(data, ctx),
   hashFields: (data) => literalItems(data),
   validate: (data, ctx, answer) => {
     const items = literalItems(data);

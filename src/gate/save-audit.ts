@@ -71,6 +71,12 @@ export interface LiteralItem {
    *  audit fills it in from this value. Set explicitly to the same shape
    *  to override (rare). */
   auto_classified?: LiteralClassification;
+  /** Informational only (NOT auto-applied): set when a STATIC-looking literal's
+   *  value exactly matches a value the caller passed to start_session, hinting
+   *  the agent likely baked a caller arg that should be templated as
+   *  {{<arg>}} / classified {caller_input: "<arg>"}. Never part of the token
+   *  hash — purely a nudge the agent reads. */
+  caller_arg_hint?: string;
 }
 
 export interface NameSegmentItem {
