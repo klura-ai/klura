@@ -43,6 +43,7 @@ import {
   type SaveWarning,
 } from '../../gate/save-warnings';
 import { detectSensitiveActionShape } from '../../gate/save-warnings-sensitive-shape';
+import { detectUselessCapabilityPrereq } from '../../gate/save-warnings-useless-prereq';
 import {
   validateLookupPrereqsAreCapabilities,
   type ObservedSiblingItem,
@@ -462,6 +463,24 @@ const enumParamListingUnfactoredDetector: Detector<Strategy, SaveStrategyCtx> = 
   ackReason: 'none',
 };
 
+// A side-effect-only (no-vars) capability prereq whose target is a saved pure
+// read (GET, no `provides`) — a dead fetch on every warm execute. ackReason:
+// 'required' — the rare GET-that-warms-session case is the ack escape; the
+// detector itself never fires on auth/provides/mutating/unverifiable targets.
+const uselessCapabilityPrereqDetector: Detector<Strategy, SaveStrategyCtx> = {
+  kind: 'useless_capability_prereq',
+  detect: (data, ctx) => {
+    const platform = ctx.session?.platform;
+    return asIssues(
+      detectUselessCapabilityPrereq(
+        data,
+        platform ? (cap) => loadStrategiesForPlatformAndCapability(platform, cap) : undefined,
+      ),
+    );
+  },
+  ackReason: 'required',
+};
+
 // Slug has _by_X / _for_X / lookup_X segments + a saved sibling on the
 // platform looks lookup-shaped + this strategy has no capability prereq.
 // The agent saved the lookup separately but forgot to wire it; at
@@ -795,6 +814,7 @@ export const saveStrategyAudit = new Audit<Strategy, SaveStrategyCtx>({
     authGatedWithoutAuthPrereqDetector,
     unreferencedPrereqBindingDetector,
     unreferencedParamsDetector,
+    uselessCapabilityPrereqDetector,
     recordedPathInlinesLookupDetector,
     ungroundedEnumPlaceholderDetector,
     enumParamListingUnfactoredDetector,
