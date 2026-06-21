@@ -113,11 +113,6 @@ export type SaveConstraint =
       detector_kind: 'captured_query_param_missing_from_strategy';
     }
   | {
-      kind: 'param_source_capability_requires_prereq';
-      rule: string;
-      detector_kind: 'capability_source_missing_prereq';
-    }
-  | {
       kind: 'auth_gated_chain_auth_prereq';
       rule: string;
       cookie_setter_origins: string[];
@@ -242,20 +237,6 @@ export function composeSaveAuthoringContract(
       url_param_consumed_in: listing.used_as.url_param,
       link_via_shape: `notes.params.<placeholder>.source = "capability:<your-listing-slug>"`,
       detector_kind: 'enum_param_listing_unfactored',
-    });
-  }
-
-  // 5b. Whenever a listing is suggested, also surface the standing pairing
-  // rule: `notes.params.<X>.source: "capability:Y"` is dead code without a
-  // matching `prerequisites[]` entry. Mirrors the
-  // `capability_source_missing_prereq` audit (ackReason: 'none'). One
-  // entry is enough — applies uniformly to every source: capability:...
-  // declaration.
-  if (listings.length > 0) {
-    constraints.push({
-      kind: 'param_source_capability_requires_prereq',
-      rule: `Every \`notes.params.<X>.source: "capability:<Y>"\` declaration MUST be paired with a matching \`prerequisites[{kind: "capability", capability: "<Y>", args: {...}, vars: {...}}]\` entry. The runtime resolves prereqs by walking \`prerequisites[]\` only; without the pair the source declaration is cosmetic and the listing never fetches at warm-execute time. ackReason: 'none' on the audit side — either add the prereq or drop the source.`,
-      detector_kind: 'capability_source_missing_prereq',
     });
   }
 

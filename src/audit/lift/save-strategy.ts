@@ -38,7 +38,6 @@ import {
   detectEnumParamListingUnfactored,
   detectEnumValueInCapabilitySlug,
   detectUnreferencedPrereqBinding,
-  detectCapabilitySourceMissingPrereq,
   detectLookupSiblingNotReferenced,
   detectUnreferencedParams,
   type SaveWarning,
@@ -463,17 +462,6 @@ const enumParamListingUnfactoredDetector: Detector<Strategy, SaveStrategyCtx> = 
   ackReason: 'none',
 };
 
-// notes.params.<X>.source: "capability:Y" must be paired with a
-// prerequisites[].kind:"capability" entry targeting Y. Without the prereq
-// the source declaration is cosmetic and the listing never fetches at
-// warm-execute time. ackReason: 'none' — the declaration is either
-// load-bearing (needs the prereq) or it's not (drop the source).
-const capabilitySourcePrereqMismatchDetector: Detector<Strategy, SaveStrategyCtx> = {
-  kind: 'capability_source_missing_prereq',
-  detect: (data) => asIssues(detectCapabilitySourceMissingPrereq(data)),
-  ackReason: 'none',
-};
-
 // Slug has _by_X / _for_X / lookup_X segments + a saved sibling on the
 // platform looks lookup-shaped + this strategy has no capability prereq.
 // The agent saved the lookup separately but forgot to wire it; at
@@ -810,7 +798,6 @@ export const saveStrategyAudit = new Audit<Strategy, SaveStrategyCtx>({
     recordedPathInlinesLookupDetector,
     ungroundedEnumPlaceholderDetector,
     enumParamListingUnfactoredDetector,
-    capabilitySourcePrereqMismatchDetector,
     lookupSiblingNotReferencedDetector,
     sensitiveActionShapeDetector,
     enumValueInCapabilitySlugDetector,

@@ -128,7 +128,7 @@ export const DRIVE_ACTIVE: ReadonlySet<string> = new Set([
  *  capability declared (lookup_X chained as a prereq, list_Y as an enum
  *  source). Drive-only restriction forced agents to either inline those
  *  prereqs as fetch-extracts (which then trip the lookup_embedded_in_prereq
- *  / capability_source_missing_prereq audits) or bail and re-discover.
+ *  audit) or bail and re-discover.
  *  declare_capability is append-only on session.declaredCapabilities and
  *  has no phase-specific internal logic; admitting it in every non-closed
  *  phase is structurally safe. */

@@ -583,9 +583,8 @@ test('kind:"email" caller_input without source:capability → NOT marker-rejecte
 test('enum-shape marker kind (slug) WITH source:capability + matching prereq → marker-kind silent', () => {
   // The escape valve: declaring source:"capability:list_<entity>" defers
   // value resolution to a sibling list capability that fetches fresh
-  // values at warm-execute. The capability_source_missing_prereq detector
-  // (from earlier sprint) also requires a matching {kind:"capability"}
-  // prerequisite — these two checks compose.
+  // values at warm-execute (the source resolver fetches it directly — no
+  // paired prereq required).
   const strategy = {
     strategy: 'fetch',
     baseUrl: 'http://example.test',
