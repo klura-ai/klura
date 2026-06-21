@@ -35,6 +35,37 @@ const validJsEvalPrereq = (name = 'threads') => ({
   return_shape: { kind: 'string' },
 });
 
+const fetchExtractPrereq = (name = 'lookup', varKey = 'ticket_id') => ({
+  kind: 'fetch-extract',
+  name,
+  url: 'https://example.com/api/x',
+  vars: { [varKey]: 'data.id' },
+});
+
+// ---------------------------------------------------------------------------
+// response.from must reference a STORED token, kind-aware: vars KEYS for
+// fetch-extract / page-extract / capability (not the prereq name).
+// ---------------------------------------------------------------------------
+
+test('response.from referencing a fetch-extract vars KEY passes', () => {
+  validateStrategyShape({
+    strategy: 'page-script',
+    prerequisites: [fetchExtractPrereq('lookup', 'ticket_id')],
+    response: { from: 'ticket_id', format: 'json' },
+  });
+});
+
+test('response.from referencing a fetch-extract prereq NAME is rejected (name is not a stored token)', () => {
+  expectReject(
+    {
+      strategy: 'page-script',
+      prerequisites: [fetchExtractPrereq('lookup', 'ticket_id')],
+      response: { from: 'lookup', format: 'json' },
+    },
+    /stored under "ticket_id", not the prereq name/,
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Validation: page-script + response.from + js-eval prereq, no endpoint
 // ---------------------------------------------------------------------------
@@ -67,7 +98,7 @@ test('response.from with no matching prereq is rejected naming the prereq', () =
       prerequisites: [validJsEvalPrereq('other')],
       response: { from: 'threads' },
     },
-    /response\.from = "threads" but no prereq with that name/,
+    /response\.from = "threads" but no prereq stores a token with that name/,
   );
 });
 

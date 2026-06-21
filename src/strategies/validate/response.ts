@@ -147,49 +147,59 @@ export function validateResponseShape(data: Record<string, unknown>, tier: strin
     }
     const fromName = response.from as string;
     const prereqs = Array.isArray(data.prerequisites) ? data.prerequisites : [];
-    // Execution stores a prereq's value under tokens[binds ?? name] and reads it
-    // back by response.from, so response.from must reference the EFFECTIVE bind
-    // name (binds when set, else name).
-    const effectiveBind = (p: Record<string, unknown>): string => {
-      if (typeof p.binds === 'string' && p.binds.length > 0) return p.binds;
-      if (typeof p.name === 'string') return p.name;
-      return '';
+    // Execution reads response.from out of the token scope, so it must reference
+    // a token the prereq actually STORES — and that name is kind-dependent:
+    //   • js-eval (and tag): tokens[binds ?? name] — a single bound value.
+    //   • fetch-extract / page-extract / capability: one token per `vars` KEY
+    //     (tokens[varName]). The prereq `name` is NOT a stored token for these,
+    //     so accepting response.from === name (the old binds ?? name rule) let a
+    //     fetch-extract strategy validate but silently break at execute.
+    const storedTokenNames = (p: Record<string, unknown>): string[] => {
+      const kind = typeof p.kind === 'string' ? p.kind : '';
+      if (kind === 'fetch-extract' || kind === 'page-extract' || kind === 'capability') {
+        const vars = p.vars;
+        if (vars && typeof vars === 'object' && !Array.isArray(vars)) {
+          return Object.keys(vars as Record<string, unknown>);
+        }
+        return [];
+      }
+      if (typeof p.binds === 'string' && p.binds.length > 0) return [p.binds];
+      if (typeof p.name === 'string') return [p.name];
+      return [];
     };
     const named = prereqs.find(
-      (p): p is Record<string, unknown> => isPlainObject(p) && effectiveBind(p) === fromName,
+      (p): p is Record<string, unknown> =>
+        isPlainObject(p) && storedTokenNames(p).includes(fromName),
     );
     if (!named) {
-      // Footgun: response.from references a prereq's NAME, but that prereq binds
-      // its value under a different key. Execution writes tokens[binds] and reads
-      // tokens[response.from] → the read misses → HTTP 500 at warm-execute.
+      // Footgun: response.from references a prereq's NAME, but that prereq stores
+      // its value under different token name(s) — `binds` for js-eval, the `vars`
+      // KEYS for fetch-extract / page-extract / capability. Execution reads
+      // tokens[response.from] → the read misses → broken warm-execute.
       const nameMatch = prereqs.find(
         (p): p is Record<string, unknown> =>
-          isPlainObject(p) &&
-          p.name === fromName &&
-          typeof p.binds === 'string' &&
-          p.binds.length > 0 &&
-          p.binds !== fromName,
+          isPlainObject(p) && p.name === fromName && !storedTokenNames(p).includes(fromName),
       );
       if (nameMatch) {
+        const tokens = storedTokenNames(nameMatch);
+        const tokenList =
+          tokens.length > 0
+            ? tokens.map((t) => `"${t}"`).join(', ')
+            : `(none — a ${String(nameMatch.kind)} prereq exposes a token per \`vars\` key; add a vars entry)`;
         throw new Error(
-          `invalid_strategy: ${tier}.response.from = "${fromName}" matches a prereq's name, but that prereq binds its ` +
-            `value under "${nameMatch.binds as string}". At execute time the value is stored under the bind key, so ` +
-            `response.from must reference "${nameMatch.binds as string}" (not the prereq name). ` +
-            `Change response.from to "${nameMatch.binds as string}".`,
+          `invalid_strategy: ${tier}.response.from = "${fromName}" matches a prereq's name, but at execute time ` +
+            `(kind:"${String(nameMatch.kind)}") its value is stored under ${tokenList}, not the prereq name. ` +
+            `Change response.from to one of those token names.`,
         );
       }
       const declared = prereqs
-        .map((p) => {
-          if (!isPlainObject(p)) return null;
-          const eb = effectiveBind(p);
-          return eb ? `"${eb}"` : null;
-        })
-        .filter((n): n is string => n !== null);
+        .flatMap((p) => (isPlainObject(p) ? storedTokenNames(p) : []))
+        .map((n) => `"${n}"`);
       const declaredList = declared.length > 0 ? declared.join(', ') : '(none)';
       throw new Error(
-        `invalid_strategy: ${tier}.response.from = "${fromName}" but no prereq with that name was declared. ` +
-          `Declared prereq names: ${declaredList}. ` +
-          `Either add a prereq with name:"${fromName}" (kind:"js-eval" / "page-extract" / "fetch-extract" / "capability" / "tag") ` +
+        `invalid_strategy: ${tier}.response.from = "${fromName}" but no prereq stores a token with that name. ` +
+          `Available prereq tokens: ${declaredList}. ` +
+          `Either add a prereq that produces "${fromName}" (js-eval binds / fetch-extract|page-extract|capability vars key) ` +
           `or remove response.from to let the strategy fire its own HTTP/replay.`,
       );
     }
