@@ -2289,13 +2289,13 @@ test('verify-required: answer with transaction-shape literal tag → save commit
   assert.equal(result.status, 'committed', JSON.stringify(result));
 });
 
-test('verify-required: transaction-shape on a strategy with NO verification surface → rejected', () => {
-  // A bare POST whose only structure is its request body can't confirm a side
-  // effect — a claiming tag (transaction-shape) is dishonest there. The agent
-  // must add a real anchor or use a no-surface tag (fire-and-forget / rpc-read /
-  // intrinsic-to-caller).
+test('verify-required: claiming tag on a page-script with NO verification surface → rejected', () => {
+  // A page-script whose return isn't anchored on a frameFromPage / response.from
+  // / prereq can't confirm a side effect — a claiming tag (transaction-shape) is
+  // dishonest there. (A `fetch` JSON strategy is exempt: its returned body IS
+  // the confirmation — see the next test.)
   const strategy = {
-    strategy: 'fetch',
+    strategy: 'page-script',
     baseUrl: 'https://site.example.com',
     endpoint: '/api/send',
     method: 'POST',
@@ -2320,6 +2320,28 @@ test('verify-required: transaction-shape on a strategy with NO verification surf
     issues.some((i) => /carries no verification surface/.test(i)),
     `expected no-verification-surface rejection; got ${JSON.stringify(issues)}`,
   );
+});
+
+test('verify-required: fetch JSON POST + transaction-shape (no extract) → commits (body IS the confirmation)', () => {
+  // Regression guard: a plain JSON API POST returns its confirmation in the
+  // response body (execute returns it verbatim). response.extract is HTML-only,
+  // so requiring it here would wrongly reject every JSON-API mutation.
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'https://site.example.com',
+    endpoint: '/api/send',
+    method: 'POST',
+    headers: {},
+    body: { text: '{{text}}' },
+    notes: { params: { text: { kind: 'text', example: 'hi' } }, anchor_type: 'unknown' },
+  };
+  const result = runWarningClassifier(strategy, verifyCtx(), {
+    mutating_verification_required:
+      'transaction-shape: the response body returns {ok:true, id} confirming the write',
+    literal_provenance: { endpoint: 'static' },
+    observed_siblings: {},
+  });
+  assert.equal(result.status, 'committed', JSON.stringify(result));
 });
 
 test('verify-required: no-surface POST + fire-and-forget (with noun) → save commits', () => {

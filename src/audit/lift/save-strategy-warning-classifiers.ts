@@ -224,9 +224,17 @@ export const mutatingVerificationClassifier: Classifier<Strategy, SaveStrategyCt
     // no-surface tag instead. Runs after the anchor-mismatch check so a strategy
     // with both problems surfaces the more specific mismatch too.
     const claimingTagUsed = CLAIMING_VERIFICATION_TAGS.some((t) => answer.includes(t));
-    if (claimingTagUsed && validPaths.length === 0) {
+    // A `fetch` strategy whose response is JSON (format absent or "json") DOES
+    // have a verification surface: execute() returns the parsed response body
+    // verbatim, so `transaction-shape` ("the body returns {ok,id}") is honest
+    // without a response.extract anchor — response.extract is HTML-only. Only
+    // page-script (return is constructed) and fetch+format:"html" (need extract
+    // to pull structured data from the page) require an explicit anchor.
+    const dataObj = data as { strategy?: unknown; response?: { format?: unknown } };
+    const isFetchJson = dataObj.strategy === 'fetch' && dataObj.response?.format !== 'html';
+    if (claimingTagUsed && validPaths.length === 0 && !isFetchJson) {
       out.push(
-        `mutating_verification_required: ${shapeTagsUsed.join(' / ')} claims the strategy can confirm the side effect, but it carries no verification surface (no response.extract, no prerequisite, no frameFromPage — only the request body, which can't verify a mutation). Either add a confirmation anchor (response.extract.<field> on the POST's response, or a follow-up read prereq) OR, if the action genuinely has no observable confirmation, use a no-surface tag: fire-and-forget / rpc-read / intrinsic-to-caller.`,
+        `mutating_verification_required: ${shapeTagsUsed.join(' / ')} claims the strategy can confirm the side effect, but it carries no verification surface (no response.extract, no prerequisite, no frameFromPage — only the request body, which can't verify a mutation). Either add a confirmation anchor (response.extract.<field> on an HTML response, or a follow-up read prereq) OR, if the action genuinely has no observable confirmation, use a no-surface tag: fire-and-forget / rpc-read / intrinsic-to-caller.`,
       );
     }
     return out;
