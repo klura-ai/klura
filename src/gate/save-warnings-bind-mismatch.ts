@@ -37,39 +37,70 @@ export function detectPrereqBindKeyMismatch(data: Strategy, sessionId?: string):
   // placeholder appears in. This is the set of places the detector needs
   // to cross-check against wire keys.
   const bindSlots = new Map<string, Set<BindSlot>>();
+  // Per (bind, slot), the strategy field KEYS whose value references {{bind}}.
+  // When one of those keys is itself a real wire key, the placeholder is already
+  // correctly placed (`headers: {"x-nonce": "{{nonce}}"}` maps the bind to wire
+  // key `x-nonce` via the KEY — the bind NAME needn't match) and no mismatch
+  // warning should fire. Without this, the canonical header-value-placeholder
+  // pattern false-flags on every nonce-bearing strategy.
+  const bindKeys = new Map<string, Map<BindSlot, Set<string>>>();
   const addSlot = (name: string, slot: BindSlot): void => {
     if (!binds.has(name)) return;
     const cur = bindSlots.get(name) ?? new Set();
     cur.add(slot);
     bindSlots.set(name, cur);
   };
+  const recordKey = (name: string, slot: BindSlot, key: string): void => {
+    if (!binds.has(name)) return;
+    let perSlot = bindKeys.get(name);
+    if (!perSlot) {
+      perSlot = new Map();
+      bindKeys.set(name, perSlot);
+    }
+    const keys = perSlot.get(slot) ?? new Set<string>();
+    keys.add(slot === 'header' ? key.toLowerCase() : key);
+    perSlot.set(slot, keys);
+  };
 
-  const scanString = (s: string, slot: BindSlot): void => {
+  // Scan a value for {{placeholder}}s. `key` (when given) is the strategy field
+  // key the value sits under — recorded so a correct key→value mapping suppresses
+  // the warning.
+  const scanString = (s: string, slot: BindSlot, key?: string): void => {
     const re = /\{\{([\w.]+)\}\}/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(s)) !== null) {
-      if (m[1]) addSlot(m[1], slot);
+      if (!m[1]) continue;
+      addSlot(m[1], slot);
+      if (key !== undefined) recordKey(m[1], slot, key);
+    }
+  };
+  // Split a `k=v&k2=v2` string and scan each value under its key.
+  const scanKvPairs = (s: string, slot: BindSlot): void => {
+    for (const pair of s.split('&')) {
+      const eq = pair.indexOf('=');
+      if (eq < 0) continue;
+      scanString(pair.slice(eq + 1), slot, pair.slice(0, eq));
     }
   };
 
   const endpoint = typeof obj.endpoint === 'string' ? obj.endpoint : '';
   const qIdx = endpoint.indexOf('?');
-  if (qIdx >= 0) scanString(endpoint.slice(qIdx + 1), 'query');
+  if (qIdx >= 0) scanKvPairs(endpoint.slice(qIdx + 1), 'query');
 
   const body = obj.body;
   if (body && typeof body === 'object' && !Array.isArray(body)) {
-    for (const v of Object.values(body as Record<string, unknown>)) {
-      if (typeof v === 'string') scanString(v, 'body');
+    for (const [key, v] of Object.entries(body as Record<string, unknown>)) {
+      if (typeof v === 'string') scanString(v, 'body', key);
     }
   } else if (typeof body === 'string') {
     // Raw form-urlencoded or stringified JSON body — still scannable.
-    scanString(body, 'body');
+    scanKvPairs(body, 'body');
   }
 
   const headers = obj.headers;
   if (headers && typeof headers === 'object') {
-    for (const v of Object.values(headers as Record<string, unknown>)) {
-      if (typeof v === 'string') scanString(v, 'header');
+    for (const [key, v] of Object.entries(headers as Record<string, unknown>)) {
+      if (typeof v === 'string') scanString(v, 'header', key);
     }
   }
 
@@ -86,6 +117,11 @@ export function detectPrereqBindKeyMismatch(data: Strategy, sessionId?: string):
       if (wireKeys.size === 0) continue;
       const lookupName = slot === 'header' ? name.toLowerCase() : name;
       if (wireKeys.has(lookupName)) continue; // exact match — fine.
+      // Correct key→value mapping: the placeholder sits under a strategy field
+      // whose KEY is the real wire key (`{"x-nonce": "{{nonce}}"}`). The bind
+      // name differing from the wire key is fine — suppress the false positive.
+      const stratKeys = bindKeys.get(name)?.get(slot);
+      if (stratKeys && [...stratKeys].some((k) => wireKeys.has(k))) continue;
       const suggestion = closestWireKey(lookupName, wireKeys);
       if (!suggestion) continue;
       warnings.push({

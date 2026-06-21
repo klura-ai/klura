@@ -228,7 +228,9 @@ test('detectPrereqBindKeyMismatch: flags query-key mismatch and suggests the wir
   const strategy = {
     strategy: 'fetch',
     baseUrl: 'https://api.example.com',
-    endpoint: '/messages?thread_id={{threadId}}&limit=20',
+    // Genuine mismatch: the query KEY is the bind name `threadId`, but the wire
+    // key is `thread_id` — the server ignores `?threadId=` and the call fails.
+    endpoint: '/messages?threadId={{threadId}}&limit=20',
     method: 'GET',
     prerequisites: [
       {
@@ -247,6 +249,59 @@ test('detectPrereqBindKeyMismatch: flags query-key mismatch and suggests the wir
   assert.match(warnings[0].message, /captured query has "thread_id"/);
   assert.match(warnings[0].message, /did you mean "thread_id"/);
   assert.match(warnings[0].hint, /Rename the prereq's binds to "thread_id"/);
+});
+
+test('detectPrereqBindKeyMismatch: NO warning for the canonical key→value mapping (bind name differs from wire key)', () => {
+  // `?thread_id={{threadId}}` already uses the correct wire key `thread_id` as
+  // the query KEY; the bind NAME `threadId` differing is fine. This is the
+  // recurring false positive — must stay silent.
+  setCapturedRequestsProvider(() => [
+    {
+      method: 'GET',
+      url: 'https://api.example.com/messages?thread_id=x&limit=20',
+      headers: {},
+      postData: null,
+      status: 200,
+      responseBody: '',
+    },
+  ]);
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'https://api.example.com',
+    endpoint: '/messages?thread_id={{threadId}}&limit=20',
+    method: 'GET',
+    prerequisites: [
+      { name: 'resolve_thread', kind: 'capability', capability: 'lookup_thread_by_name', args: {}, binds: 'threadId' },
+    ],
+  };
+  assert.deepEqual(detectPrereqBindKeyMismatch(strategy, 'sess-bind-canonical-query'), []);
+});
+
+test('detectPrereqBindKeyMismatch: NO warning for header-value placeholder (x-nonce: {{nonce}})', () => {
+  // The canonical nonce pattern: header KEY is the wire key `x-nonce`, value is
+  // the bind placeholder `{{nonce}}`. Bind name `nonce` != `x-nonce` is fine.
+  setCapturedRequestsProvider(() => [
+    {
+      method: 'POST',
+      url: 'https://api.example.com/send',
+      headers: { 'x-nonce': 'abc123', 'content-type': 'application/json' },
+      postData: JSON.stringify({ text: 'hi' }),
+      status: 200,
+      responseBody: '',
+    },
+  ]);
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'https://api.example.com',
+    endpoint: '/send',
+    method: 'POST',
+    headers: { 'x-nonce': '{{nonce}}' },
+    body: { text: '{{text}}' },
+    prerequisites: [
+      { name: 'mint_nonce', kind: 'js-eval', url: 'https://api.example.com/', binds: 'nonce', expression: 'mint()', return_shape: { kind: 'string' } },
+    ],
+  };
+  assert.deepEqual(detectPrereqBindKeyMismatch(strategy, 'sess-bind-canonical-header'), []);
 });
 
 test('detectPrereqBindKeyMismatch: no warning when bind name matches the wire query key', () => {
@@ -325,7 +380,8 @@ test('detectPrereqBindKeyMismatch: flags body-key mismatch for JSON POST body', 
     endpoint: '/send',
     method: 'POST',
     contentType: 'json',
-    body: { thread_id: '{{threadId}}', text: '{{text}}' },
+    // Genuine mismatch: body KEY is the bind name `threadId`, wire key is `thread_id`.
+    body: { threadId: '{{threadId}}', text: '{{text}}' },
     prerequisites: [
       {
         name: 'resolve',
