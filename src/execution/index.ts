@@ -1438,7 +1438,9 @@ export interface UnobservedEnumIssue {
  * exists. Used by `validateEnumArgsAgainstSourceCapability` to refresh
  * dynamic-enum values from the source capability's response.
  */
-function extractEnumValuesFromListing(body: unknown): Array<{ value: string; label: string }> {
+export function extractEnumValuesFromListing(
+  body: unknown,
+): Array<{ value: string; label: string }> {
   const tupleFromItem = (item: unknown): Array<{ value: string; label: string }> => {
     if (typeof item === 'string') return [{ value: item, label: item }];
     if (!item || typeof item !== 'object') return [];
@@ -1449,13 +1451,43 @@ function extractEnumValuesFromListing(body: unknown): Array<{ value: string; lab
   };
   if (Array.isArray(body)) return body.flatMap(tupleFromItem);
   if (body && typeof body === 'object') {
-    for (const v of Object.values(body)) {
+    const o = body as Record<string, unknown>;
+    for (const [key, v] of Object.entries(o)) {
       if (!Array.isArray(v) || v.length === 0) continue;
       const tuples = v.flatMap(tupleFromItem);
-      if (tuples.length > 0) return tuples;
+      if (tuples.length === 0) continue;
+      // Parallel-array shape: when the values array is bare strings (so labels
+      // defaulted to value), enrich labels from a sibling label-named string
+      // array of EQUAL length, pairing by index. Common when an HTML listing
+      // is extracted via two `multiple: true` selectors → {values:[…],
+      // labels:[…]}. Values are unchanged (only labels improve), so this never
+      // affects which values validate — purely better fuzzy-match labels.
+      if (v.every((x) => typeof x === 'string')) {
+        const labels = findParallelLabelArray(o, key, v.length);
+        if (labels) {
+          return v.map((val, i) => ({ value: val, label: labels[i] ?? val }));
+        }
+      }
+      return tuples;
     }
   }
   return [];
+}
+
+// Find a sibling array (different key, equal length, all strings) whose KEY name
+// is label-shaped — the parallel labels for a bare-string values array.
+function findParallelLabelArray(
+  o: Record<string, unknown>,
+  valueKey: string,
+  len: number,
+): string[] | null {
+  for (const [k, v] of Object.entries(o)) {
+    if (k === valueKey) continue;
+    if (!Array.isArray(v) || v.length !== len) continue;
+    if (!v.every((x) => typeof x === 'string')) continue;
+    if (/label|name|title|text|display/i.test(k)) return v;
+  }
+  return null;
 }
 
 /**
