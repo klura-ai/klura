@@ -277,6 +277,10 @@ export interface AuditRejection {
   /** Detector ack-shape issues (ack referenced unemitted kind, missing
    *  reason, etc.). Bundled with classifier_issues in the message. */
   ack_issues?: string[];
+  /** Warning kinds the runtime registered as acked on THIS call. Acks are
+   *  per-call (not remembered across retries) — a re-ack must resend these plus
+   *  an ack for every still-listed warning. */
+  currently_acked?: string[];
   /** Per-classifier structural remedy — the alternative the agent's
    *  retry should consider. Keyed by Classifier.kind. Present whenever a
    *  classifier was active (mints item-list or has validation issues). */
@@ -469,6 +473,8 @@ export class Audit<TPayload, TCtx> {
           warnings: unackedBlocking,
           ...(nonAckableKinds.length > 0 ? { non_ackable_warning_kinds: nonAckableKinds } : {}),
           ...(ackIssues.length > 0 ? { ack_issues: ackIssues } : {}),
+          // Acked THIS call (per-call, not remembered) — see currently_acked doc.
+          ...(ackedKinds.size > 0 ? { currently_acked: [...ackedKinds] } : {}),
         },
       };
     }
@@ -806,6 +812,14 @@ export function rejectionToErrorMessage(
         ? `  → To commit: call ${toolName} again embedding notes.save_warnings_acked: [{kind, reason}] on the strategy for each warning above — no audit_token is needed for this rejection class (none was issued).`
         : `  → To commit: call ${toolName} again with {acks: {<kind>: "<reason>"}} for each warning above — no audit_token is needed for this rejection class (none was issued).`,
     );
+    const currentlyAcked = rejection.currently_acked ?? [];
+    if (currentlyAcked.length > 0) {
+      lines.push(
+        `  → Acks are PER-CALL and not remembered across retries. This call you acked: [${currentlyAcked.join(', ')}]. ` +
+          `Your next call must RESEND those acks AND add one for every warning still listed above — acking only the new ` +
+          `one drops the prior acks and re-emits them.`,
+      );
+    }
   } else {
     lines.push(
       isSaveStrategy

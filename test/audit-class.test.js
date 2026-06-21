@@ -61,6 +61,27 @@ test('detector issue acked with reason → committed', () => {
   assert.equal(r.status, 'committed');
 });
 
+test('two required detectors, one acked → rejection surfaces currently_acked + the unacked one', () => {
+  const audit = new Audit({
+    kind: 'test',
+    detectors: [
+      { kind: 'first', detect: () => [{ kind: 'first', message: 'one' }], ackReason: 'required' },
+      { kind: 'second', detect: () => [{ kind: 'second', message: 'two' }], ackReason: 'required' },
+    ],
+    classifiers: [],
+  });
+  // Ack only `first` — the runtime registers it but `second` still blocks.
+  const r = audit.process({}, {}, { acks: { first: 'acked the first one' } });
+  assert.equal(r.status, 'rejected');
+  assert.equal(r.rejection.reason, 'unacked_warnings');
+  assert.deepEqual(r.rejection.currently_acked, ['first']);
+  // The still-blocking warning is `second`, not `first`.
+  assert.deepEqual(
+    r.rejection.warnings.map((w) => w.kind),
+    ['second'],
+  );
+});
+
 test('detector ack with empty reason → ack_issue', () => {
   const audit = new Audit({
     kind: 'test',
