@@ -40,6 +40,7 @@ import {
   detectUnreferencedPrereqBinding,
   detectCapabilitySourceMissingPrereq,
   detectLookupSiblingNotReferenced,
+  detectUnreferencedParams,
   type SaveWarning,
 } from '../../gate/save-warnings';
 import { detectSensitiveActionShape } from '../../gate/save-warnings-sensitive-shape';
@@ -396,6 +397,16 @@ const authGatedWithoutAuthPrereqDetector: Detector<Strategy, SaveStrategyCtx> = 
 const unreferencedPrereqBindingDetector: Detector<Strategy, SaveStrategyCtx> = {
   kind: 'unreferenced_prereq_binding',
   detect: (data) => asIssues(detectUnreferencedPrereqBinding(data)),
+  ackReason: 'required',
+};
+
+// A top-level `params` key referenced by no token is silently dropped at
+// execute time (params never auto-append to the query string). ackReason:
+// 'required' — legitimate ack is rare (a param the agent knows is a documented
+// default the server applies); the usual fix is to reference or drop it.
+const unreferencedParamsDetector: Detector<Strategy, SaveStrategyCtx> = {
+  kind: 'params_key_unreferenced',
+  detect: (data) => asIssues(detectUnreferencedParams(data)),
   ackReason: 'required',
 };
 
@@ -795,6 +806,7 @@ export const saveStrategyAudit = new Audit<Strategy, SaveStrategyCtx>({
     lookupEmbeddedInPrereqDetector,
     authGatedWithoutAuthPrereqDetector,
     unreferencedPrereqBindingDetector,
+    unreferencedParamsDetector,
     recordedPathInlinesLookupDetector,
     ungroundedEnumPlaceholderDetector,
     enumParamListingUnfactoredDetector,

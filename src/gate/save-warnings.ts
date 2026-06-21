@@ -978,3 +978,4 @@ export function detectCapabilitySourceMissingPrereq(data: Strategy): SaveWarning
 // detectRecordedPathInlinesLookup moved to ./save-warnings-recorded-path-lookup
 // (this file hit the 1000-line cap; the detector is self-contained).
 export { detectRecordedPathInlinesLookup } from './save-warnings-recorded-path-lookup';
+export { detectUnreferencedParams } from './save-warnings-unreferenced-params';
