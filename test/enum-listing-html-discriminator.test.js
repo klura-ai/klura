@@ -130,6 +130,28 @@ test('with both an HTML page and a JSON listing captured, only the JSON one is f
   assert.doesNotMatch(warnings[0].message, /captured http:\/\/example\.test\/ whose/);
 });
 
+test('listing already saved → nudges to source-link instead of staying silent', () => {
+  // The listing /api/categories is already a saved sibling capability, but this
+  // strategy froze observed_values inline. Old behavior: silent early-out
+  // (freshness contract abandoned). New: flag "declare source: capability:X".
+  const loadStrategiesForPlatform = (cap) =>
+    cap === 'list_categories'
+      ? [{ strategy: 'fetch', baseUrl: 'http://example.test', endpoint: '/api/categories', method: 'GET' }]
+      : [];
+  const listSavedCapabilityNames = () => ['list_categories'];
+  const warnings = detectEnumParamListingUnfactored(
+    makeStrategy(),
+    { intercepted: [JSON_LISTING] },
+    'find_top_restaurants',
+    loadStrategiesForPlatform,
+    listSavedCapabilityNames,
+  );
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0].kind, 'enum_param_listing_unfactored');
+  assert.match(warnings[0].message, /saved as the sibling capability `list_categories`/);
+  assert.match(warnings[0].hint, /source: "capability:list_categories"/);
+});
+
 test('JSON array (not object) listing is also detected', () => {
   const arrayListing = {
     method: 'GET',

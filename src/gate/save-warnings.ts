@@ -739,14 +739,17 @@ function valuesCorroboratedByRequest(
   return false;
 }
 
-function isListingAlreadySaved(
+// Returns the name of a saved sibling capability whose endpoint matches the
+// listing URL (i.e. the listing is already factored into its own capability),
+// or null when none is saved.
+function findSavedListingCapability(
   listingUrl: string,
   capability: string,
   loadStrategiesForPlatform: (capabilityName: string) => Strategy[],
   listSavedCapabilityNames: () => string[],
-): boolean {
+): string | null {
   const listingCanon = canonicalizeUrl(listingUrl);
-  if (!listingCanon) return false;
+  if (!listingCanon) return null;
   for (const cap of listSavedCapabilityNames()) {
     if (cap === capability) continue;
     let strategies: Strategy[];
@@ -757,10 +760,10 @@ function isListingAlreadySaved(
     }
     for (const s of strategies) {
       const otherCanon = canonicalizeEndpoint(s as unknown as Record<string, unknown>);
-      if (otherCanon === listingCanon) return true;
+      if (otherCanon === listingCanon) return cap;
     }
   }
-  return false;
+  return null;
 }
 
 function checkCapabilitySource(
@@ -850,16 +853,37 @@ export function detectEnumParamListingUnfactored(
     const listingUrl = findListingUrlForValues(intercepted, values, myEndpoint);
     if (!listingUrl) continue;
 
-    if (
-      loadStrategiesForPlatform &&
-      listSavedCapabilityNames &&
-      isListingAlreadySaved(
-        listingUrl,
-        capability,
-        loadStrategiesForPlatform,
-        listSavedCapabilityNames,
-      )
-    ) {
+    const savedListing =
+      loadStrategiesForPlatform && listSavedCapabilityNames
+        ? findSavedListingCapability(
+            listingUrl,
+            capability,
+            loadStrategiesForPlatform,
+            listSavedCapabilityNames,
+          )
+        : null;
+    if (savedListing) {
+      // The listing is ALREADY a saved capability, but this strategy froze
+      // observed_values inline instead of linking to it. Don't stay silent
+      // (the old early-out) — that abandons the freshness contract: the inline
+      // values never refresh while the saved listing does. Nudge to source-link.
+      claimedParams.add(paramName);
+      const valueSample = values
+        .slice(0, 6)
+        .map((v) => JSON.stringify(v))
+        .join(', ');
+      warnings.push({
+        kind: 'enum_param_listing_unfactored',
+        message:
+          `\`notes.params.${paramName}\` is enum-grounded with frozen observed_values [${valueSample}], ` +
+          `but the listing they came from is ALREADY saved as the sibling capability \`${savedListing}\`. ` +
+          `Inline observed_values never refresh; the saved listing does. Link them so the enum re-resolves ` +
+          `on every warm execute instead of staying frozen at discovery.`,
+        hint:
+          `Re-save with \`notes.params.${paramName} = {kind: "enum", source: "capability:${savedListing}"}\` ` +
+          `(you may keep observed_values as a fast-path cache, but source: makes it dynamic). The runtime ` +
+          `resolves \`source: "capability:${savedListing}"\` directly at execute time — no extra prereq needed.`,
+      });
       continue;
     }
 
