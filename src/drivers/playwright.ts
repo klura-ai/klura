@@ -813,8 +813,8 @@ export class PlaywrightDriver extends BrowserDriver {
       // Prefer the user's real Chrome install so the TLS fingerprint, JA3/JA4,
       // HTTP/2 SETTINGS frame, and ALPN order match a normal browser visit —
       // Playwright's bundled chromium is distinguishable at the transport layer
-      // before any JS runs. KLURA_CHANNEL overrides: 'chrome' | 'chromium' |
-      // 'auto' (default).
+      // before any JS runs. The `pool.channel` config field selects: 'chrome' |
+      // 'chromium' | 'auto' (default).
       //
       // --headless=new runs the same binary and engine as headed Chrome with a
       // hidden window. Without it, Playwright's `headless: true` launches the
@@ -835,12 +835,24 @@ export class PlaywrightDriver extends BrowserDriver {
             channel: 'chrome',
             args,
           });
+          if (process.env.KLURA_VERBOSE) {
+            console.warn(`[klura] launched real Chrome (channel=chrome, headful=${this.headful})`);
+          }
           return this._browser;
         } catch (err) {
+          // channel 'chrome' is an explicit request — never paper over a miss.
           if (this.channel === 'chrome') throw err;
-          // auto mode — silently fall back to bundled chromium
+          // auto mode falls back to bundled chromium, but that is a real
+          // degradation: bundled chromium is distinguishable at the transport
+          // and brand layer (reports as Chromium, not Google Chrome) and will
+          // fail managed browser challenges that real Chrome clears. Never let
+          // this pass silently — the operator needs to know their traffic no
+          // longer looks like a real browser. Install Chrome or set
+          // pool.channel: 'chrome' to make the miss a hard error instead.
           console.warn(
-            `[klura] channel 'chrome' unavailable, falling back to chromium: ${String(err)}`,
+            `[klura] DEGRADED: real Chrome unavailable, falling back to bundled chromium — ` +
+              `expect managed browser challenges to fail. Install Google Chrome or set ` +
+              `pool.channel:'chrome' to fail loudly instead. Cause: ${String(err)}`,
           );
         }
       }
@@ -896,6 +908,18 @@ export class PlaywrightDriver extends BrowserDriver {
    * method — it lives in `_instrumentSession`, which the public `createSession`
    * orchestrates after this returns. That split is the seam for BYO drivers.
    */
+  /**
+   * Pluggable hook — resolve the context viewport from the caller's options.
+   * Returns the value to pass to `newContext`, or a falsy value to let the
+   * browser apply its own default. Drivers may override to substitute a
+   * different size when the caller did not pin one.
+   */
+  protected _resolveViewport(
+    options: SessionOptions,
+  ): { width: number; height: number } | undefined {
+    return options.viewport;
+  }
+
   protected async _createBrowserContext(options: SessionOptions): Promise<Session> {
     const browser = await this._ensureBrowser();
 
@@ -909,7 +933,8 @@ export class PlaywrightDriver extends BrowserDriver {
     if (options.storageState) contextOpts.storageState = options.storageState;
     if (options.hasTouch) contextOpts.hasTouch = true;
     if (options.isMobile) contextOpts.isMobile = true;
-    if (options.viewport) contextOpts.viewport = options.viewport;
+    const viewport = this._resolveViewport(options);
+    if (viewport) contextOpts.viewport = viewport;
     if (options.userAgent) contextOpts.userAgent = options.userAgent;
     if (options.deviceScaleFactor) contextOpts.deviceScaleFactor = options.deviceScaleFactor;
 

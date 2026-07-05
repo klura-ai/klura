@@ -946,40 +946,64 @@ export async function startViewer(
         try {
           const event = JSON.parse(data.toString()) as InputEvent;
 
-          // First message must be capabilities — validate device match. Per the
-          // daemon=device refactor, the daemon has exactly one device profile
-          // shared by every session. The default `desktop` preset already
-          // accepts touch input, so mouse↔touch on a desktop-viewport session
-          // is a non-issue and doesn't warn. The case worth flagging is a
-          // mobile/desktop layout mismatch: the page was laid out for a narrow
-          // viewport but the client is on a wide screen, or vice versa. That's
-          // the one the user can't fix post-hoc without reloading the context
-          // under a different profile.
+          // First message must be capabilities — validate that the connecting
+          // client matches the session's device profile. The daemon has exactly
+          // one device profile shared by every session, so a client whose screen
+          // or input modality differs from that profile is driving a page that
+          // was laid out and event-bound for a different device. Two mismatches
+          // are worth blocking on, because neither is fixable post-hoc without
+          // reloading the context under a different profile:
+          //   - layout: the page was laid out for a narrow viewport but the
+          //     client is on a wide screen, or vice versa.
+          //   - modality: the client's input is touch-capable but the session
+          //     expects pointer/mouse, or vice versa. Dispatch stays correct
+          //     either way, but hover and precise clicks into cross-origin
+          //     widgets behave differently than the human expects.
           if (event.type === 'capabilities') {
             const profile = getDeviceProfile();
             const clientWidth = event.screenWidth ?? 0;
             const profileIsMobileSize = profile.viewport.width < 500;
             const clientIsMobileSize = clientWidth > 0 && clientWidth < 500;
             const layoutMismatch = clientWidth > 0 && profileIsMobileSize !== clientIsMobileSize;
-            if (layoutMismatch) {
-              const clientClass = clientIsMobileSize ? 'mobile device' : 'desktop';
-              const suggested = clientIsMobileSize ? 'iphone-15' : 'desktop';
+
+            const sessionHasTouch = profile.hasTouch;
+            const clientHasTouch = event.hasTouch === true;
+            const modalityMismatch =
+              event.hasTouch !== undefined && clientHasTouch !== sessionHasTouch;
+
+            if (layoutMismatch || modalityMismatch) {
+              const reasons: string[] = [];
+              if (layoutMismatch) {
+                const clientClass = clientIsMobileSize ? 'mobile device' : 'desktop';
+                reasons.push(
+                  `layout — you're on a ${clientClass} but the browser was laid out at ` +
+                    `${profile.viewport.width}×${profile.viewport.height}`,
+                );
+              }
+              if (modalityMismatch) {
+                reasons.push(
+                  `input — your device is ${clientHasTouch ? 'touch' : 'pointer/mouse'} but the ` +
+                    `session expects ${sessionHasTouch ? 'touch' : 'pointer/mouse'}`,
+                );
+              }
+              // Prefer a preset that matches the client: mobile size wins first,
+              // then modality decides touch-capable desktop vs strict pointer.
+              let suggested = 'desktop-strict';
+              if (clientIsMobileSize) suggested = 'iphone-15';
+              else if (clientHasTouch) suggested = 'desktop';
               console.error(
-                `[viewer] Layout mismatch warning for session ${sessionId}: ` +
-                  `session=${profile.viewport.width}w, client=${clientWidth}w`,
+                `[viewer] Device mismatch warning for session ${sessionId}: ${reasons.join('; ')}`,
               );
               try {
                 ws.send(
                   JSON.stringify({
                     type: 'warning',
                     message:
-                      `You're connecting from a ${clientClass} but this daemon spawned the browser at ` +
-                      `${profile.viewport.width}×${profile.viewport.height} (${profile.name ?? 'desktop'}). ` +
-                      `Input will work either way, but the page was laid out for the daemon's viewport — ` +
-                      `some elements may be harder to interact with. To fix this for future sessions, run ` +
-                      `\`klura device set --preset ${suggested}\` (or run a dedicated daemon for ${clientClass} ` +
-                      `use via a separate KLURA_HOME). See docs/identities-and-device.md for details. ` +
-                      `Continue anyway?`,
+                      `Your device doesn't match this session's profile (${profile.name ?? 'desktop'}): ` +
+                      `${reasons.join('; ')}. Input will still work, but some elements may be harder to ` +
+                      `interact with. To fix this for future sessions, run ` +
+                      `\`klura device set --preset ${suggested}\` (or run a dedicated daemon via a separate ` +
+                      `KLURA_HOME). See docs/identities-and-device.md for details. Continue anyway?`,
                   }),
                 );
               } catch {
