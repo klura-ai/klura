@@ -62,22 +62,48 @@ function startCaptureInterval(
   );
 }
 
+// A sub-page whose URL carries this session's viewer token (or is served from
+// the viewer's own port) IS the remote viewer itself, opened inside the driven
+// browser's context. Streaming it would mirror the viewer into itself — an
+// infinite feedback loop — so it's excluded from the tab strip and can never be
+// selected. The token is per-session and unguessable, so this never hides a
+// real site page.
+export function isViewerSelfPage(
+  url: string | undefined,
+  viewer: Pick<ViewerSession, 'token' | 'port'>,
+): boolean {
+  if (!url) return false;
+  if (viewer.token && url.includes(viewer.token)) return true;
+  try {
+    return new URL(url).port === String(viewer.port);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Push the current sub-page list to the connected viewer client. Called on
  * connect (so the tab strip renders immediately) and from the
  * `onSubPagesChange` subscription (popup opened / closed / url-title
  * refresh). The client renders one button per entry and sends back
- * `{type: 'switch_page', id}` when the user picks one.
+ * `{type: 'switch_page', id}` when the user picks one. Excludes the viewer's
+ * own page so it can't appear as a self-referential (mirror-loop) tab.
  */
-function sendSubPagesSnapshot(ws: WebSocket, viewer: ViewerSession, subPages: SubPage[]): void {
+export function sendSubPagesSnapshot(
+  ws: WebSocket,
+  viewer: ViewerSession,
+  subPages: SubPage[],
+): void {
   if (ws.readyState !== WebSocket.OPEN) return;
   try {
-    const list = subPages.map((p) => ({
-      id: p.id,
-      url: p.url,
-      title: p.title,
-      closedAt: p.closedAt,
-    }));
+    const list = subPages
+      .filter((p) => !isViewerSelfPage(p.url, viewer))
+      .map((p) => ({
+        id: p.id,
+        url: p.url,
+        title: p.title,
+        closedAt: p.closedAt,
+      }));
     ws.send(
       JSON.stringify({
         type: 'sub_pages',
