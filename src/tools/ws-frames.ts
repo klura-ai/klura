@@ -168,23 +168,19 @@ export async function inspectWsFrame(args: InspectWsFrameArgs): Promise<InspectW
       (result.starter as { code_total_chars?: number }).code_total_chars = code.length;
     }
   }
-  // For sent frames, point the agent at `get_send_encoder` — the runtime
-  // captured a live handle to the WebSocket the page sent through, plus the
-  // exact bytes the page passed to `.send()`. The agent can re-send through
-  // the SAME already-authenticated socket via
-  // `window.__kluraSendEncoders[<key>].ws.send(<bytes>)` without finding the
-  // encoder function in the bundle. Fires on every sent frame because the
-  // tool is uniformly cheap and most agents don't know about the page-side
-  // cache by name.
+  // For sent frames, point the agent at `get_send_encoder` — it describes the
+  // exact bytes the page sent, whether an OPEN socket for that URL is still
+  // live, and pairs with this frame's `js_callstack` to locate the encoder
+  // source. Fires on every sent frame because the tool is uniformly cheap.
   if (frame.direction === 'sent') {
     (result as { live_handle_hint?: unknown }).live_handle_hint = {
       tool: 'get_send_encoder',
       args: { session_id: args.session_id, ws_i: wsI },
       reason:
-        'klura captured a live handle to the WebSocket that sent this frame and the exact bytes the page passed to `.send()`. ' +
-        'Calling `get_send_encoder({ws_i})` returns `encoder_handle: window.__kluraSendEncoders[<key>]` plus structured advice. ' +
-        "Use it to re-send through the page's already-authenticated socket — `<handle>.ws.send(<your_bytes>)` — without locating the encoder function in the bundle. " +
-        'Faster than reading the bundle when you only need to verify byte layout against the captured `<handle>.sentArgs`.',
+        'Calling `get_send_encoder({ws_i})` returns a preview of the sent bytes, their length/type, and whether ' +
+        "an OPEN socket for this URL is still live. Pair it with this frame's `js_callstack` + get_js_source to " +
+        'read the encoder, then reconstruct the bytes and save a frameFromPage / generated.frame strategy — ' +
+        "execute replays them on the page's live authenticated socket.",
     };
   }
   // Surface the JS callstack captured by the page-side WebSocket.send wrapper,

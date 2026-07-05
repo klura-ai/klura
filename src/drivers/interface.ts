@@ -576,6 +576,22 @@ export abstract class BrowserDriver {
   }
 
   /**
+   * Arm out-of-band capture of the JS call-stack behind each WebSocket send,
+   * used to enrich sent frames with `js_callstack` for encoder reverse-
+   * engineering. Reentrant (refcounted). Drivers without a live page context
+   * no-op — sent frames simply carry no callstack. Paired with
+   * `disarmSendCapture`; keep the armed window bounded (it adds per-send cost).
+   */
+  armSendCapture(_session: Session): Promise<void> {
+    return Promise.resolve();
+  }
+
+  /** Release one arm of `armSendCapture`. No-op by default. */
+  disarmSendCapture(_session: Session): Promise<void> {
+    return Promise.resolve();
+  }
+
+  /**
    * Stream every WebSocket frame the page sends or receives to the given
    * callback, in real time. Returns a handle with a `dispose()` function to
    * stop the stream and a `closed` Promise that resolves when the stream

@@ -46,6 +46,11 @@ See [pool.md](pool.md) for the warm-pool / ready-page checkout protocol and [dri
 | `pool.warm.enabled` | boolean | `false` | Keep browser backends alive across klura sessions (~2-3s warm vs ~10-20s cold). |
 | `pool.warm.max_contexts` | number, 0–64 | `3` | Max idle warm backends. `0` = unlimited (bounded by TTL only). |
 | `pool.warm.idle_ttl_seconds` | number, 0–86400 | `600` | Seconds a warm backend may sit idle before eviction. |
+| `pool.connect.enabled` | boolean | `false` | Drive a normally-launched real Chrome over CDP instead of Playwright-launching it. Clears managed browser challenges that fail an automation-launched browser. See [drivers.md#connect-mode](drivers.md#connect-mode). Needs a runtime restart. |
+| `pool.connect.mode` | `spawn` \| `attach` | `spawn` | `spawn` = klura launches a real Chrome with a dedicated persistent profile; `attach` = connect to a Chrome you started with `--remote-debugging-port`. |
+| `pool.connect.endpoint` | string | (unset) | CDP endpoint for `mode: attach`, e.g. `http://localhost:9222`. |
+| `pool.connect.chromePath` | string | (unset) | Chrome binary path override for `mode: spawn`. Defaults to the platform install. |
+| `pool.connect.profileDir` | string | (unset) | Persistent user-data-dir for `mode: spawn`. Defaults to `{KLURA_HOME}/connect-profile`. |
 
 ### `remote.*` — viewer tunnel
 

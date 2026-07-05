@@ -1,7 +1,7 @@
 import { BrowserDriver } from '../drivers/interface';
 import type { BrowserPool, Session, SessionOptions } from '../drivers/types/session';
 import { JsEvalCacheImpl } from '../strategies/js-eval-cache';
-import { loadConfig } from '../config/handler';
+import { loadConfig, type ConnectConfig } from '../config/handler';
 import { isDrivenByExternalMcpHost } from '../runtime-state/mcp-host';
 import {
   emptyStats,
@@ -28,6 +28,8 @@ interface PoolOptions {
   /** Opaque per-driver config — passed verbatim as `opts.config` to the
    *  driver constructor. Shape is the driver's contract. */
   driverConfig?: Record<string, unknown>;
+  /** Connect-mode settings. Overrides `config.pool.connect`. */
+  connect?: ConnectConfig;
   /**
    * Warm-pool settings. When `enabled`, `endDrive` returns the underlying
    * BrowserContext to a per-platform idle slot instead of tearing it down, and
@@ -45,6 +47,7 @@ interface DriverConstructorOptions {
   headful?: boolean;
   channel?: 'auto' | 'chrome' | 'chromium';
   config?: Record<string, unknown>;
+  connect?: ConnectConfig;
 }
 
 type DriverCtor = new (opts?: DriverConstructorOptions) => BrowserDriver;
@@ -103,6 +106,7 @@ export function createPool(opts: PoolOptions = {}): BrowserPool {
     headful: opts.headful ?? config.pool.headful,
     channel: opts.channel ?? config.pool.channel,
     driverConfig: opts.driverConfig ?? config.pool.driver_config,
+    connect: opts.connect ?? config.pool.connect,
     warm: {
       enabled: config.pool.warm.enabled,
       maxContexts: config.pool.warm.max_contexts,
@@ -231,6 +235,7 @@ export class Pool implements BrowserPool {
       headful: opts.headful ?? false,
       channel: opts.channel ?? 'auto',
       config: opts.driverConfig,
+      connect: opts.connect,
     });
     this._idleTimeout = (opts.idleTimeout ?? 300) * 1000;
     this._warmEnabled = opts.warm?.enabled ?? false;

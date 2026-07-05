@@ -69,12 +69,40 @@ export interface HealConfig {
   structural: boolean;
 }
 
+export interface ConnectConfig {
+  /**
+   * When true, drive a normally-launched Chrome over CDP instead of letting
+   * Playwright launch the browser. A normally-launched Chrome clears managed
+   * browser challenges that a
+   * Playwright-launched one fails — the distinguishing signal is Playwright's
+   * launch profile, not the CDP connection itself. Default false.
+   */
+  enabled: boolean;
+  /**
+   * 'spawn' — klura launches a real Chrome with a dedicated persistent profile
+   * and attaches over CDP. 'attach' — connect to a Chrome you started yourself
+   * with `--remote-debugging-port`. Default 'spawn'.
+   */
+  mode?: 'spawn' | 'attach';
+  /** CDP endpoint for mode 'attach', e.g. "http://localhost:9222". */
+  endpoint?: string;
+  /** Override the Chrome binary path (mode 'spawn'). Defaults to the platform's
+   *  Google Chrome install. */
+  chromePath?: string;
+  /** Persistent user-data-dir (mode 'spawn'). Defaults to
+   *  {KLURA_HOME}/connect-profile. */
+  profileDir?: string;
+}
+
 export interface PoolConfig {
   idleTimeout: number;
   maxSessions: number;
   headful: boolean;
   channel: 'auto' | 'chrome' | 'chromium';
   driver?: string;
+  /** Drive a normally-launched real Chrome over CDP (managed-challenge bypass
+   *  via a genuine browser). Off by default; see ConnectConfig. */
+  connect?: ConnectConfig;
   /**
    * Opaque per-driver config passed verbatim to the driver constructor as
    * `opts.config`. The runtime treats this as a black box; drivers that care
@@ -159,6 +187,7 @@ export const CONFIG_DEFAULTS: DaemonConfig = {
       structural: true,
     },
     rediscoverThreshold: 0.7,
+    connect: { enabled: false, mode: 'spawn' },
   },
   remote: { mode: 'auto', timeout: 600, auto_open: 'on_local', short_url: true },
 };
@@ -321,6 +350,53 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     needsRestart: false,
   },
   {
+    path: 'pool.connect.enabled',
+    type: 'boolean',
+    default: CONFIG_DEFAULTS.pool.connect?.enabled ?? false,
+    description:
+      'Drive a normally-launched real Chrome over CDP instead of ' +
+      'Playwright-launching the browser. Clears managed browser challenges ' +
+      'that fail an automation-launched ' +
+      'browser — the tell is the launch profile, not the CDP connection.',
+    needsRestart: true,
+  },
+  {
+    path: 'pool.connect.mode',
+    type: 'enum',
+    enum: ['spawn', 'attach'] as const,
+    default: CONFIG_DEFAULTS.pool.connect?.mode ?? 'spawn',
+    description:
+      'spawn = klura launches a real Chrome with a dedicated persistent ' +
+      'profile; attach = connect to a Chrome you started with ' +
+      '--remote-debugging-port.',
+    needsRestart: true,
+  },
+  {
+    path: 'pool.connect.endpoint',
+    type: 'string',
+    optional: true,
+    default: undefined,
+    description: "CDP endpoint for mode 'attach', e.g. http://localhost:9222.",
+    needsRestart: true,
+  },
+  {
+    path: 'pool.connect.chromePath',
+    type: 'string',
+    optional: true,
+    default: undefined,
+    description: "Chrome binary path override (mode 'spawn'). Defaults to the platform install.",
+    needsRestart: true,
+  },
+  {
+    path: 'pool.connect.profileDir',
+    type: 'string',
+    optional: true,
+    default: undefined,
+    description:
+      "Persistent user-data-dir (mode 'spawn'). Defaults to {KLURA_HOME}/connect-profile.",
+    needsRestart: true,
+  },
+  {
     path: 'pool.rediscoverThreshold',
     type: 'number',
     range: [0, 1],
@@ -457,6 +533,11 @@ function mergeWithDefaults(loaded: unknown): DaemonConfig {
       ...loadedPool,
       warm: { ...CONFIG_DEFAULTS.pool.warm, ...(loadedPool.warm ?? {}) },
       heal: { ...CONFIG_DEFAULTS.pool.heal, ...(loadedPool.heal ?? {}) },
+      connect: {
+        enabled: false,
+        ...(CONFIG_DEFAULTS.pool.connect ?? {}),
+        ...(loadedPool.connect ?? {}),
+      },
     },
     remote: { ...CONFIG_DEFAULTS.remote, ...(src.remote ?? {}) },
     ...(src.secrets ? { secrets: { ...src.secrets } } : {}),

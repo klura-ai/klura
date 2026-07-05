@@ -206,7 +206,12 @@ export async function triggerReferenceSend(
   // ../index, which itself pulls in this tool's re-export. Resolving it at call
   // time reads the already-loaded module off the graph.
   const { performAction } = await import('../index');
+  const driver = pool.driverFor(args.session_id);
 
+  // Arm WebSocket send-callstack capture for the duration of this bounded
+  // action+settle window, so the sent frame(s) this tool surfaces carry a
+  // `js_callstack` pointing at the encoder callsite. Disarmed in `finally`.
+  await driver.armSendCapture(session).catch(() => {});
   try {
     for (const step of args.actions) {
       if (typeof step.action !== 'string' || step.action.length === 0) {
@@ -216,16 +221,15 @@ export async function triggerReferenceSend(
         returnTree: false,
       });
     }
+    // Settle — let the post-action ws activity land in the ring.
+    await new Promise((resolve) => setTimeout(resolve, settleMs));
+    // Refresh from the driver so the ring reflects the latest.
+    await driver.getInterceptedWebSocketFrames(session).catch(() => []);
   } catch (err) {
     return { error: `action step failed: ${err instanceof Error ? err.message : String(err)}` };
+  } finally {
+    await driver.disarmSendCapture(session).catch(() => {});
   }
-
-  // Settle — let the post-action ws activity land in the ring.
-  await new Promise((resolve) => setTimeout(resolve, settleMs));
-
-  // Refresh from the driver so the ring reflects the latest.
-  const driver = pool.driverFor(args.session_id);
-  await driver.getInterceptedWebSocketFrames(session).catch(() => []);
   const ring = session.wsFrames ?? [];
   const { hashWsFrame, pinWsFrame: pinImpl } = await import('../response/ws-pin');
 

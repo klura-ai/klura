@@ -101,11 +101,7 @@ export async function getSendEncoder(args: GetSendEncoderArgs): Promise<
   | SendEncoderResponse
   | {
       encoder: null;
-      reason:
-        | 'frame_out_of_range'
-        | 'frame_received'
-        | 'wrapper_not_installed'
-        | 'no_matching_fingerprint';
+      reason: 'frame_out_of_range' | 'frame_received';
       advice: string;
     }
 > {
@@ -129,13 +125,7 @@ export async function getSendEncoder(args: GetSendEncoderArgs): Promise<
           handle_alive: boolean;
           encoder_key: string;
         }
-      | {
-          reason:
-            | 'frame_out_of_range'
-            | 'frame_received'
-            | 'wrapper_not_installed'
-            | 'no_matching_fingerprint';
-        }
+      | { reason: 'frame_out_of_range' | 'frame_received' }
     >;
   };
   if (typeof driver.getSendEncoderInfo !== 'function') {
@@ -157,11 +147,7 @@ export async function getSendEncoder(args: GetSendEncoderArgs): Promise<
         case 'frame_out_of_range':
           return `ws_i ${args.ws_i} is beyond the captured-frame buffer. Call get_network_log to see the current ring buffer's range of ws frames.`;
         case 'frame_received':
-          return `ws_i ${args.ws_i} is a received frame (direction:"received"). The encoder stash only carries sent frames — pick a ws_i whose direction is "sent" (filter get_network_log's wsFrames by direction).`;
-        case 'wrapper_not_installed':
-          return `The page-side WebSocket.send wrapper hasn't been installed on this page yet (no JS has opened a WebSocket, or the page loaded before the init script ran). If you just opened the session, interact once to trigger the app's JS, then retry.`;
-        case 'no_matching_fingerprint':
-          return `No encoder entry matched this frame's fingerprint. Either the send happened before the wrapper was installed, the page JS re-wrapped WebSocket.prototype.send and bypassed the stash, or the entry aged out of the 2000-entry cap on a chatty session. Treat the encoder as unavailable for this specific frame; read the encoder source via get_js_source + inspect_ws_frame.js_callstack instead.`;
+          return `ws_i ${args.ws_i} is a received frame (direction:"received"). get_send_encoder only describes sent frames — pick a ws_i whose direction is "sent" (filter get_network_log's wsFrames by direction).`;
       }
     })();
     return { encoder: null, reason, advice };

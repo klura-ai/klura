@@ -12,7 +12,7 @@ The fast path is reading the page's own encoder. The toolkit is a set of primiti
 - **`get_js_source(session_id, url, line, context?)`** — windowed source read around a specific line, when you need surrounding context the function-extractor doesn't capture.
 - **`js_eval(session_id, expression)`** — evaluate an arbitrary expression in the live page. Binary returns (ArrayBuffer / Uint8Array) are hex-encoded by a shared wrapper so they round-trip cleanly across the driver boundary. Top-level statements (`const x = ...; x`) auto-wrap into an async IIFE so the LLM can paste the shape it'd write in a Node REPL — see [principles.md](principles.md#if-the-llm-keeps-making-the-same-mistake-the-runtime-is-wrong).
 - **`inspect_ws_frame(session_id, ws_i | ws_hash)`** — load a captured WebSocket frame with full metadata, including `js_callstack` (the `file:line:col` where `WebSocket.send` was called).
-- **`get_send_encoder(session_id, ws_i | ws_hash)`** — live handle to the captured encoder function from the frame's call site.
+- **`get_send_encoder(session_id, ws_i | ws_hash)`** — describes the encoder output behind a sent frame (byte preview, length, whether an OPEN socket for that URL is still live), sourced host-side from the captured frame. Pair it with the frame's `js_callstack` to locate the encoder source.
 
 Combined, the agent navigates a minified bundle the way a reverse engineer with DevTools open would.
 

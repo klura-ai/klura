@@ -26,7 +26,6 @@ export interface SendEncoderDriverInfo {
 }
 
 export interface SendEncoderResponse extends SendEncoderDriverInfo {
-  encoder_handle: string;
   advice: string;
 }
 
@@ -34,19 +33,22 @@ export function composeSendEncoderResponse(
   info: SendEncoderDriverInfo,
   wsI: number,
 ): SendEncoderResponse {
-  const handle = `window.__kluraSendEncoders[${info.encoder_key}]`;
+  const previewSnippet =
+    info.sent_args_preview.length > 80
+      ? info.sent_args_preview.slice(0, 80) + '…'
+      : info.sent_args_preview;
   return {
     ...info,
-    encoder_handle: handle,
     advice:
-      `The captured WebSocket instance is at ${handle}.ws; the original send args are at ${handle}.sentArgs ` +
-      `(type: ${info.sent_args_type}, ${info.sent_args_byte_length} bytes). ` +
+      `The captured send is ${info.sent_args_byte_length} bytes (${info.sent_args_type}); ` +
+      `preview: ${previewSnippet}. ` +
       `Read the encoder source via inspect_ws_frame(${wsI}).js_callstack + get_js_source(<file>, {line}) ` +
-      `to learn what transforms produced these bytes from the input you typed. From there: ` +
-      `(a) if the source shows the encoder lives at a stable global path you can re-locate at warm time, ` +
+      `to learn what transforms produced these bytes from the input you typed` +
+      `${info.handle_alive ? ' (an OPEN socket for this URL is still live)' : ''}. From there: ` +
+      `(a) if the encoder lives at a stable global path you can re-locate at warm time, ` +
       `save a page-script strategy with a js-eval prereq calling that path; ` +
-      `(b) if the encoder is closure-private, write generated.frame.code in a Node sandbox reproducing the transforms you read in source; ` +
-      `(c) for in-session verification of either path, js_eval(\`return ${handle}.ws.send(<your_constructed_bytes>)\`) ` +
-      `sends through the same connection that produced the captured frame.`,
+      `(b) if the encoder is closure-private, write generated.frame.code in a Node sandbox reproducing the transforms you read in source. ` +
+      `Either way, save a frameFromPage / generated.frame strategy and run it — execute replays your ` +
+      `reconstructed bytes on the page's live authenticated socket.`,
   };
 }

@@ -92,6 +92,21 @@ interface BrowserDriver {
 
 **Stealth vs bot-evasion:** Stealth (making the browser's fingerprint consistent and realistic) is fine and encouraged — the user is a real human using a real browser. Bot-evasion (faking human mouse movements, solving CAPTCHAs programmatically, residential proxies) is not the marketed feature surface. When a site challenges the session, a human solves it via the remote viewer. See [principles.md](principles.md#stealth-vs-bot-evasion).
 
+## Connect mode
+
+By default the driver **launches** the browser through Playwright. Playwright's launch applies its own flag set (`--enable-automation`, a large default-args list) and a synthetic `--user-data-dir`; some managed challenges — notably an aggressive full-page interstitial — fingerprint that launch profile and loop forever, even with a fully native page and real-Chrome channel. The distinguishing signal is the **launch**, not the CDP connection: a Chrome launched the ordinary way clears the same challenge even with CDP attached afterward.
+
+Connect mode makes klura **attach to a normally-launched Chrome over CDP** instead of launching one itself. Enable via config (`pool.connect`):
+
+```json
+{ "pool": { "connect": { "enabled": true, "mode": "spawn" } } }
+```
+
+- **`mode: "spawn"`** (default) — klura launches the real Chrome binary the ordinary way (a dedicated persistent profile under `{KLURA_HOME}/connect-profile`, no automation flags), waits for its DevTools endpoint, and `connectOverCDP`s to it. The spawned process is torn down on `closeBrowser`. Override the binary with `connect.chromePath` and the profile with `connect.profileDir`.
+- **`mode: "attach"`** — connect to a Chrome you launched yourself with `--remote-debugging-port`, via `connect.endpoint` (e.g. `http://localhost:9222`). Use this to drive your own real, already-signed-in browser.
+
+Connect mode always attaches with the **plain** Playwright chromium — never a stealth-wrapped one — because the browser is a genuine Chrome and must stay untouched; layering page-level evasions onto it would re-introduce detectable artifacts. It composes with the "no page-observable instrumentation by default" invariant (the built-in driver injects no init scripts), so the driven page stays byte-identical to a normal browser. This is squarely the "drive a real browser / human-in-the-loop" model, not behavioral bot-evasion: the browser passes because it genuinely is one. Cookie/login persistence still works via klura's per-platform `storageState`.
+
 ## Multi-locator capture
 
 During discovery, the LLM saves **multiple locator types** for each recorded-path step. This maximizes resilience — if one locator breaks, alternatives survive.

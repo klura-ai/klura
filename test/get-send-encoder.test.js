@@ -55,14 +55,13 @@ const SAMPLE_INFO = {
   encoder_key: '168',
 };
 
-test('composeSendEncoderResponse: encoder_handle uses encoder_key (not ws_i)', () => {
-  // ws_i counts sent + received frames; encoder_key is the page-side
-  // cache index that counts only sent. They diverge on chatty sites.
-  // The handle must address the page-side cache using encoder_key.
-  const a = composeSendEncoderResponse(SAMPLE_INFO, 504);
-  assert.strictEqual(a.encoder_handle, 'window.__kluraSendEncoders[168]');
-  const b = composeSendEncoderResponse({ ...SAMPLE_INFO, encoder_key: '7' }, 100);
-  assert.strictEqual(b.encoder_handle, 'window.__kluraSendEncoders[7]');
+test('composeSendEncoderResponse: no page-observable handle in the response', () => {
+  // The old encoder_handle (window.__kluraSendEncoders[...]) is gone — the
+  // encoder info is re-sourced host-side and the page stays untampered. The
+  // response must not carry that field or reference any __klura* global.
+  const r = composeSendEncoderResponse(SAMPLE_INFO, 504);
+  assert.ok(!('encoder_handle' in r), 'encoder_handle must not be present');
+  assert.doesNotMatch(JSON.stringify(r), /__klura/, 'must not reference any __klura* page global');
 });
 
 test('composeSendEncoderResponse: spreads driver info verbatim', () => {
@@ -80,20 +79,18 @@ test('composeSendEncoderResponse: advice references the right next-step tools', 
   const r = composeSendEncoderResponse(SAMPLE_INFO, 471);
   assert.match(r.advice, /inspect_ws_frame/);
   assert.match(r.advice, /get_js_source/);
-  assert.match(r.advice, /js_eval/);
-  assert.match(r.advice, /generated\.frame\.code/);
+  assert.match(r.advice, /generated\.frame/);
+  assert.match(r.advice, /frameFromPage/);
   assert.match(r.advice, /page-script/);
 });
 
-test('composeSendEncoderResponse: advice references the captured handle', () => {
+test('composeSendEncoderResponse: advice points at the frame by ws_i, no page global', () => {
   const r = composeSendEncoderResponse(SAMPLE_INFO, 471);
-  // Handle is addressed by encoder_key (168), not ws_i (471) — but the
-  // advice mentions ws_i when referring the agent to inspect_ws_frame /
-  // js_callstack (those ARE indexed by ws_i). Both conventions are
-  // semantically correct in their context.
-  assert.match(r.advice, /window\.__kluraSendEncoders\[168\]\.ws/);
-  assert.match(r.advice, /window\.__kluraSendEncoders\[168\]\.sentArgs/);
+  // js_callstack / inspect_ws_frame are indexed by ws_i.
   assert.match(r.advice, /inspect_ws_frame\(471\)/);
+  // No page-observable handle path anymore.
+  assert.doesNotMatch(r.advice, /__klura/);
+  assert.doesNotMatch(r.advice, /\.ws\.send\(/);
 });
 
 test('composeSendEncoderResponse: response is brand-free (principles.md compliance)', () => {

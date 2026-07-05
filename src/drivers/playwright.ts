@@ -14,7 +14,13 @@ import type {
   WebSocket as PlaywrightWebSocket,
 } from 'playwright';
 import crypto from 'crypto';
+import fs from 'fs';
+import net from 'net';
+import path from 'path';
+import { spawn, type ChildProcess } from 'child_process';
 import * as cheerio from 'cheerio';
+import type { ConnectConfig } from '../config/handler';
+import { getKluraHome } from '../paths';
 import { BrowserDriver, Capability, PageOpts } from './interface';
 import type { InterceptedRequest } from './types/network';
 import type { WebSocketFrame, WebSocketFrameStream } from './types/websocket';
@@ -27,6 +33,7 @@ import type {
   SubPagesListener,
 } from './types/session';
 import { attachCdpNetworkCapture, getInterceptedFromSink } from './cdp-network-capture';
+import { hasOpenSocket, sendOnLiveSocket } from './cdp-websocket-capture';
 import { parseStack } from '../response/stack-parse';
 import { needsBlockBodyWrap, wrapAgentExpression } from '../response/js-eval-wrapper';
 
@@ -35,6 +42,73 @@ import { needsBlockBodyWrap, wrapAgentExpression } from '../response/js-eval-wra
 // recording whether the focus-tracker init script has been installed yet).
 // Keyed by Session identity.
 type NavVia = 'pushState' | 'replaceState' | 'popstate' | 'hashchange';
+
+// --- connect-mode helpers (drive a normally-launched Chrome over CDP) ---
+
+// Locate a Google Chrome binary for connect-mode 'spawn'. Returns the first
+// existing platform-default path, or null so the caller can surface a clear
+// "set pool.connect.chromePath" error.
+function resolveChromeBinary(): string | null {
+  let candidates: string[];
+  if (process.platform === 'darwin') {
+    candidates = ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'];
+  } else if (process.platform === 'win32') {
+    candidates = [
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    ];
+  } else {
+    candidates = [
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+      '/opt/google/chrome/chrome',
+      '/usr/bin/chromium',
+      '/usr/bin/chromium-browser',
+    ];
+  }
+  for (const c of candidates) {
+    try {
+      if (fs.existsSync(c)) return c;
+    } catch {
+      /* keep scanning */
+    }
+  }
+  return null;
+}
+
+// Reserve an ephemeral TCP port for the spawned Chrome's DevTools endpoint.
+function freeTcpPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      const port = addr && typeof addr === 'object' ? addr.port : 0;
+      srv.close(() => {
+        if (port) resolve(port);
+        else reject(new Error('could not reserve a port'));
+      });
+    });
+  });
+}
+
+// Attach over CDP, retrying until the freshly-spawned Chrome has opened its
+// DevTools endpoint. The retry IS the readiness signal — Chrome exposes no
+// pre-open event, so a bounded connect-retry at this launch barrier is the
+// correct primitive (not a steady-state poll).
+async function connectOverCdpWithRetry(url: string, timeoutMs: number): Promise<Browser> {
+  const deadline = Date.now() + timeoutMs;
+  let lastErr: unknown;
+  while (Date.now() < deadline) {
+    try {
+      return await defaultChromium.connectOverCDP(url);
+    } catch (err) {
+      lastErr = err;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
 
 interface SessionExtras {
   cdp?: CDPSession;
@@ -67,12 +141,12 @@ interface SessionExtras {
   // CDP session so detaching one doesn't kill the other.
   networkCdp?: CDPSession;
   // Buffer of frame-level navigations observed via `page.on('framenavigated')`
-  // and SPA route changes captured via the `__klura_url_change` exposed
-  // binding (history.pushState / replaceState / popstate / hashchange).
-  // Drained by `consumePendingNavs` after each `perform_action`. Entries
-  // suppressed when an explicit `driver.navigate()` call is in flight so the
-  // index.ts perform_action(navigate) handler doesn't double-count.
-  // `via` is set when the SPA binding fires (the precise transition kind);
+  // and same-document (History API) route changes captured via CDP
+  // `Page.navigatedWithinDocument`. Drained by `consumePendingNavs` after each
+  // `perform_action`. Entries suppressed when an explicit `driver.navigate()`
+  // call is in flight so the index.ts perform_action(navigate) handler doesn't
+  // double-count. `via` is set for same-document navs (`pushState` for
+  // pushState/replaceState/popstate, `hashchange` for a fragment-only change);
   // omitted when the source is `framenavigated` and the perform_action
   // consumer derives `via` from the action that triggered the call.
   pendingNavs?: Array<{
@@ -102,6 +176,17 @@ interface SessionExtras {
   // wait_for_pause, evaluate_on_frame, step, resume). Lazily created when the
   // agent first calls set_breakpoint; torn down by cleanupDebuggerState.
   debuggerState?: DebuggerState;
+  // Host-side ring of WebSocket send call-stacks captured out-of-band via CDP.
+  // Drained by `popMatchingCallstack` in `_attachWebSocketCapture` on each
+  // `framesent`, keyed by (url, byte length, first-16-byte hex), to attach
+  // `frame.js_callstack`. Empty unless send-capture has been armed for
+  // reverse-engineering — the built-in driver installs no page-observable
+  // WebSocket instrumentation by default, so a normal session leaves this
+  // untouched and frames carry no callstack (graceful absence).
+  sendCaptures?: Array<{ raw_stack: string }>;
+  /** Reentrancy counter for armed WebSocket send-capture. >0 means the
+   *  Debugger breakpoint on native `WebSocket.prototype.send` is installed. */
+  sendCaptureRefCount?: number;
 }
 
 interface DebuggerBreakpoint {
@@ -114,6 +199,10 @@ interface DebuggerBreakpoint {
 interface CdpPausedEvent {
   reason: string;
   breakpointIds?: string[];
+  // CDP's own field name for the breakpoints hit at this pause. Populated by
+  // Debugger.setBreakpointOnFunctionCall (verified), so the shared onPaused
+  // handler routes our armed send-capture breakpoint by matching this.
+  hitBreakpoints?: string[];
   callFrames: CdpCallFrame[];
 }
 
@@ -146,6 +235,11 @@ interface DebuggerState {
   } | null;
   onPaused: (ev: CdpPausedEvent) => void;
   onScriptParsed: (ev: { scriptId: string; url: string }) => void;
+  // Breakpoint id of the armed WebSocket send-capture (setBreakpointOnFunction-
+  // Call on native WebSocket.prototype.send), or null when disarmed. Pauses
+  // whose hitBreakpoints include this are handled internally (stack captured,
+  // auto-resumed) and never surface to the agent's wait_for_pause queue.
+  sendBreakpointId?: string | null;
 }
 
 const DEBUGGER_PAUSE_QUEUE_CAP = 5;
@@ -386,184 +480,13 @@ function getExtras(session: Session): SessionExtras {
   return e;
 }
 
-// Init script that monkey-patches window.WebSocket at page load so every
-// WebSocket the page creates is tracked in a hidden registry. Added via
-// page.addInitScript so it runs before any of the page's own JS — this is the
-// only way we can catch WS instances the site opens during bootstrap. The
-// registry is a Set<WebSocket>; each entry has `__kluraUrl` stamped for
-// URL-prefix lookup, and the Set evicts on the WS `close` event so reconnection
-// doesn't leave stale entries.
-//
-// Used by: - hasOpenWebSocket(session, urlPrefix) — polls registry for OPEN ws
-// - sendWebSocketFrame(session, urlPrefix, payload) — picks matching ws and
-// calls .send(payload) (text or binary)
-const WS_REGISTRY_SCRIPT = `
-(() => {
-  if (window.__kluraWsRegistry) return;
-  const registry = window.__kluraWsRegistry = new Set();
-  const OrigWS = window.WebSocket;
-  function WrappedWS(url, protocols) {
-    const ws = protocols ? new OrigWS(url, protocols) : new OrigWS(url);
-    try { ws.__kluraUrl = url; } catch (_e) {}
-    registry.add(ws);
-    ws.addEventListener('close', () => registry.delete(ws));
-    return ws;
-  }
-  // Preserve the WebSocket.prototype chain so instanceof checks and
-  // prototype-based method lookups (e.g. ws.send) work unchanged.
-  WrappedWS.prototype = OrigWS.prototype;
-  for (const k of ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED']) {
-    try { WrappedWS[k] = OrigWS[k]; } catch (_e) {}
-  }
-  window.WebSocket = WrappedWS;
-})();
-`;
-
-// Init script that monkey-patches WebSocket.prototype.send to capture a JS
-// Error().stack on every send. Runs at document_start before any site JS, so we
-// get the original send reference. Stack entries land on a page-side ring
-// buffer (window.__kluraSendCallstacks); the host correlates them with
-// playwright's `framesent` events by (url, payload byte length, first-16-byte
-// hex fingerprint).
-//
-// Per-ws_i side-channel (Phase 4): also stashes a handle to the live WebSocket
-// instance + the data that was passed to send, under
-// window.__kluraSendEncoders[ws_i] = { ws, sentArgs, ws_url, len, head_hex, ts
-// }. The agent can `js_eval` that handle to verify their own bytes against the
-// captured pipeline (call <handle>.ws.send(myBytes) and observe whether the
-// server acks). NO automated walk of the call stack to find a "global path" —
-// the runtime exposes the captured pieces; the LLM reasons about where the
-// encoder lives in the page from what it reads in the source via get_js_source.
-//
-// Captured callstack shape per entry: { idx, ts, ws_url, len, head_hex, stack }
-//
-// Bounded at 4000 entries to prevent OOM on runaway-send pages. Entries are
-// matched-and-cleared on every framesent event so the buffer stays roughly
-// empty in practice.
-const WS_SEND_CALLSTACK_SCRIPT = `
-(() => {
-  if (window.__kluraSendCallstacksInstalled) return;
-  window.__kluraSendCallstacksInstalled = true;
-  const captures = (window.__kluraSendCallstacks = []);
-  const encoders = (window.__kluraSendEncoders = window.__kluraSendEncoders || {});
-  let nextEncoderIdx = 0;
-  // Chat sites can send hundreds of frames per session. 2000 entries is ~500KB
-  // of WebSocket + Data refs (GC-collectable), cheap memory. The previous 200
-  // cap evicted too aggressively on sites with chatty background traffic.
-  const ENCODERS_CAP = 2000;
-  const orig = WebSocket.prototype.send;
-  function fingerprintHead(d) {
-    try {
-      let bytes;
-      if (typeof d === 'string') {
-        bytes = new TextEncoder().encode(d).slice(0, 16);
-      } else if (d instanceof ArrayBuffer) {
-        bytes = new Uint8Array(d, 0, Math.min(16, d.byteLength));
-      } else if (ArrayBuffer.isView(d)) {
-        bytes = new Uint8Array(d.buffer, d.byteOffset, Math.min(16, d.byteLength));
-      } else {
-        return '';
-      }
-      let out = '';
-      for (let i = 0; i < bytes.length; i += 1) {
-        out += bytes[i].toString(16).padStart(2, '0');
-      }
-      return out;
-    } catch (_) {
-      return '';
-    }
-  }
-  function payloadLen(d) {
-    try {
-      if (typeof d === 'string') return new TextEncoder().encode(d).length;
-      if (d instanceof ArrayBuffer) return d.byteLength;
-      if (ArrayBuffer.isView(d)) return d.byteLength;
-      if (d instanceof Blob) return d.size;
-    } catch (_) {}
-    return 0;
-  }
-  function evictOldestEncoder() {
-    // Drop the lowest-numbered entry. encoders is keyed by send-call index (a
-    // monotonically increasing integer per-page-load), so iterating ordered
-    // keys and deleting the first one keeps recent captures.
-    const keys = Object.keys(encoders).map(Number).sort((a, b) => a - b);
-    if (keys.length > 0) delete encoders[keys[0]];
-  }
-  // Build the wrapper once; stash it on window so we can detect when the page
-  // (or third-party JS) reassigned WebSocket.prototype.send to its own wrapper
-  // after our init ran. Object.defineProperty uses configurable:true because
-  // libraries that wrap globals often need to — making it immutable would crash
-  // legitimate pages.
-  function buildKluraSendWrapper(delegate) {
-    return function (data) {
-      let stack = '';
-      try { stack = new Error().stack || ''; } catch (_) {}
-      const idx = nextEncoderIdx++;
-      const len = payloadLen(data);
-      const head_hex = fingerprintHead(data);
-      try {
-        captures.push({
-          idx: idx,
-          ts: Date.now(),
-          ws_url: this.url,
-          len: len,
-          head_hex: head_hex,
-          stack: stack,
-        });
-        if (captures.length > 4000) captures.splice(0, captures.length - 4000);
-      } catch (_) {}
-      try {
-        encoders[idx] = {
-          ws: this,
-          sentArgs: data,
-          ws_url: this.url,
-          len: len,
-          head_hex: head_hex,
-          ts: Date.now(),
-        };
-        if (Object.keys(encoders).length > ENCODERS_CAP) evictOldestEncoder();
-      } catch (_) {}
-      return delegate.call(this, data);
-    };
-  }
-  const wrapper = buildKluraSendWrapper(orig);
-  window.__kluraWsSendWrapper = wrapper;
-  Object.defineProperty(WebSocket.prototype, 'send', {
-    value: wrapper,
-    writable: true,
-    configurable: true,
-  });
-  // Repair path: when a host-side tool suspects the wrapper was replaced
-  // (get_send_encoder / inspect_ws_frame / get_network_log call this before
-  // reading the registry), re-install ourselves. If another wrapper is
-  // currently in place we delegate through it, so page instrumentation
-  // continues to work and our recording layers on top.
-  window.__kluraEnsureWsWrapper = function () {
-    try {
-      if (WebSocket.prototype.send === window.__kluraWsSendWrapper) return 'already-installed';
-      const current = WebSocket.prototype.send;
-      const fresh = buildKluraSendWrapper(current);
-      window.__kluraWsSendWrapper = fresh;
-      Object.defineProperty(WebSocket.prototype, 'send', {
-        value: fresh,
-        writable: true,
-        configurable: true,
-      });
-      return 'reinstalled';
-    } catch (e) {
-      return 'reinstall-failed:' + (e && e.message ? e.message : 'unknown');
-    }
-  };
-})();
-`;
-
 // Script injected into every page to watch focus changes and report them back
 // through an exposed binding. Runs on every navigation via addInitScript, plus
 // once on the current document at install time.
 const FOCUS_TRACKER_SCRIPT = `
 (() => {
   if (window.__kluraFocusTrackerInstalled) return;
-  window.__kluraFocusTrackerInstalled = true;
+  Object.defineProperty(window, '__kluraFocusTrackerInstalled', { value: true, configurable: true });
   const isEditable = (el) => {
     if (!el) return false;
     if (el.isContentEditable) return true;
@@ -767,6 +690,9 @@ export interface PlaywrightDriverOptions {
    * Built-in PlaywrightDriver ignores it.
    */
   config?: Record<string, unknown>;
+  /** Connect-mode settings. When `enabled`, `_ensureBrowser` drives a
+   *  normally-launched Chrome over CDP instead of launching one via Playwright. */
+  connect?: ConnectConfig;
 }
 
 export class PlaywrightDriver extends BrowserDriver {
@@ -775,6 +701,9 @@ export class PlaywrightDriver extends BrowserDriver {
   protected readonly headful: boolean;
   protected readonly channel: 'auto' | 'chrome' | 'chromium';
   protected readonly config: Record<string, unknown>;
+  protected readonly connect?: ConnectConfig;
+  /** Child process for a spawned connect-mode Chrome; killed on closeBrowser. */
+  private _connectChild: ChildProcess | null = null;
 
   constructor(opts: PlaywrightDriverOptions = {}) {
     super();
@@ -782,18 +711,15 @@ export class PlaywrightDriver extends BrowserDriver {
     this.headful = opts.headful ?? false;
     this.channel = opts.channel ?? 'auto';
     this.config = opts.config ?? {};
+    this.connect = opts.connect;
 
-    // The three built-in init scripts that every PlaywrightDriver subclass
-    // inherits. Subclasses can append their own via `this.registerInitScript`
-    // in their constructor after calling `super(opts)`.
-    //
-    // The focus-tracker script tolerates running before its `__kluraFocusChange`
-    // binding exists — the listener calls the binding inside a try/catch and
-    // no-ops on missing binding, so eager registration here is safe even
-    // though the binding itself is set up lazily on first `onFocusChange`.
-    this.registerInitScript('ws-registry', WS_REGISTRY_SCRIPT);
-    this.registerInitScript('ws-send-callstack', WS_SEND_CALLSTACK_SCRIPT);
-    this.registerInitScript('focus-tracker', FOCUS_TRACKER_SCRIPT);
+    // The built-in driver registers NO init scripts: a fresh page runs zero
+    // klura-authored script before the site's own JS and exposes no patched
+    // globals, so it is byte-identical to a normal browser for bot detection.
+    // Instrumentation that needs in-page presence installs lazily on first use
+    // (focus-tracker in `onFocusChange`), and everything else is sourced
+    // out-of-band via CDP. Subclasses may append their own via
+    // `this.registerInitScript` after calling `super(opts)`.
   }
 
   get capabilities(): readonly Capability[] {
@@ -810,6 +736,15 @@ export class PlaywrightDriver extends BrowserDriver {
 
   protected async _ensureBrowser(): Promise<Browser> {
     if (!this._browser || !this._browser.isConnected()) {
+      // Connect mode: drive a normally-launched Chrome over CDP. A Chrome
+      // launched the ordinary way clears managed browser challenges that a
+      // Playwright-launched Chrome fails —
+      // the distinguishing signal is Playwright's launch profile (its flag set
+      // + synthetic user-data-dir), not the CDP connection itself.
+      if (this.connect?.enabled) {
+        this._browser = await this._connectBrowser();
+        return this._browser;
+      }
       // Prefer the user's real Chrome install so the TLS fingerprint, JA3/JA4,
       // HTTP/2 SETTINGS frame, and ALPN order match a normal browser visit —
       // Playwright's bundled chromium is distinguishable at the transport layer
@@ -860,6 +795,91 @@ export class PlaywrightDriver extends BrowserDriver {
       this._browser = await this.chromium.launch({ headless: false, args });
     }
     return this._browser;
+  }
+
+  /**
+   * Acquire a Browser by connecting over CDP to a normally-launched Chrome,
+   * rather than launching one via Playwright. Uses the plain `defaultChromium`
+   * (never the injected/stealth chromium) so no page-level evasions are applied
+   * — the browser is a genuine Chrome and must stay untouched.
+   *
+   * mode 'attach' connects to an operator-run Chrome at `connect.endpoint`.
+   * mode 'spawn' (default) launches the real Chrome binary the ordinary way
+   * (persistent profile, no automation flags), waits for its DevTools endpoint,
+   * and attaches. The spawned process is tracked for teardown in closeBrowser.
+   */
+  private async _connectBrowser(): Promise<Browser> {
+    const cfg = this.connect;
+    if (!cfg?.enabled) throw new Error('_connectBrowser called without connect.enabled');
+
+    if (cfg.mode === 'attach') {
+      const endpoint = cfg.endpoint;
+      if (!endpoint) {
+        throw new Error(
+          "connect mode 'attach' requires pool.connect.endpoint (e.g. http://localhost:9222)",
+        );
+      }
+      const browser = await defaultChromium.connectOverCDP(endpoint);
+      if (process.env.KLURA_VERBOSE) console.warn(`[klura] connect: attached to ${endpoint}`);
+      browser.on('disconnected', () => {
+        if (this._browser === browser) this._browser = null;
+      });
+      return browser;
+    }
+
+    // spawn mode
+    const chromePath = cfg.chromePath ?? resolveChromeBinary();
+    if (!chromePath || !fs.existsSync(chromePath)) {
+      const at = chromePath ? ` at ${chromePath}` : '';
+      throw new Error(
+        `connect mode: could not find a Google Chrome binary${at}. Set pool.connect.chromePath.`,
+      );
+    }
+    const profileDir = cfg.profileDir ?? path.join(getKluraHome(), 'connect-profile');
+    fs.mkdirSync(profileDir, { recursive: true });
+    const port = await freeTcpPort();
+
+    // A normal Chrome launch: real profile, no --enable-automation, no
+    // Playwright default-arg soup. Only the DevTools port + the flags a normal
+    // first-run needs. This is what makes managed challenges treat it as human.
+    const child = spawn(
+      chromePath,
+      [
+        `--remote-debugging-port=${port}`,
+        `--user-data-dir=${profileDir}`,
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--restore-last-session=false',
+        'about:blank',
+      ],
+      { stdio: 'ignore' },
+    );
+    this._connectChild = child;
+    child.on('exit', () => {
+      if (this._connectChild === child) this._connectChild = null;
+    });
+
+    let browser: Browser;
+    try {
+      browser = await connectOverCdpWithRetry(`http://127.0.0.1:${port}`, 20000);
+    } catch (err) {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+      this._connectChild = null;
+      throw new Error(`connect mode: failed to attach to spawned Chrome on port ${port}`, {
+        cause: err,
+      });
+    }
+    if (process.env.KLURA_VERBOSE) {
+      console.warn(`[klura] connect: spawned real Chrome (port ${port}, profile ${profileDir})`);
+    }
+    browser.on('disconnected', () => {
+      if (this._browser === browser) this._browser = null;
+    });
+    return browser;
   }
 
   protected _page(session: Session, handle: string = MAIN_PAGE): Page {
@@ -976,7 +996,7 @@ export class PlaywrightDriver extends BrowserDriver {
     this._attachWebSocketCapture(session);
     await this._installRegisteredInitScripts(session);
     this._attachFrameNavigatedCapture(session);
-    await this._attachSpaRouteCapture(session);
+    await this._attachSameDocNavCapture(session);
     this._attachPopupCapture(session);
   }
 
@@ -1010,71 +1030,20 @@ export class PlaywrightDriver extends BrowserDriver {
           buffer.splice(0, buffer.length - cap);
         }
       };
-      // Drain the page-side callstack buffer for entries matching the just-
-      // received framesent (by url + payload byte length + first-16-byte hex
-      // fingerprint). Best-effort: failures are swallowed, so a page that
-      // doesn't expose __kluraSendCallstacks (e.g. unstashed by site JS) just
-      // yields no js_callstack on the frame.
-      const popMatchingCallstack = async (
-        url: string,
-        len: number,
-        headHex: string,
-      ): Promise<{ raw_stack: string } | null> => {
-        try {
-          const result = (await withPageOpTimeout(
-            page.evaluate(
-              ({ url: u, len: l, head_hex: h }) => {
-                const g = globalThis as unknown as {
-                  __kluraSendCallstacks?: Array<Record<string, unknown>>;
-                };
-                const buf = g.__kluraSendCallstacks;
-                if (!Array.isArray(buf) || buf.length === 0) return null;
-                for (let i = 0; i < buf.length; i += 1) {
-                  const e = buf[i];
-                  if (!e) continue;
-                  if (e.ws_url === u && e.len === l && (h === '' || e.head_hex === h)) {
-                    buf.splice(i, 1);
-                    return { stack: typeof e.stack === 'string' ? e.stack : '' };
-                  }
-                }
-                // No exact match: fall back to the oldest entry whose ws_url
-                // matches. Covers sites that mutate payload after capture (e.g.
-                // compression in the WS layer) so length/fingerprint shift
-                // between callsite and wire. Better an approximate match than
-                // no callstack at all.
-                for (let i = 0; i < buf.length; i += 1) {
-                  const e = buf[i];
-                  if (e && e.ws_url === u) {
-                    buf.splice(i, 1);
-                    return { stack: typeof e.stack === 'string' ? e.stack : '' };
-                  }
-                }
-                return null;
-              },
-              { url, len, head_hex: headHex },
-            ),
-            'ws_callstack_lookup',
-          )) as { stack: string } | null;
-          if (!result || typeof result.stack !== 'string' || result.stack.length === 0) {
-            return null;
-          }
-          return { raw_stack: result.stack };
-        } catch {
-          return null;
-        }
-      };
-      const fingerprintPayload = (payload: string): { len: number; head_hex: string } => {
-        // Mirrors the page-side fingerprintHead/payloadLen logic. Playwright
-        // delivers framesent payload as a string (utf-8 decoded) or Buffer
-        // (binary). We're consistent with the rest of klura: treat as raw
-        // octets via Buffer.from(payload, 'binary') to round-trip every byte.
-        const buf = Buffer.from(payload, 'binary');
-        const head = buf.subarray(0, 16);
-        let hex = '';
-        for (let i = 0; i < head.length; i += 1) {
-          hex += (head[i] ?? 0).toString(16).padStart(2, '0');
-        }
-        return { len: buf.length, head_hex: hex };
+      // Drain the oldest host-side send-capture and attach it to this framesent.
+      // The ring is populated out-of-band via CDP (Debugger.setBreakpointOn-
+      // FunctionCall on native WebSocket.prototype.send) only while send-capture
+      // is armed for reverse-engineering — a bounded window (trigger_reference_
+      // send / an active get_send_encoder) in which sends and framesent events
+      // stay 1:1 and in order, so oldest-first correlation is exact. The native
+      // send frame exposes no readable `this`/args, so we correlate by order
+      // rather than by (url, len, head_hex). A normal session leaves the ring
+      // empty → no js_callstack on the frame (graceful absence).
+      const popMatchingCallstack = (): { raw_stack: string } | null => {
+        const buf = getExtras(session).sendCaptures;
+        if (!buf || buf.length === 0) return null;
+        const e = buf.shift();
+        return e && e.raw_stack.length > 0 ? { raw_stack: e.raw_stack } : null;
       };
       const wsListener = (ws: PlaywrightWebSocket): void => {
         const url = ws.url();
@@ -1104,12 +1073,10 @@ export class PlaywrightDriver extends BrowserDriver {
             // completes. This keeps framesent ordering deterministic and bounds
             // latency for callers that don't care about callstacks.
             pushFrame(frame);
-            const { len, head_hex } = fingerprintPayload(payload);
-            void popMatchingCallstack(url, len, head_hex).then((cs) => {
-              if (!cs) return;
-              const parsed = parseStack(cs.raw_stack);
-              frame.js_callstack = { raw_stack: cs.raw_stack, frames: parsed };
-            });
+            const cs = popMatchingCallstack();
+            if (cs) {
+              frame.js_callstack = { raw_stack: cs.raw_stack, frames: parseStack(cs.raw_stack) };
+            }
           } catch {
             // ignore
           }
@@ -1310,64 +1277,54 @@ export class PlaywrightDriver extends BrowserDriver {
   }
 
   /**
-   * Patch `history.pushState` / `replaceState` and listen for `popstate` /
-   * `hashchange` so SPA route changes (most of the modern web) feed the
-   * same `pendingNavs` buffer that `framenavigated` does. Without this
-   * the URL→surface routing is half-broken on SPAs — `framenavigated`
-   * only fires on real navigations. The exposed binding `__klura_url_change`
-   * receives `{kind, url, ts}` from in-page code; `kind` is forwarded as
-   * the entry's `via` so the surface map and platform_map both see the
-   * precise transition kind.
+   * Tag same-document (History API) navigations via CDP
+   * `Page.navigatedWithinDocument` — the tamper-free replacement for patching
+   * `history.pushState`/`replaceState` in the page (a bot-detection tell).
    *
-   * Detection-risk note: monkey-patching history is detectable via
-   * `history.pushState.toString()` — sites that fingerprint this can spot
-   * the patched function. Existing risk; init-script injection is already
-   * a fingerprint surface. Mitigation (override `Function.prototype.toString`
-   * for the patched fns) deferred until evidence of breakage.
+   * `_attachFrameNavigatedCapture` (`page.on('framenavigated')`) already pushes
+   * an entry for these — Playwright fires `framenavigated` on History-API
+   * transitions too — but without a `via`. This handler *enriches* the matching
+   * entry with `via:'pushState'` (or pushes a fresh one if the CDP event won the
+   * race). `Page.navigatedWithinDocument` fires ONLY for same-document navs, so
+   * cross-document navigations stay via-less (their `via` is derived from the
+   * triggering action by the perform_action consumer).
+   *
+   * `via` fidelity: same-document navs collapse to `pushState` — CDP can't
+   * distinguish pushState / replaceState / popstate / hashchange, and it doesn't
+   * matter: `NAV_ONLY_VIAS` treats all four identically and `via` is otherwise a
+   * cosmetic url-graph edge label.
    */
-  protected async _attachSpaRouteCapture(session: Session): Promise<void> {
+  protected async _attachSameDocNavCapture(session: Session): Promise<void> {
     try {
-      const context = this._context(session);
       const extras = getExtras(session);
       if (!extras.pendingNavs) extras.pendingNavs = [];
       const buffer = extras.pendingNavs;
-      await context.exposeBinding(
-        '__klura_url_change',
-        (_src, payload: { kind: NavVia; url: string; ts: number }) => {
-          try {
-            if (!payload.url || payload.url === 'about:blank') return;
-            if (extras.lastObservedNavUrl === payload.url) return;
-            extras.lastObservedNavUrl = payload.url;
-            buffer.push({ at: payload.ts, url: payload.url, via: payload.kind });
-          } catch {
-            // best-effort
+      const cdp =
+        extras.networkCdp ?? (await this._context(session).newCDPSession(this._page(session)));
+      await cdp.send('Page.enable');
+      cdp.on('Page.navigatedWithinDocument', (raw: unknown) => {
+        try {
+          const url = (raw as { url?: string }).url;
+          if (!url || url === 'about:blank') return;
+          // Enrich the most recent same-URL entry that framenavigated pushed
+          // without a via; if none (CDP won the race), push a fresh one.
+          for (let i = buffer.length - 1; i >= 0; i -= 1) {
+            const e = buffer[i];
+            if (e && e.url === url && e.via === undefined) {
+              e.via = 'pushState';
+              return;
+            }
           }
-        },
-      );
-      // String-form init script — runs in the page context where DOM
-      // globals (history / window / location) exist; the source is a
-      // string here precisely so the runtime's TypeScript checker doesn't
-      // try to type-check it as Node code.
-      const spaInitSource = [
-        `(() => {`,
-        `  try {`,
-        `    var dispatch = function (kind) {`,
-        `      try { window.__klura_url_change && window.__klura_url_change({ kind: kind, url: location.href, ts: Date.now() }); } catch (e) {}`,
-        `    };`,
-        `    var origPush = history.pushState;`,
-        `    var origReplace = history.replaceState;`,
-        `    history.pushState = function () { var r = origPush.apply(this, arguments); dispatch('pushState'); return r; };`,
-        `    history.replaceState = function () { var r = origReplace.apply(this, arguments); dispatch('replaceState'); return r; };`,
-        `    window.addEventListener('popstate', function () { dispatch('popstate'); });`,
-        `    window.addEventListener('hashchange', function () { dispatch('hashchange'); });`,
-        `  } catch (e) { /* capture failures are non-fatal */ }`,
-        `})();`,
-      ].join('\n');
-      // eslint-disable-next-line no-restricted-syntax
-      await context.addInitScript({ content: spaInitSource });
+          if (extras.lastObservedNavUrl === url) return;
+          extras.lastObservedNavUrl = url;
+          buffer.push({ at: Date.now(), url, via: 'pushState' });
+        } catch {
+          // best-effort
+        }
+      });
     } catch {
-      // exposeBinding throws if the binding is already registered (e.g. on
-      // session reset paths); swallow — the existing binding still routes.
+      // Page.enable / listener attach is best-effort; framenavigated still
+      // covers cross-document navigation if this fails.
     }
   }
 
@@ -1646,39 +1603,20 @@ export class PlaywrightDriver extends BrowserDriver {
    */
   async hasOpenWebSocket(session: Session, urlPrefix: string): Promise<boolean> {
     try {
-      const page = this._page(session);
-      return await withPageOpTimeout(
-        page.evaluate(
-          ({ prefix }: { prefix: string }) => {
-            const reg = (
-              globalThis as unknown as {
-                __kluraWsRegistry?: Set<WebSocket & { __kluraUrl?: string }>;
-              }
-            ).__kluraWsRegistry;
-            if (!reg) return false;
-            for (const ws of reg) {
-              if (ws.readyState === 1 /* OPEN */ && ws.__kluraUrl?.startsWith(prefix)) {
-                return true;
-              }
-            }
-            return false;
-          },
-          { prefix: urlPrefix },
-        ),
-        'has_open_websocket',
-      );
+      const cdp = await this._cdp(session);
+      return await withPageOpTimeout(hasOpenSocket(cdp, urlPrefix), 'has_open_websocket');
     } catch {
       return false;
     }
   }
 
   /**
-   * Send `payload` on the first OPEN WebSocket in the page's registry whose URL
-   * starts with `urlPrefix`. For `encoding: 'binary'`, payload is treated as
-   * base64 and decoded to a Uint8Array before send. Returns `{ok: true}` on
-   * successful send (no wait for ack — that's the executor's job), or `{ok:
-   * false, error}` on any failure (registry missing, no matching socket, send
-   * threw).
+   * Send `payload` on the first OPEN WebSocket in the page whose URL starts with
+   * `urlPrefix`. Live sockets are enumerated over CDP (queryObjects on
+   * WebSocket.prototype) — no page-side registry — so the page stays untampered.
+   * For `encoding: 'binary'`, payload is treated as base64 and decoded to a
+   * Uint8Array before send. Returns `{ok: true}` on send (no ack wait — that's
+   * the executor's job), or `{ok: false, error}` on any failure.
    */
   async sendWebSocketFrame(
     session: Session,
@@ -1688,53 +1626,8 @@ export class PlaywrightDriver extends BrowserDriver {
   ): Promise<{ ok: boolean; error?: string }> {
     const encoding: 'text' | 'binary' = opts.encoding === 'binary' ? 'binary' : 'text';
     try {
-      const page = this._page(session);
-      const result = await page.evaluate(
-        ({
-          prefix,
-          enc,
-          body,
-        }: {
-          prefix: string;
-          enc: 'text' | 'binary';
-          body: string;
-        }): { ok: boolean; error?: string } => {
-          const reg = (
-            globalThis as unknown as {
-              __kluraWsRegistry?: Set<WebSocket & { __kluraUrl?: string }>;
-            }
-          ).__kluraWsRegistry;
-          if (!reg)
-            return { ok: false, error: 'no __kluraWsRegistry on page (init script failed?)' };
-          let match: (WebSocket & { __kluraUrl?: string }) | null = null;
-          for (const ws of reg) {
-            if (ws.readyState === 1 /* OPEN */ && ws.__kluraUrl?.startsWith(prefix)) {
-              match = ws;
-              break;
-            }
-          }
-          if (!match)
-            return {
-              ok: false,
-              error: `no OPEN WebSocket matching prefix ${JSON.stringify(prefix)}`,
-            };
-          try {
-            if (enc === 'binary') {
-              const bin = atob(body);
-              const buf = new Uint8Array(bin.length);
-              for (let i = 0; i < bin.length; i += 1) buf[i] = bin.charCodeAt(i);
-              match.send(buf.buffer);
-            } else {
-              match.send(body);
-            }
-            return { ok: true };
-          } catch (e) {
-            return { ok: false, error: e instanceof Error ? e.message : String(e) };
-          }
-        },
-        { prefix: urlPrefix, enc: encoding, body: payload },
-      );
-      return result;
+      const cdp = await this._cdp(session);
+      return await sendOnLiveSocket(cdp, urlPrefix, payload, encoding);
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
@@ -1799,18 +1692,7 @@ export class PlaywrightDriver extends BrowserDriver {
         return { page_on_url };
       }
       if (!page_on_url) return { page_on_url, ws_open: false };
-      const ws_open = await page.evaluate((prefix: string) => {
-        const reg = (
-          globalThis as unknown as {
-            __kluraWsRegistry?: Set<WebSocket & { __kluraUrl?: string }>;
-          }
-        ).__kluraWsRegistry;
-        if (!reg) return false;
-        for (const ws of reg) {
-          if (ws.readyState === 1 /* OPEN */ && ws.__kluraUrl?.startsWith(prefix)) return true;
-        }
-        return false;
-      }, wsUrlPrefix);
+      const ws_open = await hasOpenSocket(await this._cdp(session), wsUrlPrefix);
       return { page_on_url, ws_open };
     } catch {
       return { page_on_url: false };
@@ -1905,6 +1787,12 @@ export class PlaywrightDriver extends BrowserDriver {
     session.subPages = [];
     if (session.wsFrames) session.wsFrames.length = 0;
     else session.wsFrames = [];
+    // Clear armed send-capture state so a recycled context starts clean.
+    const resetExtras = sessionExtras.get(session);
+    if (resetExtras) {
+      resetExtras.sendCaptures = [];
+      resetExtras.sendCaptureRefCount = 0;
+    }
 
     if (options.storageState) {
       try {
@@ -2478,20 +2366,15 @@ export class PlaywrightDriver extends BrowserDriver {
   }
 
   /**
-   * Read the encoder side-channel that `WS_SEND_CALLSTACK_SCRIPT` stashed at
-   * send time. Returns `{sentArgsPreview, sentArgsType, ws_url, len, head_hex,
-   * ts}` for the captured send, plus a confirmation that the in-page handle is
-   * still alive and re-callable via `js_eval`.
-   *
-   * The `wsI` the agent passes is an index into `session.wsFrames[]` (sent AND
-   * received frames). The page-side encoder cache is keyed by a separate
-   * counter that increments only on sent calls. Those diverge whenever received
-   * frames arrive (most WS-based chats do this ~2 frames received per 1
-   * sent). We look up the target frame in the host-side buffer to get its
-   * payload fingerprint, then search the page-side cache by that fingerprint —
-   * aligns the two indexing contexts. Returns null only when the fingerprint
-   * really isn't on the page-side (cache evicted, or the monkey-patch missed
-   * the send).
+   * Describe the encoder output behind a captured sent frame: a preview of the
+   * bytes, their length, the socket URL, and whether an OPEN socket for that URL
+   * still exists (so the agent knows a live re-send is possible). Everything is
+   * derived host-side from `session.wsFrames[wsI]` — WebSocket.send takes only
+   * serialized data, so the frame's wire payload is exactly what the encoder
+   * produced. `wsI` indexes `session.wsFrames[]` (sent + received); a received
+   * frame returns `{reason:'frame_received'}`. The agent pairs this with the
+   * frame's `js_callstack` (captured via trigger_reference_send) to locate the
+   * encoder source.
    */
   async getSendEncoderInfo(
     session: Session,
@@ -2507,149 +2390,53 @@ export class PlaywrightDriver extends BrowserDriver {
         handle_alive: boolean;
         encoder_key: string;
       }
-    | {
-        reason:
-          | 'frame_out_of_range'
-          | 'frame_received'
-          | 'wrapper_not_installed'
-          | 'no_matching_fingerprint';
-      }
+    | { reason: 'frame_out_of_range' | 'frame_received' }
   > {
-    // Resolve the target frame on the host side so we can fingerprint it. If
-    // the frame isn't direction:'sent' (the agent could pass a received-frame
-    // ws_i), surface the reason so the agent can pick a sent frame instead of
-    // folding on bare null.
+    // Re-source everything host-side from the captured sent frame. WebSocket.send
+    // only accepts already-serialized data (string / ArrayBuffer / Blob), so the
+    // frame's wire payload IS the bytes the encoder produced — no page-side stash
+    // is needed, and the page stays untampered.
     const frame = session.wsFrames?.[wsI];
     if (!frame) return { reason: 'frame_out_of_range' };
     if (frame.direction !== 'sent') return { reason: 'frame_received' };
-    const payloadBytes = Buffer.from(frame.payload, 'binary');
-    const headHex = payloadBytes
-      .subarray(0, Math.min(16, payloadBytes.length))
+    const bytes = Buffer.from(frame.payload, 'binary');
+    const headHex = bytes
+      .subarray(0, Math.min(16, bytes.length))
       .reduce((acc, b) => acc + b.toString(16).padStart(2, '0'), '');
-    const fingerprint = {
-      ws_url: frame.url,
-      len: payloadBytes.length,
-      head_hex: headHex,
-    };
-    const data = (await withPageOpTimeout(
-      this._page(session).evaluate((fp) => {
-        const g = globalThis as unknown as {
-          __kluraSendEncoders?: Record<
-            number,
-            {
-              ws: unknown;
-              sentArgs: unknown;
-              ws_url: string;
-              len: number;
-              head_hex: string;
-              ts: number;
-            }
-          >;
-          __kluraEnsureWsWrapper?: () => string;
-        };
-        // Repair the wrapper if a page replaced WebSocket.prototype.send after
-        // our init ran. No-op when our wrapper is already current.
-        try {
-          if (typeof g.__kluraEnsureWsWrapper === 'function') g.__kluraEnsureWsWrapper();
-        } catch {
-          /* wrapper repair best-effort */
-        }
-        const store = g.__kluraSendEncoders;
-        if (!store) return { __reason: 'wrapper_not_installed' } as const;
-        // Scan in reverse (newest first) so duplicate fingerprints pick the
-        // most recent send. Typical chat apps don't send byte-identical frames
-        // twice back-to-back, but when they do (re-send on ack timeout) the
-        // agent wants the latest one.
-        const keys = Object.keys(store)
-          .map((k) => parseInt(k, 10))
-          .filter((k) => Number.isFinite(k))
-          .sort((a, b) => b - a);
-        let match: {
-          idx: number;
-          entry: {
-            ws: unknown;
-            sentArgs: unknown;
-            ws_url: string;
-            len: number;
-            head_hex: string;
-            ts: number;
-          };
-        } | null = null;
-        for (const idx of keys) {
-          const e = store[idx];
-          if (!e) continue;
-          if (e.ws_url === fp.ws_url && e.len === fp.len && e.head_hex === fp.head_hex) {
-            match = { idx, entry: e };
-            break;
-          }
-        }
-        if (!match) return { __reason: 'no_matching_fingerprint' } as const;
-        const entry = match.entry;
-        const matchedIdx = match.idx;
-        const a = entry.sentArgs;
-        let preview = '';
-        let type = 'unknown';
-        let byteLen = entry.len;
-        try {
-          if (typeof a === 'string') {
-            type = 'string';
-            preview = a.length > 200 ? a.slice(0, 200) + '…' : a;
-          } else if (a && typeof (a as { byteLength?: number }).byteLength === 'number') {
-            type = a instanceof ArrayBuffer ? 'ArrayBuffer' : 'TypedArray';
-            // Hex preview of first 64 bytes.
-            const view =
-              a instanceof ArrayBuffer
-                ? new Uint8Array(a, 0, Math.min(64, a.byteLength))
-                : new Uint8Array(
-                    (a as { buffer: ArrayBuffer }).buffer,
-                    (a as { byteOffset: number }).byteOffset,
-                    Math.min(64, (a as { byteLength: number }).byteLength),
-                  );
-            let hex = '';
-            for (let i = 0; i < view.length; i += 1) {
-              const b = view[i] ?? 0;
-              hex += b.toString(16).padStart(2, '0');
-            }
-            preview = hex;
-            byteLen = (a as { byteLength: number }).byteLength;
-          } else if (a && typeof (a as { size?: number }).size === 'number') {
-            type = 'Blob';
-            byteLen = (a as { size: number }).size;
-            preview = `<blob, ${byteLen} bytes>`;
-          } else {
-            preview = String(a).slice(0, 200);
-          }
-        } catch {
-          /* best-effort preview; fall back to empty */
-        }
-        return {
-          sent_args_preview: preview,
-          sent_args_type: type,
-          sent_args_byte_length: byteLen,
-          ws_url: entry.ws_url,
-          head_hex: entry.head_hex,
-          ts: entry.ts,
-          handle_alive: true,
-          encoder_key: String(matchedIdx),
-        };
-      }, fingerprint),
-      'get_send_encoder_info',
-    )) as
-      | {
-          sent_args_preview: string;
-          sent_args_type: string;
-          sent_args_byte_length: number;
-          ws_url: string;
-          head_hex: string;
-          ts: number;
-          handle_alive: boolean;
-          encoder_key: string;
-        }
-      | { __reason: 'wrapper_not_installed' | 'no_matching_fingerprint' };
-    if ('__reason' in data) {
-      return { reason: data.__reason };
+    // Infer text vs binary from the wire bytes — the JS argument type is no
+    // longer observable now that send is native.
+    let nonPrintable = 0;
+    for (const b of bytes) {
+      if (b < 9 || (b > 13 && b < 32) || b === 127) nonPrintable += 1;
     }
-    return data;
+    const isBinary = bytes.length > 0 && nonPrintable / bytes.length > 0.15;
+    let preview: string;
+    if (isBinary) {
+      preview = bytes
+        .subarray(0, Math.min(64, bytes.length))
+        .reduce((acc, b) => acc + b.toString(16).padStart(2, '0'), '');
+    } else if (frame.payload.length > 200) {
+      preview = frame.payload.slice(0, 200) + '\u2026';
+    } else {
+      preview = frame.payload;
+    }
+    // Is there still an OPEN socket for this URL (so the agent could re-send)?
+    let handleAlive = false;
+    try {
+      handleAlive = await hasOpenSocket(await this._cdp(session), frame.url);
+    } catch {
+      /* readiness probe is best-effort */
+    }
+    return {
+      sent_args_preview: preview,
+      sent_args_type: isBinary ? 'binary' : 'text',
+      sent_args_byte_length: bytes.length,
+      ws_url: frame.url,
+      head_hex: headHex,
+      ts: frame.timestamp,
+      handle_alive: handleAlive,
+      encoder_key: String(wsI),
+    };
   }
 
   /**
@@ -3377,10 +3164,8 @@ export class PlaywrightDriver extends BrowserDriver {
       extras.focusInstalled = true;
       const context = this._context(session);
 
-      // exposeBinding is context-wide and survives navigations. The
-      // FOCUS_TRACKER_SCRIPT init script is already registered on every
-      // session via the init-script registry; once the binding exists, any
-      // focusin/focusout event on any page picks it up.
+      // exposeBinding is context-wide and survives navigations. Bind first so
+      // the tracker script (which calls the binding) has a target.
       await context.exposeBinding('__kluraFocusChange', (_src, state: FocusState | null) => {
         const snapshot = Array.from(extras.focusListeners);
         for (const l of snapshot) {
@@ -3391,6 +3176,18 @@ export class PlaywrightDriver extends BrowserDriver {
           }
         }
       });
+
+      // Install the focus-tracker lazily — only once a viewer actually
+      // subscribes — so an agent-only session (e.g. a bot-challenge page)
+      // carries no focus artifact at all. addInitScript covers future
+      // navigations; evaluate once for the current document.
+      // eslint-disable-next-line no-restricted-syntax
+      await context.addInitScript({ content: FOCUS_TRACKER_SCRIPT });
+      try {
+        await this._page(session).evaluate(FOCUS_TRACKER_SCRIPT);
+      } catch {
+        /* current-document install is best-effort */
+      }
     }
 
     return () => {
@@ -3566,6 +3363,30 @@ export class PlaywrightDriver extends BrowserDriver {
       if (ev.url) state.scriptUrls.set(ev.scriptId, ev.url);
     };
     state.onPaused = (ev: CdpPausedEvent) => {
+      // Armed WebSocket send-capture: this pause is our function-call breakpoint
+      // on native WebSocket.prototype.send. Capture the encoder callstack (the
+      // frames below the native send frame), auto-resume, and never let it reach
+      // the agent's wait_for_pause queue.
+      if (state.sendBreakpointId && ev.hitBreakpoints?.includes(state.sendBreakpointId)) {
+        try {
+          const rawStack = ev.callFrames
+            .slice(1)
+            .map(
+              (f) =>
+                `    at ${f.functionName || '<anonymous>'} (${f.url || '<anonymous>'}:` +
+                `${f.location.lineNumber + 1}:${(f.location.columnNumber ?? 0) + 1})`,
+            )
+            .join('\n');
+          const capExtras = getExtras(session);
+          if (!capExtras.sendCaptures) capExtras.sendCaptures = [];
+          capExtras.sendCaptures.push({ raw_stack: rawStack });
+          while (capExtras.sendCaptures.length > 200) capExtras.sendCaptures.shift();
+        } catch {
+          /* capture is best-effort */
+        }
+        void state.cdp.send('Debugger.resume').catch(() => {});
+        return;
+      }
       state.paused = ev;
       if (state.pending) {
         const p = state.pending;
@@ -3584,6 +3405,57 @@ export class PlaywrightDriver extends BrowserDriver {
     state.enabled = true;
     extras.debuggerState = state;
     return state;
+  }
+
+  /**
+   * Arm out-of-band WebSocket send-callstack capture: a Debugger function-call
+   * breakpoint on native `WebSocket.prototype.send`. Reentrant (refcounted) so
+   * overlapping callers (trigger_reference_send + an active get_send_encoder)
+   * compose. While armed, each send pauses momentarily on the shared debugger
+   * session; the onPaused handler captures the encoder callstack and auto-
+   * resumes. No page tampering — the page's `send` stays native. Best-effort:
+   * failures leave capture disarmed rather than throw.
+   */
+  override async armSendCapture(session: Session): Promise<void> {
+    const extras = getExtras(session);
+    const next = (extras.sendCaptureRefCount ?? 0) + 1;
+    extras.sendCaptureRefCount = next;
+    if (next > 1) return; // already armed
+    try {
+      const state = await this._enableDebugger(session);
+      const fn = (await state.cdp.send('Runtime.evaluate', {
+        expression: 'WebSocket.prototype.send',
+      })) as { result?: { objectId?: string } };
+      const objectId = fn.result?.objectId;
+      if (!objectId) throw new Error('could not resolve WebSocket.prototype.send');
+      const bp = (await state.cdp.send('Debugger.setBreakpointOnFunctionCall', {
+        objectId,
+      })) as { breakpointId?: string };
+      state.sendBreakpointId = bp.breakpointId ?? null;
+    } catch {
+      extras.sendCaptureRefCount = 0; // arming failed — treat as disarmed
+    }
+  }
+
+  /** Disarm send-capture. Removes the breakpoint and clears the ring once the
+   *  last caller releases. Best-effort; safe to call when not armed. */
+  override async disarmSendCapture(session: Session): Promise<void> {
+    const extras = getExtras(session);
+    const next = Math.max(0, (extras.sendCaptureRefCount ?? 0) - 1);
+    extras.sendCaptureRefCount = next;
+    if (next > 0) return;
+    const state = extras.debuggerState;
+    if (state?.sendBreakpointId) {
+      try {
+        await state.cdp.send('Debugger.removeBreakpoint', {
+          breakpointId: state.sendBreakpointId,
+        });
+      } catch {
+        /* breakpoint may already be gone */
+      }
+      state.sendBreakpointId = null;
+    }
+    extras.sendCaptures = [];
   }
 
   async setBreakpoint(
@@ -4077,6 +3949,17 @@ export class PlaywrightDriver extends BrowserDriver {
     if (this._browser) {
       await this._browser.close();
       this._browser = null;
+    }
+    // In connect-mode 'spawn', browser.close() only disconnects the CDP
+    // session — the Chrome process is ours, so kill it. 'attach' mode leaves
+    // no child (the operator owns that Chrome).
+    if (this._connectChild) {
+      try {
+        this._connectChild.kill('SIGKILL');
+      } catch {
+        /* already exited */
+      }
+      this._connectChild = null;
     }
   }
 }

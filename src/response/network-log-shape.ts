@@ -322,9 +322,10 @@ function summarizeWsFrame(frame: WebSocketFrame, i: number): WsFrameSummary {
       tool: 'get_send_encoder',
       args: { ws_i: i },
       reason:
-        'klura captured a live handle to the WebSocket that sent this frame and the exact bytes the page passed to `.send()`. ' +
-        'Calling `get_send_encoder({ws_i})` returns `encoder_handle: window.__kluraSendEncoders[<key>]` plus structured advice. ' +
-        "Use it to re-send through the page's already-authenticated socket — `<handle>.ws.send(<your_bytes>)` — without locating the encoder function in the bundle.",
+        'Calling `get_send_encoder({ws_i})` returns a preview of the bytes this frame sent, their length/type, ' +
+        "and whether an OPEN socket for this URL is still live. Pair it with the frame's `js_callstack` + " +
+        'get_js_source to read the encoder, then save a frameFromPage / generated.frame strategy that execute ' +
+        "replays on the page's live authenticated socket.",
     };
   }
   const sliced = sliceLargeString(payload, {

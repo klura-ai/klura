@@ -31,7 +31,7 @@ Semantics: iterate every session the pool knows about for this platform — warm
 **The probe is the transport's definition of "ready."** It's pure, side-effect-free, and MUST NOT throw for ordinary "nope not ready" states — the protocol treats throws as false by design. Canonical probes, all composing `driver.probePageReady(session, urlPrefix, wsUrlPrefix?)`:
 
 - **HTTP fetch / page-script** — `probePageReady(session, baseUrl)` returning `page_on_url: true`. Any page navigated to the origin has cookies seeded, sec-\* headers established, and any scripts the page serves have already run. Sufficient for both the prereq path and the in-page fetch.
-- **WebSocket (`executeWebSocket`)** — `probePageReady(session, baseUrl, wsUrlPrefix)` returning `page_on_url: true AND ws_open: true`. The page-side registry (`__kluraWsRegistry`) is scanned for an OPEN socket matching `wsUrlPrefix`. If the site's WebSocket ever disconnected (server-side timeout, page crash, navigation), the probe returns false and the caller cold-spawns.
+- **WebSocket (`executeWebSocket`)** — `probePageReady(session, baseUrl, wsUrlPrefix)` returning `page_on_url: true AND ws_open: true`. Live sockets are enumerated over CDP (`Runtime.queryObjects` on `WebSocket.prototype`, no page-side registry) and checked for an OPEN one matching `wsUrlPrefix`. If the site's WebSocket ever disconnected (server-side timeout, page crash, navigation), the probe returns false and the caller cold-spawns.
 - **Recorded-path** opts out entirely. Step replay depends on a fresh DOM — no leftover dialogs, scroll offsets, hover state.
 
 **Borrow and release.** A borrowed session has `Session.borrowed = true` set. `pool.closeSession` on a borrowed session does NOT tear it down:

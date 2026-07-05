@@ -637,6 +637,7 @@ You can edit the file directly or ask your agent to use klura's configuration to
 A few knobs that are worth knowing about up front:
 
 - `pool.driver` (default unset → bundled Playwright driver) — switches the browser driver. Set to `"@klura/driver-playwright-stealth"` to enable stealth fingerprint patches (puppeteer-extra-plugin-stealth) for sites with stricter bot detection. BYO drivers can be installed by package name or absolute path.
+- `pool.connect` (default off) — drive a **normally-launched** Chrome over CDP instead of letting Playwright launch it. A Chrome launched the ordinary way clears managed browser challenges that a Playwright-launched one loops on forever — the tell is the launch profile, not the CDP connection. `{ "enabled": true, "mode": "spawn" }` spawns a real Chrome with a persistent profile; `"mode": "attach"` connects to a Chrome you started with `--remote-debugging-port`. See [docs/drivers.md#connect-mode](docs/drivers.md#connect-mode).
 - `remote.auto_open` (`"always" | "on_local" | "never"`, default `"on_local"`) — when the remote viewer URL is reachable from the runtime host, klura spawns the OS URL handler so your default browser opens the viewer automatically. Skips the LLM-relay channel where long signed URLs tend to get a single byte garbled. Set to `"never"` for headless / SSH setups.
 - `remote.short_url` (boolean, default `true`) — surface a short single-use redirect URL (≈16 chars, 60s TTL) to the agent instead of the full JWT URL. Survives chat-renderer rewrites where the long URL doesn't.
 
