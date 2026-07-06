@@ -54,6 +54,7 @@ async function snapNavigateOriginBlocked(
     navStatus,
     a11yTree,
     iframes,
+    connectEnabled: pool.connectEnabled,
   });
   return advisory ? { origin_blocked: advisory } : {};
 }

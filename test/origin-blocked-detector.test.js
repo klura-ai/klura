@@ -80,6 +80,45 @@ test('challenge_iframe_shape fires (cross-origin iframe + minimal landmarks)', (
   assert.ok(adv.signals.includes('challenge_iframe_shape'));
 });
 
+// ---- Connect-mode nudge --------------------------------------------
+
+const CHALLENGE_INPUT = {
+  requestedUrl: 'https://www.example.test/',
+  finalUrl: 'https://www.example.test/',
+  navStatus: 200,
+  a11yTree: 'iframe role: iframe\nbutton "Verify"',
+  iframes: [{ src: 'https://challenge.elsewhere.test/widget.html' }],
+};
+
+test('connect nudge fires on a challenge shape when connect mode is off', () => {
+  const adv = detectOriginBlocked({ ...CHALLENGE_INPUT, connectEnabled: false });
+  assert.ok(adv);
+  assert.match(adv.recommended_action, /pool\.connect\.enabled/);
+});
+
+test('connect nudge is suppressed when connect mode is already on', () => {
+  const adv = detectOriginBlocked({ ...CHALLENGE_INPUT, connectEnabled: true });
+  assert.ok(adv);
+  assert.doesNotMatch(adv.recommended_action, /pool\.connect\.enabled/);
+});
+
+test('connect nudge is suppressed when connectEnabled is unknown (omitted)', () => {
+  const adv = detectOriginBlocked(CHALLENGE_INPUT);
+  assert.ok(adv);
+  assert.doesNotMatch(adv.recommended_action, /pool\.connect\.enabled/);
+});
+
+test('connect nudge does NOT fire on a non-challenge block (http_failure, connect off)', () => {
+  const adv = detectOriginBlocked({
+    requestedUrl: 'https://www.example.test/blocked',
+    finalUrl: 'https://www.example.test/blocked',
+    navStatus: 403,
+    connectEnabled: false,
+  });
+  assert.ok(adv);
+  assert.doesNotMatch(adv.recommended_action, /pool\.connect\.enabled/);
+});
+
 test('challenge_iframe_shape does NOT fire when iframe is same-origin', () => {
   const adv = detectOriginBlocked({
     requestedUrl: 'https://www.example.test/',

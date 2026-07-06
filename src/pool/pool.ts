@@ -172,6 +172,10 @@ export class Pool implements BrowserPool {
   //   5. Periodic liveness sweep — `probePageReady` in the sweeper to evict
   //      slots whose WS dropped or whose page navigated away unexpectedly.
   //   6. `max_total_warm` memory-pressure cap across all platforms.
+  // Whether sessions this pool creates drive a normally-launched Chrome over
+  // CDP (connect mode) rather than a Playwright-launched browser. Read by the
+  // challenge detector to gate the connect-mode nudge.
+  private _connectEnabled: boolean;
   private _warmEnabled: boolean;
   // FUTURE item 1: rename to `_warmMaxPerPlatform` and add `_warmMaxTotal` when
   // per-platform arrays land.
@@ -238,6 +242,7 @@ export class Pool implements BrowserPool {
       connect: opts.connect,
     });
     this._idleTimeout = (opts.idleTimeout ?? 300) * 1000;
+    this._connectEnabled = opts.connect?.enabled ?? false;
     this._warmEnabled = opts.warm?.enabled ?? false;
     this._warmMax = opts.warm?.maxContexts ?? 3;
     this._warmTtlMs = (opts.warm?.idleTtlSeconds ?? 600) * 1000;
@@ -667,6 +672,11 @@ export class Pool implements BrowserPool {
 
   get idleSince(): number {
     return Math.floor((Date.now() - this._lastActivity) / 1000);
+  }
+
+  /** Whether sessions this pool creates run in connect mode. */
+  get connectEnabled(): boolean {
+    return this._connectEnabled;
   }
 
   async shutdown(): Promise<void> {

@@ -88,6 +88,12 @@ export function detectOriginBlocked(input: {
   /** Top-level iframes on the landing, with their `src` attributes.
    *  Optional — when omitted, `challenge_iframe_shape` can't fire. */
   iframes?: ReadonlyArray<{ src: string }>;
+  /** Whether the session runs in connect mode (drives a normally-launched
+   *  Chrome over CDP). When `false` and the landing is challenge-shaped, the
+   *  advisory nudges toward `pool.connect.enabled` — an automation-launched
+   *  browser fingerprint is the tell that makes such challenges loop. Omitted
+   *  or `true` suppresses the nudge (unknown state, or already on). */
+  connectEnabled?: boolean;
 }): OriginBlockedAdvisory | null {
   let requestedHost: string;
   let finalHost: string;
@@ -139,7 +145,7 @@ export function detectOriginBlocked(input: {
     final_host: finalHost,
     nav_status: input.navStatus,
     signals,
-    recommended_action: composeRecommendedAction(signals),
+    recommended_action: composeRecommendedAction(signals, input.connectEnabled),
   };
 }
 
@@ -177,7 +183,10 @@ function countSemanticLandmarks(a11yTree: string): number {
  *  reverse-engineer sites; bailing on first friction is the opposite of
  *  the mission. abort_session is the documented last resort, never the
  *  primary recommendation. */
-function composeRecommendedAction(signals: ReadonlyArray<OriginBlockedSignal>): string {
+function composeRecommendedAction(
+  signals: ReadonlyArray<OriginBlockedSignal>,
+  connectEnabled?: boolean,
+): string {
   // 451 legal/geo block short-circuits the bot-evasion playbook. The refusal is
   // keyed to the request's egress region/jurisdiction, not its session shape, so
   // alternate paths / same-origin fetch / wait+resnap / JS-challenge RE cannot
@@ -210,6 +219,25 @@ function composeRecommendedAction(signals: ReadonlyArray<OriginBlockedSignal>): 
         `multiple links / nav / footer. Those links almost certainly return the same status — ` +
         `it's a server-side block, not a navigation issue. Don't click around; try API ` +
         `sub-paths or RE the gate.`,
+    );
+  }
+  // Connect-mode nudge — only for challenge-shaped landings (interstitial /
+  // iframe-only), and only when connect mode is off. A managed challenge that
+  // fingerprints the automation launch profile loops forever for a
+  // Playwright-launched browser but clears for a normally-launched Chrome
+  // driven over CDP. Enabling it needs a local Chrome install and a browser
+  // relaunch, so it's a user-consented change, not a silent self-heal.
+  const challengeShaped =
+    signals.includes('challenge_iframe_shape') || signals.includes('shape_anomaly');
+  if (challengeShaped && connectEnabled === false) {
+    heads.push(
+      `This is a managed-browser challenge shape. Connect mode (drive a normally-launched real ` +
+        `Chrome over CDP instead of a Playwright-launched browser) usually clears it — the tell ` +
+        `is the automation launch profile, not the CDP connection. It's off by default because ` +
+        `it needs a local Chrome install and a browser relaunch. To enable, ask the user, then ` +
+        `\`configure({path: "pool.connect.enabled", value: true})\` and restart the runtime ` +
+        `(see \`pool.connect\` in \`describe_config\`). Do NOT flip it silently — it changes ` +
+        `which browser drives every session.`,
     );
   }
   const tryFirst = [

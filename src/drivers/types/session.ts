@@ -98,6 +98,11 @@ export interface BrowserPool {
   /** Seconds since the most recent pool activity. */
   readonly idleSince: number;
 
+  /** Whether sessions this pool creates run in connect mode (drive a
+   *  normally-launched Chrome over CDP). Read by the challenge detector to
+   *  gate the connect-mode nudge. */
+  readonly connectEnabled: boolean;
+
   /**
    * Optional js-eval cache + refresh scheduler. Backs the `js-eval` fetch
    * prereq: execute reads cached values from here first, and a successful warm

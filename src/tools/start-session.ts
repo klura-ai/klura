@@ -1726,6 +1726,7 @@ export async function startSession(
     navStatus,
     a11yTree: trimmed.tree,
     iframes,
+    connectEnabled: pool.connectEnabled,
   });
   // Resolvable JS-challenge path: when the initial detection fires on a
   // structurally challenge-shaped page (cross-host vendor redirect +
@@ -1752,6 +1753,7 @@ export async function startSession(
       navStatus: navStatusAfter,
       a11yTree: trimmedAfter.tree,
       iframes: iframesAfter,
+      connectEnabled: pool.connectEnabled,
     });
     if (advisoryAfter === null) {
       // Challenge resolved — swap in the post-wait snapshot.

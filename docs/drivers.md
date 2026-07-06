@@ -107,6 +107,8 @@ Connect mode makes klura **attach to a normally-launched Chrome over CDP** inste
 
 Connect mode always attaches with the **plain** Playwright chromium — never a stealth-wrapped one — because the browser is a genuine Chrome and must stay untouched; layering page-level evasions onto it would re-introduce detectable artifacts. It composes with the "no page-observable instrumentation by default" invariant (the built-in driver injects no init scripts), so the driven page stays byte-identical to a normal browser. This is squarely the "drive a real browser / human-in-the-loop" model, not behavioral bot-evasion: the browser passes because it genuinely is one. Cookie/login persistence still works via klura's per-platform `storageState`.
 
+Connect mode stays **off by default** — it needs a local Chrome install and a browser relaunch, so it's a user-consented change rather than a baseline. To make the opt-in discoverable at the moment it's warranted, the challenge detector (`origin-blocked-detector`) appends a nudge toward `pool.connect.enabled` in its advisory **only** when the landing is challenge-shaped (interstitial / cross-origin-iframe) **and** connect mode is currently off. It never nudges when connect is already on, nor on server-status blocks (`http_failure`, HTTP 451) that connect mode can't clear.
+
 ## Multi-locator capture
 
 During discovery, the LLM saves **multiple locator types** for each recorded-path step. This maximizes resilience — if one locator breaks, alternatives survive.
