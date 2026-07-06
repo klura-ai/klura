@@ -3,10 +3,11 @@
 // Agents that call record_observed_capability on slugs they never lift
 // (neither via lift_observed_capability into declaredCapabilities, nor
 // via save_strategy into savedCapabilities) drop breadcrumbs and walk
-// away. The loop's "save every safe read-only capability" task makes
-// these leftovers a missed opportunity, not a deferred one. Detector
-// refuses close on attempts 0 and 1; releases on attempt 2 per the
-// existing third-attempt escape hatch.
+// away. Framing is graph-aware: the map graph treats leftovers as a
+// legitimate observe-only terminal state (defer-ack leads), while other
+// graphs keep the save-first "missed opportunity" framing (lift path
+// leads). Detector refuses close on attempts 0 and 1; releases on attempt
+// 2 per the existing third-attempt escape hatch.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -70,6 +71,49 @@ test('observedNotLifted non-empty → detector emits warning naming the slugs', 
   assert.match(warning.message, /list_orders/);
   assert.match(warning.message, /get_inventory/);
   assert.equal(warning.context.observed_not_lifted.length, 2);
+});
+
+test('map graph → message confirms deferral is fine, hint leads with defer-ack', () => {
+  __resetStore();
+  const result = endDriveAudit.process(
+    makePayload({ graph: 'map', observedNotLifted: ['list_orders', 'get_inventory'] }),
+    {},
+    {},
+  );
+  assert.equal(result.status, 'rejected');
+  const warning = (result.rejection.warnings ?? []).find(
+    (w) => w.kind === 'observed_capabilities_not_lifted',
+  );
+  assert.ok(warning, 'detector must emit a warning');
+  // Neutral, non-accusatory framing — leftovers are a legitimate terminal
+  // state for an observe-only scan.
+  assert.doesNotMatch(warning.message, /CANNOT CLOSE|walked away/);
+  assert.match(warning.message, /terminal state|deferring/i);
+  // Defer-ack is the primary path; lifting is the opt-in.
+  assert.match(warning.hint, /^Default: defer/);
+  assert.ok(
+    warning.hint.indexOf('acks') < warning.hint.indexOf('lift_observed_capability'),
+    'map-graph hint must present defer-ack before the lift path',
+  );
+});
+
+test('non-map graph → keeps save-first framing (lift path leads)', () => {
+  __resetStore();
+  const result = endDriveAudit.process(
+    makePayload({ graph: 'discover', observedNotLifted: ['list_orders'] }),
+    {},
+    {},
+  );
+  assert.equal(result.status, 'rejected');
+  const warning = (result.rejection.warnings ?? []).find(
+    (w) => w.kind === 'observed_capabilities_not_lifted',
+  );
+  assert.ok(warning, 'detector must emit a warning');
+  assert.match(warning.message, /CANNOT CLOSE/);
+  assert.ok(
+    warning.hint.indexOf('lift_observed_capability') < warning.hint.indexOf('acks'),
+    'non-map hint must present the lift path before defer-ack',
+  );
 });
 
 test('observedNotLifted: validateAck rejects canned reason that omits slugs', () => {

@@ -71,6 +71,48 @@ test('unsavedHotXhrEndpoints non-empty → detector emits warning listing the pa
   assert.equal(warning.context.unsaved_xhr_endpoints.length, 2);
 });
 
+test('map graph → message allows defer, hint leads with defer-ack', () => {
+  __resetStore();
+  const endpoints = [
+    { method: 'GET', urlPath: '/api/products/search', sampleUrl: 'https://x.test/api/products/search?q=nike' },
+  ];
+  const result = endDriveAudit.process(
+    makePayload({ graph: 'map', unsavedHotXhrEndpoints: endpoints }),
+    {},
+    {},
+  );
+  assert.equal(result.status, 'rejected');
+  const warning = (result.rejection.warnings ?? []).find((w) => w.kind === 'unsaved_xhr_endpoints');
+  assert.ok(warning, 'detector must emit a warning');
+  assert.doesNotMatch(warning.message, /CANNOT CLOSE/);
+  assert.match(warning.message, /clean close|future lift session/i);
+  assert.match(warning.hint, /^Default: defer/);
+  assert.ok(
+    warning.hint.indexOf('acks') < warning.hint.indexOf('declare_capability'),
+    'map-graph hint must present defer-ack before the save path',
+  );
+});
+
+test('non-map graph → keeps save-first framing (save path leads)', () => {
+  __resetStore();
+  const endpoints = [
+    { method: 'GET', urlPath: '/api/products/search', sampleUrl: 'https://x.test/api/products/search?q=nike' },
+  ];
+  const result = endDriveAudit.process(
+    makePayload({ graph: 'discover', unsavedHotXhrEndpoints: endpoints }),
+    {},
+    {},
+  );
+  assert.equal(result.status, 'rejected');
+  const warning = (result.rejection.warnings ?? []).find((w) => w.kind === 'unsaved_xhr_endpoints');
+  assert.ok(warning, 'detector must emit a warning');
+  assert.match(warning.message, /CANNOT CLOSE/);
+  assert.ok(
+    warning.hint.indexOf('declare_capability') < warning.hint.indexOf('acks'),
+    'non-map hint must present the save path before defer-ack',
+  );
+});
+
 test('unsavedHotXhrEndpoints: validateAck rejects canned reason that omits paths', () => {
   __resetStore();
   const endpoints = [

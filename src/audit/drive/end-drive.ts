@@ -47,7 +47,10 @@ import { Audit, type Classifier, type Detector } from '../index';
 import { graphFor } from '../../graphs';
 import { getObservedNamesForSession } from '../../working-dir/logbook';
 import { collectUnsavedHotXhrEndpoints } from './xhr-noise';
-import { readPlatformSkillInfo } from '../../strategies/skills-list-helpers';
+import {
+  observedNotLiftedDetector,
+  unsavedXhrEndpointsDetector,
+} from './unsaved-capability-detectors';
 
 export const RE_CALL_THRESHOLD = 2;
 export const ACTION_CALL_THRESHOLD = 5;
@@ -400,112 +403,6 @@ const mapSessionNoObservationsDetector: Detector<EndDrivePayload, EndDriveCtx> =
   },
 };
 
-// ---------- Detector: observed_capabilities_not_lifted ----------
-//
-// Refuses close when the agent called `record_observed_capability` on
-// capability names that were neither lifted into the session's
-// declaredCapabilities (via `lift_observed_capability`) NOR landed as a
-// successful save. Agents commonly drop breadcrumbs and walk away — under
-// the loop's "save every safe read-only capability" task the leftover
-// observations represent missed save opportunities, not deferred ones.
-//
-// ackReason: 'required' — legitimate ack path: "intentionally deferring
-// these for next session because <structural reason>." validateAck demands
-// the ack reason names each leftover slug verbatim (anti-canned: agents
-// learn fast that `{reason: "deferred"}` won't pass).
-//
-// Releases at `endDriveAttempts >= 2` per the existing third-attempt
-// escape hatch.
-
-const observedNotLiftedDetector: Detector<EndDrivePayload, EndDriveCtx> = {
-  kind: 'observed_capabilities_not_lifted',
-  ackReason: 'required',
-  detect: (p) => {
-    if (p.endDriveAttempts >= 2) return [];
-    if (p.observedNotLifted.length === 0) return [];
-    const slugs = p.observedNotLifted.slice(0, 20);
-    const overflow =
-      p.observedNotLifted.length > 20 ? `, …+${p.observedNotLifted.length - 20} more` : '';
-    const slugList = slugs.map((s) => `\`${s}\``).join(', ') + overflow;
-    return [
-      {
-        kind: 'observed_capabilities_not_lifted',
-        message:
-          `CANNOT CLOSE: this session called record_observed_capability on ` +
-          `${p.observedNotLifted.length} capability name(s) but never lifted them: ${slugList}. ` +
-          `Each is a candidate the agent observed with structural evidence and then walked ` +
-          `away from. Closing now drops the captured XHR / DOM context the next session ` +
-          `would have to re-discover from cold start.`,
-        hint:
-          `Two ways forward: ` +
-          `(a) call lift_observed_capability({session_id, name: "<slug>"}) for each leftover, ` +
-          `walk it through triage + save_strategy this session; ` +
-          `(b) if a leftover is genuinely deferral-worthy (auth-walled, ` +
-          `paginated-listing-without-cursor, mutating-shape), ack with ` +
-          `notes-like input: append to acks {"observed_capabilities_not_lifted": ` +
-          `"deferring <slug1>, <slug2>, … because <structural reason>"} — the ack ` +
-          `reason MUST name each leftover slug verbatim or the ack fails (anti-canned).`,
-        context: {
-          session_id: p.sessionId,
-          platform: p.platform,
-          observed_not_lifted: [...p.observedNotLifted],
-        },
-      },
-    ];
-  },
-  validateAck: (ack, emittedIssues): string[] => {
-    // The ack must mention every leftover slug verbatim in its reason —
-    // anti-canned check (a "deferring all" reason that doesn't name a
-    // single slug doesn't prove the agent read the rejection).
-    const first = emittedIssues[0];
-    const ctx = first?.context as { observed_not_lifted?: unknown; platform?: unknown } | undefined;
-    const slugs = Array.isArray(ctx?.observed_not_lifted)
-      ? (ctx.observed_not_lifted as unknown[]).filter(
-          (v): v is string => typeof v === 'string' && v.length > 0,
-        )
-      : [];
-    const issues: string[] = [];
-    const missing = slugs.filter((s) => !ack.reason.includes(s));
-    if (missing.length > 0) {
-      issues.push(
-        `ack reason must name each leftover observed slug verbatim — missing: ` +
-          missing.map((s) => `\`${s}\``).join(', ') +
-          `. A canned "deferring all" doesn't pass; the runtime forces the agent ` +
-          `to read which slugs they're acking through.`,
-      );
-    }
-    // Anti-fabrication via structured field: when the agent claims a cover
-    // ("deferring slug X because it's already covered by saved capability Y"),
-    // they pass `covered_by: ["<Y>", ...]` on the ack and the runtime
-    // validates each name structurally against the platform's saved set.
-    // No prose-parsing — `covered_by` is a list of slug strings, the saved
-    // set is a list of slug strings, the check is set-membership.
-    const platform = typeof ctx?.platform === 'string' ? ctx.platform : '';
-    if (platform && Array.isArray(ack.covered_by) && ack.covered_by.length > 0) {
-      let savedNames: Set<string>;
-      try {
-        const info = readPlatformSkillInfo(platform);
-        savedNames = new Set(info.capabilities.map((c) => c.name));
-      } catch {
-        savedNames = new Set();
-      }
-      const bogus = ack.covered_by.filter((c) => !savedNames.has(c));
-      if (bogus.length > 0) {
-        const bogusList = bogus.map((c) => '`' + c + '`').join(', ');
-        const subject = bogus.length === 1 ? "that capability isn't" : "those capabilities aren't";
-        const platformJson = JSON.stringify(platform);
-        issues.push(
-          `covered_by names ${bogusList} but ${subject} a saved capability on platform ` +
-            `${platformJson}. Either pass real slug(s) (check list_platform_skills({platform: ` +
-            `${platformJson}}) for the canonical names), lift the observed slug yourself this ` +
-            `session, or drop covered_by and state a structural reason.`,
-        );
-      }
-    }
-    return issues;
-  },
-};
-
 /**
  * The re_persistence Detector fires when this session did reverse-engineering
  * work that isn't reflected on disk and isn't being persisted on close.
@@ -632,104 +529,6 @@ function shouldRunTriageAcknowledgment(p: EndDrivePayload): boolean {
   // tests + the always-save / triage-is-planning design.)
   return true;
 }
-
-// ---------- Detector: unsaved_xhr_endpoints ----------
-//
-// Refuses close when the network log carries 2xx XHR responses on URL paths
-// that aren't covered by any saved strategy's endpoint template AND don't
-// match an obvious tracking-shape heuristic. The agent observed JSON-bearing
-// surfaces and walked away from them — under map-graph and any "save every
-// safe read-only capability" task framing, leftover hot endpoints represent
-// missed lift opportunities, not deferred ones.
-//
-// Sibling of `observed_capabilities_not_lifted` — that detector reads the
-// `record_observed_capability` ledger (what the agent explicitly noted), this
-// detector reads the network log (structural evidence the runtime can see
-// regardless of what the agent acknowledged). Together they close the gap
-// where agents satisfy end_drive by adding cheap notes instead of lifting +
-// saving.
-//
-// ackReason: 'required'. The ack must name at least one URL path verbatim
-// from the emitted list (anti-canned: a generic "all noise" answer fails;
-// the agent has to read what they're acking through).
-//
-// Releases at `endDriveAttempts >= 2` per the existing third-attempt escape
-// hatch.
-
-const unsavedXhrEndpointsDetector: Detector<EndDrivePayload, EndDriveCtx> = {
-  kind: 'unsaved_xhr_endpoints',
-  ackReason: 'required',
-  detect: (p) => {
-    if (p.endDriveAttempts >= 2) return [];
-    const endpoints = p.unsavedHotXhrEndpoints ?? [];
-    if (endpoints.length === 0) return [];
-    const list = endpoints
-      .slice(0, 20)
-      .map((e) => `${e.method} \`${e.urlPath}\``)
-      .join('\n  ');
-    return [
-      {
-        kind: 'unsaved_xhr_endpoints',
-        message:
-          `CANNOT CLOSE: this session captured 2xx XHR responses on ` +
-          `${endpoints.length} URL path(s) that aren't covered by any saved ` +
-          `strategy AND don't match an obvious tracking-shape heuristic ` +
-          `(see runtime/docs/principles.md §Allowed runtime heuristics):\n  ${list}\n` +
-          `Each is a candidate read-only capability the runtime can see in your network log. ` +
-          `add_discovery_note doesn't clear this gate; save_strategy does.`,
-        hint:
-          `Two ways forward: ` +
-          `(a) for each path that's a real capability, call declare_capability + drive a ` +
-          `minimal flow to capture the literal-bearing request, then save_strategy at fetch ` +
-          `or page-script tier; ` +
-          `(b) for paths that are genuine noise (tracking, telemetry, marketing pixel that ` +
-          `slipped the heuristic), ack with append to acks ` +
-          `{"unsaved_xhr_endpoints": "noise: <urlPath1>, <urlPath2>, … — <structural reason>"}. ` +
-          `The ack MUST name each path verbatim from the list above (anti-canned: a generic ` +
-          `"all noise" answer fails so the runtime forces you to read which paths you're ` +
-          `dismissing).`,
-        context: {
-          session_id: p.sessionId,
-          platform: p.platform,
-          unsaved_xhr_endpoints: endpoints.map((e) => ({
-            method: e.method,
-            url_path: e.urlPath,
-            sample_url: e.sampleUrl,
-          })),
-        },
-      },
-    ];
-  },
-  validateAck: (ack, emittedIssues): string[] => {
-    const first = emittedIssues[0];
-    const ctx = first?.context as { unsaved_xhr_endpoints?: unknown } | undefined;
-    const rawList = Array.isArray(ctx?.unsaved_xhr_endpoints)
-      ? (ctx.unsaved_xhr_endpoints as unknown[])
-      : [];
-    const paths: string[] = [];
-    for (const e of rawList) {
-      if (e && typeof e === 'object' && 'url_path' in e) {
-        const candidate = (e as { url_path?: unknown }).url_path;
-        if (typeof candidate === 'string' && candidate.length > 0) paths.push(candidate);
-      }
-    }
-    if (paths.length === 0) return [];
-    const mentioned = paths.filter((p) => ack.reason.includes(p));
-    if (mentioned.length === 0) {
-      return [
-        `ack reason must name at least one URL path verbatim from the emitted list ` +
-          `(anti-canned: a generic "all noise" answer doesn't pass — the runtime forces ` +
-          `the agent to read which specific paths they're dismissing). Paths in list: ` +
-          paths
-            .slice(0, 5)
-            .map((p) => `\`${p}\``)
-            .join(', ') +
-          (paths.length > 5 ? `, …+${paths.length - 5} more` : ''),
-      ];
-    }
-    return [];
-  },
-};
 
 // ---------- Detector: abandoned_save_attempts_not_retried ----------
 //
