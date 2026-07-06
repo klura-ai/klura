@@ -22,6 +22,7 @@ import * as cheerio from 'cheerio';
 import type { ConnectConfig } from '../config/handler';
 import { getKluraHome } from '../paths';
 import { BrowserDriver, Capability, PageOpts } from './interface';
+import { describeProfileLockHolder } from './profile-lock';
 import type { InterceptedRequest } from './types/network';
 import type { WebSocketFrame, WebSocketFrameStream } from './types/websocket';
 import type {
@@ -869,7 +870,11 @@ export class PlaywrightDriver extends BrowserDriver {
         /* already gone */
       }
       this._connectChild = null;
-      throw new Error(`connect mode: failed to attach to spawned Chrome on port ${port}`, {
+      const holder = describeProfileLockHolder(profileDir);
+      const hint = holder
+        ? ` — ${holder}. Close it (or set pool.connect.profileDir to a different path) and retry.`
+        : '';
+      throw new Error(`connect mode: failed to attach to spawned Chrome on port ${port}${hint}`, {
         cause: err,
       });
     }

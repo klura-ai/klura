@@ -27,6 +27,7 @@ const { printAgentBanner } = require('./lib/banner');
 const { loadKluraRuntime } = require('./lib/klura-modules');
 const { unwrapPersistedOutput } = require('./lib/persisted-output');
 const { createReplIo } = require('./lib/repl-io');
+const { createTranscript } = require('./lib/transcript');
 
 const DEFAULT_MAX_ROUNDS = 40;
 
@@ -71,8 +72,24 @@ async function runChatAgent(opts = {}) {
   // after. The agent's text is streamed via `emit`, so onTurnEnd only prompts.
   const { nextLine, onTurnEnd, close } = createReplIo({ input: opts.stdin, output: stderr });
 
+  // Persist the conversation so a crashed/closed session is diagnosable. On by
+  // default; agent.log_transcript:false (or --no-transcript) opts out.
+  const transcript = createTranscript({
+    enabled: agentConfig.logTranscript !== false,
+    kind: 'chat',
+    provider: provider.label || provider.id,
+    model,
+  });
+  // Log each human turn as it is accepted, without changing REPL semantics.
+  const loggedOnTurnEnd = async () => {
+    const line = await onTurnEnd();
+    transcript.user(line);
+    return line;
+  };
+
   const trace = (line) => stderr.write(`  \x1b[2m${line}\x1b[0m\n`);
   const emit = (ev) => {
+    transcript.event(ev);
     if (ev.type === 'text' && ev.text) stdout.write(`${ev.text}\n`);
     else if (ev.type === 'tool_call') trace(`→ ${ev.tool}`);
     else if (ev.type === 'notice' && ev.text) trace(ev.text);
@@ -90,11 +107,22 @@ async function runChatAgent(opts = {}) {
     stderr.write('> ');
     const goal = await nextLine();
     if (goal === null || goal.trim() === '') return null;
+    transcript.session({ goal: goal.trim() });
+    transcript.user(goal.trim());
     result = await provider.runAgent(
-      runAgentOpts(server, { systemPrompt, goal: goal.trim(), model, maxRounds, onTurnEnd, emit }),
+      runAgentOpts(server, {
+        systemPrompt,
+        goal: goal.trim(),
+        model,
+        maxRounds,
+        onTurnEnd: loggedOnTurnEnd,
+        emit,
+      }),
     );
   } finally {
     close();
+    transcript.close();
+    if (transcript.path) stderr.write(`\n\x1b[2mtranscript: ${transcript.path}\x1b[0m\n`);
     unregisterCheckpoints();
     try {
       await server.close();
@@ -149,8 +177,15 @@ async function runRecoveryAgent(opts = {}) {
 
   const server = await createKluraServer();
   const unregisterCheckpoints = registerAgentCheckpoints();
+  const transcript = createTranscript({
+    enabled: agentConfig.logTranscript !== false,
+    kind: 'recovery',
+    provider: provider.label || provider.id,
+    model,
+  });
   const trace = (line) => stderr.write(`  \x1b[2m${line}\x1b[0m\n`);
   const emit = (ev) => {
+    transcript.event(ev);
     if (ev.type === 'text' && ev.text) stderr.write(`${ev.text}\n`);
     else if (ev.type === 'tool_call') trace(`→ ${ev.tool}`);
   };
@@ -159,11 +194,17 @@ async function runRecoveryAgent(opts = {}) {
   // save-confirmation prompt), prompt that human. With no TTY (a script), EOF
   // ends the run: recovery still diagnoses, it just cannot commit the fix.
   const { onTurnEnd, close } = createReplIo({ input: opts.stdin, output: stderr });
+  const loggedOnTurnEnd = async () => {
+    const line = await onTurnEnd();
+    transcript.user(line);
+    return line;
+  };
   const goal =
     `The saved klura strategy for ${platform} / ${capability} just failed when ` +
     `auto-executed (session ${startRes.sessionId}). The session is in triage. ` +
     `Diagnose the failure, re-drive the site as needed, and save a corrected ` +
     `strategy with save_strategy. Caller args: ${JSON.stringify(args)}.`;
+  transcript.session({ platform, capability, goal });
 
   try {
     const result = await provider.runAgent(
@@ -172,13 +213,15 @@ async function runRecoveryAgent(opts = {}) {
         goal,
         model,
         maxRounds,
-        onTurnEnd,
+        onTurnEnd: loggedOnTurnEnd,
         emit,
       }),
     );
     return { succeeded: true, usedAgent: true, result };
   } finally {
     close();
+    transcript.close();
+    if (transcript.path) stderr.write(`\n\x1b[2mtranscript: ${transcript.path}\x1b[0m\n`);
     unregisterCheckpoints();
     try {
       await server.close();
@@ -208,9 +251,7 @@ async function runAgentTask(opts = {}) {
   // save-confirmation + per-scenario handlers) before the run; they pass
   // skipCheckpointSetup so @klura/agent's handler does not register last and
   // shadow a scenario's per-variant handler.
-  const unregisterCheckpoints = opts.skipCheckpointSetup
-    ? () => {}
-    : registerAgentCheckpoints();
+  const unregisterCheckpoints = opts.skipCheckpointSetup ? () => {} : registerAgentCheckpoints();
 
   try {
     return await provider.runAgent(

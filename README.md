@@ -164,6 +164,8 @@ Settings live in the `agent` block of `~/.klura/config.json`. For an OpenAI-comp
 }
 ```
 
+Every `klura chat` session is transcribed to `~/.klura/chat-logs/chat-<timestamp>.jsonl` (the human turns, the assistant text, and each tool call) — handy for replaying a run that crashed or closed. The path is printed when the session ends. It's on by default; opt out with `agent.log_transcript: false` or the `--no-transcript` flag.
+
 `klura execute` gets a self-healing mode. `klura execute <platform> <capability> --agent` runs the saved strategy with **no LLM cost** when it succeeds; if it fails, the LLM picks up the live session and re-drives to repair the strategy:
 
 ```bash

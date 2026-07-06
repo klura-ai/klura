@@ -8,6 +8,7 @@ import {
   type DaemonConfig,
 } from '../config/handler';
 import { asNonEmptyBoundedString } from '../validators';
+import { isStandaloneDaemon } from '../runtime-state/process-role';
 
 export function getConfig(): DaemonConfig {
   return loadConfig();
@@ -28,6 +29,21 @@ export function restartRuntime(args: { force?: boolean } = {}): {
   message: string;
 } {
   const active = pool.activeSessions;
+  // Exiting the process only self-heals when a separate CLI client re-dials and
+  // auto-respawns the daemon. When the runtime is embedded in the caller's
+  // process (klura chat / execute --agent / an MCP host over stdio), the pool,
+  // the tools, and the caller's session all live here — exiting would kill the
+  // session with nothing to respawn it. Refuse and point at the real remedy.
+  if (!isStandaloneDaemon()) {
+    return {
+      ok: false,
+      active_sessions: active,
+      message:
+        'restart_runtime is only available when klura runs as a standalone background daemon. ' +
+        'This runtime is embedded in the current process, so exiting it would terminate your session with nothing to auto-respawn it. ' +
+        'Boot-time config (runtime.listen, runtime.idleTimeout) takes effect the next time this process starts — exit and relaunch it; do not call restart_runtime here.',
+    };
+  }
   if (active > 0 && !args.force) {
     return {
       ok: false,
@@ -39,10 +55,18 @@ export function restartRuntime(args: { force?: boolean } = {}): {
     };
   }
   // Respond, then exit after the HTTP layer flushes. Next klura call respawns
-  // the daemon via the normal auto-start path in bin/klura.js.
+  // the daemon via the normal auto-start path in bin/klura.js. Drain the pool
+  // first so spawned browsers — including connect-mode Chrome, which holds the
+  // profile's singleton lock — are killed rather than orphaned; a leaked Chrome
+  // wedges the respawned daemon's next connect-spawn ("failed to attach").
   setImmediate(() => {
     console.error('[runtime] restart requested — exiting for respawn');
-    process.exit(0);
+    // Drain, then exit regardless of the drain's outcome so the respawn can
+    // proceed. void — the setImmediate callback itself stays synchronous.
+    void pool
+      .shutdown()
+      .catch(() => {})
+      .finally(() => process.exit(0));
   });
   return {
     ok: true,
@@ -100,7 +124,7 @@ export const TOOL_DEFS: ToolDef[] = [
   {
     name: TOOL_NAMES.restartRuntime,
     description:
-      'Restart the klura runtime so boot-time config (runtime.listen, runtime.idleTimeout) takes effect. Refuses if any sessions are active unless `force: true` (which will kill them). After restart, the runtime auto-respawns on your next tool call — expect a ~1s delay.',
+      'Restart the klura runtime so boot-time config (runtime.listen, runtime.idleTimeout) takes effect. Only works when klura runs as a standalone background daemon — refuses when the runtime is embedded in the caller (klura chat / execute --agent / an MCP host), since exiting would kill your session. Also refuses if any sessions are active unless `force: true` (which will kill them). After a daemon restart, the runtime auto-respawns on your next tool call — expect a ~1s delay.',
     inputSchema: {
       type: 'object',
       properties: {

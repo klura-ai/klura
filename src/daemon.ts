@@ -5,6 +5,8 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { loadConfig } from './config/handler';
 import type { NetworkLogOptions } from './drivers/types/network';
 import { KLURA_DIR } from './paths';
+import { markStandaloneDaemon } from './runtime-state/process-role';
+import { errorText } from './utils/error-text';
 const PID_FILE = path.join(KLURA_DIR, 'daemon.pid');
 const SOCKET_PATH = path.join(KLURA_DIR, 'klura.sock');
 
@@ -114,6 +116,7 @@ export function parseListen(listen: string): { host: string; port: number } {
 export { loadConfig };
 
 export function startDaemon(): void {
+  markStandaloneDaemon();
   const config = loadConfig();
   fs.mkdirSync(KLURA_DIR, { recursive: true });
 
@@ -357,8 +360,9 @@ async function handleRequest(
       error(404, `Unknown endpoint: ${req.method ?? 'UNKNOWN'} ${url.pathname}`);
     }
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    error(500, message);
+    // errorText guarantees a non-empty string — an empty `{"error":""}` reads
+    // as an inexplicable crash to the agent and is what it can least act on.
+    error(500, errorText(err));
   }
 }
 

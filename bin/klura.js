@@ -222,7 +222,10 @@ async function main() {
     switch (command) {
       case 'start-session': {
         const url = args[1];
-        if (!url) { console.error('Usage: klura start-session <url> [--platform name]'); process.exit(1); }
+        if (!url) {
+          console.error('Usage: klura start-session <url> [--platform name]');
+          process.exit(1);
+        }
         const platform = parseFlag('--platform');
         out(await sendToDaemon('POST', '/session/start', { url, platform }));
         break;
@@ -234,7 +237,9 @@ async function main() {
         const selector = args[3];
         const value = parseFlag('--value') ?? args[4];
         if (!sessionId || !action || !selector) {
-          console.error('Usage: klura perform-action <sessionId> <click|type|select> <selector> [--value text]');
+          console.error(
+            'Usage: klura perform-action <sessionId> <click|type|select> <selector> [--value text]',
+          );
           process.exit(1);
         }
         out(await sendToDaemon('POST', '/session/action', { sessionId, action, selector, value }));
@@ -243,14 +248,20 @@ async function main() {
 
       case 'get-network-log': {
         const sessionId = args[1];
-        if (!sessionId) { console.error('Usage: klura get-network-log <sessionId>'); process.exit(1); }
+        if (!sessionId) {
+          console.error('Usage: klura get-network-log <sessionId>');
+          process.exit(1);
+        }
         out(await sendToDaemon('GET', `/session/network?sessionId=${sessionId}`));
         break;
       }
 
       case 'get-screenshot': {
         const sessionId = args[1];
-        if (!sessionId) { console.error('Usage: klura get-screenshot <sessionId>'); process.exit(1); }
+        if (!sessionId) {
+          console.error('Usage: klura get-screenshot <sessionId>');
+          process.exit(1);
+        }
         const outputFile = parseFlag('--output');
         const result = await sendToDaemon('GET', `/session/screenshot?sessionId=${sessionId}`);
         if (outputFile) {
@@ -264,7 +275,10 @@ async function main() {
 
       case 'end-drive': {
         const sessionId = args[1];
-        if (!sessionId) { console.error('Usage: klura end-drive <sessionId> [--platform name]'); process.exit(1); }
+        if (!sessionId) {
+          console.error('Usage: klura end-drive <sessionId> [--platform name]');
+          process.exit(1);
+        }
         const platform = parseFlag('--platform');
         out(await sendToDaemon('POST', '/session/close', { sessionId, platform }));
         break;
@@ -274,7 +288,9 @@ async function main() {
         const platform = args[1];
         const capability = args[2];
         if (!platform || !capability) {
-          console.error('Usage: echo \'{"strategy":"fetch",...}\' | klura save-strategy <platform> <capability> [--validate \'{"arg":"val"}\']');
+          console.error(
+            'Usage: echo \'{"strategy":"fetch",...}\' | klura save-strategy <platform> <capability> [--validate \'{"arg":"val"}\']',
+          );
           process.exit(1);
         }
         const chunks = [];
@@ -300,7 +316,11 @@ async function main() {
         if (validateArgsIdx !== -1) {
           const validateArgsRaw = args[validateArgsIdx + 1];
           const execArgs = validateArgsRaw ? JSON.parse(validateArgsRaw) : {};
-          const validation = await sendToDaemon('POST', '/execute', { platform, capability, args: execArgs });
+          const validation = await sendToDaemon('POST', '/execute', {
+            platform,
+            capability,
+            args: execArgs,
+          });
           out({ saved, validation });
         } else {
           out(saved);
@@ -317,7 +337,11 @@ async function main() {
         }
         const argsJson = parseFlag('--args');
         const execArgs = argsJson ? JSON.parse(argsJson) : {};
-        const result = await sendToDaemon('POST', '/execute', { platform, capability, args: execArgs });
+        const result = await sendToDaemon('POST', '/execute', {
+          platform,
+          capability,
+          args: execArgs,
+        });
         out(result);
         // Run-2 green-text moment: a saved strategy executed in milliseconds
         // with zero LLM tokens. Show the cliff where the user can see it.
@@ -342,7 +366,10 @@ async function main() {
 
       case 'start-remote-session': {
         const sessionId = args[1];
-        if (!sessionId) { console.error('Usage: klura start-remote-session <sessionId> [--prompt "..."]'); process.exit(1); }
+        if (!sessionId) {
+          console.error('Usage: klura start-remote-session <sessionId> [--prompt "..."]');
+          process.exit(1);
+        }
         const prompt = parseFlag('--prompt') ?? undefined;
         out(await sendToDaemon('POST', '/remote/start', { sessionId, prompt }));
         break;
@@ -350,7 +377,10 @@ async function main() {
 
       case 'stop-remote-session': {
         const sessionId = args[1];
-        if (!sessionId) { console.error('Usage: klura stop-remote-session <sessionId>'); process.exit(1); }
+        if (!sessionId) {
+          console.error('Usage: klura stop-remote-session <sessionId>');
+          process.exit(1);
+        }
         out(await sendToDaemon('POST', '/remote/stop', { sessionId }));
         break;
       }
@@ -359,25 +389,38 @@ async function main() {
         const platform = args[1];
         const capability = args[2];
         if (!platform || !capability) {
-          console.error('Usage: klura start-listener <platform> <capability> [--args \'{"key":"val"}\']');
+          console.error(
+            'Usage: klura start-listener <platform> <capability> [--args \'{"key":"val"}\']',
+          );
           process.exit(1);
         }
         const argsJson = parseFlag('--args');
         const listenerArgs = argsJson ? JSON.parse(argsJson) : {};
-        out(await sendToDaemon('POST', '/listener/start', { platform, capability, args: listenerArgs }));
+        out(
+          await sendToDaemon('POST', '/listener/start', {
+            platform,
+            capability,
+            args: listenerArgs,
+          }),
+        );
         break;
       }
 
       case 'stop-listener': {
         const listenerId = args[1];
-        if (!listenerId) { console.error('Usage: klura stop-listener <listenerId>'); process.exit(1); }
+        if (!listenerId) {
+          console.error('Usage: klura stop-listener <listenerId>');
+          process.exit(1);
+        }
         out(await sendToDaemon('POST', '/listener/stop', { listenerId }));
         break;
       }
 
       case 'get-events': {
         const since = parseFlag('--since');
-        out(await sendToDaemon('GET', since ? `/listener/events?since=${since}` : '/listener/events'));
+        out(
+          await sendToDaemon('GET', since ? `/listener/events?since=${since}` : '/listener/events'),
+        );
         break;
       }
 
@@ -387,13 +430,26 @@ async function main() {
         const strategyType = args[3];
         const stepId = args[4];
         if (!platform || !capability || !strategyType || !stepId) {
-          console.error('Usage: klura patch-step <platform> <capability> <strategyType> <stepId> --patch \'{"locators":{"css":".new"}}\'');
+          console.error(
+            'Usage: klura patch-step <platform> <capability> <strategyType> <stepId> --patch \'{"locators":{"css":".new"}}\'',
+          );
           process.exit(1);
         }
         const patchJson = parseFlag('--patch');
-        if (!patchJson) { console.error('--patch is required'); process.exit(1); }
+        if (!patchJson) {
+          console.error('--patch is required');
+          process.exit(1);
+        }
         const patch = JSON.parse(patchJson);
-        out(await sendToDaemon('POST', '/strategy/patch-step', { platform, capability, strategyType, stepId, patch }));
+        out(
+          await sendToDaemon('POST', '/strategy/patch-step', {
+            platform,
+            capability,
+            strategyType,
+            stepId,
+            patch,
+          }),
+        );
         break;
       }
 
@@ -405,20 +461,32 @@ async function main() {
           console.error('Usage: klura mark-healed <platform> <capability> <strategyType>');
           process.exit(1);
         }
-        out(await sendToDaemon('POST', '/strategy/mark-healed', { platform, capability, strategyType }));
+        out(
+          await sendToDaemon('POST', '/strategy/mark-healed', {
+            platform,
+            capability,
+            strategyType,
+          }),
+        );
         break;
       }
 
       case 'resume': {
         const sessionId = args[1];
-        if (!sessionId) { console.error('Usage: klura resume <sessionId>'); process.exit(1); }
+        if (!sessionId) {
+          console.error('Usage: klura resume <sessionId>');
+          process.exit(1);
+        }
         out(await sendToDaemon('POST', '/execute/resume', { sessionId }));
         break;
       }
 
       case 'history': {
         const platform = args[1];
-        if (!platform) { console.error('Usage: klura history <platform> [--capability name] [--limit N]'); process.exit(1); }
+        if (!platform) {
+          console.error('Usage: klura history <platform> [--capability name] [--limit N]');
+          process.exit(1);
+        }
         const capability = parseFlag('--capability');
         const limit = parseFlag('--limit');
         let qs = `platform=${platform}`;
@@ -463,7 +531,10 @@ async function main() {
         const urls = [];
         for (let i = 1; i < args.length; i++) {
           const a = args[i];
-          if (KNOWN_FLAGS.has(a)) { i++; continue; }
+          if (KNOWN_FLAGS.has(a)) {
+            i++;
+            continue;
+          }
           if (a.startsWith('--')) {
             console.error(`Unknown flag for warmup: ${a}`);
             process.exit(1);
@@ -490,8 +561,12 @@ async function main() {
         const ABOUT_BLANK = 'about:blank';
         for (const raw of urls) {
           if (raw === ABOUT_BLANK) continue;
-          try { v.asUrl(raw, 'warmup url'); }
-          catch (e) { console.error(e.message); process.exit(1); }
+          try {
+            v.asUrl(raw, 'warmup url');
+          } catch (e) {
+            console.error(e.message);
+            process.exit(1);
+          }
         }
         const warmedResults = [];
         for (const url of urls) {
@@ -500,20 +575,25 @@ async function main() {
           try {
             const started = await sendToDaemon('POST', '/session/start', { url });
             sessionId = started && started.sessionId;
-            if (!sessionId) throw new Error(started && started.error ? started.error : 'start failed');
-            await new Promise(resolve => setTimeout(resolve, idleMs));
+            if (!sessionId)
+              throw new Error(started && started.error ? started.error : 'start failed');
+            await new Promise((resolve) => setTimeout(resolve, idleMs));
             await sendToDaemon('POST', '/session/close', { sessionId });
             warmedResults.push({ url, ok: true, elapsedMs: Date.now() - t0 });
           } catch (e) {
             // Best-effort close if the session got created before the error
             if (sessionId) {
-              try { await sendToDaemon('POST', '/session/close', { sessionId }); } catch { /* ignore */ }
+              try {
+                await sendToDaemon('POST', '/session/close', { sessionId });
+              } catch {
+                /* ignore */
+              }
             }
             warmedResults.push({ url, ok: false, error: e.message, elapsedMs: Date.now() - t0 });
           }
         }
         out({ warmed: warmedResults });
-        const anyFailed = warmedResults.some(r => !r.ok);
+        const anyFailed = warmedResults.some((r) => !r.ok);
         if (anyFailed) process.exit(1);
         break;
       }
@@ -526,7 +606,13 @@ async function main() {
 
 async function handleDevice() {
   // Device commands are direct file I/O — no daemon needed
-  const { getDeviceProfile, setDeviceProfile, resetDeviceProfile, startDeviceProbe, DEVICE_PRESETS } = require('../dist/index');
+  const {
+    getDeviceProfile,
+    setDeviceProfile,
+    resetDeviceProfile,
+    startDeviceProbe,
+    DEVICE_PRESETS,
+  } = require('../dist/index');
   const sub = args[1];
 
   function describe(profile) {
@@ -549,7 +635,9 @@ async function handleDevice() {
     let profile;
     if (presetName) {
       if (!DEVICE_PRESETS[presetName]) {
-        console.error(`Unknown preset: ${presetName}. Available: ${Object.keys(DEVICE_PRESETS).join(', ')}`);
+        console.error(
+          `Unknown preset: ${presetName}. Available: ${Object.keys(DEVICE_PRESETS).join(', ')}`,
+        );
         process.exit(1);
       }
       profile = { ...DEVICE_PRESETS[presetName] };
@@ -574,7 +662,10 @@ async function handleDevice() {
     const scale = parseFlag('--scale');
     if (scale !== undefined) {
       const n = Number(scale);
-      if (!Number.isFinite(n)) { console.error('--scale must be a number'); process.exit(1); }
+      if (!Number.isFinite(n)) {
+        console.error('--scale must be a number');
+        process.exit(1);
+      }
       profile.deviceScaleFactor = n;
     }
     const name = parseFlag('--name');
@@ -595,8 +686,12 @@ async function handleDevice() {
     console.error('  rendering. See docs/identities-and-device.md for rationale.');
     console.error('');
     console.error('  klura device show                               Print current profile');
-    console.error('  klura device probe                              Interactively capture from a real');
-    console.error('                                                  device you want this daemon to emulate');
+    console.error(
+      '  klura device probe                              Interactively capture from a real',
+    );
+    console.error(
+      '                                                  device you want this daemon to emulate',
+    );
     console.error('  klura device set [--preset desktop|desktop-strict|iphone-15|pixel-8]');
     console.error('                   [--viewport WxH] [--ua "..."]');
     console.error('                   [--touch|--no-touch] [--mobile|--no-mobile]');
@@ -612,7 +707,10 @@ function handleIdentity() {
 
   if (sub === 'show') {
     const platform = args[2];
-    if (!platform) { console.error('Usage: klura identity show <platform>'); process.exit(1); }
+    if (!platform) {
+      console.error('Usage: klura identity show <platform>');
+      process.exit(1);
+    }
     const identity = getIdentity(platform);
     if (Object.keys(identity).length === 0) {
       console.log(`No identity set for '${platform}'`);
@@ -628,7 +726,10 @@ function handleIdentity() {
     }
     for (const pair of pairs) {
       const eq = pair.indexOf('=');
-      if (eq === -1) { console.error(`Invalid format: ${pair} (expected key=value)`); process.exit(1); }
+      if (eq === -1) {
+        console.error(`Invalid format: ${pair} (expected key=value)`);
+        process.exit(1);
+      }
       const key = pair.slice(0, eq);
       const value = pair.slice(eq + 1);
       setIdentity(platform, key, value);
@@ -641,13 +742,18 @@ function handleIdentity() {
       console.log('No identities configured');
     } else {
       for (const [platform, fields] of Object.entries(all)) {
-        const summary = Object.entries(fields).map(([k, v]) => `${k}=${v}`).join(', ');
+        const summary = Object.entries(fields)
+          .map(([k, v]) => `${k}=${v}`)
+          .join(', ');
         console.log(`  ${platform.padEnd(20)} ${summary}`);
       }
     }
   } else if (sub === 'clear') {
     const platform = args[2];
-    if (!platform) { console.error('Usage: klura identity clear <platform>'); process.exit(1); }
+    if (!platform) {
+      console.error('Usage: klura identity clear <platform>');
+      process.exit(1);
+    }
     clearIdentity(platform);
     console.log(`Identity for '${platform}' cleared`);
   } else {
@@ -681,7 +787,10 @@ function handleSecret() {
     }
   } else if (sub === 'remove') {
     const scheme = args[2];
-    if (!scheme) { console.error('Usage: klura secret remove <scheme>'); process.exit(1); }
+    if (!scheme) {
+      console.error('Usage: klura secret remove <scheme>');
+      process.exit(1);
+    }
     removeSecretResolver(scheme);
     console.log(`Secret resolver '${scheme}' removed`);
   } else {
@@ -768,7 +877,13 @@ async function handleHookEvents() {
 }
 
 function handlePolicy() {
-  const { loadPolicy, savePolicy, clearPolicy, getEffectivePolicy, setCapabilityPolicy } = require('../dist/index');
+  const {
+    loadPolicy,
+    savePolicy,
+    clearPolicy,
+    getEffectivePolicy,
+    setCapabilityPolicy,
+  } = require('../dist/index');
   const sub = args[1];
 
   // Parse a `--reason "..."` / `--reason=...` flag out of the args array.
@@ -793,7 +908,10 @@ function handlePolicy() {
 
   if (sub === 'show') {
     const platform = pArgs[2];
-    if (!platform) { console.error('Usage: klura policy show <platform>'); process.exit(1); }
+    if (!platform) {
+      console.error('Usage: klura policy show <platform>');
+      process.exit(1);
+    }
     const policy = getEffectivePolicy(platform);
     console.log(JSON.stringify(policy, null, 2));
   } else if (sub === 'set') {
@@ -805,9 +923,15 @@ function handlePolicy() {
     const value = pArgs[4];
     if (!platform || !key || value === undefined) {
       console.error('Usage:');
-      console.error('  klura policy set <platform> <key> <value>                               # platform-level');
-      console.error('  klura policy set <platform> <capability>.max_strategy_tier <tier> [--reason "..."]   # per-capability');
-      console.error('Platform keys: max_strategy_tier, forbid_capabilities (comma-separated), notes');
+      console.error(
+        '  klura policy set <platform> <key> <value>                               # platform-level',
+      );
+      console.error(
+        '  klura policy set <platform> <capability>.max_strategy_tier <tier> [--reason "..."]   # per-capability',
+      );
+      console.error(
+        'Platform keys: max_strategy_tier, forbid_capabilities (comma-separated), notes',
+      );
       console.error('Tiers: recorded-path, page-script, fetch');
       process.exit(1);
     }
@@ -817,22 +941,34 @@ function handlePolicy() {
       const capability = key.slice(0, dotIdx);
       const subKey = key.slice(dotIdx + 1);
       if (subKey !== 'max_strategy_tier') {
-        console.error(`Per-capability key must be "<capability>.max_strategy_tier" (got "${subKey}")`);
+        console.error(
+          `Per-capability key must be "<capability>.max_strategy_tier" (got "${subKey}")`,
+        );
         process.exit(1);
       }
       const valid = ['recorded-path', 'page-script', 'fetch'];
-      if (!valid.includes(value)) { console.error(`Invalid tier. Must be one of: ${valid.join(', ')}`); process.exit(1); }
+      if (!valid.includes(value)) {
+        console.error(`Invalid tier. Must be one of: ${valid.join(', ')}`);
+        process.exit(1);
+      }
       setCapabilityPolicy(platform, capability, value, reason);
-      console.log(`User policy for '${platform}/${capability}' set: max_strategy_tier = ${value}${reason ? ` (reason: "${reason}")` : ''}`);
-      console.log('Note: user policy is permanent and does not auto-review. Agent cannot override.');
+      console.log(
+        `User policy for '${platform}/${capability}' set: max_strategy_tier = ${value}${reason ? ` (reason: "${reason}")` : ''}`,
+      );
+      console.log(
+        'Note: user policy is permanent and does not auto-review. Agent cannot override.',
+      );
       return;
     }
     const policy = loadPolicy(platform);
     if (key === 'forbid_capabilities') {
-      policy.forbid_capabilities = value.split(',').map(s => s.trim());
+      policy.forbid_capabilities = value.split(',').map((s) => s.trim());
     } else if (key === 'max_strategy_tier') {
       const valid = ['recorded-path', 'page-script', 'fetch'];
-      if (!valid.includes(value)) { console.error(`Invalid tier. Must be one of: ${valid.join(', ')}`); process.exit(1); }
+      if (!valid.includes(value)) {
+        console.error(`Invalid tier. Must be one of: ${valid.join(', ')}`);
+        process.exit(1);
+      }
       policy.max_strategy_tier = value;
     } else if (key === 'notes') {
       policy.notes = value;
@@ -848,7 +984,10 @@ function handlePolicy() {
     //   klura policy clear <platform> <capability> (clears a single per-capability entry)
     const platform = pArgs[2];
     const capability = pArgs[3];
-    if (!platform) { console.error('Usage: klura policy clear <platform> [<capability>]'); process.exit(1); }
+    if (!platform) {
+      console.error('Usage: klura policy clear <platform> [<capability>]');
+      process.exit(1);
+    }
     if (capability) {
       const policy = loadPolicy(platform);
       if (policy.per_capability && policy.per_capability[capability]) {
@@ -864,11 +1003,21 @@ function handlePolicy() {
     }
   } else {
     console.error('Usage: klura policy <show|set|clear>');
-    console.error('  show <platform>                                         Display effective platform policy');
-    console.error('  set <platform> <key> <value>                            Set platform-level key');
-    console.error('  set <platform> <cap>.max_strategy_tier <tier> [--reason "..."]  Set user cap on a capability (permanent)');
-    console.error('  clear <platform>                                        Remove platform policy');
-    console.error('  clear <platform> <capability>                           Remove per-capability cap');
+    console.error(
+      '  show <platform>                                         Display effective platform policy',
+    );
+    console.error(
+      '  set <platform> <key> <value>                            Set platform-level key',
+    );
+    console.error(
+      '  set <platform> <cap>.max_strategy_tier <tier> [--reason "..."]  Set user cap on a capability (permanent)',
+    );
+    console.error(
+      '  clear <platform>                                        Remove platform policy',
+    );
+    console.error(
+      '  clear <platform> <capability>                           Remove per-capability cap',
+    );
     console.error('');
     console.error('Note: policy is user-owned. Agent self-reports ("I tried and couldnt") live');
     console.error('in the per-session working-dir logbook, surfaced via get_platform_logbook.');
@@ -906,11 +1055,15 @@ function readAgentConfig() {
     /* no config file or no agent block */
   }
   const maxRoundsRaw = parseFlag('--max-rounds');
+  // Transcript logging is on by default; opt out via agent.log_transcript:false
+  // in config or the --no-transcript flag.
+  const logTranscript = args.includes('--no-transcript') ? false : block.log_transcript !== false;
   return {
     provider: parseFlag('--provider') || block.provider,
     model: parseFlag('--model') || block.model,
     baseUrl: parseFlag('--base-url') || block.base_url,
     maxRounds: maxRoundsRaw ? Number(maxRoundsRaw) : block.max_rounds,
+    logTranscript,
     // OpenAI-compatible providers only; claude-code reuses Claude Code auth.
     // config.agent.api_key, else the KLURA_AGENT_API_KEY env var.
     apiKey: block.api_key || process.env.KLURA_AGENT_API_KEY,
@@ -921,7 +1074,9 @@ async function handleChat() {
   const agentConfig = readAgentConfig();
   if (!agentConfig.provider) {
     console.error('klura chat: no LLM provider configured.');
-    console.error('  Pass --provider openai|claude-code, or set agent.provider in ~/.klura/config.json.');
+    console.error(
+      '  Pass --provider openai|claude-code, or set agent.provider in ~/.klura/config.json.',
+    );
     process.exit(1);
   }
   try {
@@ -938,7 +1093,9 @@ async function handleExecuteWithAgent() {
   const platform = args[1];
   const capability = args[2];
   if (!platform || !capability) {
-    console.error("Usage: klura execute <platform> <capability> --agent [--args '{\"key\":\"val\"}']");
+    console.error(
+      'Usage: klura execute <platform> <capability> --agent [--args \'{"key":"val"}\']',
+    );
     process.exit(1);
   }
   const argsJson = parseFlag('--args');
@@ -955,7 +1112,9 @@ async function handleExecuteWithAgent() {
   if (agentFlag) agentConfig.provider = agentFlag.slice('--agent='.length);
   if (!agentConfig.provider) {
     console.error('klura execute --agent: no LLM provider configured.');
-    console.error('  Pass --agent=openai|claude-code, or set agent.provider in ~/.klura/config.json.');
+    console.error(
+      '  Pass --agent=openai|claude-code, or set agent.provider in ~/.klura/config.json.',
+    );
     process.exit(1);
   }
   try {
