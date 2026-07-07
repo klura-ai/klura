@@ -16,6 +16,10 @@
 
 import { pool } from '../runtime-state';
 import * as skills from '../strategies/skills';
+import {
+  accumulatorAuthoredCapabilities,
+  flushAccumulatorArtifacts,
+} from '../strategies/discovery-artifact';
 import { appendAbortEvent } from '../working-dir/logbook';
 import { clearStartersForSession } from '../response/starter-cache';
 import { clearForSession as clearSessionObservations } from '../response/session-observations';
@@ -243,6 +247,27 @@ export async function performAbortTeardown(
     }
   }
 
+  // Persist agent-authored handoff content before teardown. Abort skips the
+  // save audit, synth, and LIFT handoff — but discovery notes, resume pointers,
+  // and verified expressions are deliberate, bounded, capability-scoped hints
+  // the agent explicitly recorded for the next session. Dropping them on abort
+  // would silently discard exactly the knowledge the agent meant to keep — the
+  // same reason abort preserves storage state. (The capture journal is still
+  // deleted below: that's incidental captured traffic, a different category.)
+  if (platform && session.artifactAccumulator) {
+    const acc = session.artifactAccumulator;
+    const caps = accumulatorAuthoredCapabilities(acc);
+    for (const dc of session.declaredCapabilities ?? []) caps.add(dc.capability);
+    for (const rec of session.savedCapabilities ?? []) caps.add(rec.capability);
+    if (caps.size > 0) {
+      try {
+        flushAccumulatorArtifacts(platform, caps, acc, null, new Date().toISOString());
+      } catch {
+        /* best-effort — never block abort teardown */
+      }
+    }
+  }
+
   await pool.endDrive(sessionId);
   clearStartersForSession(sessionId);
   clearSessionObservations(sessionId);
@@ -261,7 +286,9 @@ export const TOOL_DEF: ToolDef = {
     `Skips the close-time audit (no capability_declaration_required, no re_persistence, no ` +
     `auto-synth, no LIFT handoff). Tears down the browser, clears the sticky obligation, persists ` +
     `storage state (cookies survive), logs to the platform's abort_events ledger for cross-session ` +
-    `visibility. Admissible in any non-closed phase (drive/triage/lift).\n\n` +
+    `visibility. Agent-authored handoff — any add_discovery_note / add_resume_pointer / ` +
+    `save_verified_expression you recorded — is flushed to the discovery artifact too, so notes ` +
+    `survive abort just like cookies. Admissible in any non-closed phase (drive/triage/lift).\n\n` +
     `\`reason\` is free-text, ≥${REASON_MIN_LENGTH} chars. Legitimate reasons:\n` +
     `  - "existing capability <slug> covers this — using execute() instead"\n` +
     `  - "user explicitly said stop"\n` +

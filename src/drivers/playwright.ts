@@ -22,7 +22,7 @@ import * as cheerio from 'cheerio';
 import type { ConnectConfig } from '../config/handler';
 import { getKluraHome } from '../paths';
 import { BrowserDriver, Capability, PageOpts } from './interface';
-import { describeProfileLockHolder } from './profile-lock';
+import { readProfileLockHolder } from './profile-lock';
 import type { InterceptedRequest } from './types/network';
 import type { WebSocketFrame, WebSocketFrameStream } from './types/websocket';
 import type {
@@ -75,6 +75,17 @@ function resolveChromeBinary(): string | null {
     }
   }
   return null;
+}
+
+// A profile dir klura owns exclusively — the default {KLURA_HOME}/connect-profile
+// or anything else under KLURA_HOME. No human launches Chrome against these, so a
+// live SingletonLock holder there is definitionally a klura-spawned orphan and
+// safe to reap. A user-supplied profileDir outside KLURA_HOME might be their own
+// Chrome profile, so it's never reaped.
+function isKluraOwnedProfile(profileDir: string): boolean {
+  const home = path.resolve(getKluraHome());
+  const resolved = path.resolve(profileDir);
+  return resolved === home || resolved.startsWith(home + path.sep);
 }
 
 // Reserve an ephemeral TCP port for the spawned Chrome's DevTools endpoint.
@@ -827,6 +838,39 @@ export class PlaywrightDriver extends BrowserDriver {
    * (persistent profile, no automation flags), waits for its DevTools endpoint,
    * and attaches. The spawned process is tracked for teardown in closeBrowser.
    */
+  /**
+   * SIGKILL a klura-spawned Chrome orphaned by a previous run that's still
+   * holding `profileDir`'s singleton lock, and clear the stale lock so the next
+   * launch starts clean. No-op unless the profile is klura-owned (never touch a
+   * user's own Chrome) and a live holder that isn't this driver's own tracked
+   * child is present.
+   */
+  private _reapOwnedProfileOrphan(profileDir: string): void {
+    if (!isKluraOwnedProfile(profileDir)) return;
+    const holder = readProfileLockHolder(profileDir);
+    if (!holder) return;
+    // A child this driver still tracks isn't an orphan — leave it be.
+    if (this._connectChild && this._connectChild.pid === holder.pid) return;
+    try {
+      process.kill(holder.pid, 'SIGKILL');
+    } catch {
+      /* already gone or not ours to signal */
+    }
+    // The killed holder leaves a stale SingletonLock symlink behind; remove it so
+    // the fresh spawn doesn't hand off to a dead pid's lock. Best-effort — a race
+    // or absence falls through to Chrome's own stale-lock handling.
+    try {
+      fs.rmSync(path.join(profileDir, 'SingletonLock'), { force: true });
+    } catch {
+      /* nothing to clear */
+    }
+    if (process.env.KLURA_VERBOSE) {
+      console.warn(
+        `[klura] connect: reaped orphaned Chrome (pid ${holder.pid}) holding ${profileDir}`,
+      );
+    }
+  }
+
   private async _connectBrowser(): Promise<Browser> {
     const cfg = this.connect;
     if (!cfg?.enabled) throw new Error('_connectBrowser called without connect.enabled');
@@ -856,6 +900,11 @@ export class PlaywrightDriver extends BrowserDriver {
     }
     const profileDir = cfg.profileDir ?? path.join(getKluraHome(), 'connect-profile');
     fs.mkdirSync(profileDir, { recursive: true });
+    // Reap a connect-Chrome orphaned by a previous run before spawning. Without
+    // this, the orphan still holds the profile's singleton lock and our fresh
+    // launch hands its command line off to the orphan and exits without opening
+    // the debug port — the exact "failed to attach" wedge.
+    this._reapOwnedProfileOrphan(profileDir);
     const port = await freeTcpPort();
 
     // A normal Chrome launch: real profile, no --enable-automation, no
@@ -888,9 +937,12 @@ export class PlaywrightDriver extends BrowserDriver {
         /* already gone */
       }
       this._connectChild = null;
-      const holder = describeProfileLockHolder(profileDir);
+      const holder = readProfileLockHolder(profileDir);
       const hint = holder
-        ? ` — ${holder}. Close it (or set pool.connect.profileDir to a different path) and retry.`
+        ? ` — another Chrome (pid ${holder.pid}) is holding the connect profile at ${profileDir}. ` +
+          `Close that window or run \`kill ${holder.pid}\`, then retry. ` +
+          `(Changing pool.connect.profileDir won't help in-process: it's a boot-time setting that ` +
+          `needs a full runtime relaunch to take effect.)`
         : '';
       throw new Error(`connect mode: failed to attach to spawned Chrome on port ${port}${hint}`, {
         cause: err,

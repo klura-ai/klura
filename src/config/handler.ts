@@ -7,6 +7,8 @@ import fs from 'fs';
 import path from 'path';
 import { getKluraHome } from '../paths';
 import { describeEnum, ValidationError } from '../validators';
+import { resolveDriverClass } from '../pool/pool';
+import { isStandaloneDaemon } from '../runtime-state/process-role';
 
 export interface WarmPoolConfig {
   enabled: boolean;
@@ -694,6 +696,24 @@ export function configureOne(dotPath: string, value: unknown): ConfigureResult {
   const err = validateLeaf(spec, coerced);
   if (err) throw new ValidationError('value', err);
 
+  // The driver must be loadable before we persist it. Boot no longer crashes on
+  // an unloadable driver, but every session would still fail — reject at write
+  // time so a typo (e.g. "playwright-stealth" instead of the installed
+  // "klura-driver-playwright-stealth") never lands in config.json. If you're
+  // adding a BYO driver, install the package first, then set this.
+  if (dotPath === 'pool.driver' && typeof coerced === 'string' && coerced) {
+    try {
+      resolveDriverClass(coerced);
+    } catch (cause) {
+      throw new ValidationError(
+        'value',
+        `driver "${coerced}" can't be loaded: ${String(cause)}. ` +
+          `Use "playwright" (built-in), a BYO package name you've installed ` +
+          `(e.g. "klura-driver-playwright-stealth"), or an absolute path.`,
+      );
+    }
+  }
+
   const current = loadConfig();
   // loadConfig shares nested refs with CONFIG_DEFAULTS via spread; round-trip
   // through JSON before mutating so we never write back into the defaults
@@ -707,10 +727,30 @@ export function configureOne(dotPath: string, value: unknown): ConfigureResult {
     changed: [dotPath],
     runtime_restart_required: spec.needsRestart,
     runtime_restart_fields: restartFields,
-    suggested_user_prompt: spec.needsRestart
-      ? `I updated ${dotPath} — that's a boot-time setting, so the runtime needs to restart before it takes effect. Want me to restart it now? (Any open sessions will be closed.)`
-      : '',
+    suggested_user_prompt: restartPrompt(dotPath, spec.needsRestart),
   };
+}
+
+// Boot-time fields only take effect on a fresh runtime. When klura runs as a
+// standalone daemon, `restart_runtime` can do that in-place — so ask. When it's
+// embedded (klura chat / execute --agent / an MCP host), the process is shared
+// with the caller's session and can't self-restart; `restart_runtime` refuses.
+// Telling the agent to offer a restart there sends it into a dead-end loop
+// (offer → user says yes → restart_runtime refuses), so instead tell the truth:
+// the change is saved but inert until the host process is relaunched by hand.
+function restartPrompt(dotPath: string, needsRestart: boolean): string {
+  if (!needsRestart) return '';
+  if (isStandaloneDaemon()) {
+    return (
+      `I updated ${dotPath} — that's a boot-time setting, so the runtime needs to restart ` +
+      `before it takes effect. Want me to restart it now? (Any open sessions will be closed.)`
+    );
+  }
+  return (
+    `I updated ${dotPath} and saved it to config, but it's a boot-time setting and this runtime ` +
+    `is embedded in the current process — it can't restart itself, so the change won't take effect ` +
+    `until you exit and relaunch klura yourself. (Don't ask me to run restart_runtime; it will refuse.)`
+  );
 }
 
 function coerceValue(spec: ConfigFieldSpec, value: unknown): unknown {

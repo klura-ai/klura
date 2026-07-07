@@ -13,9 +13,11 @@ The MCP server exposes the config as four agent-facing tools, so the user can ch
 | `describe_config` | Lists every tunable field with type, valid values, default, and whether a runtime restart is needed. The agent should call this before `configure` so it never hallucinates a path. |
 | `get_config` | Returns the current merged `DaemonConfig`. |
 | `configure` | Sets one field by dot-path: `{path: "pool.driver", value: "playwright"}`. Returns `{config, changed, runtime_restart_required, suggested_user_prompt}`. |
-| `restart_runtime` | Restarts the daemon so boot-time fields (`runtime.listen`, `runtime.idleTimeout`) take effect. Refuses while sessions are active unless `force: true`. |
+| `restart_runtime` | Restarts the daemon so boot-time fields (`runtime.listen`, `runtime.idleTimeout`) take effect. Refuses while sessions are active unless `force: true`, and refuses outright when the runtime is embedded (see below). |
 
 In practice the user can say "show me the browser," "turn on the warm pool," or "use the stealth driver" and the agent will pick the right field via `describe_config` and call `configure` for them. When `runtime_restart_required` comes back true, the agent surfaces `suggested_user_prompt` and waits for confirmation before restarting.
+
+**Boot-time fields when the runtime is embedded.** `restart_runtime` only works when klura runs as a standalone background daemon (a separate CLI client re-dials and respawns it). When the runtime is embedded in the caller's process — `klura chat`, `execute --agent`, an MCP host over stdio — it can't self-restart without killing the caller's session, so it refuses. In that case a boot-time `configure` change is written to `config.json` but stays inert until the host process is exited and relaunched by hand. `configure`'s `suggested_user_prompt` detects the embedded case and says exactly this rather than offering an in-place restart that would be refused. Note also that a bad `pool.driver` no longer bricks boot: the driver is constructed lazily on first session use, so `get_config` / `describe_config` / `configure` stay reachable to repair the value.
 
 The same tools are reachable on the CLI as `klura configure <path> <value>`, `klura get-config`, etc., but the MCP path is the expected one.
 

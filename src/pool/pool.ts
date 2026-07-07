@@ -147,7 +147,13 @@ function warmKey(platform: string, identity?: string): string {
 }
 
 export class Pool implements BrowserPool {
-  private _driver: BrowserDriver;
+  // Driver construction is deferred to first use (via `_driver`, below) so that
+  // constructing the Pool — which happens at module load, before any tool runs
+  // — never depends on a loadable driver. A bad `pool.driver` then fails only
+  // when a session is actually started, keeping the config-repair tools
+  // (get_config / describe_config / configure) reachable to fix it.
+  private _driverInstance: BrowserDriver | null = null;
+  private readonly _makeDriver: () => BrowserDriver;
   private _sessions = new Map<string, Session>();
   private _lastActivity = Date.now();
   private _idleTimeout: number;
@@ -217,30 +223,35 @@ export class Pool implements BrowserPool {
   private _sessionRoundCounts = new Map<string, number>();
 
   constructor(DriverClass?: DriverCtor, opts: PoolOptions = {}) {
-    let ResolvedClass = DriverClass ?? null;
-    if (!ResolvedClass) {
-      try {
-        ResolvedClass = resolveDriverClass(opts.driver) ?? resolveDriverClass('playwright');
-      } catch (err) {
-        throw new Error(
-          `Failed to load pool.driver "${opts.driver ?? 'playwright'}": ${String(err)}. ` +
-            `Install playwright or set pool.driver to a valid built-in name ("playwright"), ` +
-            `a BYO package name (e.g. "@klura/driver-playwright-stealth"), or an absolute ` +
-            `path in ~/.klura/config.json`,
-          { cause: err },
-        );
+    // Capture the resolution recipe; don't run it. The require()/construct only
+    // happens on first `_driver` access (see the getter below). Failures surface
+    // at session start with an actionable message, not as an uncaught throw at
+    // module load that would brick the whole CLI.
+    this._makeDriver = () => {
+      let ResolvedClass = DriverClass ?? null;
+      if (!ResolvedClass) {
+        try {
+          ResolvedClass = resolveDriverClass(opts.driver) ?? resolveDriverClass('playwright');
+        } catch (err) {
+          throw new Error(
+            `Failed to load pool.driver "${opts.driver ?? 'playwright'}": ${String(err)}. ` +
+              `Install playwright or set pool.driver to a valid built-in name ("playwright"), ` +
+              `a BYO package name (e.g. "@klura/driver-playwright-stealth"), or an absolute ` +
+              `path in ~/.klura/config.json`,
+            { cause: err },
+          );
+        }
       }
-    }
-    if (!ResolvedClass) {
-      throw new Error('No driver resolved. This should be unreachable.');
-    }
-
-    this._driver = new ResolvedClass({
-      headful: opts.headful ?? false,
-      channel: opts.channel ?? 'auto',
-      config: opts.driverConfig,
-      connect: opts.connect,
-    });
+      if (!ResolvedClass) {
+        throw new Error('No driver resolved. This should be unreachable.');
+      }
+      return new ResolvedClass({
+        headful: opts.headful ?? false,
+        channel: opts.channel ?? 'auto',
+        config: opts.driverConfig,
+        connect: opts.connect,
+      });
+    };
     this._idleTimeout = (opts.idleTimeout ?? 300) * 1000;
     this._connectEnabled = opts.connect?.enabled ?? false;
     this._warmEnabled = opts.warm?.enabled ?? false;
@@ -250,6 +261,13 @@ export class Pool implements BrowserPool {
     if (this._warmEnabled) {
       this._startWarmSweeper();
     }
+  }
+
+  /** The shared driver, constructed on first access. Throws here (not at boot)
+   *  if `pool.driver` can't be loaded. */
+  private get _driver(): BrowserDriver {
+    if (!this._driverInstance) this._driverInstance = this._makeDriver();
+    return this._driverInstance;
   }
 
   get driver(): BrowserDriver {
@@ -705,7 +723,10 @@ export class Pool implements BrowserPool {
     }
     this._warm.clear();
     this.jsEvalCache.shutdown();
-    await this._driver.closeBrowser();
+    // Only close a driver we actually built. If no session ever ran, the driver
+    // was never constructed — don't force-construct it (which could itself throw
+    // on a bad pool.driver) just to close nothing.
+    if (this._driverInstance) await this._driverInstance.closeBrowser();
   }
 
   /**

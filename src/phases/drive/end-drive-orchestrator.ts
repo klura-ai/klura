@@ -22,7 +22,10 @@ import { buildSessionSummary, countPerformActionCalls } from './session-summary'
 import { inferObservedCapabilitiesFromTriage } from './triage-inference';
 import { buildCaptureEvents } from './build-capture-events';
 import { loadCapabilityPolicy as loadCapabilityPolicyFull } from '../../strategies/policy';
-import { buildAndMergeArtifact, writeArtifact } from '../../strategies/discovery-artifact';
+import {
+  accumulatorAuthoredCapabilities,
+  flushAccumulatorArtifacts,
+} from '../../strategies/discovery-artifact';
 import { clearStartersForSession } from '../../response/starter-cache';
 import { clearForSession as clearSessionObservations } from '../../response/session-observations';
 import {
@@ -558,7 +561,7 @@ export async function endDrive(
   // on-disk artifact and write the result. Protocol-neutral — the runtime just
   // persists WHICH tool calls happened and WHAT pointers the agent recorded; no
   // classification.
-  const artifactWrites: Array<{
+  let artifactWrites: Array<{
     capability: string;
     sessions_contributed: number;
   }> = [];
@@ -567,43 +570,33 @@ export async function endDrive(
     const caps = new Set<string>();
     for (const rec of session.savedCapabilities ?? []) caps.add(rec.capability);
     for (const synth of autoSynthesized) caps.add(synth.capability);
-    // Agent-supplied resume pointers also name their capability. Include them
-    // so sessions where no save succeeded but the agent explicitly called
-    // add_resume_pointer still produce a persisted handoff.
-    for (const cap of Object.keys(acc.agentResumePointers)) caps.add(cap);
+    // Agent-authored handoff content (resume pointers, notes, verified
+    // expressions) names its own capability. Include those so a session where no
+    // save succeeded still persists what the agent left for next time.
+    for (const cap of accumulatorAuthoredCapabilities(acc)) caps.add(cap);
     // Declared-capability intents also produce artifacts, even when no save
-    // succeeded and no explicit pointer was added. The declaration itself is a
+    // succeeded and no explicit handoff was added. The declaration itself is a
     // next-run pickup point.
     for (const dc of session.declaredCapabilities ?? []) caps.add(dc.capability);
-    for (const capability of caps) {
-      try {
-        const stats =
-          typeof pool.getTryGeneratorStats === 'function'
-            ? (pool.getTryGeneratorStats(sessionId) as {
-                verify_iterations: number;
-                verified_ok: number;
-                with_verify_against: number;
-                ok_true: number;
-              } | null)
-            : null;
-        const normalizedStats = stats
-          ? {
-              verify_iterations: stats.verify_iterations,
-              verified_ok: stats.verified_ok,
-            }
-          : null;
-        const { artifact } = buildAndMergeArtifact(platform, capability, acc, normalizedStats, {
-          now: new Date().toISOString(),
-        });
-        writeArtifact(platform, capability, artifact);
-        artifactWrites.push({
-          capability,
-          sessions_contributed: artifact.sessions_contributed,
-        });
-      } catch {
-        // swallow — best-effort, artifact write failure must not block teardown
-      }
-    }
+    const stats =
+      typeof pool.getTryGeneratorStats === 'function'
+        ? (pool.getTryGeneratorStats(sessionId) as {
+            verify_iterations: number;
+            verified_ok: number;
+            with_verify_against: number;
+            ok_true: number;
+          } | null)
+        : null;
+    const normalizedStats = stats
+      ? { verify_iterations: stats.verify_iterations, verified_ok: stats.verified_ok }
+      : null;
+    artifactWrites = flushAccumulatorArtifacts(
+      platform,
+      caps,
+      acc,
+      normalizedStats,
+      new Date().toISOString(),
+    );
   }
 
   await maybeDumpCapturedLogs(sessionId, platform);

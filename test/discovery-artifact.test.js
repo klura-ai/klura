@@ -25,8 +25,30 @@ const {
   writeArtifact,
   readArtifactFromDisk,
   listArtifactsForPlatform,
+  accumulatorAuthoredCapabilities,
+  flushAccumulatorArtifacts,
   RESUME_POINTER_KINDS,
 } = await import('../dist/strategies/discovery-artifact.js');
+
+// A structurally-complete accumulator (all call arrays present so
+// buildAndMergeArtifact never dereferences undefined), with the three
+// agent-authored buckets overridable.
+function fullAcc(over = {}) {
+  return {
+    inspectWsFrameCalls: [],
+    tryGeneratorCalls: [],
+    getJsSourceCalls: [],
+    getSendEncoderCalls: [],
+    findInPageCalls: [],
+    getAttributeCalls: [],
+    getNetworkLogCalls: [],
+    recommendedNextSteps: [],
+    notes: {},
+    verifiedExpressions: {},
+    agentResumePointers: {},
+    ...over,
+  };
+}
 
 // ---- Schema ----
 
@@ -242,6 +264,43 @@ test('merge: second session increments sessions_contributed and takes max iterat
   assert.ok(r2.artifact.observations.includes('first_session'));
   assert.ok(r2.artifact.observations.includes('second_session'));
   assert.strictEqual(r2.artifact.sessions_contributed, 2);
+});
+
+// ---- Agent-authored flush (abort + end_drive shared path) ----
+
+test('accumulatorAuthoredCapabilities: unions notes, pointers, and verified-expr keys', () => {
+  const acc = fullAcc({
+    notes: { search: [{ kind: 'other', body: 'x', at: '2026-04-17T12:00:00.000Z' }] },
+    verifiedExpressions: {
+      login: [{ expression: '1', binds_args: [], returns: 'string', tested_at: '2026-04-17T12:00:00.000Z' }],
+    },
+    agentResumePointers: {
+      availability: [{ kind: 'other', ref: 'r', at: '2026-04-17T12:00:00.000Z' }],
+    },
+  });
+  const caps = accumulatorAuthoredCapabilities(acc);
+  assert.deepStrictEqual([...caps].sort(), ['availability', 'login', 'search']);
+});
+
+test('flushAccumulatorArtifacts: persists a note-only capability that has no save/pointer', () => {
+  // The regression: a discovery note dropped under a capability the agent never
+  // declared/saved/pointed-at used to vanish at teardown. It must now land on
+  // disk so the next session reads it.
+  const acc = fullAcc({
+    notes: {
+      telephone: [
+        { kind: 'function_hint', body: 'numbers live in window.__PRELOAD.contacts', at: '2026-04-17T12:00:00.000Z' },
+      ],
+    },
+  });
+  const caps = accumulatorAuthoredCapabilities(acc);
+  const writes = flushAccumulatorArtifacts('berlinintim', caps, acc, null, '2026-04-17T12:05:00.000Z');
+  assert.deepStrictEqual(writes.map((w) => w.capability), ['telephone']);
+
+  const read = readArtifactFromDisk('berlinintim', 'telephone');
+  assert.ok(read, 'note-only capability should be persisted');
+  assert.strictEqual(read.notes.length, 1);
+  assert.match(read.notes[0].body, /window\.__PRELOAD\.contacts/);
 });
 
 // ---- Kinds enum coverage ----

@@ -100,3 +100,22 @@ test('new Pool() with no driver option defaults to PlaywrightDriver', () => {
   const pool = new Pool();
   assert.ok(pool.driver instanceof PlaywrightDriver);
 });
+
+test('new Pool() with an unloadable driver does not throw at construction', () => {
+  // Driver construction is deferred so a bad pool.driver can't brick boot — the
+  // Pool is built at module load, before the config-repair tools are reachable.
+  let pool;
+  assert.doesNotThrow(() => {
+    pool = new Pool(undefined, { driver: 'no-such-driver-pkg-xyz' });
+  });
+  // The failure surfaces only when the driver is actually needed.
+  assert.throws(
+    () => pool.driver,
+    (err) => /Failed to load pool\.driver "no-such-driver-pkg-xyz"/.test(err.message),
+  );
+});
+
+test('shutdown() on a never-used pool does not force-construct a bad driver', async () => {
+  const pool = new Pool(undefined, { driver: 'no-such-driver-pkg-xyz' });
+  await assert.doesNotReject(() => pool.shutdown());
+});

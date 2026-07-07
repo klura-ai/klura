@@ -6,12 +6,17 @@ import path from 'path';
 // against the same profile hands its command line to the holder and exits
 // without opening the debug port we asked for — so a connect-mode spawn that
 // can't attach is almost always a live holder, not a genuine launch failure.
-// Reading the lock turns "failed to attach" into an actionable message.
-//
-// Deterministic and side-effect-free: read the symlink, parse the trailing pid,
-// probe liveness. Returns a human description when a LIVE process holds the
-// lock, or null (no lock, stale lock, unreadable, or non-symlink platform).
-export function describeProfileLockHolder(profileDir: string): string | null {
+// Reading the lock turns "failed to attach" into an actionable message and
+// gives us the pid to reap an orphan we own.
+
+export interface ProfileLockHolder {
+  pid: number;
+  profileDir: string;
+}
+
+// Read the SingletonLock and return the LIVE holder, or null (no lock, stale
+// lock, unreadable, or non-symlink platform). Deterministic and side-effect-free.
+export function readProfileLockHolder(profileDir: string): ProfileLockHolder | null {
   let target: string;
   try {
     // readlink throws if the lock is absent or not a symlink (e.g. Windows).
@@ -22,7 +27,7 @@ export function describeProfileLockHolder(profileDir: string): string | null {
   const pid = Number(target.slice(target.lastIndexOf('-') + 1));
   if (!Number.isInteger(pid) || pid <= 0) return null;
   if (!pidIsAlive(pid)) return null; // stale lock — a dead holder isn't the cause
-  return `another Chrome (pid ${pid}) is holding the connect profile at ${profileDir}`;
+  return { pid, profileDir };
 }
 
 // Signal 0 probes existence without delivering a signal: it throws ESRCH when

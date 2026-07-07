@@ -46,11 +46,20 @@ test('saveConfig writes atomically and round-trips', () => {
 });
 
 test('configureOne sets a live field and reports no restart', () => {
-  const result = configureOne('pool.driver', 'klura-driver-playwright-stealth');
+  const result = configureOne('pool.driver', 'playwright');
   assert.deepStrictEqual(result.changed, ['pool.driver']);
   assert.strictEqual(result.runtime_restart_required, false);
   assert.strictEqual(result.suggested_user_prompt, '');
-  assert.strictEqual(loadConfig().pool.driver, 'klura-driver-playwright-stealth');
+  assert.strictEqual(loadConfig().pool.driver, 'playwright');
+});
+
+test('configureOne rejects an unloadable pool.driver before persisting it', () => {
+  assert.throws(
+    () => configureOne('pool.driver', 'playwright-stealth'),
+    (err) => /can't be loaded/.test(err.message) && /playwright/.test(err.message),
+  );
+  // Rejected write must not have touched config.json.
+  assert.notStrictEqual(loadConfig().pool.driver, 'playwright-stealth');
 });
 
 test('configureOne on a runtime.* field flags restart + prompt', () => {
@@ -58,6 +67,16 @@ test('configureOne on a runtime.* field flags restart + prompt', () => {
   assert.strictEqual(result.runtime_restart_required, true);
   assert.deepStrictEqual(result.runtime_restart_fields, ['runtime.listen']);
   assert.match(result.suggested_user_prompt, /restart/i);
+});
+
+test('embedded runtime: boot-time prompt says relaunch-by-hand, not restart_runtime', () => {
+  // Tests run embedded (isStandaloneDaemon() is false), so a boot-time field must
+  // not offer an in-place restart the embedded runtime would refuse.
+  const result = configureOne('runtime.listen', '0.0.0.0:7788');
+  assert.strictEqual(result.runtime_restart_required, true);
+  assert.match(result.suggested_user_prompt, /embedded/i);
+  assert.match(result.suggested_user_prompt, /relaunch|exit/i);
+  assert.match(result.suggested_user_prompt, /restart_runtime/);
 });
 
 test('configureOne coerces string numerics for numeric fields', () => {

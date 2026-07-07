@@ -664,6 +664,49 @@ export function writeArtifact(
 }
 
 /**
+ * Capabilities the agent authored handoff content for this session — resume
+ * pointers, discovery notes, verified expressions. Every one is a next-session
+ * pickup point that must produce a persisted artifact even when no strategy was
+ * saved, so both the end_drive flush and the abort flush seed their capability
+ * set from here (a note/expr under a capability the agent never declared or
+ * saved would otherwise be silently dropped at teardown).
+ */
+export function accumulatorAuthoredCapabilities(acc: ArtifactAccumulator): Set<string> {
+  const caps = new Set<string>();
+  for (const cap of Object.keys(acc.agentResumePointers)) caps.add(cap);
+  for (const cap of Object.keys(acc.notes)) caps.add(cap);
+  for (const cap of Object.keys(acc.verifiedExpressions)) caps.add(cap);
+  return caps;
+}
+
+/**
+ * Merge the session accumulator into each capability's on-disk artifact and
+ * write it. Shared by the end_drive orchestrator and abort teardown so the two
+ * paths persist handoff content identically. Best-effort per capability: one
+ * write throwing must not block the rest or the teardown. Returns the writes
+ * that landed.
+ */
+export function flushAccumulatorArtifacts(
+  platform: string,
+  capabilities: Iterable<string>,
+  acc: ArtifactAccumulator,
+  stats: { verify_iterations: number; verified_ok: number } | null,
+  now: string,
+): Array<{ capability: string; sessions_contributed: number }> {
+  const writes: Array<{ capability: string; sessions_contributed: number }> = [];
+  for (const capability of capabilities) {
+    try {
+      const { artifact } = buildAndMergeArtifact(platform, capability, acc, stats, { now });
+      writeArtifact(platform, capability, artifact);
+      writes.push({ capability, sessions_contributed: artifact.sessions_contributed });
+    } catch {
+      // best-effort — a single artifact write failure must not block teardown
+    }
+  }
+  return writes;
+}
+
+/**
  * List every (platform, capability) that has a discovery artifact on disk. Used
  * by list_platform_skills / start_session to inline artifacts.
  */
