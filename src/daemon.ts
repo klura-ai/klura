@@ -144,7 +144,14 @@ export function startDaemon(): void {
 
   const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
     touch();
-    void handleRequest(req, res, klura, startTime, lastActivity, shutdown);
+    handleRequest(req, res, klura, startTime, lastActivity, shutdown).catch((err: unknown) => {
+      // Defence in depth: handleRequest catches its own routing errors, so this
+      // only fires if the request/response plumbing itself rejects (e.g. a
+      // client that resets the socket mid-body). Log and keep serving — a
+      // single dropped request must not take the daemon and its live sessions
+      // down with it.
+      console.error(`[klura] request plumbing error: ${errorText(err)}`);
+    });
   });
 
   if (useUnix) {
@@ -208,6 +215,17 @@ export function startDaemon(): void {
 
   process.on('SIGTERM', () => void shutdown());
   process.on('SIGINT', () => void shutdown());
+
+  // A long-lived daemon holds live browser sessions no one else can recover.
+  // A stray async rejection or thrown callback must not terminate the process
+  // and drop every session; log it and keep serving. (Fatal V8 conditions such
+  // as heap exhaustion still abort — those are unrecoverable by design.)
+  process.on('unhandledRejection', (reason: unknown) => {
+    console.error(`[klura] unhandledRejection: ${errorText(reason)}`);
+  });
+  process.on('uncaughtException', (err: unknown) => {
+    console.error(`[klura] uncaughtException: ${errorText(err)}`);
+  });
 }
 
 async function handleRequest(
@@ -218,9 +236,6 @@ async function handleRequest(
   lastActivity: number,
   shutdown: () => Promise<void>,
 ): Promise<void> {
-  let body = '';
-  for await (const chunk of req) body += String(chunk);
-
   const json = (data: unknown): void => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(data));
@@ -232,6 +247,11 @@ async function handleRequest(
   };
 
   try {
+    // Drain inside the try so a client that resets the socket mid-body surfaces
+    // as a handled 500 rather than an unhandled rejection off the request
+    // stream's async iterator.
+    let body = '';
+    for await (const chunk of req) body += String(chunk);
     const params: RequestParams = body ? (JSON.parse(body) as RequestParams) : {};
     const url = new URL(req.url ?? '/', 'http://localhost');
 

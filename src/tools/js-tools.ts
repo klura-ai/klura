@@ -385,6 +385,13 @@ export async function jsEval(args: JsEvalArgs): Promise<
   const timeoutMs = Math.min(Math.max(args.timeout_ms ?? 5000, 50), 30_000);
   const session = pool.getSession(args.session_id);
   const driver = pool.driverFor(args.session_id);
+  // Upper bound on the eval result retained per call for close-time literal
+  // matching. The auto-promote pass matches short captured request values
+  // against this string, so a bounded prefix carries every realistic baked
+  // literal while keeping the accumulator's memory bounded across a burst of
+  // large-payload evals (a full bundle dump is never useful templating fuel).
+  // 200-deep ring × this cap bounds total retained result text.
+  const MAX_RETAINED_RESULT_STRING_CHARS = 64_000;
   const wrapped = wrapAgentExpression(args.expression);
   // Push the call into the accumulator first so failure / timeout still bumps
   // the counter (used by end-drive nag-suppression). Capture the
@@ -405,7 +412,14 @@ export async function jsEval(args: JsEvalArgs): Promise<
       // String-shaped result is candidate templating fuel for the close-time
       // auto-promote pass. Object / array / number results are skipped — the
       // pass only matches verbatim string substrings against headers / body.
-      evalEntry.result_string = result;
+      // Retain only a bounded prefix so large returns can't grow the
+      // accumulator without limit. `slice` alone yields a V8 SlicedString that
+      // pins the full source buffer, so copy the prefix into a fresh flat
+      // string (Buffer round-trip) and let the large source be collected.
+      evalEntry.result_string =
+        result.length > MAX_RETAINED_RESULT_STRING_CHARS
+          ? Buffer.from(result.slice(0, MAX_RETAINED_RESULT_STRING_CHARS), 'utf8').toString('utf8')
+          : result;
     }
     const guarded = guardLargeResult(result, args.result_offset, args.result_length, 'js_eval');
     // Record string keys/values from the eval result into the session's

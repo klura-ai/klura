@@ -481,6 +481,24 @@ function getExtras(session: Session): SessionExtras {
   return e;
 }
 
+// Total bytes of fetched JS source retained per session. The cache spares
+// repeat search_js_source / read_js_function calls a re-fetch; bundles run to
+// several MB each, so retaining every one for the session's lifetime is
+// unbounded. Keep the most recently fetched sources within this budget and
+// evict oldest-first (Map preserves insertion order).
+const MAX_JS_SOURCE_CACHE_BYTES = 16 * 1_048_576;
+
+function cacheJsSource(cache: Map<string, string>, url: string, body: string): void {
+  cache.set(url, body);
+  let total = 0;
+  for (const v of cache.values()) total += v.length;
+  while (total > MAX_JS_SOURCE_CACHE_BYTES && cache.size > 1) {
+    const oldest = cache.keys().next().value as string;
+    total -= cache.get(oldest)?.length ?? 0;
+    cache.delete(oldest);
+  }
+}
+
 // Script injected into every page to watch focus changes and report them back
 // through an exposed binding. Runs on every navigation via addInitScript, plus
 // once on the current document at install time.
@@ -2472,7 +2490,7 @@ export class PlaywrightDriver extends BrowserDriver {
         'get_js_source:fetch',
         30_000,
       );
-      extras.jsSourceCache.set(url, body);
+      cacheJsSource(extras.jsSourceCache, url, body);
       return body;
     } catch (fetchErr) {
       // CDN-protected scripts (Meta's static.xx.fbcdn.net, etc.) throw
@@ -2515,7 +2533,7 @@ export class PlaywrightDriver extends BrowserDriver {
           if (chunk.eof) break;
         }
         await cdp.send('IO.close', { handle: streamHandle }).catch(() => {});
-        extras.jsSourceCache.set(url, body);
+        cacheJsSource(extras.jsSourceCache, url, body);
         return body;
       } catch (cdpErr) {
         // Both paths failed — surface the original fetch error with the CDP
@@ -2721,8 +2739,9 @@ export class PlaywrightDriver extends BrowserDriver {
       },
       { expr: expression, blockBody: useBlockBody, args: options.args },
     );
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<never>((_resolve, reject) => {
-      const t = setTimeout(
+      timeoutHandle = setTimeout(
         () => {
           reject(
             new Error(
@@ -2733,9 +2752,17 @@ export class PlaywrightDriver extends BrowserDriver {
         },
         Math.max(1, options.timeoutMs),
       );
-      (t as unknown as { unref?: () => void }).unref?.();
+      (timeoutHandle as unknown as { unref?: () => void }).unref?.();
     });
-    return await Promise.race([evalPromise, timeoutPromise]);
+    try {
+      return await Promise.race([evalPromise, timeoutPromise]);
+    } finally {
+      // Clear the timer when the race settles. A live timer roots the pending
+      // timeout promise and, through the race's reaction chain, pins the
+      // resolved result until the timer fires — a burst of large-payload evals
+      // inside one timeout window would otherwise hold every result at once.
+      clearTimeout(timeoutHandle);
+    }
   }
 
   // Resolve the JS evaluation target for `evaluateExpression`. With no `frame`
