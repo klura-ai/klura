@@ -3,6 +3,7 @@
 // rejection envelope. See runtime/src/audit/index.ts for the Audit class.
 
 import { Audit, type Detector, type ShapeCheck, type Issue, type AuditResult } from '../index';
+import { WARNING_KINDS } from '../../vocab';
 import type { Strategy } from '../../strategies/skills';
 import {
   loadStrategies as loadStrategiesForPlatformAndCapability,
@@ -44,6 +45,7 @@ import {
 } from '../../gate/save-warnings';
 import { detectSensitiveActionShape } from '../../gate/save-warnings-sensitive-shape';
 import { detectUselessCapabilityPrereq } from '../../gate/save-warnings-useless-prereq';
+import { detectHardcodedPaginationValue } from '../../gate/save-warnings-pagination';
 import {
   validateLookupPrereqsAreCapabilities,
   type ObservedSiblingItem,
@@ -384,6 +386,16 @@ const lookupEmbeddedInPrereqDetector: Detector<Strategy, SaveStrategyCtx> = {
 const authGatedWithoutAuthPrereqDetector: Detector<Strategy, SaveStrategyCtx> = {
   kind: 'auth_gated_without_auth_prereq',
   detect: (data, ctx) => asIssues(detectAuthGatedWithoutAuthPrereq(data, ctx.sessionId)),
+  ackReason: 'required',
+};
+
+// ackReason: 'required'. A fixed page size is occasionally the intent (a
+// capability that returns the single top hit), so the agent can ack with a
+// reason — but the default posture is "parameterize or drop it", surfaced at
+// the moment of save rather than in a REFERENCE section the agent won't read.
+const hardcodedPaginationDetector: Detector<Strategy, SaveStrategyCtx> = {
+  kind: WARNING_KINDS.hardcodedPaginationValue,
+  detect: (data) => asIssues(detectHardcodedPaginationValue(data)),
   ackReason: 'required',
 };
 
@@ -826,6 +838,7 @@ export const saveStrategyAudit = new Audit<Strategy, SaveStrategyCtx>({
     urlParamCompletenessDetector,
     lookupPrereqMustBeCapabilityDetector,
     popupAddressingWithoutTriggerDetector,
+    hardcodedPaginationDetector,
   ],
   classifiers: [
     parameterizationDisclosureClassifier,

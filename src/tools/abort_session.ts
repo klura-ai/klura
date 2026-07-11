@@ -2,7 +2,8 @@
 // the user has explicitly said stop.
 //
 // Reason guidance is in the tool description, not enforced. Legitimate
-// reasons: existing capability covers the task (use `execute()`), user
+// reasons: existing capability covers the task (run the saved strategy via
+// `start_session(graph: "execute")`), user
 // explicitly said abort, site dead/blocked. NOT legitimate: "this is a
 // one-off task" — that judgment isn't the agent's to make. klura is
 // always-save-by-default; the LLM does not get to unilaterally classify work
@@ -55,6 +56,15 @@ export const ABORT_KIND_VALUES: readonly AbortKind[] = [
   'other',
 ];
 
+/** `existing_capability_covers` is the one abort kind that names work still to
+ *  be done: the agent claims a saved strategy covers the task, but aborting only
+ *  closed the session — nothing ran. Naming the next call on the response beats
+ *  trusting the agent to remember it from SKILL.md. */
+const EXISTING_CAPABILITY_HINT =
+  `The saved strategy has NOT run — abort only closed the session. Run it now: ` +
+  `${TOOL_NAMES.startSession}(url, {graph: "execute", platform, capability, args}). ` +
+  `Do not end your turn until execute_result reports success.`;
+
 /** Abort kinds that represent a genuine persistent block worth escalating to
  *  the human operator when they repeat. Only these count toward
  *  `must_escalate` (see computeAbortEscalation in start-session). The others
@@ -105,8 +115,8 @@ export async function abortSession(args: AbortSessionArgs): Promise<AbortSession
   if (typeof args.reason !== 'string' || args.reason.trim().length < REASON_MIN_LENGTH) {
     throw new Error(
       `invalid_args: abort_session requires \`reason\` (string, ≥${REASON_MIN_LENGTH} chars). ` +
-        `Reason guidance: legitimate reasons are "existing capability <slug> covers this — using ` +
-        `execute() instead", "user explicitly said stop", "site is blocked / dead end". NOT ` +
+        `Reason guidance: legitimate reasons are "existing capability <slug> covers this — running ` +
+        `the saved strategy instead", "user explicitly said stop", "site is blocked / dead end". NOT ` +
         `legitimate: "this is a one-off task" — that judgment isn't the agent's to make. klura is ` +
         `always for saving; if you'd reach for that reason, you're using klura wrong.`,
     );
@@ -186,6 +196,7 @@ export async function abortSession(args: AbortSessionArgs): Promise<AbortSession
     kind,
     phase_at_abort: phaseAtAbort,
     captured_actions_count: capturedActionsCount,
+    ...(kind === 'existing_capability_covers' ? { _hint: EXISTING_CAPABILITY_HINT } : {}),
   };
 }
 
@@ -290,7 +301,7 @@ export const TOOL_DEF: ToolDef = {
     `save_verified_expression you recorded — is flushed to the discovery artifact too, so notes ` +
     `survive abort just like cookies. Admissible in any non-closed phase (drive/triage/lift).\n\n` +
     `\`reason\` is free-text, ≥${REASON_MIN_LENGTH} chars. Legitimate reasons:\n` +
-    `  - "existing capability <slug> covers this — using execute() instead"\n` +
+    `  - "existing capability <slug> covers this — running the saved strategy instead"\n` +
     `  - "user explicitly said stop"\n` +
     `  - "site is blocked / dead end"\n\n` +
     `NOT a legitimate reason: "this is a one-off task" — that judgment isn't yours to make. klura ` +

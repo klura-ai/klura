@@ -283,12 +283,18 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     description: 'Maximum concurrent browser sessions the pool will hold.',
     needsRestart: false,
   },
+  // Driver + warm-pool fields are captured when the Pool constructs its driver
+  // (`Pool._makeDriver` closes over headful/channel/driver/driver_config; the
+  // constructor freezes `_warmEnabled/_warmMax/_warmTtlMs`) and the driver
+  // instance is cached for the pool's life. A running daemon can't apply a new
+  // value, so these need a restart — reporting `needsRestart: false` would tell
+  // the agent a change took effect when it silently did not.
   {
     path: 'pool.headful',
     type: 'boolean',
     default: CONFIG_DEFAULTS.pool.headful,
     description: 'Show a visible browser window. Default false (headless).',
-    needsRestart: false,
+    needsRestart: true,
   },
   {
     path: 'pool.channel',
@@ -297,7 +303,7 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     default: CONFIG_DEFAULTS.pool.channel,
     description:
       'Chromium channel. "chrome" = installed Google Chrome (real TLS); "chromium" = Playwright bundled; "auto" tries chrome first.',
-    needsRestart: false,
+    needsRestart: true,
   },
   {
     path: 'pool.driver',
@@ -306,7 +312,7 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     default: undefined,
     description:
       'Driver. "playwright" (default), "@klura/driver-playwright-stealth", or a BYO path / package name.',
-    needsRestart: false,
+    needsRestart: true,
   },
   {
     path: 'pool.driver_config',
@@ -315,14 +321,14 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     default: undefined,
     description:
       "Opaque config object passed to the driver constructor as `opts.config`. Shape is the driver's contract — klura validates that this is a JSON object and otherwise leaves it alone. Use for per-driver settings the runtime doesn't know about (API keys, project IDs, vendor-specific stealth toggles).",
-    needsRestart: false,
+    needsRestart: true,
   },
   {
     path: 'pool.warm.enabled',
     type: 'boolean',
     default: CONFIG_DEFAULTS.pool.warm.enabled,
     description: 'Keep browser backends alive across klura sessions (~2-3s warm vs ~10-20s cold).',
-    needsRestart: false,
+    needsRestart: true,
   },
   {
     path: 'pool.warm.max_contexts',
@@ -330,7 +336,7 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     range: [0, 64],
     default: CONFIG_DEFAULTS.pool.warm.max_contexts,
     description: 'Max idle warm backends (LRU-evicted). 0 = unlimited (bounded by TTL only).',
-    needsRestart: false,
+    needsRestart: true,
   },
   {
     path: 'pool.warm.idle_ttl_seconds',
@@ -338,7 +344,7 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     range: [0, 86_400],
     default: CONFIG_DEFAULTS.pool.warm.idle_ttl_seconds,
     description: 'Seconds a warm backend may sit idle before eviction.',
-    needsRestart: false,
+    needsRestart: true,
   },
   {
     path: 'pool.heal.structural',

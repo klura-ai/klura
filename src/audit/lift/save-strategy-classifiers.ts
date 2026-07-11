@@ -113,7 +113,9 @@ export const literalProvenanceClassifier: Classifier<Strategy, SaveStrategyCtx, 
   kind: 'literal_provenance',
   expectedAnswerShape:
     'literal_provenance: {<path>: "static" | {caller_input: "<param>"} | {prereq_output: "<binds>"} | "single_entity"} ' +
-    '— DEFAULT SUSPICIOUS: only "static" for tokens that will be the same on every future call regardless of caller ' +
+    '— items shown with `auto_classified` are ALREADY resolved: omit them and the audit applies that classification for you, ' +
+    'so a plain `{audit_token}` retry commits (only supply an entry to override one). ' +
+    'DEFAULT SUSPICIOUS: only "static" for tokens that will be the same on every future call regardless of caller ' +
     '(API paths, query-param KEYS like `?foo=`, hostnames, HTTP methods, scheme tokens). Anything you saw in observed ' +
     'traffic, anything the user typed, any value that could rotate across callers → caller_input (a `{{placeholder}}` ' +
     'fed by an arg) or prereq_output (resolved by a fetch-extract / page-extract / capability prereq). When in doubt, ' +

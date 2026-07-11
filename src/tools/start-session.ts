@@ -272,7 +272,7 @@ export interface StartSessionResult {
    * Recent `abort_session` events for this platform, newest first, capped at
    * `RECENT_ABORTS_BUDGET`. Cross-session learning surface — agents read this
    * at session start to spot prior wrong starts (e.g. "session N aborted
-   * because existing capability X covers this — use execute"). Omitted when
+   * because existing capability X covers this — run the saved strategy"). Omitted when
    * no abort_events have been logged for the platform.
    */
   recent_aborts?: Array<{
@@ -414,7 +414,7 @@ export interface StartSessionResult {
    * Lists each capability's required enum params with the values the agent
    * should pick from. The right move is to re-call start_session with
    * `{capability, args: {<param>: "<value>"}}` (which auto-executes the saved
-   * strategy) or call execute() directly. Without this nudge the runtime
+   * strategy), optionally with `graph: "execute"`. Without this nudge the runtime
    * silently drops to a fresh DRIVE session even when a perfectly-good warm
    * path exists.
    */
@@ -910,7 +910,7 @@ function collectWarmPathAvailable(
     capabilities: out,
     hint:
       `${summary} Re-call start_session with {platform, capability, args: {<param>: "<observed value>"}} to auto-execute the saved strategy, ` +
-      `or call execute() directly. Match the user's free-text request against the observed_values' \`label\` field — ` +
+      `adding graph: "execute" if you want that invocation to be the whole session. Match the user's free-text request against the observed_values' \`label\` field — ` +
       `\`value\` is the wire-format token the saved strategy expects.`,
   };
 }
@@ -1445,7 +1445,7 @@ export function compactExecuteResultBody(er: Record<string, unknown>): void {
     er.body_truncated = true;
     er.body =
       `<truncated: ${bodyStr.length} chars; first ${previewBudget} in body_preview. ` +
-      `For a structured view of subsets, re-run with the strategy directly via execute() and shape the body in the strategy itself.>`;
+      `For a structured view of subsets, re-run via start_session(graph: "execute") and shape the body in the strategy itself.>`;
   }
 }
 

@@ -246,7 +246,7 @@ export interface PlatformLogbook {
      * visibility — future agents starting on the same platform can read
      * `recent_aborts` (capped server-side) to learn from prior wrong starts
      * (e.g. "session N aborted because existing capability search_products
-     * covers this — use execute next time").
+     * covers this — run the saved strategy next time").
      */
     abort_events: Array<{
       at: string;

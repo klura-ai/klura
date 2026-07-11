@@ -143,6 +143,7 @@ export const WARNING_KINDS = {
   multiFetchInlinePrereq: 'multi_fetch_inline_prereq',
   parameterizationDisclosureRequired: 'parameterization_disclosure_required',
   unreferencedPrereqBinding: 'unreferenced_prereq_binding',
+  hardcodedPaginationValue: 'hardcoded_pagination_value',
 } as const;
 
 export type WarningKind = (typeof WARNING_KINDS)[keyof typeof WARNING_KINDS];

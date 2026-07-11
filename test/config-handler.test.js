@@ -45,12 +45,36 @@ test('saveConfig writes atomically and round-trips', () => {
   assert.strictEqual(reloaded.pool.driver, 'klura-driver-playwright-stealth');
 });
 
-test('configureOne sets a live field and reports no restart', () => {
-  const result = configureOne('pool.driver', 'playwright');
-  assert.deepStrictEqual(result.changed, ['pool.driver']);
-  assert.strictEqual(result.runtime_restart_required, false);
-  assert.strictEqual(result.suggested_user_prompt, '');
-  assert.strictEqual(loadConfig().pool.driver, 'playwright');
+test('configureOne on a driver/warm pool field flags restart (captured at pool construction)', () => {
+  // pool.{driver,headful,channel,driver_config,warm.*} are frozen when the Pool
+  // builds its driver, so a live daemon can't apply them — configure must say so
+  // rather than falsely reporting the change as effective.
+  for (const path of [
+    'pool.headful',
+    'pool.channel',
+    'pool.driver',
+    'pool.driver_config',
+    'pool.warm.enabled',
+    'pool.warm.max_contexts',
+    'pool.warm.idle_ttl_seconds',
+  ]) {
+    const value =
+      path === 'pool.driver'
+        ? 'playwright'
+        : path === 'pool.channel'
+          ? 'chromium'
+          : path === 'pool.driver_config'
+            ? { k: 'v' }
+            : path === 'pool.warm.max_contexts'
+              ? 2
+              : path === 'pool.warm.idle_ttl_seconds'
+                ? 120
+                : true;
+    const result = configureOne(path, value);
+    assert.strictEqual(result.runtime_restart_required, true, `${path} must flag restart`);
+    assert.deepStrictEqual(result.runtime_restart_fields, [path], `${path} names itself`);
+    assert.match(result.suggested_user_prompt, /restart|relaunch|exit/i, `${path} prompts to restart`);
+  }
 });
 
 test('configureOne rejects an unloadable pool.driver before persisting it', () => {
@@ -127,7 +151,7 @@ test('describeConfig returns every registered field', () => {
   assert.ok(paths.includes('remote.mode'));
   const driverField = desc.fields.find((f) => f.path === 'pool.driver');
   assert.strictEqual(driverField.optional, true);
-  assert.strictEqual(driverField.needsRestart, false);
+  assert.strictEqual(driverField.needsRestart, true);
   const listenField = desc.fields.find((f) => f.path === 'runtime.listen');
   assert.strictEqual(listenField.needsRestart, true);
   assert.ok(desc.dynamic_paths['secrets.<scheme>']);
