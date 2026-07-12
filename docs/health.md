@@ -24,7 +24,7 @@ Execute strategy
 
 Health status can be queried via `get_strategy_health(platform, capability, strategy_type)` and reset via `reset_strategy_health(platform, capability, strategy_type)`.
 
-A separate per-protocol counter (`NODE_TRANSPORT_FAIL_THRESHOLD = 3` in `runtime/src/health.ts`) handles the narrower case of `fetch` Node transport failing on a strategy that does work in-browser — TLS fingerprint mismatch, ECONNRESET, that class. After 3 consecutive Node-transport failures, the runtime demotes the strategy to in-browser transport for subsequent execute calls without changing its on-disk shape or marking it broken.
+A separate per-protocol counter (`NODE_TRANSPORT_FAIL_THRESHOLD = 3` in `runtime/src/strategies/health.ts`) handles the narrower case of `fetch` Node transport failing on a strategy that does work in-browser — TLS fingerprint mismatch, ECONNRESET, that class. After 3 consecutive Node-transport failures, the runtime persistently demotes the strategy from `fetch` to `page-script` for subsequent execute calls without marking it broken.
 
 ---
 

@@ -13,7 +13,7 @@ Graphs are data — `runtime/src/graphs/<name>.ts` exports each as a `Graph` lit
 | Graph | Topology | Notable per-graph config |
 | --- | --- | --- |
 | **discover** (default) | `drive → triage → lift → terminal{closed}` | None special — the canonical reverse-engineering flow. |
-| **map** | `drive → terminal{closed}` | `gateMutatingActions: true`, `skipAutoSynth: true`, `inferObservedCapabilitiesAtClose: true`, `skipDeclarationGuard: true`, `rePersistenceThreshold: {reCalls: 1, actions: 5}`, `obligationStyle: 'flush_reminder'`. |
+| **map** | `drive → triage → lift → terminal{closed}` | `lift_observed_capability` opens the opt-in triage/lift cycle. `end_drive` can close from drive, triage, or lift. `gateMutatingActions: true`, `skipAutoSynth: true`, `inferObservedCapabilitiesAtClose: true`, `skipDeclarationGuard: true`, `rePersistenceThreshold: {reCalls: 1, actions: 5}`, `obligationStyle: 'flush_reminder'`. |
 | **execute** | `execute → triage → lift → terminal{closed \| failed}` | The `execute_failed` event has a guarded transition (rediscover-failure gate fires → triage) and an unguarded fallback (terminal{failed}). |
 
 ## The four phases
@@ -46,8 +46,18 @@ lift   ──[resolved_via_save]────→ terminal{closed}
 `map` graph:
 
 ```
-drive  ──[end_drive_unresolved]──→ terminal{closed}
-drive  ──[resolved_via_save]────→ terminal{closed}
+drive  ──[lift_observed_capability_invoked]──→ triage
+drive  ──[end_drive_unresolved]─────────────→ terminal{closed}
+drive  ──[resolved_via_save]────────────────→ terminal{closed}
+triage ──[plan_submitted]───────────────────→ triage
+triage ──[plan_handoff]─────────────────────→ lift
+triage ──[surface_changed]──────────────────→ triage
+triage ──[end_drive_unresolved]─────────────→ terminal{closed}
+lift   ──[plan_submitted]───────────────────→ triage
+lift   ──[surface_changed]──────────────────→ triage
+lift   ──[lift_observed_capability_invoked]─→ triage
+lift   ──[end_drive_unresolved]─────────────→ terminal{closed}
+lift   ──[resolved_via_save]────────────────→ terminal{closed}
 ```
 
 `execute` graph:
