@@ -14,7 +14,7 @@ Every session walks one of three declarative state machines. The `graph` paramet
 | Graph | Topology | Use it for |
 | --- | --- | --- |
 | `discover` (default) | `drive → triage → lift → terminal{closed}` | Goal-directed reverse engineering. The standard reverse-engineering flow that dominates this doc. |
-| `map` | `drive → terminal{closed}` | Surface mapping. Mutating actions gate behind a per-(action, selector) consent checkpoint; auto-synth is skipped at close; the re-persistence gate fires at lower thresholds. The platform logbook accretes the surface map for future sessions. |
+| `map` | `drive → triage → lift → terminal{closed}` | Surface mapping with an opt-in lift cycle for an observed capability. Mutating actions gate behind a per-(action, selector) consent checkpoint; auto-synth is skipped at close; the re-persistence gate fires at lower thresholds. The platform logbook accretes the surface map for future sessions. |
 | `execute` | `execute → triage → lift → terminal{closed \| failed}` | Run a saved strategy as the whole session. On stale-strategy failure, the FSM auto-falls into triage with the failure as defense-surface input — the agent re-plans and re-lifts. Arg / auth / structural failures terminate `failed`. |
 
 ```mermaid
@@ -34,8 +34,16 @@ flowchart LR
   subgraph M["map graph"]
     direction LR
     M_drive[drive]
+    M_triage[triage]
+    M_lift[lift]
     M_close(((closed)))
-    M_drive --> M_close
+    M_drive -->|lift observed capability| M_triage
+    M_triage --> M_lift
+    M_lift --> M_close
+    M_drive -.->|end drive| M_close
+    M_triage -.->|end drive| M_close
+    M_lift -.->|re-plan / next capability| M_triage
+    M_lift -.->|end drive| M_close
   end
   subgraph E["execute graph"]
     direction LR
@@ -53,9 +61,9 @@ flowchart LR
   end
 ```
 
-Solid arrows are the primary path; dotted arrows are alternate transitions (early resolve, stale-strategy fall-through to triage, structural failure, re-plan back to triage when the user said no or `perform_action` crossed surfaces). Triage and lift do not branch on a "user approves" event — there's no `plan_rejected` in the FSM. The agent submits a plan via `submit_triage_plan`, the runtime fires an `ack_checkpoint`, and the agent reads `user_response` itself: re-submitting re-enters triage, RE moves transition to lift. Self-loops (`triage → triage` on `plan_submitted` / `surface_changed`) are omitted from the diagram for legibility — see [docs/session-phases.md](docs/session-phases.md) for the full edge list.
+Solid arrows are the primary path; dotted arrows are alternate transitions (early resolve, explicit close, stale-strategy fall-through to triage, structural failure, re-plan back to triage when the user said no or `perform_action` crossed surfaces). Triage and lift do not branch on a "user approves" event — there's no `plan_rejected` in the FSM. The agent submits a plan via `submit_triage_plan`, the runtime fires an `ack_checkpoint`, and the agent reads `user_response` itself: re-submitting re-enters triage, RE moves transition to lift. Self-loops (`triage → triage` on `plan_submitted` / `surface_changed`) are omitted from the diagram for legibility — see [docs/session-phases.md](docs/session-phases.md) for the full edge list.
 
-Graphs are data, not code: `runtime/src/session-phase/graphs/<name>.ts` exports each Graph literal (nodes, transitions, per-graph config). The dispatcher in `runtime/src/session-phase/state-machine.ts` is the only writer of `session.phase` and `session.status` — illegal transitions throw. Per-graph behavior (consent gates, auto-synth, re-persistence threshold) is declared in each Graph's `GraphConfig`, not as scattered `if` branches in the runtime. New graphs land as one new file under `graphs/`. Mermaid render via `runtime/src/session-phase/dump.ts`.
+Graphs are data, not code: `runtime/src/graphs/<name>.ts` exports each Graph literal (nodes, transitions, per-graph config). The dispatcher in `runtime/src/phases/state-machine.ts` is the only writer of `session.phase` and `session.status` — illegal transitions throw. Per-graph behavior (consent gates, auto-synth, re-persistence threshold) is declared in each Graph's `GraphConfig`, not as scattered `if` branches in the runtime. New graphs land as one new file under `graphs/`. Mermaid render via `runtime/src/graphs/dump.ts`.
 
 Full FSM mechanics — admissibility, round budgets, transition events, the failure-gate guard — in [docs/session-phases.md](docs/session-phases.md).
 
