@@ -5,9 +5,9 @@
   </picture>
 </p>
 
-<p align="center"><strong>Your agent learns a website once. Every run after is a direct API call — zero tokens, no browser.</strong></p>
+<p align="center"><strong>Your agent learns a website once. The saved-strategy execution after that uses zero LLM tokens and no UI rediscovery.</strong></p>
 
-<p align="center"><sub>Klura is an MCP runtime your LLM agent uses to drive a browser, learn the API underneath, and save the result as a reusable skill.</sub></p>
+<p align="center"><sub>Klura is a local-first MCP runtime your agent uses to drive a browser, learn the interface underneath, and save the result as a reusable skill.</sub></p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@klura/runtime"><img alt="npm version" src="https://img.shields.io/npm/v/@klura/runtime?style=flat-square&logo=npm&color=cb3837"></a>
@@ -22,7 +22,7 @@
 
 # Turn any website into an API
 
-Klura lets an agent use the browser once, learn the underlying interface, and turn future runs into direct API calls.
+Klura lets an agent use the browser once, learn the underlying interface, and turn future runs into reusable executable strategies.
 
 ```text
 First run:
@@ -35,18 +35,19 @@ Lift:
 
 Later:
 > message Bob in the team chat using klura
-  direct saved strategy → ~0.3s · 0 tokens
+  direct saved strategy → no UI rediscovery · 0 LLM tokens
 ```
 
-Browser agents pay for the UI on every run. Klura pays once.
+Browser agents rediscover the UI on every run. Klura learns it once.
 
-|                                      |      Hacker News search |    Messenger send message |
-| ------------------------------------ | ----------------------: | ------------------------: |
-| Plain browser agent — every run      | 20.2s · 63k tok · $0.09 |   206s · 696k tok · $0.34 |
-| Klura cold — one-time, includes LIFT |  77s · 518k tok · $0.42 | 27 min · 3.5M tok · $2.53 |
-| **Klura, warm — no LLM in the loop** |  **274ms · 0 tok · $0** |    **0.1ms · 0 tok · $0** |
+| Task | Plain browser agent[^baseline-reported] | klura cold — learn once | **klura runtime replay** |
+| --- | --: | --: | --: |
+| IKEA stock across four Berlin stores | 2m 17s | 9m 43s | **1.14s · 0 LLM tokens** |
+| ASOS filtered product search | 1m 35s | 6m 57s | **67.9ms · 0 LLM tokens** |
+| Airbnb Berlin stay search | 2m 48s | 13m 19s | **2.17s · 0 LLM tokens** |
+| Amazon product search[^amazon-sonnet] | 3m 52s | 2m 00s | **1.07s · 0 LLM tokens** |
 
-<sub>The first klura run costs a normal browser-agent run plus one-time reverse-engineering — full table and method in <a href="#benchmarks">Benchmarks</a>.</sub>
+<sub>The first three rows use <code>gpt-5.6-sol</code> through Codex; Amazon uses Sonnet 4.6. The first klura run includes one-time discovery and LIFT; replay is the saved strategy itself. Full method in <a href="#benchmarks">Benchmarks</a>.</sub>
 
 <p align="center">
   <picture>
@@ -55,11 +56,7 @@ Browser agents pay for the UI on every run. Klura pays once.
   </picture>
 </p>
 
-<p align="center"><sub>Whether the underlying call is a plain <code>fetch</code> or a binary WebSocket frame the page builds in-memory, klura saves the simplest strategy that actually fires — and replays it the same way every run after.</sub></p>
-
-Klura watches what the browser actually does — requests, responses, cookies, page state, tokens, and action trails — then turns repeatable flows into saved executable strategies.
-
-The next time your agent needs the same task, it does not rediscover the page. It calls the saved strategy.
+<p align="center"><sub>Klura observes requests, responses, page state, and action trails, then saves the simplest executable strategy that works — from a plain <code>fetch</code> to an in-page WebSocket frame.</sub></p>
 
 ---
 
@@ -81,7 +78,17 @@ The next time your agent needs the same task, it does not rediscover the page. I
 
 ## Quick Start
 
-Add klura to your MCP client — Claude Code, Claude Desktop, Cursor, Windsurf, OpenClaw, or any MCP-compatible host.
+Klura works with Codex, the ChatGPT desktop app, Claude Code, Claude Desktop, Cursor, Windsurf, OpenClaw, and other MCP hosts. GPT-5.6 Sol (`gpt-5.6-sol`) performed roughly on par with Sonnet 4.6 in our live-site discovery and LIFT runs.
+
+### Codex / ChatGPT desktop
+
+The Codex CLI, IDE extension, and ChatGPT desktop app share one MCP configuration:
+
+```bash
+codex mcp add klura -- npx -y @klura/mcp
+```
+
+Restart the host after registering. The `gpt-5.6-sol` benchmark rows below use this integration.
 
 ### Claude Code
 
@@ -136,7 +143,7 @@ After every code change, re-run `npm run build` and restart the daemon: `klura r
 
 ### Standalone — talk to klura directly
 
-Klura works two ways. The sections above set it up as **infrastructure**: an MCP server any agent (Claude Code, Claude Desktop, Cursor) builds on. But klura is also a **standalone agentic tool** — you can talk to it directly, with no MCP host, by attaching an optional LLM:
+As well as serving MCP hosts, klura can run as a standalone agent with an optional LLM provider:
 
 ```bash
 npm install -g @klura/runtime @klura/agent-claude-code   # or @klura/agent-openai
@@ -144,7 +151,7 @@ klura chat
 > message Adam in the team chat
 ```
 
-`klura chat` is a REPL: a local LLM drives klura through the same tools an MCP host would use. The agent ships with klura; the LLM provider is a pluggable add-on package. Pick the provider once — `claude-code` reuses your Claude Code login (no API key), `openai` works against OpenAI, NVIDIA, Together, Groq, vLLM, or any chat-completions endpoint:
+`klura chat` is a REPL over the same tools exposed through MCP. `claude-code` reuses your Claude Code login; `openai` supports OpenAI and compatible endpoints such as NVIDIA, Together, Groq, and vLLM:
 
 ```bash
 klura chat --provider claude-code
@@ -164,7 +171,7 @@ Settings live in the `agent` block of `~/.klura/config.json`. For an OpenAI-comp
 }
 ```
 
-Every `klura chat` session is transcribed to `~/.klura/chat-logs/chat-<timestamp>.jsonl` (the human turns, the assistant text, and each tool call) — handy for replaying a run that crashed or closed. The path is printed when the session ends. It's on by default; opt out with `agent.log_transcript: false` or the `--no-transcript` flag.
+Sessions are transcribed to `~/.klura/chat-logs/chat-<timestamp>.jsonl`; opt out with `agent.log_transcript: false` or `--no-transcript`.
 
 `klura execute` gets a self-healing mode. `klura execute <platform> <capability> --agent` runs the saved strategy with **no LLM cost** when it succeeds; if it fails, the LLM picks up the live session and re-drives to repair the strategy:
 
@@ -172,27 +179,7 @@ Every `klura chat` session is transcribed to `~/.klura/chat-logs/chat-<timestamp
 klura execute team-chat send_message --args '{"to":"Adam"}' --agent
 ```
 
-The LLM is **never** invoked when klura is driven by an external MCP host — that host already supplies one. Providers: [`@klura/agent-claude-code`](https://www.npmjs.com/package/@klura/agent-claude-code), [`@klura/agent-openai`](https://www.npmjs.com/package/@klura/agent-openai).
-
-### Try it
-
-Now ask your agent to do a website task:
-
-```text
-message Adam in the team chat using klura
-```
-
-If klura already knows the task, it runs the saved strategy.
-
-If not, your agent opens a browser and completes the task normally while klura records what happens underneath. Afterward, klura can analyze the captured trace and learn the real interface behind the UI.
-
-The next time you ask:
-
-```text
-message Bob in the team chat using klura
-```
-
-klura can skip the page entirely and execute the saved strategy directly.
+External MCP hosts supply their own LLM. Standalone providers: [`@klura/agent-claude-code`](https://www.npmjs.com/package/@klura/agent-claude-code), [`@klura/agent-openai`](https://www.npmjs.com/package/@klura/agent-openai).
 
 ---
 
@@ -372,11 +359,7 @@ See [docs/logbook.md](docs/logbook.md).
 
 ## Why Klura Exists
 
-Agents should not have to rediscover the same UI forever.
-
-The UI is not the real interface. It is the human layer over requests, responses, tokens, cookies, state, and event streams.
-
-Klura captures that lower layer and turns it into something reusable.
+The UI is the human layer over requests, tokens, state, and event streams. Klura captures that lower layer once and reuses it.
 
 |               | Browser agent             | Klura                                 |
 | ------------- | ------------------------- | ------------------------------------- |
@@ -384,31 +367,30 @@ Klura captures that lower layer and turns it into something reusable.
 | Learning step | None                      | Optional LIFT pass                    |
 | Later runs    | Browser exploration again | Saved strategy                        |
 | Tokens        | Paid every run            | Paid once, then zero in runtime       |
-| Latency       | Seconds per UI step       | Usually one request                   |
+| Latency       | Seconds per UI step       | Direct strategy execution             |
 
-The agent stays in the loop when judgment is needed. The runtime takes over when the task has become mechanical.
+The agent keeps judgment; the runtime takes over once execution becomes mechanical.
 
 ---
 
 ## Benchmarks
 
-Same task, same Claude model, same agent loop on both sides — the only difference is whether klura has seen the task before.
+Each live-site task runs once with raw Playwright and once with an empty klura skill directory. After discovery, the harness executes the saved strategy directly.
 
-|  | Hacker News search | Messenger send message[^messenger-re] | Amazon product search |
-| --- | --: | --: | --: |
-| Plain browser agent — paid every run | 20.2s · 63k tok · $0.09 | 206s · 696k tok · $0.34 | 232s · 872k tok · $0.54 |
-| Klura cold — first run only[^cold-includes-lift] | 77.4s · 518k tok · $0.42 | 1648s · 3.5M tok · $2.53 | 120s · 621k tok · $0.52 |
-| **Klura warm — runtime only**[^runtime-only] | **274ms · 0 tok · $0** | **0.1ms · 0 tok · $0** | **1.07s · 0 tok · $0** |
+| Task | Run | Result requirement | Plain browser agent[^baseline-reported] | klura cold[^cold-includes-lift] | **Runtime replay[^runtime-only]** |
+| --- | --- | --- | --: | --: | --: |
+| IKEA stock availability | `gpt-5.6-sol` | Stock evidence for all four Berlin stores | 2m 17s | 9m 43s | **1.14s** |
+| ASOS filtered search | `gpt-5.6-sol` | Five products plus both selected facets | 1m 35s | 6m 57s | **67.9ms** |
+| Airbnb search | `gpt-5.6-sol` | Five Berlin stays with exact dates and guest count | 2m 48s | 13m 19s | **2.17s** |
+| Amazon product search | `sonnet 4.6` | Top-three titles, prices, and ASINs/URLs | 3m 52s | 2m 00s | **1.07s** |
 
-**Warm runtime-only** is the saved-strategy call itself — no LLM in the loop, deterministic replay. The number every run after the first pays in pure execution time. Dispatched from inside a conversational MCP host, add the host's LLM latency on top — still strictly faster than re-discovering the page.
+ASOS and Amazon replay with `fetch`; IKEA and Airbnb use `page-script`. Replay is the median of five sequential executions, all validated against the requested content rather than HTTP status alone.
 
-**Cold** is the one-time tax. The agent first completes the task like any browser agent (roughly the "plain browser agent" row), then reverse-engineers the protocol and saves a runnable strategy. Hard sites cost more here — Messenger's send path is a binary MQTT frame with snowflake IDs and an in-page codec, so cold is ~27 minutes of work that the next thousand sends never pay again.
+[^cold-includes-lift]: Klura cold time includes browsing, capture, triage, LIFT, validation, and saving the reusable strategy. It is the one-time learning cost.
 
-[^cold-includes-lift]: Klura cold time includes discovery, triage, and LIFT. The agent first completes the user's task, then reverse-engineers the protocol and persists a runnable strategy. The actual sending or searching portion is roughly comparable to the raw Playwright row; the remainder is one-time work that amortizes across future runs.
+[^runtime-only]: `klura.execute()` with no agent SDK in the loop; median of five sequential calls. A conversational host still spends tokens deciding to make the call.
 
-[^runtime-only]: No agent SDK in the loop — `klura.execute()` replaying the saved strategy. n=5 sequential, median wall-clock.
-
-[^messenger-re]: Messenger send is an MQTT PUBLISH on `/ls_req`, with a JSON body whose snowflake IDs exceed `Number.MAX_SAFE_INTEGER`, a packet-id counter in the in-page MQTT client, and binary framing through the page's `MqttProtocolCodec`. Sonnet 4.6 located the encoder, intercepted the live connection, decoded the envelope, and saved a script that rebuilds and dispatches the frame through the already-authenticated socket.
+[^baseline-reported]: Agent-reported after the raw Playwright run completes without a blocker.
 
 ---
 
@@ -527,6 +509,8 @@ Examples:
 - compare binary payloads by structure instead of exact bytes
 - classify failed probes as getting closer, stuck, or oscillating
 
+Klura can handle even the toughest sites, and could even one-shot Facebook Messenger's binary MQTT `/ls_req` send path, regenerating rotating BigInt fields and replaying the frame through the page's authenticated socket in **2.365s**.
+
 The runtime does not brute-force endpoints, enumerate IDs outside the user's scope, or fuzz inputs.
 
 See [docs/reverse-engineering.md](docs/reverse-engineering.md).
@@ -572,29 +556,15 @@ Bad fits:
 
 Klura depends on the model driving it.
 
-Models extract capabilities differently. Some follow instructions tightly. Some improvise. Some handle signed or encoded flows well. Others struggle.
+Discovery quality varies by model; saved strategies replay deterministically.
 
 Current snapshot:
 
-| Model | Status |
-| --- | --- |
-| Sonnet 4.6 and newer | Strongest tested overall; often one-shots complex LIFTs and reverse-engineering flows |
-| GLM 4.7 | Solid across most ordinary tasks |
-| GPT models | Not yet extensively tested |
-
-Expect variability during discovery.
-
-Saved strategies replay deterministically. Variance lives mostly in the learning phase.
-
-Useful reliability metrics we track or intend to track:
-
-- LIFT success rate
-- percentage of skills saved as `fetch`
-- percentage saved as `page-script`
-- percentage stuck at `recorded-path`
-- time-to-warm-execution
-- relearn frequency
-- stale-strategy repair success rate
+| Model                       | Status                                        |
+| --------------------------- | --------------------------------------------- |
+| GPT-5.6 Sol (`gpt-5.6-sol`) | Very strong across ordinary and complex LIFTs |
+| Sonnet 4.6                  | Strong across ordinary and complex LIFTs      |
+| GLM 4.7                     | Solid across most ordinary tasks              |
 
 ---
 
