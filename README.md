@@ -40,14 +40,14 @@ Later:
 
 Browser agents rediscover the UI on every run. Klura learns it once.
 
-| Task | Plain browser agent[^baseline-reported] | klura cold — learn once | **klura runtime replay** |
+| Task[^benchmark-model] | Plain browser agent[^baseline-reported] | klura cold — learn once | **klura runtime replay** |
 | --- | --: | --: | --: |
 | IKEA stock across four Berlin stores | 2m 17s | 9m 43s | **1.14s · 0 LLM tokens** |
 | ASOS filtered product search | 1m 35s | 6m 57s | **67.9ms · 0 LLM tokens** |
 | Airbnb Berlin stay search | 2m 48s | 13m 19s | **2.17s · 0 LLM tokens** |
-| Amazon product search[^amazon-sonnet] | 3m 52s | 2m 00s | **1.07s · 0 LLM tokens** |
+| Amazon product search | 3m 05s | 6m 52s | **3.46s · 0 LLM tokens** |
 
-<sub>The first three rows use <code>gpt-5.6-sol</code> through Codex; Amazon uses Sonnet 4.6. The first klura run includes one-time discovery and LIFT; replay is the saved strategy itself. Full method in <a href="#benchmarks">Benchmarks</a>.</sub>
+<sub>The first klura run includes one-time discovery and LIFT; replay is the saved strategy itself. Full method in <a href="#benchmarks">Benchmarks</a>.</sub>
 
 <p align="center">
   <picture>
@@ -78,7 +78,7 @@ Browser agents rediscover the UI on every run. Klura learns it once.
 
 ## Quick Start
 
-Klura works with Codex, the ChatGPT desktop app, Claude Code, Claude Desktop, Cursor, Windsurf, OpenClaw, and other MCP hosts. GPT-5.6 Sol (`gpt-5.6-sol`) performed roughly on par with Sonnet 4.6 in our live-site discovery and LIFT runs.
+Klura works with Codex, the ChatGPT desktop app, Claude Code, Claude Desktop, Cursor, Windsurf, OpenClaw, and other MCP hosts.
 
 ### Codex / ChatGPT desktop
 
@@ -88,7 +88,7 @@ The Codex CLI, IDE extension, and ChatGPT desktop app share one MCP configuratio
 codex mcp add klura -- npx -y @klura/mcp
 ```
 
-Restart the host after registering. The `gpt-5.6-sol` benchmark rows below use this integration.
+Restart the host after registering.
 
 ### Claude Code
 
@@ -375,16 +375,18 @@ The agent keeps judgment; the runtime takes over once execution becomes mechanic
 
 ## Benchmarks
 
-Each live-site task runs once with raw Playwright and once with an empty klura skill directory. After discovery, the harness executes the saved strategy directly.
+Each live-site task runs once with raw Playwright and once with an empty klura skill directory. After discovery, the saved strategy is executed directly.[^benchmark-model]
 
-| Task | Run | Result requirement | Plain browser agent[^baseline-reported] | klura cold[^cold-includes-lift] | **Runtime replay[^runtime-only]** |
-| --- | --- | --- | --: | --: | --: |
-| IKEA stock availability | `gpt-5.6-sol` | Stock evidence for all four Berlin stores | 2m 17s | 9m 43s | **1.14s** |
-| ASOS filtered search | `gpt-5.6-sol` | Five products plus both selected facets | 1m 35s | 6m 57s | **67.9ms** |
-| Airbnb search | `gpt-5.6-sol` | Five Berlin stays with exact dates and guest count | 2m 48s | 13m 19s | **2.17s** |
-| Amazon product search | `sonnet 4.6` | Top-three titles, prices, and ASINs/URLs | 3m 52s | 2m 00s | **1.07s** |
+| Task | Result requirement | Plain browser agent[^baseline-reported] | klura cold[^cold-includes-lift] | **Runtime replay[^runtime-only]** |
+| --- | --- | --: | --: | --: |
+| IKEA stock availability | Stock evidence for all four Berlin stores | 2m 17s | 9m 43s | **1.14s** |
+| ASOS filtered search | Five products plus both selected facets | 1m 35s | 6m 57s | **67.9ms** |
+| Airbnb search | Five Berlin stays with exact dates and guest count | 2m 48s | 13m 19s | **2.17s** |
+| Amazon product search | Top-three titles, prices, and ASINs/URLs | 3m 05s | 6m 52s | **3.46s** |
 
-ASOS and Amazon replay with `fetch`; IKEA and Airbnb use `page-script`. Replay is the median of five sequential executions, all validated against the requested content rather than HTTP status alone.
+ASOS replays with `fetch`; IKEA, Airbnb, and Amazon use `page-script`. Replay is the median of five sequential executions, all validated against the requested content rather than HTTP status alone.
+
+[^benchmark-model]: All rows used GPT-5.6 Sol (`gpt-5.6-sol`) through Codex.
 
 [^cold-includes-lift]: Klura cold time includes browsing, capture, triage, LIFT, validation, and saving the reusable strategy. It is the one-time learning cost.
 
@@ -642,7 +644,7 @@ Klura is new and moving fast. If the idea resonates:
 - ⭐ **Star the repo** to follow along.
 - 💬 **Join the [Discord](https://discord.gg/YJQ2zZYJ)** — discovery walkthroughs, what's breaking, what's next.
 - 🐛 **Open an issue** naming a site you wish your agent could just _use_. Real workflows drive what gets built.
-- 🔧 **Contribute** a driver, transport, prerequisite method, or benchmark site — see [Contributing](#contributing).
+- 🔧 **Contribute** a driver, transport, prerequisite method, or validation improvement — see [Contributing](#contributing).
 
 The single most useful thing you can do: point klura at the most annoying internal tool you have, watch run 1 versus run 2, and tell us what broke.
 
@@ -671,7 +673,6 @@ Contributions that fit especially well:
 - listener transports
 - prerequisite methods
 - validation improvements
-- benchmark sites
 - focused test fixtures
 - better docs for real workflows
 

@@ -318,3 +318,85 @@ test('js-eval cacheable mode (no args_template) still uses cache + omits args/fr
   const cached = [...cacheStore.entries()].find(([k]) => k.startsWith('example:tok'));
   assert.strictEqual(cached?.[1]?.value, 'cacheable-mint-of-good-length');
 });
+
+test('js-eval reloads a matching page that has not reached DOMContentLoaded', async () => {
+  const calls = [];
+  const driver = {
+    async getUrl() {
+      return 'https://example.com/app';
+    },
+    async navigate(_session, url, options) {
+      calls.push({ kind: 'navigate', url, options });
+    },
+    async evaluateExpression(_session, expression, options) {
+      calls.push({ kind: 'evaluateExpression', expression, options });
+      if (expression === 'document.readyState') return 'loading';
+      return 'fresh-token-after-navigation';
+    },
+    async delay() {},
+  };
+
+  await runPrerequisites({
+    strategy: {
+      baseUrl: 'https://example.com',
+      prerequisites: [{
+        name: 'sig',
+        kind: 'js-eval',
+        url: 'https://example.com/app',
+        expression: 'window.mint()',
+        binds: 'sig',
+        return_shape: { kind: 'string', min_length: 1 },
+        args_template: {},
+      }],
+    },
+    args: {},
+    platform: 'example',
+    pool: makePool(driver),
+    tokenCache: null,
+  });
+
+  assert.deepStrictEqual(calls.find((call) => call.kind === 'navigate'), {
+    kind: 'navigate',
+    url: 'https://example.com/app',
+    options: { waitUntil: 'domcontentloaded' },
+  });
+});
+
+test('js-eval reuses a matching page after DOMContentLoaded', async () => {
+  const calls = [];
+  const driver = {
+    async getUrl() {
+      return 'https://example.com/app';
+    },
+    async navigate(_session, url, options) {
+      calls.push({ kind: 'navigate', url, options });
+    },
+    async evaluateExpression(_session, expression, options) {
+      calls.push({ kind: 'evaluateExpression', expression, options });
+      if (expression === 'document.readyState') return 'interactive';
+      return 'warm-page-token';
+    },
+    async delay() {},
+  };
+
+  await runPrerequisites({
+    strategy: {
+      baseUrl: 'https://example.com',
+      prerequisites: [{
+        name: 'sig',
+        kind: 'js-eval',
+        url: 'https://example.com/app',
+        expression: 'window.mint()',
+        binds: 'sig',
+        return_shape: { kind: 'string', min_length: 1 },
+        args_template: {},
+      }],
+    },
+    args: {},
+    platform: 'example',
+    pool: makePool(driver),
+    tokenCache: null,
+  });
+
+  assert.equal(calls.some((call) => call.kind === 'navigate'), false);
+});
