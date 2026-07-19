@@ -176,7 +176,7 @@ Eight tools wrapping CDP's `Debugger` domain. See [reverse-engineering.md#source
 
 | Tool | Purpose |
 | --- | --- |
-| `get_skill_md()` / `get_reference_md()` | Read SKILL.md / REFERENCE.md from the installed `klura` package — the canonical source the MCP server and benchmark harness use. |
+| `get_skill_md()` / `get_reference_md()` | Read SKILL.md / REFERENCE.md from the installed `klura` package — the canonical source used by the MCP server and other integrations. |
 | `get_secret(scheme, ref)` | Resolve a `{{secret:scheme:ref}}` placeholder via the configured shell-command resolver. |
 
 **Discovery is LLM-orchestrated.** There is no single `discover()` call — the LLM drives exploration via `start_session` → `perform_action` → `get_network_log` → `save_strategy`. The LLM is the reasoning engine; klura provides the browser and persistence. This means:
