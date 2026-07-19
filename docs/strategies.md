@@ -79,7 +79,7 @@ Preferred `page-extract` shape for a CSRF-gated mutation:
 
 **Generators see prereq-extracted tokens via `args`.** Generators resolve _after_ prerequisites, so `args.shortId` in generator code refers to the value a `page-extract` just pulled from a meta tag. This unlocks extract-then-transform flows: grab a short numeric id from the DOM, base64-encode it into whatever opaque form the API expects, all in one strategy — no external API calls, no user-supplied opaque IDs.
 
-**Execution** fires all prerequisites and the main request on a **single browser session** so cookies, same-origin headers, and one-time nonces survive between the token grab and the fetch. Re-navigating between prereq and fetch would reset page-scoped state (nonces that are only valid on the issuing page load, sensor-script counters), so the executor deliberately holds one page open across both.
+**Execution** fires all prerequisites and the main request on a **single browser session** so cookies, same-origin headers, and one-time nonces survive between the token grab and the fetch. Re-navigating between prereq and fetch would reset page-scoped state (nonces that are only valid on the issuing page load, sensor-script counters), so the executor deliberately holds one page open across both. A `js-eval` prerequisite reuses a matching warm page only after its document reaches `interactive` or `complete`; a matching page that is still loading is navigated through the driver's `DOMContentLoaded` boundary before evaluation.
 
 ## recorded-path
 
