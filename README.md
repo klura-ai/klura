@@ -5,9 +5,9 @@
   </picture>
 </p>
 
-<p align="center"><strong>Your agent learns a website once. The saved-strategy execution after that uses zero LLM tokens and no UI rediscovery.</strong></p>
+<p align="center"><strong>From one browser run to repeatable agent workflows: same outcome, faster, cheaper, and private.</strong></p>
 
-<p align="center"><sub>Klura is a local-first MCP runtime your agent uses to drive a browser, learn the interface underneath, and save the result as a reusable skill.</sub></p>
+<p align="center"><sub>Klura is a local-first MCP runtime that turns web workflows into reusable capabilities your agent can call again and again.</sub></p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@klura/runtime"><img alt="npm version" src="https://img.shields.io/npm/v/@klura/runtime?style=flat-square&logo=npm&color=cb3837"></a>
@@ -20,9 +20,9 @@
 
 ---
 
-# Turn any website into an API
+# Turn every stable web workflow into an MCP capability
 
-Klura lets an agent use the browser once, learn the underlying interface, and turn future runs into reusable executable strategies.
+Klura lets your agent use the browser once, discover the real contract, and then execute the workflow directly on repeat.
 
 ```text
 First run:
