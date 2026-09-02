@@ -942,7 +942,7 @@ test('production registry authority is compiled into the consumer service', asyn
     signature: {
       algorithm: 'ed25519',
       key_id: 'registry-v1',
-      value: 'xR7AcF2SD_bQlBr0HgIlR4OdLb49PWfXyu92gGkE3YEeLcltaD6An68WDCmpRpvFlhM4OlDfSP2SjMTHXb1MDQ',
+      value: 'WV79TohI67t_JzNzuXfvdH7gNYIb4QshBBOMII9NP1pg3iH4gEdGsIaGwn26sGeWcod1JiQi9-ycjKZiRBO6DQ',
     },
   };
   const requests = [];

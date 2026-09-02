@@ -7,7 +7,7 @@ import { RegistryClientV1, type RegistryAuthorityV1 } from './client';
 const REGISTRY_INDEX_URL_V1 = 'https://registry.klura.ai/v1/index.signed.json';
 
 const REGISTRY_PUBLIC_KEY_PEM_V1 = `-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAIJpIAWefU6weG10IXG71obd4E28uTKuPbA7e5sewzSE=
+MCowBQYDK2VwAyEAnD0J3fmLdd6jVcYsQ9PT8NgZapOBvkQ0KOrJVGYnbKc=
 -----END PUBLIC KEY-----
 `;
 
