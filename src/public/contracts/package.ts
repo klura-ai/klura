@@ -55,6 +55,7 @@ import {
   type CallRetryPolicyV1,
   type OutcomeContractV1,
 } from './outcome';
+import { assertHttpRequestStringSlots } from './request-slots';
 import { parseValueExpression, type ValueExpressionV1 } from './value-expression';
 import {
   parseBrowserPageScriptStrategy,
@@ -319,6 +320,14 @@ function parsePublicReadCapability(value: unknown, field: string): PublicReadCap
   const inputSchema = parseJsonSchema(record.input_schema, `${field}.input_schema`);
   const retryPolicy = parseCallRetryPolicy(record.call_retry_policy, `${field}.call_retry_policy`);
   const strategies = parseStrategies(record.strategies, `${field}.strategies`, requestOrigins);
+  strategies.forEach((strategy, index) => {
+    if (strategy.kind !== 'http_request') return;
+    assertHttpRequestStringSlots(
+      strategy.request,
+      inputSchema,
+      `${field}.strategies[${index}].request`,
+    );
+  });
   const browserHttpStrategies = strategies.filter(
     (strategy): strategy is PublicHttpStrategyV1 =>
       strategy.kind === 'http_request' && strategy.context === 'browser',

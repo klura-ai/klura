@@ -97,11 +97,13 @@ function compileMap(
   const record = parseBoundedRecord(value, field, 64);
   const out: Record<string, ValueExpressionV1> = {};
   for (const [key, entry] of Object.entries(record)) {
-    // A literal value expression carries string | number | boolean | null, so a
-    // numeric query param (`num_results_per_page: 24`) is expressible as-is.
-    // Only a string can hold a {{name}} template and needs compiling.
+    // A query or header slot only ever carries text. Local execution serializes
+    // a number, boolean, or null param through URLSearchParams, so the public
+    // literal is that same text (`24`, `true`, `null`), never a JSON scalar the
+    // string slot would refuse at call time. Only a string can hold a {{name}}
+    // template and needs compiling.
     if (typeof entry === 'number' || typeof entry === 'boolean' || entry === null) {
-      out[key] = { op: 'literal', value: entry };
+      out[key] = { op: 'literal', value: String(entry) };
       continue;
     }
     if (typeof entry !== 'string') {

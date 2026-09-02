@@ -11,8 +11,30 @@ import {
   evaluateValueExpression,
   type ValueExpressionContextV1,
 } from '../../public/contracts/value-expression';
+import { readConsumerRuntimeVersion } from '../runtime-version';
 import { OriginSchedulerV1 } from './origin-scheduler';
 import type { BrowserInteractionFailureV1 } from './public-browser/interaction-executor';
+
+let cachedUserAgent: string | null = null;
+
+/** Identifies the runtime on every target request a package does not label itself. */
+export function consumerUserAgent(): string {
+  if (cachedUserAgent === null) cachedUserAgent = `klura/${readConsumerRuntimeVersion()}`;
+  return cachedUserAgent;
+}
+
+/** The exact header set dispatched for a prepared request: the runtime's
+ *  user-agent unless the package declares its own, every declared header, and
+ *  the pinned host. */
+export function outgoingRequestHeaders(
+  request: Pick<PreparedRequestV1, 'headers' | 'url'>,
+): Record<string, string> {
+  return {
+    'user-agent': consumerUserAgent(),
+    ...request.headers,
+    host: request.url.host,
+  };
+}
 
 export interface PublicHttpResponseV1 {
   status: number;
@@ -353,7 +375,7 @@ async function sendPinnedHttpsRequest(
       settled = true;
       resolve(value);
     };
-    const headers = { ...request.headers, host: request.url.host };
+    const headers = outgoingRequestHeaders(request);
     const outgoing = https.request({
       protocol: 'https:',
       hostname: address,

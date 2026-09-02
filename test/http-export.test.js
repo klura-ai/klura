@@ -197,12 +197,13 @@ test('a numeric query param is a literal, not a rejection', () => {
   assert.equal(out.request.query.q.op, 'input');
 });
 
-test('boolean and null params are literals too', () => {
+test('number, boolean and null params export as the text they put on the wire', () => {
   const out = exportReviewedLocalFetchStrategySource(
-    base({ params: { exact: true, cursor: null } }),
+    base({ params: { exact: true, cursor: null, limit: 24 } }),
   );
-  assert.deepEqual(out.request.query.exact, { op: 'literal', value: true });
-  assert.deepEqual(out.request.query.cursor, { op: 'literal', value: null });
+  assert.deepEqual(out.request.query.exact, { op: 'literal', value: 'true' });
+  assert.deepEqual(out.request.query.cursor, { op: 'literal', value: 'null' });
+  assert.deepEqual(out.request.query.limit, { op: 'literal', value: '24' });
 });
 
 test('a param that is neither scalar nor string is still refused', () => {
