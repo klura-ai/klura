@@ -777,13 +777,21 @@ test('platform export captures a replayable run fixture for a collection capabil
       'registry.json',
     ],
   );
-  assert.equal(smokeRunCalls.length, 1);
+  // One run records the fixture; a second runs the collection to its own
+  // declared ceilings so the exported package is proven to reach them live.
+  assert.equal(smokeRunCalls.length, 2);
   assert.notEqual(smokeRunCalls[0].capability.collection, null);
   assert.deepEqual(smokeRunCalls[0].fixture, {
     input: { id: 'desk' },
     caller_bounds: {},
     input_mode_id: 'by_id',
   });
+  assert.deepEqual(smokeRunCalls[1].fixture, {
+    input: { id: 'desk' },
+    caller_bounds: {},
+    input_mode_id: 'by_id',
+  });
+  assert.equal(smokeRunCalls[1].context.artifact.capability, 'list_products');
   assert.equal(smokeRunCalls[0].context.artifact.capability, 'list_products');
   assert.match(smokeRunCalls[0].context.artifact.package_digest, /^[a-f0-9]{64}$/);
   const { parsePublicPackageFixtureBytes } = require('../dist/public/contracts/fixture.js');

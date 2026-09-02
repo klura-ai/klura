@@ -438,8 +438,67 @@ async function runSmokeFixtures(
       }
       files.push({ name, value: captured.value });
     }
+    const ceiling = await proveCollectionCeilings(
+      capability,
+      capabilityId,
+      capabilityReview,
+      review,
+      compiled,
+      run,
+    );
+    if (ceiling !== null) issues.push(ceiling);
   }
   return { issues, files };
+}
+
+/** Runs a collection once to its own declared ceilings. A fixture proves the
+ *  recorded page replays; this proves the package can actually reach the item
+ *  and page limits it signs, against the live site, without tripping a budget
+ *  it declared for itself or emitting an item its own schema rejects. */
+async function proveCollectionCeilings(
+  capability: PublicReadCapabilityV1,
+  capabilityId: string,
+  capabilityReview: ParsedExportReviewV1['capabilities'][string],
+  review: ParsedExportReviewV1,
+  compiled: CompiledPublicPackageV1,
+  run: NonNullable<PlatformPackageExportDependenciesV1['smoke_run']>,
+): Promise<PackageExportAuditIssueV1 | null> {
+  if (capability.collection === null) return null;
+  const seed = capabilityReview.fixtures.find(
+    (fixture): fixture is Extract<ParsedFixtureReviewV1, { kind: 'run' }> =>
+      fixture.kind === PACKAGE_FIXTURE_KINDS.run,
+  );
+  if (seed === undefined) return null;
+  const proofPath = `platform_export.review.capabilities.${capabilityId}.collection.run_policy`;
+  const execution = await run(
+    capability,
+    { input: seed.input, caller_bounds: {}, input_mode_id: seed.input_mode_id },
+    {
+      capabilities: compiled.package.capabilities,
+      artifact: {
+        package_id: review.package_id,
+        version: review.version,
+        package_digest: sha256Digest(compiled.bytes),
+        capability: capabilityId as CapabilityIdV1,
+        runtime_range: review.registry_manifest.releases[0].runtime_range,
+      },
+    },
+  );
+  const result = execution.result;
+  const reachedOwnCeiling =
+    result.kind === 'scrape_outcome' ||
+    (result.kind === 'scrape_partial' && result.stop === 'run_budget_exhausted');
+  if (reachedOwnCeiling) return null;
+  return {
+    code: PACKAGE_EXPORT_AUDIT_CODES.smokeFailed,
+    path: proofPath,
+    message:
+      `Running the collection to its declared ceilings stopped with ${JSON.stringify(result)}; ` +
+      'a signed package must reach its own max_items and max_pages on the live site.',
+    remedy:
+      'Correct the item schema, pagination, or durable budgets this capability declares, then retry the export.',
+    ...(execution.diagnostics[0] === undefined ? {} : { diagnostic: execution.diagnostics[0] }),
+  };
 }
 
 async function captureCallFixtureEvidence(
