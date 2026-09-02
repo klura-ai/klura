@@ -5,9 +5,9 @@
   </picture>
 </p>
 
-<p align="center"><strong>Get data out of a website without writing a scraper.</strong></p>
+<p align="center"><strong>Verified web data for agents — from a signed catalog, or built on demand.</strong></p>
 
-<p align="center"><sub>Install a tool someone already built for that site, call it, get clean data back. It all runs on your machine.</sub></p>
+<p align="center"><sub>Install a maintained tool for the site and call it. No tool yet? klura builds one from a real session, and it gets the same declared contract. It all runs on your machine.</sub></p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@klura/runtime"><img alt="npm version" src="https://img.shields.io/npm/v/@klura/runtime?style=flat-square&logo=npm&color=cb3837"></a>
@@ -16,6 +16,13 @@
   <a href="https://www.typescriptlang.org/"><img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-3178c6?style=flat-square&logo=typescript&logoColor=white"></a>
   <a href="https://discord.gg/YJQ2zZYJ"><img alt="Discord" src="https://img.shields.io/discord/1496415213765791774?color=5865F2&label=Discord&logo=discord&logoColor=white&style=flat-square"></a>
   <a href="LICENSE"><img alt="License: BUSL-1.1" src="https://img.shields.io/badge/license-BUSL--1.1-blue?style=flat-square"></a>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/klura-ai/klura/main/catalog-dark.gif">
+    <img alt="klura: install a catalog tool, call it, run it as a bounded collection; then hit a site the catalog lacks, build the tool, and get the same declared contract" src="https://raw.githubusercontent.com/klura-ai/klura/main/catalog-light.gif" width="900">
+  </picture>
 </p>
 
 ---
@@ -38,6 +45,8 @@ You get back structured data, checked against the shape the tool promised. Not H
 ```text
 search → inspect → install → call once, or run a bounded scrape
 ```
+
+**Not in the catalog?** Point klura at the site. It drives a real session, records what the page actually does, and turns that into a tool with the same declared origins, request budget, and output shape as every catalog tool. You can use it locally right away, or export it and open a pull request; after review it is signed into the catalog for everyone. That is how the catalog grows — see [Advanced authoring](#advanced-authoring-how-it-works).
 
 **Two ways to use a tool.** `call` does one read and hands you one verified result. `run` collects a bounded set into a file — it has hard limits on items, pages, requests, and time, and you can leave it running, check on it, cancel it, or resume it.
 
