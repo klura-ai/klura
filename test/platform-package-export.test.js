@@ -13,6 +13,18 @@ const {
   createPostSaveVerificationProof,
 } = require('../dist/strategies/post-save-verification-proof.js');
 
+// The export audit checks an installable release's range against the runtime
+// performing the export, so the reviewed window follows package.json rather
+// than pinning a version that a release bump would silently exclude.
+const RUNTIME_VERSION = require('../package.json').version;
+const RUNTIME_RANGE = {
+  minimum_inclusive: RUNTIME_VERSION,
+  maximum_exclusive: (() => {
+    const [major, minor] = RUNTIME_VERSION.split('.').map(Number);
+    return `${major}.${minor + 1}.0`;
+  })(),
+};
+
 function localStrategy(capability = 'get_product') {
   const strategy = {
     strategy: 'page-script',
@@ -60,10 +72,7 @@ function review() {
       domains: ['shop.example.test'],
       tags: ['products'],
       state: 'installable',
-      runtime_range: {
-        minimum_inclusive: '0.6.3',
-        maximum_exclusive: '0.7.0',
-      },
+      runtime_range: { ...RUNTIME_RANGE },
     },
     capabilities: {
       get_product: {
@@ -416,7 +425,9 @@ test('platform export writes one PR-ready tools directory and stops before git',
       .package_id,
     'shop-example',
   );
-  const { parseRegistryCatalogManifestBytes } = require('../dist/public/contracts/registry-catalog.js');
+  const {
+    parseRegistryCatalogManifestBytes,
+  } = require('../dist/public/contracts/registry-catalog.js');
   assert.deepEqual(
     parseRegistryCatalogManifestBytes(
       fs.readFileSync(path.join(target, 'registry.json')),
@@ -433,7 +444,7 @@ test('platform export writes one PR-ready tools directory and stops before git',
         {
           source: 'package.source.json',
           state: 'installable',
-          runtime_range: { minimum_inclusive: '0.6.3', maximum_exclusive: '0.7.0' },
+          runtime_range: { ...RUNTIME_RANGE },
         },
       ],
     },
@@ -778,13 +789,7 @@ test('platform export captures a replayable run fixture for a collection capabil
   const { parsePublicPackageFixtureBytes } = require('../dist/public/contracts/fixture.js');
   const runFixture = parsePublicPackageFixtureBytes(
     fs.readFileSync(
-      path.join(
-        repository,
-        'tools',
-        'shop-example',
-        'fixtures',
-        'list-products-run.run.json',
-      ),
+      path.join(repository, 'tools', 'shop-example', 'fixtures', 'list-products-run.run.json'),
     ),
     'fixture list-products-run.run.json',
   );
