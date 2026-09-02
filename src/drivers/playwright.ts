@@ -23,7 +23,7 @@ import type { ConnectConfig } from '../config/handler';
 import { getKluraHome } from '../paths';
 import { BrowserDriver, Capability, PageOpts } from './interface';
 import { readProfileLockHolder } from './profile-lock';
-import type { InterceptedRequest } from './types/network';
+import type { InterceptedRequest, LoadedScript } from './types/network';
 import type { WebSocketFrame, WebSocketFrameStream } from './types/websocket';
 import type {
   FocusListener,
@@ -152,6 +152,10 @@ interface SessionExtras {
   // CDP session dedicated to Network domain capture. Separate from the touch
   // CDP session so detaching one doesn't kill the other.
   networkCdp?: CDPSession;
+  // External scripts observed from CDP Network.requestWillBeSent events.
+  // Separate from the compact intercepted-request log, which excludes passive
+  // resource types by construction.
+  loadedScripts?: LoadedScript[];
   // Buffer of frame-level navigations observed via `page.on('framenavigated')`
   // and same-document (History API) route changes captured via CDP
   // `Page.navigatedWithinDocument`. Drained by `consumePendingNavs` after each
@@ -267,6 +271,11 @@ const DEBUGGER_MAX_BREAKPOINTS = 10;
 // net. 20s is generous for any legitimate interaction while remaining short
 // enough that a user-visible hang self-recovers.
 const PAGE_OP_TIMEOUT_MS = 20_000;
+// A native accessibility snapshot is a passive read on the session-start
+// critical path and normally completes in well under a second. Give it a
+// tighter ceiling than interactive page operations so an engine-side
+// ariaSnapshot stall can fall back to the inert DOM serializer promptly.
+const A11Y_SNAPSHOT_TIMEOUT_MS = 10_000;
 
 async function withPageOpTimeout<T>(
   promise: Promise<T>,
@@ -1717,9 +1726,11 @@ export class PlaywrightDriver extends BrowserDriver {
       const page = this._page(session);
       const cdp = await context.newCDPSession(page);
       extras.networkCdp = cdp;
+      if (!extras.loadedScripts) extras.loadedScripts = [];
       await attachCdpNetworkCapture(
         cdp as unknown as Parameters<typeof attachCdpNetworkCapture>[0],
         session.intercepted as Parameters<typeof attachCdpNetworkCapture>[1],
+        extras.loadedScripts,
       );
     } catch {
       // Network.enable or CDP session creation failed — the session still
@@ -1867,6 +1878,7 @@ export class PlaywrightDriver extends BrowserDriver {
     if (resetExtras) {
       resetExtras.sendCaptures = [];
       resetExtras.sendCaptureRefCount = 0;
+      resetExtras.loadedScripts = [];
     }
 
     if (options.storageState) {
@@ -1948,12 +1960,18 @@ export class PlaywrightDriver extends BrowserDriver {
   async navigate(
     session: Session,
     url: string,
-    options: { waitUntil?: 'commit' | 'domcontentloaded' | 'networkidle' } = {},
+    options: {
+      waitUntil?: 'commit' | 'domcontentloaded' | 'networkidle';
+      timeout_ms?: number;
+    } = {},
   ): Promise<void> {
     const extras = getExtras(session);
     extras.navigateInFlight = true;
     try {
-      await this._page(session).goto(url, { waitUntil: options.waitUntil ?? 'domcontentloaded' });
+      await this._page(session).goto(url, {
+        waitUntil: options.waitUntil ?? 'domcontentloaded',
+        ...(options.timeout_ms === undefined ? {} : { timeout: options.timeout_ms }),
+      });
     } finally {
       // Stamp the post-navigation URL so the framenavigated listener doesn't
       // re-emit it as a click-driven nav after this method returns.
@@ -2662,6 +2680,7 @@ export class PlaywrightDriver extends BrowserDriver {
       headers: Record<string, string>;
       body?: string;
       credentials?: 'include' | 'omit' | 'same-origin';
+      timeout_ms?: number;
     },
   ): Promise<
     { ok: true; status: number; body: unknown; finalUrl: string } | { ok: false; error: string }
@@ -2677,19 +2696,26 @@ export class PlaywrightDriver extends BrowserDriver {
         headers,
         body,
         credentials,
+        timeoutMs,
       }: {
         url: string;
         method: string;
         headers: Record<string, string>;
         body: string | undefined;
         credentials: 'include' | 'omit' | 'same-origin';
+        timeoutMs: number;
       }) => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => {
+          controller.abort();
+        }, timeoutMs);
         try {
           const res = await fetch(url, {
             method,
             headers,
             body: body ?? null,
             credentials,
+            signal: controller.signal,
           });
           const text = await res.text();
           let parsed: unknown = text;
@@ -2722,6 +2748,7 @@ export class PlaywrightDriver extends BrowserDriver {
           return {
             ok: false as const,
             error: `${errName}: ${errMsg}`,
+            timed_out: controller.signal.aborted,
             diagnostics: {
               page_origin: w.location.origin,
               page_url: w.location.href,
@@ -2731,6 +2758,8 @@ export class PlaywrightDriver extends BrowserDriver {
               credentials_mode: credentials,
             },
           };
+        } finally {
+          clearTimeout(timer);
         }
       },
       {
@@ -2739,12 +2768,13 @@ export class PlaywrightDriver extends BrowserDriver {
         headers: options.headers,
         body: options.body,
         credentials: options.credentials ?? 'include',
+        timeoutMs: options.timeout_ms ?? 30_000,
       },
     );
   }
 
   async getPageHtml(session: Session, opts?: PageOpts): Promise<string> {
-    return await this._page(session, opts?.page).content();
+    return await withPageOpTimeout(this._page(session, opts?.page).content(), 'get_page_html');
   }
 
   async evaluateExpression(
@@ -3093,7 +3123,51 @@ export class PlaywrightDriver extends BrowserDriver {
   }
 
   async getAccessibilityTree(session: Session, opts?: PageOpts): Promise<string> {
-    return await this._page(session, opts?.page).locator(':root').ariaSnapshot();
+    const page = this._page(session, opts?.page);
+    try {
+      const tree = await withPageOpTimeout(
+        page.locator(':root').ariaSnapshot(),
+        'get_accessibility_tree:native_snapshot',
+        A11Y_SNAPSHOT_TIMEOUT_MS,
+      );
+      session.accessibilitySnapshot = {
+        source: 'native',
+        at: Date.now(),
+      };
+      return tree;
+    } catch (nativeError) {
+      try {
+        const html = await this.getPageHtml(session, opts);
+        const tree = await this.htmlToAriaLikeTree(session, html);
+        const nativeMessage =
+          nativeError instanceof Error ? nativeError.message : String(nativeError);
+        session.accessibilitySnapshot = {
+          source: 'static_dom',
+          at: Date.now(),
+          warning:
+            `The native accessibility snapshot failed; klura returned an inert serialized-DOM ` +
+            `fallback instead. Computed ARIA relationships and hidden-element filtering may be ` +
+            `absent. Native failure: ${nativeMessage}`,
+        };
+        return tree;
+      } catch (fallbackError) {
+        const nativeMessage =
+          nativeError instanceof Error ? nativeError.message : String(nativeError);
+        const fallbackMessage =
+          fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+        const warning =
+          `The native accessibility snapshot and inert serialized-DOM fallback both failed. ` +
+          `The browser session is still live and may be inspected with get_screenshot, ` +
+          `find_in_page, or js_eval. Native failure: ${nativeMessage}. ` +
+          `Fallback failure: ${fallbackMessage}`;
+        session.accessibilitySnapshot = {
+          source: 'unavailable',
+          at: Date.now(),
+          warning,
+        };
+        throw new Error(`get_accessibility_tree: ${warning}`, { cause: fallbackError });
+      }
+    }
   }
 
   async screenshot(session: Session, opts?: PageOpts): Promise<string> {
@@ -3336,6 +3410,12 @@ export class PlaywrightDriver extends BrowserDriver {
 
   getInterceptedRequests(session: Session): Promise<InterceptedRequest[]> {
     return Promise.resolve(getInterceptedFromSink(session));
+  }
+
+  override async getLoadedScripts(session: Session): Promise<LoadedScript[]> {
+    if (!session.intercepting) return await super.getLoadedScripts(session);
+    const scripts = getExtras(session).loadedScripts ?? [];
+    return scripts.map((script) => ({ ...script }));
   }
 
   streamWebSocketFrames(

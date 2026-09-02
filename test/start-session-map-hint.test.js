@@ -14,17 +14,19 @@ import path from 'node:path';
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'klura-map-hint-'));
 process.env.KLURA_HOME = TMP;
 process.on('exit', () => {
-  try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {}
+  try {
+    fs.rmSync(TMP, { recursive: true, force: true });
+  } catch {}
 });
 
 const { startSession } = await import('../dist/index.js');
 const { pool } = await import('../dist/runtime-state/index.js');
 
-function patchPoolForFakeBrowser() {
+function patchPoolForFakeBrowser(finalUrl = 'https://x.example/') {
   const fakeDriver = {
     navigate: async () => {},
     getAccessibilityTree: async () => '<root />',
-    getUrl: async () => 'https://x.example/',
+    getUrl: async () => finalUrl,
     consumePendingNavs: async () => [],
     captureFormSummary: async () => [],
   };
@@ -38,14 +40,17 @@ function patchPoolForFakeBrowser() {
   const origDriver = pool.driverFor;
   pool.createSession = async () => fakeSession;
   pool.driverFor = (id) => (id === fakeSession.id ? fakeDriver : origDriver.call(pool, id));
-  return () => {
-    pool.createSession = origCreate;
-    pool.driverFor = origDriver;
+  return {
+    fakeSession,
+    restore: () => {
+      pool.createSession = origCreate;
+      pool.driverFor = origDriver;
+    },
   };
 }
 
 test("graph: 'map' → response carries the map-graph start hint", async () => {
-  const restore = patchPoolForFakeBrowser();
+  const { restore } = patchPoolForFakeBrowser();
   try {
     const result = await startSession('https://x.example/', { graph: 'map' });
     assert.ok(result._hint, 'map graph has a hint');
@@ -59,7 +64,7 @@ test("graph: 'map' → response carries the map-graph start hint", async () => {
 });
 
 test("graph: 'discover' → no map-graph hint", async () => {
-  const restore = patchPoolForFakeBrowser();
+  const { restore } = patchPoolForFakeBrowser();
   try {
     const result = await startSession('https://x.example/', { graph: 'discover' });
     if (result._hint) {
@@ -71,12 +76,24 @@ test("graph: 'discover' → no map-graph hint", async () => {
 });
 
 test('graph omitted → no map-graph hint (defaults to discover)', async () => {
-  const restore = patchPoolForFakeBrowser();
+  const { restore } = patchPoolForFakeBrowser();
   try {
     const result = await startSession('https://x.example/');
     if (result._hint) {
       assert.doesNotMatch(result._hint, /Map mode/);
     }
+  } finally {
+    restore();
+  }
+});
+
+test('start_session tracks the actual landing URL after navigation redirects', async () => {
+  const finalUrl = 'https://x.example/landing';
+  const { fakeSession, restore } = patchPoolForFakeBrowser(finalUrl);
+  try {
+    const result = await startSession('https://x.example/start');
+    assert.equal(result.url, finalUrl);
+    assert.equal(fakeSession.lastSurfaceUrl, finalUrl);
   } finally {
     restore();
   }

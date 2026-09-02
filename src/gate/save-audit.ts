@@ -18,6 +18,7 @@ import type { Strategy } from '../strategies/skills';
 import type { ParamObservation } from '../response/session-observations';
 import { closestAllowedCandidates, formatCandidateList } from '../validators';
 import { escapeRegExp } from '../utils/regex';
+import { isLookupSurfaceOwnerCapability } from './save-audit-lookup';
 import { findLookupSegments, validateLookupPrereqsAreCapabilities } from './save-audit-lookup';
 import { secretLiteralProvenanceIssue } from './credential-secrets';
 
@@ -517,6 +518,7 @@ export function validateNameJustification(
   data: Strategy,
   justification: string | undefined,
 ): string[] {
+  if (isLookupSurfaceOwnerCapability(capability)) return [];
   const segments = findLookupSegments(capability);
   if (segments.length === 0) return [];
 

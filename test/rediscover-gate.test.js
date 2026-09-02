@@ -5,10 +5,12 @@
 // stale strategy) or terminal{failed} (caller-side error, retrying is
 // futile).
 //
-// Two signals:
+// Three signals:
 //   1. Structural: `diagnosis_kind` from the cascade's typed
 //      AutoExecDiagnosis. Stale-shape kinds trip on the FIRST failure.
-//   2. Rate-based fallback: rolling success rate < pool.rediscoverThreshold.
+//   2. Explicit factory failure: boolean body.ok:false trips on the first
+//      failure without interpreting the application-defined code.
+//   3. Rate-based fallback: rolling success rate < pool.rediscoverThreshold.
 //
 // These tests pin the structural signal. Rate-based behavior is covered
 // implicitly by execute-error-shape.test.js + graph-invariants.test.js.
@@ -16,9 +18,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { rediscoverFailureGate } = await import(
-  '../dist/graphs/guards/rediscover.js'
-);
+const { rediscoverFailureGate } = await import('../dist/graphs/guards/rediscover.js');
 
 const fakeSession = {};
 
@@ -63,10 +63,7 @@ test('gate: prereq_returned_undefined trips on first failure', () => {
   // The prereq's expression read page state that has drifted; the
   // new shape is discoverable by the agent, so relearn.
   assert.equal(
-    rediscoverFailureGate(
-      fakeSession,
-      payload({ diagnosis_kind: 'prereq_returned_undefined' }),
-    ),
+    rediscoverFailureGate(fakeSession, payload({ diagnosis_kind: 'prereq_returned_undefined' })),
     true,
   );
 });
@@ -80,14 +77,48 @@ test('gate: auth_failed does NOT trip — relearn cannot fix logged-out state', 
   );
 });
 
+test('gate: auth_failed stays terminal even when the local body explicitly failed', () => {
+  assert.equal(
+    rediscoverFailureGate(
+      fakeSession,
+      payload({
+        diagnosis_kind: 'auth_failed',
+        result_classification: 'explicit_failure',
+      }),
+    ),
+    false,
+  );
+});
+
+test('gate: explicit factory failure trips without interpreting its code', () => {
+  assert.equal(
+    rediscoverFailureGate(
+      fakeSession,
+      payload({
+        result_classification: 'explicit_failure',
+      }),
+    ),
+    true,
+  );
+});
+
+test('gate: transport failure alone remains on the rate-based path', () => {
+  assert.equal(
+    rediscoverFailureGate(
+      fakeSession,
+      payload({
+        result_classification: 'transport_failure',
+      }),
+    ),
+    false,
+  );
+});
+
 test('gate: unknown falls through to rate-based fallback (no rate → no trip)', () => {
   // No saved strategies for the test platform/capability → rate is
   // null → gate doesn't trip on its own. Same shape as a fresh
   // strategy whose first call fails for a caller-arg reason.
-  assert.equal(
-    rediscoverFailureGate(fakeSession, payload({ diagnosis_kind: 'unknown' })),
-    false,
-  );
+  assert.equal(rediscoverFailureGate(fakeSession, payload({ diagnosis_kind: 'unknown' })), false);
 });
 
 test('gate: missing diagnosis_kind falls through to rate-based fallback', () => {

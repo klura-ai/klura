@@ -204,9 +204,21 @@ test('compact: object body over budget is JSON-preview-replaced + status survive
   };
   compactExecuteResultBody(er);
   assert.equal(er.status, 200);
+  assert.equal(er.body_ok, true);
   assert.equal(er.body_truncated, true);
   assert.ok(typeof er.body === 'string' && er.body.startsWith('<truncated:'));
   assert.ok(er.body_preview.length <= MAX_TOOL_OUTPUT_CHARS / 2);
+});
+
+test('compact: explicit failure survives oversized object replacement', () => {
+  const er = {
+    status: 200,
+    body: { ok: false, outcome: 'failure', original_body: 'x'.repeat(500_000) },
+  };
+  compactExecuteResultBody(er);
+  assert.equal(er.body_ok, false);
+  assert.equal(er.body_truncated, true);
+  assert.ok(typeof er.body === 'string' && er.body.startsWith('<truncated:'));
 });
 
 test('compact: small object body left alone', () => {

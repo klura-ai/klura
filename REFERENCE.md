@@ -2,6 +2,32 @@
 
 Detailed strategy schemas, authentication flows, healing formats, and graduation guidance. Read this before saving or debugging strategies.
 
+## Consumer tools
+
+Klura's default product surface is a signed local-tool registry and local execution, not browser discovery. Start with `search_packages`, inspect a candidate with `show_package`, activate the exact signed artifact with `install_package`, then call one read capability or start a bounded scrape run.
+
+| Goal | Tool |
+| --- | --- |
+| Find a maintained package | `search_packages` |
+| Inspect its public capability contract | `show_package` |
+| Activate one signed immutable artifact | `install_package` |
+| See or remove active local packages | `list_installed_packages`, `remove_package` |
+| Make one typed read call | `call_package_capability` |
+| Create a local browser session | `open_package_login`, then `complete_package_login` |
+| Start and inspect a durable collection | `start_scrape_run`, `get_scrape_run`, `wait_scrape_run`, `list_scrape_runs`, `list_scrape_run_items` |
+| Continue, stop, or discard a run | `resume_scrape_run`, `cancel_scrape_run`, `discard_scrape_run` |
+| Inspect local state and live origin contention | `run_consumer_doctor` |
+
+These tools accept only closed structural inputs and return bounded typed results. A package is selected by separate `package_id` and `capability` fields; no consumer adapter accepts a combined selector. `search`, `show`, and `install` use the runtime-owned registry authority. Calls and runs use only the currently active immutable local package and never refresh or replace it.
+
+Treat every returned `kind`, operation, failure code, and declared outcome as data. A response body, HTTP status, visible page text, or missing selector is not an implicit success, absence, retry, or discovery signal. A missing or failed managed package does not trigger factory work: tell the user what happened, or enter discovery only after they explicitly ask to author a tool.
+
+The local daemon owns active execution, browser-login interactions, and durable run state. `open_package_login` opens only the selected authentication realm and returns an opaque interaction ID. After the user finishes in the visible browser, `complete_package_login` runs the realm's declared structural check in that same context, then creates an encrypted local session generation only for its declared authenticated outcome. `start_scrape_run` accepts `options.session_name` for a collection in that realm: it pins exactly that encrypted generation through the run and a later resume, and returns a typed session failure before target traffic if the requested generation is unavailable or leased. `start_scrape_run` returns acceptance rather than an unbounded item array. Each mutating run tool accepts an optional canonical operation ID (`op_v1_…`; `options.operation_id` for start) so a caller can retry a lost local-daemon reply with the exact same ID. The daemon binds that ID to one canonical command and result; a different command is rejected and a matching retry returns the stored result without repeating target work or a local mutation. `wait_scrape_run` returns a durable snapshot immediately when `after_state_version` is omitted or differs; with an equal prior version it listens once for a journal change, returning `changed:true` for a new snapshot or `changed:false` after `wait_timeout_ms` (0–25,000 ms; default 20,000). The observer is event-driven and does not poll. `list_scrape_run_items` reads only durably committed item pages. `list_scrape_runs` uses an opaque cursor over the immutable `(created_at, run_id)` sort key, so a later run cannot invalidate a page already read. Cancelling a wait detaches that observer; `cancel_scrape_run` records a durable cancellation request. `remove_package` never deletes immutable artifacts or run history.
+
+`run_consumer_doctor` sends no target traffic. Its scheduler snapshot names each currently relevant origin, active and queued request counts, queued workload count, and one structural blocker: `concurrency`, `rate_limit`, `minimum_delay`, or `circuit_open`. An admission time is present only when the contract determines one; an active concurrency slot has no guessed release time. A persisted open circuit remains visible after a daemon restart.
+
+Public packages are read-only contracts. The sole source-bearing profile is `browser_page_script`: exact source bytes reviewed by a maintainer, covered by the signed manifest, and executed only in a fresh sandboxed browser page under signed same-origin egress, request, byte, and structural-result limits. Packages cannot install or run Node modules, execute unreviewed source, choose arbitrary network destinations, bypass the browser/security boundary, or turn a scrape into hosted execution. The registry is signed static metadata; target-site execution and output stay local.
+
 ## graphs
 
 A klura session belongs to one of three named graphs. The `graph` parameter on `start_session` selects the FSM topology the session walks; per-graph behavior (mutating-action consent gates, auto-synth at close, re-persistence threshold) is data-driven from the graph's `GraphConfig`, not from session-level flags. Adding a new graph is one new file in `runtime/src/graphs/`.
@@ -9,7 +35,7 @@ A klura session belongs to one of three named graphs. The `graph` parameter on `
 | Graph | Topology | Use it when |
 | --- | --- | --- | --- |
 | `discover` (default) | `drive → triage → lift → terminal{closed}` | **ANY user-driven request with a specific goal, even when the agent has to navigate around an unfamiliar site to find the right page.** Drive the UI, hand off to triage to read the defense surface, lift via the RE playbook, save a strategy. Single primary capability declared up front via `start_session({capability, args})` or `declare_capability`. |
-| `map` | `drive → triage → lift → terminal{closed}` | **Bred platform-exploration where the agent decides what's worth saving as it goes.** Walk the site, record observations via `record_observed_capability`, and when an observed capability is ready to graduate to a saved strategy call `lift_observed_capability({name, args})` to enter triage+lift for that one slug. `end_drive` closes from drive, triage, or lift. Mutating `perform_action` calls (POST/PUT/DELETE-shaped clicks, `type` into write-shaped inputs, etc.) gate behind a per-(action, selector) consent prompt. Auto-synth at close is skipped. The re-persistence gate fires when ≥5 perform_actions land with zero persistence calls and no saved strategies. |
+| `map` | `drive → triage → lift → terminal{closed}` | **Bred platform-exploration where the agent decides what's worth saving as it goes.** Walk the site, record observations via `record_observed_capability`, and when an observed capability is ready to graduate to a saved strategy call `lift_observed_capability({name, args})` to enter triage+lift for that one slug. The user's map request pre-authorizes plan handover and saves, so these cycles do not interrupt for per-capability approval. Mutating `perform_action` calls (POST/PUT/DELETE-shaped clicks, `type` into write-shaped inputs, etc.) keep their separate consent gates. `end_drive` closes from drive, triage, or lift; auto-synth at close is skipped. The re-persistence gate fires when ≥5 perform_actions land with zero persistence calls and no saved strategies. |
 | `execute` | `execute → triage → lift → terminal{closed | failed}` | Runs a saved strategy as the whole session. On stale-strategy failure (rolling success rate below `pool.rediscoverThreshold`) the FSM auto-falls into triage with the failure as defense-surface input — the agent re-plans and re-lifts. Arg/auth/structural failures terminate `failed`. |
 
 **Picking between `discover` and `map`.** Discover when the user has a specific goal in mind ("send a message", "search for X") — declare the capability up front, drive straight to it, save. Map when the user wants a broad walk of the platform ("map out X", "see what's here") — explore first, then graduate observed capabilities to saved strategies via `lift_observed_capability` as you find them. Both graphs close after their final capability saves; map can also close explicitly with `end_drive` from any active phase. When unsure, default to `discover` — but the cost of picking map and only lifting one capability is small, so the bias matters less than it used to.
@@ -239,6 +265,8 @@ Tags are snake_case identifiers; one capability can advertise multiple tags. Val
 ## self-verifying-strategies
 
 Every mutating-shaped strategy must verify its side effect before returning `ok:true`. `status:200` proves the network call succeeded — not that the right entity was mutated. The save-time `mutating_verification_required` classifier rejection enumerates every trigger condition, the valid ack shape, and the recognized shape tags (`transaction-shape`, `chat-shape`, `dom-poll`, `intrinsic-to-caller`, `rpc-read`, `fire-and-forget`) inline.
+
+For local factory execution, an object body's boolean `ok` is authoritative: `ok:false` fails even on HTTP 2xx. A 2xx body without boolean `ok` is transport-only and requires LLM inspection; published tools use their signed manifest outcome contracts instead of this local convention.
 
 **Verification verifies the SEND, not the recipient's reply.** For chat: confirm OUR outbound message landed in the thread — not "wait for them to reply." The reply is its own capability (`read_messages`).
 
@@ -1775,7 +1803,7 @@ Triage is a defense-surface fingerprinting pass. The agent inspects what third-p
 
 ### Surface keying
 
-A capability can span multiple URLs (`/cart` → `/checkout` → `/payment`) with different defense postures. The agent supplies a semantic `surface_label` (e.g. `"checkout"`, `"search"`, `"settings/billing"`); the runtime binds every URL in the plan's `observed_at_urls` to that label in an in-session map. When `perform_action` lands on a path-distinct URL no surface owns, the runtime fires the `surface_changed` checkpoint, transitions LIFT → triage, and waits for the agent to submit a plan for the new surface before any RE-active or save tool re-admits.
+A capability can span multiple URLs (`/cart` → `/checkout` → `/payment`) with different defense postures. The agent supplies a semantic `surface_label` (e.g. `"checkout"`, `"search"`, `"settings/billing"`); the runtime derives `observed_at_urls` from the current runtime-observed URL plus navigations made after triage entry, then binds every derived URL to that label in an in-session map. Including the current URL binds the navigation that triggered `surface_changed`, which occurred immediately before triage entry. When `perform_action` lands on a path-distinct URL no surface owns, the runtime fires the `surface_changed` checkpoint, transitions LIFT → triage, and waits for the agent to submit a plan for the new surface before any RE-active or save tool re-admits.
 
 URL canonicalization for the surface map: origin + pathname; query / fragment stripped; host lowercased; trailing slash on a non-root path stripped. So `/search?q=foo` and `/search?q=bar` collapse to one surface; `/search` and `/checkout` don't. SPA route changes (`history.pushState` / `replaceState` / `popstate` / `hashchange`) feed the same map via a driver-side init script; modern SPAs are first-class.
 

@@ -54,8 +54,10 @@ import { TOOL_DEFS as listenerTools } from './listeners';
 import { TOOL_DEF as resumeExecution } from './execute';
 import { TOOL_DEFS as configTools } from './config-tools';
 import { TOOL_DEFS as interruptionTools } from './interruption-tools';
+import { TOOL_DEFS as consumerTools } from '../consumer/mcp-tools';
 
 export const TOOL_REGISTRY: ToolDef[] = [
+  ...consumerTools,
   abortSession,
   startSession,
   ...performActionTools,

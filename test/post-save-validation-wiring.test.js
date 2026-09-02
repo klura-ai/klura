@@ -3,10 +3,11 @@
 // `save_strategy` stages `session.pendingPostSaveValidation` and emits the
 // `post_save_validation_consent` checkpoint via `invokeCheckpointAndGate`.
 // `ack_checkpoint` resolves it: consent runs `verifySavedStrategy` (archive on
-// non-2xx), decline stamps the strategy unverified. This test drives that path
-// from the exact `invokeCheckpointAndGate` call `save_strategy` makes — driving
-// the whole `save_strategy` tool in a unit test isn't feasible (audit-token
-// dance + browser probe), and the rest of the suite covers its audit/probe.
+// transport or explicit local failure), decline stamps the strategy unverified.
+// This test drives that path from the exact `invokeCheckpointAndGate` call
+// `save_strategy` makes — driving the whole `save_strategy` tool in a unit test
+// isn't feasible (audit-token dance + browser probe), and the rest of the suite
+// covers its audit/probe.
 //
 // The benchmark's `checkpoint-stubs.js` auto-continues this checkpoint, so the
 // field-report e2e cannot exercise this — this test is the verification.
@@ -41,6 +42,9 @@ const server = http.createServer((req, res) => {
   if (req.url === '/ok') {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
+  } else if (req.url === '/transport-only') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ outcome: 'failure', code: 'surface_missing' }));
   } else {
     res.writeHead(500, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: 'boom' }));
@@ -147,6 +151,33 @@ test('consent ack → a 2xx strategy passes and stays, stamped passed', async ()
     assert.ok(fs.existsSync(activePath(platform, capability)), 'verified strategy stays active');
     const saved = JSON.parse(fs.readFileSync(activePath(platform, capability), 'utf8'));
     assert.equal(saved.runtime_meta?.post_save_validation, 'passed');
+  } finally {
+    restore();
+  }
+});
+
+test('consent ack → typed 2xx without body.ok is surfaced as inconclusive', async () => {
+  const platform = 'psv-wire-transport';
+  const capability = 'list_things';
+  writeFetchStrategy(platform, capability, '/transport-only');
+  const session = { id: 'sess_psv_transport' };
+  const restore = patchPool(session);
+  try {
+    const envelope = await stageAndEmit(session, platform, capability);
+    const ack = await ackCheckpoint({
+      session_id: session.id,
+      checkpoint_token: envelope.checkpoint_token,
+      user_response: 'yes',
+    });
+
+    assert.equal(ack.post_save_validation?.ok, false);
+    assert.equal(ack.post_save_validation?.classification, 'transport_accepted');
+    assert.equal(ack.post_save_validation?.archived, false);
+    assert.match(ack.post_save_validation?.body_preview ?? '', /"outcome":"failure"/);
+    assert.match(String(ack._hint ?? ''), /inconclusive/i);
+    assert.doesNotMatch(String(ack._hint ?? ''), /validation passed/i);
+    const saved = JSON.parse(fs.readFileSync(activePath(platform, capability), 'utf8'));
+    assert.equal(saved.runtime_meta?.post_save_validation, 'transport_passed');
   } finally {
     restore();
   }

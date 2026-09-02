@@ -180,16 +180,20 @@ export interface RuntimeMeta {
   /** Soft warnings the save-time probe accumulated (e.g. login-wall redirects). */
   probe_warnings?: string[];
   /**
-   * Outcome of the post-commit 2xx verification (the `post_save_validation_consent`
-   * checkpoint). `passed` — `execute()` returned 2xx. `declined` — the user
-   * declined the verification fire; the strategy stands but is unverified.
+   * Outcome of the post-commit verification (the `post_save_validation_consent`
+   * checkpoint). `passed` — `execute()` returned 2xx with explicit
+   * `body.ok:true`. `transport_passed` — `execute()` returned 2xx without an
+   * explicit boolean `body.ok`; transport worked but factory execution did not
+   * classify the semantic body. `declined` — the user declined the verification
+   * fire; the strategy stands but is unverified.
    * `skipped` — the runtime structurally couldn't probe (e.g. the strategy
    * declares an auth prerequisite whose credentials aren't available at save-time
    * probe); the strategy stands and self-validates on the next authed execute. A
-   * non-2xx result is not recorded here: the strategy is archived to
-   * `.broken.json` instead, so the archive itself is the failure record.
+   * non-2xx result or explicit `body.ok:false` is not recorded here: the
+   * strategy is archived to `.broken.json` instead, so the archive itself is
+   * the failure record.
    */
-  post_save_validation?: 'passed' | 'declined' | 'skipped';
+  post_save_validation?: 'passed' | 'transport_passed' | 'declined' | 'skipped';
 }
 
 export interface Strategy {

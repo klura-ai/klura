@@ -20,7 +20,9 @@ import {
   type LiteralItem,
   type NameSegmentItem,
 } from '../../gate/save-audit';
+import { isLookupSurfaceOwnerCapability } from '../../gate/save-audit-lookup';
 import { collectScannedFields } from '../../strategies/validate/helpers';
+import { parseSecretReference } from '../../identity/secret-reference';
 
 // Resolve the placeholders in a field's value. A field with a single distinct
 // placeholder name `{{X}}` (any number of repetitions) is unambiguous: X
@@ -54,7 +56,7 @@ function autoClassifyTemplatedItem(
 // free to omit `audit_answers.literal_provenance[<path>]` for those entries
 // and the audit fills in.
 function literalItems(data: Strategy): LiteralItem[] {
-  const fields = collectScannedFields(data);
+  const fields = collectScannedFields(data).filter((field) => !parseSecretReference(field.value));
   const prereqBinds = new Set(listDeclaredPrereqBinds(data));
   return fields.map((f) => {
     const auto = autoClassifyTemplatedItem(f.value, prereqBinds);
@@ -235,6 +237,7 @@ export const capabilityNameJustificationClassifier: Classifier<Strategy, SaveStr
     expectedAnswerShape:
       'capability_name_justification: "<one-sentence reason this slug doesn\'t need a lookup-shaped prereq>"',
     buildItems: (data, ctx): NameSegmentItem[] => {
+      if (isLookupSurfaceOwnerCapability(ctx.capability)) return [];
       if (hasLookupShapedPrereq(data)) return [];
       const segments = findLookupSegments(ctx.capability);
       return segments.map((s) => ({

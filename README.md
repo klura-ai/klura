@@ -5,9 +5,9 @@
   </picture>
 </p>
 
-<p align="center"><strong>From one browser run to repeatable agent workflows: same outcome, faster, cheaper, and private.</strong></p>
+<p align="center"><strong>Maintained web-data tools that run entirely on your machine.</strong></p>
 
-<p align="center"><sub>Klura is a local-first MCP runtime that turns web workflows into reusable capabilities your agent can call again and again.</sub></p>
+<p align="center"><sub>Search a GitHub-hosted catalog, install one signed tool, then call it or run a bounded scrape locally.</sub></p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@klura/runtime"><img alt="npm version" src="https://img.shields.io/npm/v/@klura/runtime?style=flat-square&logo=npm&color=cb3837"></a>
@@ -20,49 +20,21 @@
 
 ---
 
-# Turn every stable web workflow into an MCP capability
+# Local web data tools, maintained on GitHub
 
-Klura lets your agent use the browser once, discover the real contract, and then execute the workflow directly on repeat.
+Klura is a local execution runtime and public catalog for maintained web-data tools. The catalog is static and signed; package bytes, browser sessions, scrape output, and target-site traffic stay on your machine. No account, LLM key, or hosted execution is required to use an installed tool.
 
 ```text
-First run:
-> message Amanda in the team chat using klura
-  opens browser, completes the task, captures traffic
-
-Lift:
-> yes, analyze the capture
-  learns the real request behind the UI
-
-Later:
-> message Bob in the team chat using klura
-  direct saved strategy → no UI rediscovery · 0 LLM tokens
+search → inspect → install → call once or run a bounded scrape
 ```
 
-Browser agents rediscover the UI on every run. Klura learns it once.
-
-| Task[^benchmark-model] | Plain browser agent[^baseline-reported] | klura cold — learn once | **klura runtime replay** |
-| --- | --: | --: | --: |
-| IKEA stock across four Berlin stores | 2m 17s | 9m 43s | **1.14s · 0 LLM tokens** |
-| ASOS filtered product search | 1m 35s | 6m 57s | **67.9ms · 0 LLM tokens** |
-| Airbnb Berlin stay search | 2m 48s | 13m 19s | **2.17s · 0 LLM tokens** |
-| Amazon product search | 3m 05s | 6m 52s | **3.46s · 0 LLM tokens** |
-
-<sub>The first klura run includes one-time discovery and LIFT; replay is the saved strategy itself. Full method in <a href="#benchmarks">Benchmarks</a>.</sub>
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/klura-ai/klura/main/hero-dark.gif">
-    <img alt="klura: one run, lift, then execute the saved skill directly" src="https://raw.githubusercontent.com/klura-ai/klura/main/hero-light.gif" width="900">
-  </picture>
-</p>
-
-<p align="center"><sub>Klura observes requests, responses, page state, and action trails, then saves the simplest executable strategy that works — from a plain <code>fetch</code> to an in-page WebSocket frame.</sub></p>
+Each package declares its input/output schema, exact network permissions, outcome verification, request limits, and—where applicable—a finite collection graph. The runtime treats a `200` response or an empty result as untrusted until the package's structural contract verifies it.
 
 ---
 
 <p align="center"><sub>
   <a href="#quick-start">Quick Start</a> &nbsp;·&nbsp;
-  <a href="#how-it-works">How It Works</a> &nbsp;·&nbsp;
+  <a href="#advanced-authoring-how-it-works">Advanced Authoring</a> &nbsp;·&nbsp;
   <a href="#lift">LIFT</a> &nbsp;·&nbsp;
   <a href="#self-healing">Self-Healing</a> &nbsp;·&nbsp;
   <a href="#map-mode">Map Mode</a> &nbsp;·&nbsp;
@@ -78,9 +50,25 @@ Browser agents rediscover the UI on every run. Klura learns it once.
 
 ## Quick Start
 
-Klura works with Codex, the ChatGPT desktop app, Claude Code, Claude Desktop, Cursor, Windsurf, OpenClaw, and other MCP hosts.
+### CLI
 
-### Codex / ChatGPT desktop
+```bash
+npm install -g @klura/runtime
+
+klura search products
+klura show <package[.capability]>
+klura install <package[@version]>
+klura call <package.capability> --input '{"...":"..."}'
+klura run <package.capability> --input '{"...":"..."}' --output results.ndjson
+```
+
+`call` returns one typed, verified read result. `run` writes a bounded local collection and can be detached, inspected, cancelled, or explicitly resumed under the exact installed package digest. `klura factory --help` is the separate advanced authoring surface; it is never entered automatically when a catalog search has no match.
+
+### MCP hosts
+
+Klura also works with Codex, the ChatGPT desktop app, Claude Code, Claude Desktop, Cursor, Windsurf, OpenClaw, and other MCP hosts. The same server exposes the consumer tools first and discovery tools only for explicit authoring.
+
+#### Codex / ChatGPT desktop
 
 The Codex CLI, IDE extension, and ChatGPT desktop app share one MCP configuration:
 
@@ -90,7 +78,7 @@ codex mcp add klura -- npx -y @klura/mcp
 
 Restart the host after registering.
 
-### Claude Code
+#### Claude Code
 
 The fastest path is the CLI:
 
@@ -113,7 +101,7 @@ That registers klura at user scope. To install per-project, drop it into `.mcp.j
 
 You can also edit `~/.claude.json` directly, but `claude mcp add` is the supported path. After install, run `claude mcp list` to confirm klura is registered.
 
-### Claude Desktop, Cursor, Windsurf, OpenClaw
+#### Claude Desktop, Cursor, Windsurf, OpenClaw
 
 These hosts share the same MCP config shape. Drop the snippet into the host's MCP config file (e.g. `claude_desktop_config.json` for Claude Desktop) and restart the client:
 
@@ -141,9 +129,9 @@ npm link
 
 After every code change, re-run `npm run build` and restart the daemon: `klura restart-runtime --force` (or `pkill -f 'klura.*daemon'`).
 
-### Standalone — talk to klura directly
+### Advanced: author or maintain a tool
 
-As well as serving MCP hosts, klura can run as a standalone agent with an optional LLM provider:
+When a maintained package does not exist and you explicitly want to author one, klura can run its discovery/factory workflow with an optional LLM provider:
 
 ```bash
 npm install -g @klura/runtime @klura/agent-claude-code   # or @klura/agent-openai
@@ -151,7 +139,7 @@ klura chat
 > message Adam in the team chat
 ```
 
-`klura chat` is a REPL over the same tools exposed through MCP. `claude-code` reuses your Claude Code login; `openai` supports OpenAI and compatible endpoints such as NVIDIA, Together, Groq, and vLLM:
+`klura chat` is a REPL over the factory tools exposed through MCP. `claude-code` reuses your Claude Code login; `openai` supports OpenAI and compatible endpoints such as NVIDIA, Together, Groq, and vLLM:
 
 ```bash
 klura chat --provider claude-code
@@ -183,7 +171,7 @@ External MCP hosts supply their own LLM. Standalone providers: [`@klura/agent-cl
 
 ---
 
-## How It Works
+## Advanced authoring: how it works
 
 Browser agents are slow because they keep using the UI as the interface.
 

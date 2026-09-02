@@ -36,13 +36,22 @@ test('loadConfig merges partial file with defaults', () => {
   assert.strictEqual(cfg.pool.warm.max_contexts, 3); // nested default
 });
 
-test('saveConfig writes atomically and round-trips', () => {
+test('saveConfig writes atomically with owner-only permissions on create and update', () => {
+  try { fs.unlinkSync(configPath); } catch { /* not present */ }
   const next = JSON.parse(JSON.stringify(CONFIG_DEFAULTS));
   next.pool.driver = 'klura-driver-playwright-stealth';
   saveConfig(next);
   assert.ok(!fs.existsSync(`${configPath}.tmp`), 'tmp file should be renamed');
+  assert.strictEqual(fs.statSync(configPath).mode & 0o777, 0o600);
+
+  fs.chmodSync(configPath, 0o644);
+  next.pool.driver = 'playwright';
+  saveConfig(next);
+  assert.ok(!fs.existsSync(`${configPath}.tmp`), 'tmp file should be renamed on update');
+  assert.strictEqual(fs.statSync(configPath).mode & 0o777, 0o600);
+
   const reloaded = loadConfig();
-  assert.strictEqual(reloaded.pool.driver, 'klura-driver-playwright-stealth');
+  assert.strictEqual(reloaded.pool.driver, 'playwright');
 });
 
 test('configureOne on a driver/warm pool field flags restart (captured at pool construction)', () => {

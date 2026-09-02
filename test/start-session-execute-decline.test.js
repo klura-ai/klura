@@ -9,10 +9,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { dispatchExecuteGraphOutcome } = await import('../dist/tools/start-session.js');
-const { checkAdmissibility, UNIVERSAL_TOOLS } = await import(
-  '../dist/phases/registry.js'
-);
+const { applyAutoExecuteHint, dispatchExecuteGraphOutcome } =
+  await import('../dist/tools/start-session.js');
+const { checkAdmissibility, UNIVERSAL_TOOLS } = await import('../dist/phases/registry.js');
 
 function executeSession() {
   return {
@@ -30,7 +29,10 @@ test('execute graph: args_required_to_auto_execute → swap to discover, session
   assert.equal(session.graph, 'discover', 'session.graph must swap back to discover');
   // Drive primitives are admissible in the drive phase (discover graph entry).
   const r = checkAdmissibility(session, 'js_eval');
-  assert.ok(r.ok, `js_eval must be admissible after auto-execute decline; got ${JSON.stringify(r)}`);
+  assert.ok(
+    r.ok,
+    `js_eval must be admissible after auto-execute decline; got ${JSON.stringify(r)}`,
+  );
 });
 
 test('execute graph: no_complete_saved_strategy → no dispatch, session stays active', () => {
@@ -64,6 +66,73 @@ test('execute graph: executed: true with ok body → execute_succeeded → termi
   const result = {
     executed: true,
     execute_result: { status: 200, body: { ok: true } },
+  };
+  dispatchExecuteGraphOutcome(session, opts, result);
+  assert.equal(session.status, 'closed');
+});
+
+test('execute graph: HTTP 2xx with body.ok false → active triage on first failure', () => {
+  const session = executeSession();
+  const opts = { platform: 'p', capability: 'c' };
+  const result = {
+    executed: true,
+    execute_result: {
+      status: 200,
+      body: { ok: false, code: 'application_defined_failure' },
+    },
+  };
+  dispatchExecuteGraphOutcome(session, opts, result);
+  assert.notEqual(session.status, 'failed');
+  assert.equal(session.phase, 'triage');
+  applyAutoExecuteHint(result, session, opts);
+  assert.match(result._hint, /SESSION REMAINS ACTIVE IN TRIAGE/);
+  assert.match(result._hint, /submit a surface-bound triage plan/i);
+  assert.doesNotMatch(result._hint, /SESSION IS TERMINAL/);
+});
+
+test('execute graph: compacted HTTP 2xx retains hoisted body.ok false and enters triage', () => {
+  const session = executeSession();
+  const opts = { platform: 'p', capability: 'c' };
+  const result = {
+    executed: true,
+    execute_result: {
+      status: 200,
+      body: '<truncated object body>',
+      body_ok: false,
+    },
+  };
+  dispatchExecuteGraphOutcome(session, opts, result);
+  assert.equal(session.phase, 'triage');
+  assert.notEqual(session.status, 'failed');
+});
+
+test('execute graph: auth diagnosis remains terminal despite body.ok false', () => {
+  const session = executeSession();
+  const opts = { platform: 'p', capability: 'c' };
+  const result = {
+    executed: true,
+    execute_result: {
+      status: 200,
+      body: {
+        ok: false,
+        diagnosis: { kind: 'auth_failed' },
+      },
+    },
+  };
+  dispatchExecuteGraphOutcome(session, opts, result);
+  assert.equal(session.status, 'failed');
+  applyAutoExecuteHint(result, session, opts);
+  assert.equal(result.session_terminal, true);
+  assert.match(result._hint, /SESSION IS TERMINAL/);
+  assert.doesNotMatch(result._hint, /SESSION REMAINS ACTIVE IN TRIAGE/);
+});
+
+test('execute graph: HTTP 2xx without body.ok closes transport but makes no body claim', () => {
+  const session = executeSession();
+  const opts = { platform: 'p', capability: 'c' };
+  const result = {
+    executed: true,
+    execute_result: { status: 200, body: { outcome: 'failure' } },
   };
   dispatchExecuteGraphOutcome(session, opts, result);
   assert.equal(session.status, 'closed');

@@ -312,9 +312,9 @@ export interface ListLoadedScriptsArgs {
 }
 
 /**
- * Every JS script URL the page has loaded, as observed in the captured network
- * log. Filtered to `content-type: application/javascript` / `text/javascript` /
- * `.js` URLs. Deduped, ordered by load time.
+ * Every external JS script URL the browser observed during the session.
+ * Script resources live in a driver-owned event ledger because the ordinary
+ * request log intentionally excludes passive assets. Deduped in load order.
  */
 export async function listLoadedScriptsTool(
   args: ListLoadedScriptsArgs,
@@ -322,19 +322,19 @@ export async function listLoadedScriptsTool(
   if (!args.session_id) throw new Error('session_id is required');
   const session = pool.getSession(args.session_id);
   const driver = pool.driverFor(args.session_id);
-  const intercepted = await driver.getInterceptedRequests(session).catch(() => []);
+  const loaded = await driver.getLoadedScripts(session);
   const seen = new Set<string>();
   const out: Array<{ url: string; bytes?: number; loaded_at?: number }> = [];
-  for (const req of intercepted) {
-    const url = typeof req.url === 'string' ? req.url : '';
+  for (const script of loaded) {
+    const url = typeof script.url === 'string' ? script.url : '';
     if (!url) continue;
-    const ct = (req.headers['content-type'] ?? req.headers['Content-Type'] ?? '').toLowerCase();
-    const isJs = ct.includes('javascript') || /\.js(\?|$|#)/.test(url);
-    if (!isJs) continue;
     if (seen.has(url)) continue;
     seen.add(url);
-    const bytes = typeof req.responseBody === 'string' ? req.responseBody.length : undefined;
-    out.push({ url, bytes });
+    out.push({
+      url,
+      ...(typeof script.bytes === 'number' ? { bytes: script.bytes } : {}),
+      ...(typeof script.loaded_at === 'number' ? { loaded_at: script.loaded_at } : {}),
+    });
   }
   ringPush(ensureAccumulator(session).listLoadedScriptsCalls, {
     at: new Date().toISOString(),
@@ -683,7 +683,7 @@ export const TOOL_DEFS: ToolDef[] = [
   {
     name: TOOL_NAMES.listLoadedScripts,
     description:
-      'List every JS script URL the page loaded, observed via the captured network log. Filtered to JS content-types, deduped, in load order. Use when the `inspect_ws_frame.js_callstack` bundle turns out not to contain the encoder — widen the search to other bundles.',
+      'List every external JS script URL observed during the browser session. Uses the driver resource-event ledger (separate from the API-focused network log), deduped in load order with encoded byte counts when available. Use when the `inspect_ws_frame.js_callstack` bundle turns out not to contain the encoder — widen the search to other bundles.',
     inputSchema: {
       type: 'object',
       properties: { session_id: { type: 'string' } },

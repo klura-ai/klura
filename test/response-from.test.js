@@ -4,16 +4,19 @@
 //   - Helper: applyResponseFrom returns the prereq's parsed value across
 //     format=json / format=html / format absent / extract present.
 //
-// Execution-path integration (running fetch-node / fetch-browser end-to-end)
-// is covered indirectly by the field-reports facebook scenario; pulling the
-// full pool/session machinery into a unit test isn't worth the complexity
-// for what is structurally a 5-line short-circuit.
+// Browser execution-path integration lives in
+// response-from-fresh-js-eval.test.js, including direct-result cache isolation
+// and exact caller-URL navigation.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { validateStrategyShape } from '../dist/strategies/skills.js';
-import { applyResponseFrom, hasResponseFrom } from '../dist/execution/response-from.js';
+import {
+  applyResponseFrom,
+  hasResponseFrom,
+  responseFromBinding,
+} from '../dist/execution/response-from.js';
 
 function expectReject(data, matcher) {
   assert.throws(
@@ -106,7 +109,13 @@ test('response.from referencing a browser-kind prereq is rejected', () => {
   expectReject(
     {
       strategy: 'page-script',
-      prerequisites: [{ kind: 'browser', name: 'login', steps: [{ action: 'navigate', url: 'https://example.com' }] }],
+      prerequisites: [
+        {
+          kind: 'browser',
+          name: 'login',
+          steps: [{ action: 'navigate', url: 'https://example.com' }],
+        },
+      ],
       response: { from: 'login' },
     },
     /references a prereq of kind "browser"/,
@@ -145,6 +154,12 @@ test('hasResponseFrom returns true only when response.from is non-empty string',
   assert.equal(hasResponseFrom({ response: {} }), false);
   assert.equal(hasResponseFrom({}), false);
   assert.equal(hasResponseFrom(null), false);
+});
+
+test('responseFromBinding returns the exact binding or null', () => {
+  assert.equal(responseFromBinding({ response: { from: 'result' } }), 'result');
+  assert.equal(responseFromBinding({ response: { from: '' } }), null);
+  assert.equal(responseFromBinding({}), null);
 });
 
 test('applyResponseFrom parses JSON when format:json (default)', () => {

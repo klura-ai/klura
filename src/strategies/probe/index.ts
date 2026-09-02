@@ -35,6 +35,7 @@ import {
 } from './recorded-path';
 import { resolveTemplate } from '../probe-helpers';
 import { extractInvalidStrategyMessage } from './errors';
+import { isSecretLeafKey } from '../../gate/credential-secrets';
 
 export { isTransientNavigationError } from './errors';
 
@@ -47,6 +48,11 @@ interface ProbeArgs {
    *  rather than the default-identity path, so auth-gated reads probe against
    *  fresh credentials instead of bouncing to a login wall. */
   identity?: string;
+  /** Caller inputs declared on the live discovery session for this capability.
+   *  Used only as ephemeral probe scope, with `notes.params.*.example` as
+   *  fallback. Secret-shaped fields are excluded from navigation and replaced
+   *  with stand-ins before js-eval. */
+  declaredArgs?: Record<string, unknown>;
 }
 
 /**
@@ -69,6 +75,7 @@ export async function probeStrategySelectors({
   platform,
   pool,
   identity,
+  declaredArgs,
 }: ProbeArgs): Promise<void> {
   const prereqs = extractPageExtractPrereqs(data);
   const fetchPrereqs = extractFetchExtractPrereqs(data);
@@ -88,23 +95,39 @@ export async function probeStrategySelectors({
     return;
   }
 
-  // Pre-resolve {{template}} placeholders using notes.params example values. If
-  // a placeholder has no example, refuse the probe with a message telling the
-  // agent to add one — better than silently skipping.
+  // Resolve probe inputs from two grounded sources. Live session declarations
+  // win because they are the exact values the agent just exercised; documented
+  // notes.params examples remain the fallback for programmatic saves and
+  // undeclared fields. The scope is ephemeral and never enters runtime_meta or
+  // rejection text.
   const examples = collectParamExamples(data);
+  const groundedInputs: Record<string, unknown> = {
+    ...examples,
+    ...(declaredArgs ?? {}),
+  };
+  // URL templates accept scalar string values only. Never put credential
+  // material in a probe navigation URL: structurally secret-shaped keys stay
+  // unresolved and produce the existing actionable missing-example rejection.
+  const navigationInputs: Record<string, string> = {};
+  for (const [name, value] of Object.entries(groundedInputs)) {
+    if (isSecretLeafKey(name)) continue;
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      navigationInputs[name] = String(value);
+    }
+  }
   const resolvedPrereqs = prereqs.map((p) => ({
     name: p.name,
-    url: resolveTemplate(p.url, examples, `prerequisite "${p.name}".url`),
+    url: resolveTemplate(p.url, navigationInputs, `prerequisite "${p.name}".url`),
     vars: p.vars,
   }));
   const resolvedFetchPrereqs = fetchPrereqs.map((p) => ({
     ...p,
-    url: resolveTemplate(p.url, examples, `prerequisite "${p.name}".url`),
+    url: resolveTemplate(p.url, navigationInputs, `prerequisite "${p.name}".url`),
   }));
-  const resolvedFetchHtml = resolveFetchHtmlExtracts(fetchHtmlExtracts, examples);
+  const resolvedFetchHtml = resolveFetchHtmlExtracts(fetchHtmlExtracts, navigationInputs);
   const resolvedJsEval = jsEvalPrereqs.map((p) => ({
     ...p,
-    url: resolveTemplate(p.url, examples, `prerequisite "${p.name}".url`),
+    url: resolveTemplate(p.url, navigationInputs, `prerequisite "${p.name}".url`),
   }));
 
   // Spin up a real session. Use the platform's saved storage state so the probe
@@ -182,7 +205,7 @@ export async function probeStrategySelectors({
     }
     for (const jsEval of resolvedJsEval) {
       try {
-        await probeOneJsEvalPrereq(driver, session, jsEval, probeWarnings);
+        await probeOneJsEvalPrereq(driver, session, jsEval, probeWarnings, groundedInputs);
       } catch (err) {
         prereqFailures.push(extractInvalidStrategyMessage(err));
       }
@@ -223,7 +246,7 @@ export async function probeStrategySelectors({
           );
         }
       }
-      await probeRecordedPathSteps(driver, session, wsOpenSteps, examples);
+      await probeRecordedPathSteps(driver, session, wsOpenSteps, navigationInputs);
       // ws + wsOpen.steps is browser-only by construction.
       allPrereqsNodeCompatible = false;
       nodeIncompatReason = 'wsOpen.steps requires a browser';

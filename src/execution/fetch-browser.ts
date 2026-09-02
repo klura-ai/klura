@@ -19,7 +19,7 @@ import { resolveGenerated } from '../strategies/generators';
 import { JS_EVAL_TIMEOUT_DEFAULT_MS } from '../strategies/skills';
 import { trimA11yTree, MAX_TOOL_OUTPUT_CHARS, truncateString } from '../response/response-size';
 import { fireInterrupts, type InterruptEntry } from '../strategies/interrupt-firing';
-import { applyResponseFrom, hasResponseFrom } from './response-from';
+import { applyResponseFrom, hasResponseFrom, responseFromBinding } from './response-from';
 import type { TokenCache } from '../strategies/tokens';
 import {
   applyHtmlExtract,
@@ -46,6 +46,57 @@ import type {
 } from './types';
 import { currentDeviceSessionOpts, resolveCapabilityPrereq, stringifyScope } from '../execution';
 import { looksLikeHtml } from '../execution';
+import {
+  acquireLocalOriginPermit,
+  LocalRequestTimeoutError,
+  localRequestTimeoutMs,
+} from './local-traffic';
+
+function workloadId(platform: string, capability: string): string {
+  return `${platform}/${capability}`;
+}
+
+export async function navigateWithOriginAdmission(
+  session: Session,
+  driver: BrowserDriver,
+  url: string,
+  workload: string,
+  options?: { waitUntil?: 'commit' | 'domcontentloaded' | 'networkidle' },
+): Promise<void> {
+  const permit = await acquireLocalOriginPermit(url, workload);
+  try {
+    await driver.navigate(session, url, {
+      ...options,
+      timeout_ms: localRequestTimeoutMs(),
+    });
+    permit.release('success');
+  } catch (error) {
+    permit.release('neutral');
+    throw error;
+  }
+}
+
+async function fetchInBrowserWithOriginAdmission(
+  session: Session,
+  driver: BrowserDriver,
+  url: string,
+  workload: string,
+  options: Parameters<BrowserDriver['fetchInBrowser']>[2],
+): Promise<Awaited<ReturnType<BrowserDriver['fetchInBrowser']>>> {
+  const permit = await acquireLocalOriginPermit(url, workload);
+  try {
+    const timeoutMs = localRequestTimeoutMs();
+    const result = await driver.fetchInBrowser(session, url, { ...options, timeout_ms: timeoutMs });
+    let completion: 'success' | 'transient_failure' | 'neutral' = 'neutral';
+    if (result.ok) completion = result.status >= 500 ? 'transient_failure' : 'success';
+    permit.release(completion);
+    if (!result.ok && result.timed_out) throw new LocalRequestTimeoutError(timeoutMs);
+    return result;
+  } catch (error) {
+    permit.release('neutral');
+    throw error;
+  }
+}
 
 /**
  * Pre-scan a strategy's prerequisites to separate cached/capability ones
@@ -108,6 +159,7 @@ async function runFetchExtractPrereq(
   driver: BrowserDriver,
   scope: Record<string, unknown>,
   tokens: Record<string, string>,
+  workload: string,
 ): Promise<void> {
   if (!prereq.url) {
     throw new Error(`prereq "${prereq.name}": fetch-extract requires "url" string`);
@@ -129,7 +181,7 @@ async function runFetchExtractPrereq(
   const body = prereq.fetch_body
     ? JSON.stringify(resolveBody(prereq.fetch_body, scope))
     : undefined;
-  const result = await driver.fetchInBrowser(session, resolvedUrl, {
+  const result = await fetchInBrowserWithOriginAdmission(session, driver, resolvedUrl, workload, {
     method: httpMethod,
     headers,
     ...(body !== undefined ? { body } : {}),
@@ -167,6 +219,7 @@ async function runPageExtractPrereq(
   driver: BrowserDriver,
   scope: Record<string, unknown>,
   tokens: Record<string, string>,
+  workload: string,
 ): Promise<void> {
   if (!prereq.url) {
     throw new Error(
@@ -180,7 +233,9 @@ async function runPageExtractPrereq(
   }
 
   const resolvedUrl = interpolateVars(prereq.url, scope);
-  await driver.navigate(session, resolvedUrl, { waitUntil: 'domcontentloaded' });
+  await navigateWithOriginAdmission(session, driver, resolvedUrl, workload, {
+    waitUntil: 'domcontentloaded',
+  });
   for (const [varName, rawSpec] of Object.entries(prereq.vars)) {
     if (!rawSpec || typeof rawSpec !== 'object') {
       throw new Error(`prereq "${prereq.name}": var "${varName}" must be {selector, attr?}`);
@@ -205,26 +260,34 @@ async function runJsEvalBrowserPrereq(
   pool: AnyPool,
   tokens: Record<string, string>,
   scope: Record<string, unknown>,
+  forceFresh: boolean,
+  workload: string,
 ): Promise<void> {
   const bindsTo = prereq.binds ?? prereq.name;
   const resolvedUrl = interpolateVars(prereq.url ?? '', scope);
   const timeoutMs = prereq.timeout_ms ?? JS_EVAL_TIMEOUT_DEFAULT_MS;
   const expression = prereq.expression ?? '';
 
-  // Per-call mode: args_template is body-dependent, so caching the result would
-  // bind a stale signature for the wrong body. Interpolate the template against
-  // the live caller scope, skip cache + refresh entirely, mint fresh on every
-  // execute. Save-time validation guarantees args_template + refresh.enabled
-  // is rejected, so reaching this branch means refresh is off by construction.
-  if (prereq.args_template !== undefined) {
-    const resolvedArgs = resolveBody(prereq.args_template, scope);
+  // Result-producing and per-call modes both require a fresh page evaluation.
+  // A `response.from` binding is the capability result itself, so reusing it
+  // could return a structurally valid entity from an earlier caller URL.
+  // `args_template` is body-dependent and has the same per-call requirement.
+  if (forceFresh || prereq.args_template !== undefined) {
+    const resolvedArgs =
+      prereq.args_template !== undefined ? resolveBody(prereq.args_template, scope) : undefined;
     const minted = await runJsEvalPrereq(driver, session, {
       name: prereq.name,
       url: resolvedUrl,
       expression,
       returnShape: prereq.return_shape,
       timeoutMs,
-      args: resolvedArgs,
+      ...(forceFresh ? { requireExactUrl: true } : {}),
+      navigate: async (url) => {
+        await navigateWithOriginAdmission(session, driver, url, workload, {
+          waitUntil: 'domcontentloaded',
+        });
+      },
+      ...(resolvedArgs !== undefined ? { args: resolvedArgs } : {}),
       ...(prereq.frame ? { frame: prereq.frame } : {}),
     });
     tokens[bindsTo] = minted;
@@ -248,6 +311,11 @@ async function runJsEvalBrowserPrereq(
     expression,
     returnShape: prereq.return_shape,
     timeoutMs,
+    navigate: async (url) => {
+      await navigateWithOriginAdmission(session, driver, url, workload, {
+        waitUntil: 'domcontentloaded',
+      });
+    },
     ...(prereq.frame ? { frame: prereq.frame } : {}),
   });
   tokens[bindsTo] = minted;
@@ -260,6 +328,11 @@ async function runJsEvalBrowserPrereq(
       expression,
       returnShape: prereq.return_shape,
       timeoutMs,
+      navigate: async (url) => {
+        await navigateWithOriginAdmission(session, driver2, url, workload, {
+          waitUntil: 'domcontentloaded',
+        });
+      },
       ...(prereq.frame ? { frame: prereq.frame } : {}),
     });
   });
@@ -271,13 +344,16 @@ async function runBrowserStepPrereq(
   driver: BrowserDriver,
   args: Record<string, unknown>,
   tokens: Record<string, string>,
+  workload: string,
 ): Promise<void> {
   for (const step of prereq.steps || []) {
     const stepScope: Record<string, unknown> = { ...tokens, ...args };
     const resolvedStep = resolveBrowserPrereqStep(step, stepScope);
     switch (resolvedStep.action) {
       case 'navigate':
-        if (resolvedStep.url) await driver.navigate(session, resolvedStep.url);
+        if (resolvedStep.url) {
+          await navigateWithOriginAdmission(session, driver, resolvedStep.url, workload);
+        }
         break;
       case 'click':
         if (resolvedStep.selector) await driver.click(session, resolvedStep.selector);
@@ -311,30 +387,44 @@ export async function runBrowserPrereqs(
   session: Session,
   driver: BrowserDriver,
   platform: string,
+  capability: string,
   args: Record<string, unknown>,
   pool: AnyPool,
   tokenCache: TokenCache | null,
   tokens: Record<string, string>,
+  options?: { freshJsEvalBindings?: ReadonlySet<string> },
 ): Promise<void> {
+  const workload = workloadId(platform, capability);
   for (const prereq of browserPrereqs) {
     const scope: Record<string, unknown> = { ...tokens, ...args };
 
     if (prereq.kind === 'fetch-extract') {
-      await runFetchExtractPrereq(prereq, session, driver, scope, tokens);
+      await runFetchExtractPrereq(prereq, session, driver, scope, tokens, workload);
       continue;
     }
 
     if (prereq.kind === 'page-extract') {
-      await runPageExtractPrereq(prereq, session, driver, scope, tokens);
+      await runPageExtractPrereq(prereq, session, driver, scope, tokens, workload);
       continue;
     }
 
     if (prereq.kind === 'js-eval') {
-      await runJsEvalBrowserPrereq(prereq, session, driver, platform, pool, tokens, scope);
+      const bindsTo = prereq.binds ?? prereq.name;
+      await runJsEvalBrowserPrereq(
+        prereq,
+        session,
+        driver,
+        platform,
+        pool,
+        tokens,
+        scope,
+        options?.freshJsEvalBindings?.has(bindsTo) ?? false,
+        workload,
+      );
       continue;
     }
 
-    await runBrowserStepPrereq(prereq, session, driver, args, tokens);
+    await runBrowserStepPrereq(prereq, session, driver, args, tokens, workload);
     const extracted = tokens[prereq.name];
     if (prereq.name && extracted && tokenCache && prereq.ttl !== null) {
       tokenCache.set(platform, prereq.name, extracted, { ttl: prereq.ttl ?? 1800 });
@@ -354,6 +444,8 @@ export async function runPrerequisites(opts: {
   strategy: { prerequisites?: Prerequisite[]; baseUrl?: string };
   args: Record<string, unknown>;
   platform: string;
+  /** Stable capability label used for shared origin-scheduler fairness. */
+  capability?: string;
   pool: AnyPool;
   tokenCache: TokenCache | null;
   depth?: number;
@@ -361,6 +453,7 @@ export async function runPrerequisites(opts: {
   identity?: string;
 }): Promise<{ tokens: Record<string, string> }> {
   const { strategy, args, platform, pool, tokenCache, depth = 0, identity } = opts;
+  const capability = opts.capability ?? 'prerequisite';
   const { tokens, browserPrereqs } = await scanCachedPrereqs(
     strategy.prerequisites,
     platform,
@@ -407,6 +500,7 @@ export async function runPrerequisites(opts: {
       session,
       driver,
       platform,
+      capability,
       args,
       pool,
       tokenCache,
@@ -490,15 +584,22 @@ export async function executeFetchInBrowser(
 
   try {
     const driver = pool.driverFor(session.id);
+    const directResultBinding = responseFromBinding(strategy);
     await runBrowserPrereqs(
       browserPrereqs,
       session,
       driver,
       platform,
+      capability,
       args,
       pool,
       tokenCache,
       tokens,
+      directResultBinding
+        ? {
+            freshJsEvalBindings: new Set([directResultBinding]),
+          }
+        : undefined,
     );
 
     // `response.from` short-circuit — strategy returns the named prereq's value
@@ -621,7 +722,15 @@ export async function executeFetchInBrowser(
       fireOpts = { navigateTo, waitUntil: 'commit' };
     }
 
-    return await fireRequestInSession(session, fireStrategy, mergedArgs, platform, pool, fireOpts);
+    return await fireRequestInSession(
+      session,
+      fireStrategy,
+      mergedArgs,
+      platform,
+      capability,
+      pool,
+      fireOpts,
+    );
   } finally {
     await pool.endDrive(session.id);
   }
@@ -693,6 +802,7 @@ async function fireRequestInSession(
   strategy: RequestStrategy,
   args: Record<string, unknown>,
   platform: string,
+  capability: string,
   pool: AnyPool,
   options: FireRequestOptions = {},
 ): Promise<ExecuteResult> {
@@ -708,16 +818,28 @@ async function fireRequestInSession(
 
   const driver = pool.driverFor(session.id);
   if (options.navigateTo) {
-    await driver.navigate(session, options.navigateTo, {
-      waitUntil: options.waitUntil ?? 'domcontentloaded',
-    });
+    await navigateWithOriginAdmission(
+      session,
+      driver,
+      options.navigateTo,
+      workloadId(platform, capability),
+      {
+        waitUntil: options.waitUntil ?? 'domcontentloaded',
+      },
+    );
   }
 
-  const evalResult = await driver.fetchInBrowser(session, url, {
-    method,
-    headers,
-    body: serializedBody,
-  });
+  const evalResult = await fetchInBrowserWithOriginAdmission(
+    session,
+    driver,
+    url,
+    workloadId(platform, capability),
+    {
+      method,
+      headers,
+      body: serializedBody,
+    },
+  );
 
   // Save cookies — challenge clearance tokens, rotated sessions, sensor state.
   const statePath = skills.storageStatePath(platform);

@@ -27,7 +27,7 @@ Public per-platform keys (e.g. `x-fp-api-key: volo`) and hostnames are fine. Rep
 
 ## Login capability format
 
-Save login as a recorded-path named `login`, parameterized by `{{email}}`, `{{password}}`:
+Save login as a recorded-path named `login`. Keep non-secret identity fields parameterized (`{{email}}`, `{{username}}`). For the password, prefer an exact `{{secret:<scheme>:<ref>}}` reference; use `{{password}}` only when the caller must supply the password transiently:
 
 ```json
 {
@@ -47,7 +47,7 @@ Save login as a recorded-path named `login`, parameterized by `{{email}}`, `{{pa
         "a11y": { "role": "textbox", "name": "Password" },
         "css": "input[name='password']"
       },
-      "value": "{{password}}"
+      "value": "{{secret:file-local:example.default}}"
     },
     {
       "id": "click_remember_me",
@@ -65,7 +65,7 @@ Save login as a recorded-path named `login`, parameterized by `{{email}}`, `{{pa
     { "id": "wait_navigation", "action": "wait", "condition": "navigation", "timeout": 10000 }
   ],
   "notes": {
-    "params": { "email": "login email", "password": "account password" },
+    "params": { "email": "login email" },
     "discovery": "Captured during initial discovery. Remember-me ticked by default for longer sessions."
   }
 }
@@ -75,7 +75,8 @@ Guidelines:
 
 - **Name it `login`** — convention so reauth logic always finds it.
 - **Include remember-me** — fewer reauths, less CAPTCHA friction.
-- **Never save credentials** in the strategy file — `{{email}}` and `{{password}}` are filled from `execute` args.
+- **Never save credential values** in the strategy file. `{{email}}` is filled from identity state; the exact secret reference is resolved only during execution.
+- **Keep a secret reference as the whole field value.** Prefixes and suffixes belong in the resolver's returned value. Mixed strings such as `Bearer {{secret:...}}` are rejected.
 - **Capture both locator types** — login forms change often.
 - **Include the post-submit wait** — cookies need the navigation to complete before `saveStorageState` runs.
 
@@ -162,7 +163,7 @@ Shell-command resolvers that fetch passwords from external vaults at execution t
 }
 ```
 
-**Strategy placeholder**: `{{secret:scheme:ref}}`.
+**Strategy placeholder**: `{{secret:<scheme>:<ref>}}`. Scheme names may contain letters, digits, dashes, and underscores. The token must occupy the complete string field.
 
 ```json
 {
@@ -176,6 +177,8 @@ Shell-command resolvers that fetch passwords from external vaults at execution t
 ```
 
 At execute time, the runtime parses `{{secret:op:op://Personal/<platform>/password}}`, looks up the `op` scheme, runs `op read op://Personal/<platform>/password`, captures stdout, strips trailing newline, and substitutes the value. 10-second timeout. On failure, error message says `[REDACTED]` — never leaks the ref or output.
+
+Save-time validation checks only the reference shape. It does not require that the current machine has the named scheme configured, so a platform skill remains portable. The executing machine must configure the scheme before it calls the capability. Exact secret references are not caller parameters and are omitted from the `literal_provenance` audit; do not declare the reference under `notes.params`.
 
 **Setting up resolvers**:
 

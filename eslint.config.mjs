@@ -94,6 +94,14 @@ export default tseslint.config(
     },
   },
   {
+    // Public browser execution owns a separate mandatory egress boundary and
+    // never receives the discovery BrowserDriver surface.
+    files: ['src/consumer/execution/public-browser/**/*.ts'],
+    rules: {
+      'no-restricted-imports': 'off',
+    },
+  },
+  {
     // Driver implementation: the entire CDP / Playwright surface lives in
     // one file (capture, locators, lifecycle, stealth, debugger). Ignore for now.
     files: ['src/drivers/playwright.ts'],

@@ -339,15 +339,17 @@ test('js-eval reloads a matching page that has not reached DOMContentLoaded', as
   await runPrerequisites({
     strategy: {
       baseUrl: 'https://example.com',
-      prerequisites: [{
-        name: 'sig',
-        kind: 'js-eval',
-        url: 'https://example.com/app',
-        expression: 'window.mint()',
-        binds: 'sig',
-        return_shape: { kind: 'string', min_length: 1 },
-        args_template: {},
-      }],
+      prerequisites: [
+        {
+          name: 'sig',
+          kind: 'js-eval',
+          url: 'https://example.com/app',
+          expression: 'window.mint()',
+          binds: 'sig',
+          return_shape: { kind: 'string', min_length: 1 },
+          args_template: {},
+        },
+      ],
     },
     args: {},
     platform: 'example',
@@ -355,11 +357,14 @@ test('js-eval reloads a matching page that has not reached DOMContentLoaded', as
     tokenCache: null,
   });
 
-  assert.deepStrictEqual(calls.find((call) => call.kind === 'navigate'), {
-    kind: 'navigate',
-    url: 'https://example.com/app',
-    options: { waitUntil: 'domcontentloaded' },
-  });
+  assert.deepStrictEqual(
+    calls.find((call) => call.kind === 'navigate'),
+    {
+      kind: 'navigate',
+      url: 'https://example.com/app',
+      options: { waitUntil: 'domcontentloaded', timeout_ms: 30_000 },
+    },
+  );
 });
 
 test('js-eval reuses a matching page after DOMContentLoaded', async () => {
@@ -382,15 +387,17 @@ test('js-eval reuses a matching page after DOMContentLoaded', async () => {
   await runPrerequisites({
     strategy: {
       baseUrl: 'https://example.com',
-      prerequisites: [{
-        name: 'sig',
-        kind: 'js-eval',
-        url: 'https://example.com/app',
-        expression: 'window.mint()',
-        binds: 'sig',
-        return_shape: { kind: 'string', min_length: 1 },
-        args_template: {},
-      }],
+      prerequisites: [
+        {
+          name: 'sig',
+          kind: 'js-eval',
+          url: 'https://example.com/app',
+          expression: 'window.mint()',
+          binds: 'sig',
+          return_shape: { kind: 'string', min_length: 1 },
+          args_template: {},
+        },
+      ],
     },
     args: {},
     platform: 'example',
@@ -398,5 +405,8 @@ test('js-eval reuses a matching page after DOMContentLoaded', async () => {
     tokenCache: null,
   });
 
-  assert.equal(calls.some((call) => call.kind === 'navigate'), false);
+  assert.equal(
+    calls.some((call) => call.kind === 'navigate'),
+    false,
+  );
 });

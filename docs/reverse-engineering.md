@@ -6,7 +6,7 @@ When a captured request carries bytes that don't round-trip — binary WebSocket
 
 The fast path is reading the page's own encoder. The toolkit is a set of primitives the agent composes — there's no "RE these bytes" command.
 
-- **`list_loaded_scripts(session_id)`** — every script the page loaded, deduped + ordered by size. The bundle hunt starts here.
+- **`list_loaded_scripts(session_id)`** — every external script observed during the browser session, deduped in load order with encoded byte counts when the browser reports them. A dedicated CDP resource-event ledger records scripts across document navigations without adding passive assets to `get_network_log`. The bundle hunt starts here.
 - **`search_js_source(session_id, url, pattern)`** — literal substring search across a cached bundle body. The agent searches for protocol literals (`"/ls_req"`, `"encodeSend"`, field names from the envelope JSON) to find candidate call sites.
 - **`read_js_function(session_id, url, line)`** — bracket-match-based extraction of the function enclosing a given line. Read one function at a time instead of guessing line windows.
 - **`get_js_source(session_id, url, line, context?)`** — windowed source read around a specific line, when you need surrounding context the function-extractor doesn't capture.

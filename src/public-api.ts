@@ -212,6 +212,7 @@ export { SCHEMA_VERSION } from './strategies/skills';
 export { BrowserDriver } from './drivers/interface';
 export type { Capability } from './drivers/interface';
 export type { SessionOptions, Session } from './drivers/types/session';
+export type { LoadedScript } from './drivers/types/network';
 export { PlaywrightDriver } from './drivers/playwright';
 export type { PlaywrightDriverOptions } from './drivers/playwright';
 

@@ -1,5 +1,16 @@
 import type { WebSocketFrame, WsFrameSummary } from './websocket';
 
+/**
+ * External JavaScript resource observed while a browser session was active.
+ * `loaded_at` is Unix milliseconds; `bytes` is the encoded byte count reported
+ * by the browser when the resource finishes loading.
+ */
+export interface LoadedScript {
+  url: string;
+  bytes?: number;
+  loaded_at?: number;
+}
+
 export interface InterceptedRequest {
   method: string;
   url: string;

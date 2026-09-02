@@ -1,4 +1,4 @@
-import type { InterceptedRequest } from './types/network';
+import type { InterceptedRequest, LoadedScript } from './types/network';
 import type { WebSocketFrame, WebSocketFrameStream } from './types/websocket';
 import type { Session, SessionOptions, FocusListener, SubPagesListener } from './types/session';
 import type { DebuggerLocation, DebuggerPause } from './types/debugger';
@@ -109,7 +109,11 @@ export abstract class BrowserDriver {
   abstract navigate(
     session: Session,
     url: string,
-    options?: { waitUntil?: 'commit' | 'domcontentloaded' | 'networkidle' },
+    options?: {
+      waitUntil?: 'commit' | 'domcontentloaded' | 'networkidle';
+      /** Abort navigation in the driver after this many milliseconds. */
+      timeout_ms?: number;
+    },
   ): Promise<void>;
   abstract waitForNavigation(session: Session, options?: { timeout?: number }): Promise<void>;
 
@@ -254,12 +258,15 @@ export abstract class BrowserDriver {
       headers: Record<string, string>;
       body?: string;
       credentials?: 'include' | 'omit' | 'same-origin';
+      /** Abort the in-page request after this many milliseconds. */
+      timeout_ms?: number;
     },
   ): Promise<
     | { ok: true; status: number; body: unknown; finalUrl: string }
     | {
         ok: false;
         error: string;
+        timed_out?: boolean;
         /** Browser-side context captured on fetch failure. Surfaces
          *  same-origin vs cross-origin mismatches and credentials-mode
          *  decisions to the caller when "Failed to fetch" fires. */
@@ -418,6 +425,44 @@ export abstract class BrowserDriver {
   abstract screenshotJpeg(session: Session, quality?: number, opts?: PageOpts): Promise<Buffer>;
   abstract startIntercepting(session: Session): void | Promise<void>;
   abstract getInterceptedRequests(session: Session): Promise<InterceptedRequest[]>;
+
+  /**
+   * Return external JavaScript resources observed during the session. Drivers
+   * with a resource-event surface should override this so script capture stays
+   * independent from the compact API-focused request log. The default reads
+   * the current document's Resource Timing buffer once at this lifecycle
+   * boundary; it does not poll or mutate page state.
+   */
+  async getLoadedScripts(session: Session): Promise<LoadedScript[]> {
+    const raw = await this.evaluateExpression(
+      session,
+      `Array.from(performance.getEntriesByType("resource"))
+        .filter((entry) => entry.initiatorType === "script")
+        .map((entry) => ({
+          url: entry.name,
+          bytes: Number.isFinite(entry.encodedBodySize) ? entry.encodedBodySize : undefined,
+          loaded_at: performance.timeOrigin + entry.startTime
+        }))`,
+      { timeoutMs: 5000 },
+    );
+    if (!Array.isArray(raw)) return [];
+    const scripts: LoadedScript[] = [];
+    for (const value of raw) {
+      if (typeof value !== 'object' || value === null) continue;
+      const entry = value as Record<string, unknown>;
+      if (typeof entry.url !== 'string' || entry.url.length === 0) continue;
+      scripts.push({
+        url: entry.url,
+        ...(typeof entry.bytes === 'number' && Number.isFinite(entry.bytes)
+          ? { bytes: entry.bytes }
+          : {}),
+        ...(typeof entry.loaded_at === 'number' && Number.isFinite(entry.loaded_at)
+          ? { loaded_at: entry.loaded_at }
+          : {}),
+      });
+    }
+    return scripts;
+  }
 
   /**
    * Return the always-on WebSocket frame buffer for the session. Populated by

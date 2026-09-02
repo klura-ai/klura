@@ -73,7 +73,7 @@ Detectors in `runtime/src/gate/save-warnings.ts` (consumed by the save-strategy 
 - `entity_pinned_infra_prereq` — a `prerequisites[i].url` contains a verbatim substring from `session.declaredCapabilities[0].args`. Catches strategies that bake a single-entity id into an infra URL.
 - `inline_multi_fetch_prereq` — a single prereq packs multiple sequential fetches that should be split into siblings.
 - `prereq_bind_key_mismatch` — `prereq.binds` doesn't match the placeholder names the strategy actually references.
-- `lookup_embedded_in_prereq` — a lookup-shaped slug + inline lookup-shaped prereq; the inline lookup should be a capability sibling.
+- `lookup_embedded_in_prereq` — a downstream capability inlines a lookup-shaped prereq; the lookup should be a capability sibling. First-class `search_<entity>`, `lookup_<entity>`, `list_<entity>`, and equivalent `<entity>_search` capabilities own their retrieval surface and are excluded.
 - `auth_gated_without_auth_prereq` — strategy targets an origin where the session captured cookie-setting requests, but declares no `{kind: "capability"}` or `{kind: "tag", tag: "auth"}` prereq, and the strategy itself doesn't advertise `provides: ["auth"]`.
 
 ## The Audit class — one machinery, all save-time concerns

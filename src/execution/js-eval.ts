@@ -58,6 +58,12 @@ interface JsEvalRuntimeArgs {
   /** CSS selector for an iframe — when set, the expression runs inside the
    *  iframe's contentFrame instead of the main page. */
   frame?: string;
+  /** Require the exact resolved URL before evaluation. Direct capability
+   *  results use this so query/hash-bound entities cannot inherit a warm page. */
+  requireExactUrl?: boolean;
+  /** Browser-executor navigation boundary. It applies the shared local origin
+   *  scheduler and deadline before delegating to the driver. */
+  navigate?: (url: string) => Promise<void>;
 }
 
 /**
@@ -106,12 +112,13 @@ export async function runJsEvalPrereq(
         return null;
       }
     })();
-    if (
+    const reusable =
       current &&
       target &&
-      current.origin === target.origin &&
-      current.pathname === target.pathname
-    ) {
+      (args.requireExactUrl
+        ? current.href === target.href
+        : current.origin === target.origin && current.pathname === target.pathname);
+    if (reusable) {
       // start_session can expose the target URL before its initial navigation
       // reaches DOMContentLoaded. Reusing that page immediately races the
       // js-eval expression against a document that is still loading. Check the
@@ -129,7 +136,11 @@ export async function runJsEvalPrereq(
 
   if (navigate) {
     try {
-      await driver.navigate(session, args.url, { waitUntil: 'domcontentloaded' });
+      if (args.navigate) {
+        await args.navigate(args.url);
+      } else {
+        await driver.navigate(session, args.url, { waitUntil: 'domcontentloaded' });
+      }
     } catch (err) {
       throw new Error(
         `prereq "${args.name}" (js-eval): failed to navigate to ${args.url}: ${

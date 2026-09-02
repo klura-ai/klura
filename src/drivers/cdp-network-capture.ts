@@ -18,7 +18,7 @@
 // view, and seeing 200 CSS/font/image requests per page swamps the interesting
 // traffic.
 
-import type { InterceptedRequest } from './types/network';
+import type { InterceptedRequest, LoadedScript } from './types/network';
 import type { Session } from './types/session';
 
 // CDPSession is Playwright's type — we import it structurally to stay
@@ -96,6 +96,8 @@ interface RequestWillBeSentParams {
   requestId: string;
   request: CdpRequest;
   type?: string;
+  /** Seconds since Unix epoch. */
+  wallTime?: number;
   redirectResponse?: {
     status: number;
     headers?: CdpResponseHeaders;
@@ -111,6 +113,11 @@ interface ResponseReceivedParams {
 }
 
 interface LoadingFinishedParams {
+  requestId: string;
+  encodedDataLength?: number;
+}
+
+interface LoadingFailedParams {
   requestId: string;
 }
 
@@ -141,7 +148,11 @@ interface RawIntercepted extends InterceptedRequest {
  * immediately after, which is the same — Network events fire from the enable
  * point forward).
  */
-export async function attachCdpNetworkCapture(cdp: CDPLike, sink: RawIntercepted[]): Promise<void> {
+export async function attachCdpNetworkCapture(
+  cdp: CDPLike,
+  sink: RawIntercepted[],
+  loadedScripts?: LoadedScript[],
+): Promise<void> {
   await cdp.send('Network.enable');
 
   // CDP's Network.responseReceived doesn't carry the URL in a form convenient
@@ -155,9 +166,32 @@ export async function attachCdpNetworkCapture(cdp: CDPLike, sink: RawIntercepted
   // statusCode) — without this, the cookie set by a POST→302 lands on the
   // GET-the-redirect-resolves-to entry instead of the original POST.
   const chainByReqId = new Map<string, RawIntercepted[]>();
+  // Script resources are deliberately absent from `sink`: the agent-facing
+  // request log stays focused on documents and data traffic. Keep a parallel
+  // event ledger so source-discovery tools still see every external bundle,
+  // including extensionless module URLs and resources loaded after navigation.
+  const scriptByReqId = new Map<string, LoadedScript>();
 
   cdp.on('Network.requestWillBeSent', (raw) => {
     const params = raw as RequestWillBeSentParams;
+    const request = params.request;
+    if (params.type === 'Script' && loadedScripts) {
+      const existing = scriptByReqId.get(params.requestId);
+      if (existing) {
+        // Redirect chains reuse requestId. The browser executes the final
+        // resource, so keep the ledger entry bound to its final URL.
+        existing.url = request.url;
+      } else {
+        const script: LoadedScript = {
+          url: request.url,
+          loaded_at:
+            typeof params.wallTime === 'number' ? Math.floor(params.wallTime * 1000) : Date.now(),
+        };
+        loadedScripts.push(script);
+        scriptByReqId.set(params.requestId, script);
+      }
+    }
+
     // A redirectResponse means the previous hop of this requestId just finished
     // with a 3xx. Finalize the old entry before overwriting it with the new
     // one.
@@ -176,7 +210,6 @@ export async function attachCdpNetworkCapture(cdp: CDPLike, sink: RawIntercepted
       }
     }
 
-    const request = params.request;
     if (isStaticAsset(request.url)) return;
     // Filter by CDP resource type — structural signal of what the browser
     // thinks this request is, not a pathname-substring heuristic. The
@@ -278,6 +311,17 @@ export async function attachCdpNetworkCapture(cdp: CDPLike, sink: RawIntercepted
 
   cdp.on('Network.loadingFinished', (raw) => {
     const params = raw as LoadingFinishedParams;
+    const script = scriptByReqId.get(params.requestId);
+    if (script) {
+      if (
+        typeof params.encodedDataLength === 'number' &&
+        Number.isFinite(params.encodedDataLength) &&
+        params.encodedDataLength >= 0
+      ) {
+        script.bytes = Math.floor(params.encodedDataLength);
+      }
+      scriptByReqId.delete(params.requestId);
+    }
     const entry = byReqId.get(params.requestId);
     if (!entry || entry.responseBody !== null) return;
     // Network.getResponseBody can fail with "No resource with given identifier"
@@ -310,6 +354,16 @@ export async function attachCdpNetworkCapture(cdp: CDPLike, sink: RawIntercepted
       .catch(() => {
         /* resource gone */
       });
+  });
+
+  cdp.on('Network.loadingFailed', (raw) => {
+    const params = raw as LoadingFailedParams;
+    const script = scriptByReqId.get(params.requestId);
+    if (script && loadedScripts) {
+      const index = loadedScripts.indexOf(script);
+      if (index >= 0) loadedScripts.splice(index, 1);
+    }
+    scriptByReqId.delete(params.requestId);
   });
 }
 

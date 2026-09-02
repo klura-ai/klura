@@ -38,8 +38,8 @@ A capability may have entries in multiple subdirectories — the runtime tries s
 
 ```
 ~/.klura/
-  config.json                 ← daemon settings, pool config, secret resolvers
-  identities.json             ← per-platform PII (email, username) — auto-fills {{placeholders}}
+  config.json                 ← daemon settings, pool config, secret resolvers (mode 0600)
+  identities.json             ← per-platform PII; auto-fills {{placeholders}} (mode 0600)
   device.json                 ← this daemon's device profile (viewport, UA, touch, mobile, scale)
   remote-secret.key           ← HS256 signing secret for remote-viewer JWTs (mode 0600)
   storage-state/
@@ -50,6 +50,8 @@ A capability may have entries in multiple subdirectories — the runtime tries s
 ```
 
 Storage state is scoped per-platform within the daemon. The daemon is one device, so there is no per-device suffix in the filename. Multi-device setups run multiple daemons with different `KLURA_HOME` values — see [identities-and-device.md](identities-and-device.md).
+
+Runtime writes to `config.json` and `identities.json` use an owner-only temporary file followed by an atomic rename. Initial creation and every update therefore leave both files at mode `0600`.
 
 ## The portability rule
 

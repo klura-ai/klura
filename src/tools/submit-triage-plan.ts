@@ -137,19 +137,26 @@ function getPlatform(args: SubmitTriagePlanArgs, sessionPlatform: string | undef
   );
 }
 
-/** Server-derive `observed_at_urls` from `session.domNavigations` between
- *  triage entry and now. The agent doesn't supply this — they could
- *  hallucinate visits; the runtime knows what was actually navigated to. */
+/** Server-derive `observed_at_urls` from the runtime-observed current URL
+ *  plus `session.domNavigations` between triage entry and now. The current
+ *  URL is load-bearing for `surface_changed`: the navigation that triggered
+ *  triage is recorded before the state transition stamps `triage.enteredAt`,
+ *  so the post-entry navigation slice alone cannot bind the surface the
+ *  agent is classifying. The agent doesn't supply either source. */
 function deriveObservedAtUrls(session: Session): string[] {
   const since = session.triage?.enteredAt ?? 0;
   const navs = session.domNavigations ?? [];
   const seen = new Set<string>();
   const ordered: string[] = [];
+  const append = (url: string | undefined): void => {
+    if (!url || seen.has(url)) return;
+    seen.add(url);
+    ordered.push(url);
+  };
+  append(session.lastSurfaceUrl);
   for (const nav of navs) {
     if (nav.at < since) continue;
-    if (seen.has(nav.url)) continue;
-    seen.add(nav.url);
-    ordered.push(nav.url);
+    append(nav.url);
   }
   return ordered;
 }
@@ -157,9 +164,9 @@ function deriveObservedAtUrls(session: Session): string[] {
 export interface SubmitTriagePlanResult {
   ok: true;
   phase: 'lift';
-  /** User-facing summary verbatim. The agent surfaces it as a text turn
-   *  to the user before the next tool call. */
-  relay_to_user_before_proceeding: string;
+  /** User-facing summary verbatim when the checkpoint handler requested a
+   *  handover. Absent when the plan continued without user intervention. */
+  relay_to_user_before_proceeding?: string;
   /** Always 'lift' on success — the only return shape. */
   next_phase: 'lift';
   message: string;
@@ -374,12 +381,16 @@ export async function submitTriagePlan(rawArgs: unknown): Promise<SubmitTriagePl
   const surfaceVerdict = classifyTriageSurface(args.defense_surface, session.intercepted);
   let envelope: CheckpointEnvelope | undefined;
   let fastPathHint: string | undefined;
-  if (surfaceVerdict.trivial) {
-    fastPathHint =
-      `Trivial surface detected (${surfaceVerdict.reason}) — auto-approving the plan and ` +
-      `entering LIFT directly without user-relay. Save_strategy still passes through its full ` +
-      `audit pipeline; if you want explicit user gating on a future re-plan, change the surface ` +
-      `(e.g. add a mutating request_pattern) and the checkpoint reactivates.`;
+  const mapPreauthorized = session.graph === 'map';
+  if (surfaceVerdict.trivial || mapPreauthorized) {
+    fastPathHint = mapPreauthorized
+      ? `Map graph is user-pre-authorized platform onboarding — committing the plan and entering ` +
+        `LIFT directly without a per-capability user handover. Mutating actions remain protected by ` +
+        `the map graph's action-consent gates.`
+      : `Trivial surface detected (${surfaceVerdict.reason}) — auto-approving the plan and ` +
+        `entering LIFT directly without user-relay. Save_strategy still passes through its full ` +
+        `audit pipeline; if you want explicit user gating on a future re-plan, change the surface ` +
+        `(e.g. add a mutating request_pattern) and the checkpoint reactivates.`;
   } else {
     // Step B — fire the triage_plan checkpoint. The default handler
     // surfaces the user-facing summary as a handover prompt; the
@@ -437,7 +448,6 @@ export async function submitTriagePlan(rawArgs: unknown): Promise<SubmitTriagePl
     ok: true,
     phase: 'lift',
     next_phase: 'lift',
-    relay_to_user_before_proceeding: args.summary_for_user,
     message:
       `Triage plan committed and approved — entering LIFT for surface \`${args.surface_label}\`. ` +
       ackInstructionLine +
@@ -448,9 +458,16 @@ export async function submitTriagePlan(rawArgs: unknown): Promise<SubmitTriagePl
       `RE-active tools (try_generator, set_breakpoint, evaluate_on_frame, install_page_init_script) ` +
       `are now unlocked. ` +
       `If reality contradicts the verdict (e.g. T0 (fetch) attempts silently 403 on a "looks clean" surface), ` +
-      `call submit_triage_plan again with updated defense_surface — re-plans drop you back to triage with a fresh budget. ` +
-      `Relay this summary to the user before proceeding: "${args.summary_for_user}"`,
-    ...(envelope ? { _checkpoint: envelope } : {}),
+      `call submit_triage_plan again with updated defense_surface — re-plans drop you back to triage with a fresh budget.` +
+      (envelope
+        ? ` Relay this summary to the user before proceeding: "${args.summary_for_user}"`
+        : ''),
+    ...(envelope
+      ? {
+          _checkpoint: envelope,
+          relay_to_user_before_proceeding: args.summary_for_user,
+        }
+      : {}),
     ...(fastPathHint ? { _hint: fastPathHint } : {}),
     ...(triageWarnings.length > 0 ? { triage_warnings: triageWarnings } : {}),
     ...((): { save_authoring_contract?: SaveAuthoringContract } => {

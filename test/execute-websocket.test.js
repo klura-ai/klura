@@ -23,6 +23,7 @@ const klura = await import('../dist/index.js');
 const skillsMod = await import('../dist/strategies/skills.js');
 const { execute } = klura;
 const saveStrategy = skillsMod.saveStrategy;
+const { localTrafficPolicyForUrl } = await import('../dist/execution/local-traffic.js');
 
 test.after(async () => {
   // Dispose the daemon pool that index.js spins up on module load — without
@@ -115,6 +116,13 @@ test('fetch + ws + node: success with ackMatch', async () => {
   } finally {
     await srv.close();
   }
+});
+
+test('trusted local wss handshakes share the matching HTTPS scheduler origin', () => {
+  assert.equal(
+    localTrafficPolicyForUrl('wss://realtime.example.test/socket').origin,
+    'https://realtime.example.test',
+  );
 });
 
 test('fetch + ws + node: fire-and-forget (no ackMatch)', async () => {
@@ -282,4 +290,3 @@ test('fetch + ws + node: unreachable server → TransportFailureError → no poo
     /all_strategies_failed|ws_handshake_failed|ws_open_timeout|ws_error|ws_navigate_failed|no pool/,
   );
 });
-

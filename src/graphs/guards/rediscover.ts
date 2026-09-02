@@ -4,7 +4,7 @@
 // graph terminates with status: 'failed' and the agent gets a structured
 // error back.
 //
-// Two signals, structural-first then rate-based fallback:
+// Three signals, structural-first then rate-based fallback:
 //
 //  1. **Structural**: the cascade's `AutoExecDiagnosis.kind` (composed in
 //     `runtime/src/execution/index.ts`). Stale-shape kinds (`stale_nonce`,
@@ -14,10 +14,17 @@
 //     so retrying is by-construction futile and triage→lift IS the next
 //     useful move. `auth_failed` doesn't trip — relearn won't help,
 //     the user needs to re-auth via remote viewer. `unknown` falls
-//     through to the rate-based fallback (conservative — caller-arg
-//     garbage shouldn't trigger rediscovery on its own).
+//     through to the next structural signal. `auth_failed` is terminal even
+//     when historical health is low: changing the saved strategy cannot
+//     restore the user's session.
 //
-//  2. **Rate-based fallback**: when the diagnosis is `unknown` or absent,
+//  2. **Explicit local failure**: a saved factory strategy that returns
+//     boolean `body.ok:false` has structurally declared that it did not
+//     fulfill the capability. The runtime does not interpret its arbitrary
+//     `code` or prose. It routes the live session to triage so the LLM can
+//     inspect the returned body and page, then decide what needs repair.
+//
+//  3. **Rate-based fallback**: when the diagnosis is `unknown` or absent,
 //     a saved strategy is "stale" when its rolling success rate across
 //     saved tiers has fallen below `pool.rediscoverThreshold`. Same
 //     signal used by the pre-execute ack-gate in `runtime/src/tools/execute.ts`.
@@ -31,6 +38,7 @@ import type { Session } from '../../drivers/types/session';
 import { loadConfig } from '../../config/handler';
 import * as skills from '../../strategies/skills';
 import { getHealth, successRate } from '../../strategies/health';
+import type { FactoryExecutionClassification } from '../../execution/result-classification';
 
 export interface ExecuteFailedPayload {
   platform: string;
@@ -41,6 +49,10 @@ export interface ExecuteFailedPayload {
    *  signal in this gate; absent on synthetic failures (e.g. caller
    *  didn't pass args) where the cascade never ran. */
   diagnosis_kind?: AutoExecDiagnosisKind;
+  /** Structural local-factory result classification. This is derived from
+   *  HTTP status plus boolean `body.ok`, never from response prose or an
+   *  application-defined `code`. */
+  result_classification?: FactoryExecutionClassification;
 }
 
 /** Mirrors `AutoExecDiagnosis['kind']` in `runtime/src/execution/index.ts` —
@@ -89,8 +101,15 @@ export function rediscoverFailureGate(_session: Session, payload: unknown): bool
   //    on the first failure for stale-shape kinds — no rate history
   //    needed.
   if (p.diagnosis_kind && STALE_SHAPE_KINDS.has(p.diagnosis_kind)) return true;
+  if (p.diagnosis_kind === 'auth_failed') return false;
 
-  // 2. Rate-based fallback for `unknown` / absent diagnosis: only trip
+  // 2. Explicit `body.ok:false` means the saved factory strategy itself
+  //    reported failure. Cause classification belongs to the LLM reading
+  //    the typed body; keeping the live session in triage gives it the
+  //    observation surface needed to make that decision.
+  if (p.result_classification === 'explicit_failure') return true;
+
+  // 3. Rate-based fallback for `unknown` / absent diagnosis: only trip
   //    when the rolling success rate has fallen below threshold.
   const threshold = loadConfig().pool.rediscoverThreshold;
   if (threshold <= 0) return false;

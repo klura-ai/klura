@@ -79,7 +79,7 @@ Preferred `page-extract` shape for a CSRF-gated mutation:
 
 **Generators see prereq-extracted tokens via `args`.** Generators resolve _after_ prerequisites, so `args.shortId` in generator code refers to the value a `page-extract` just pulled from a meta tag. This unlocks extract-then-transform flows: grab a short numeric id from the DOM, base64-encode it into whatever opaque form the API expects, all in one strategy — no external API calls, no user-supplied opaque IDs.
 
-**Execution** fires all prerequisites and the main request on a **single browser session** so cookies, same-origin headers, and one-time nonces survive between the token grab and the fetch. Re-navigating between prereq and fetch would reset page-scoped state (nonces that are only valid on the issuing page load, sensor-script counters), so the executor deliberately holds one page open across both. A `js-eval` prerequisite reuses a matching warm page only after its document reaches `interactive` or `complete`; a matching page that is still loading is navigated through the driver's `DOMContentLoaded` boundary before evaluation.
+**Execution** fires all prerequisites and the main request on a **single browser session** so cookies, same-origin headers, and one-time nonces survive between the token grab and the fetch. Re-navigating between prereq and fetch would reset page-scoped state (nonces that are only valid on the issuing page load, sensor-script counters), so the executor deliberately holds one page open across both. A token-producing `js-eval` prerequisite reuses a matching warm page only after its document reaches `interactive` or `complete`; a matching page that is still loading is navigated through the driver's `DOMContentLoaded` boundary before evaluation. A `js-eval` binding selected by `response.from` is the capability result itself: it bypasses the token cache, enters the shared local origin scheduler and request deadline when navigation is needed, ensures the page is at the exact resolved caller URL, and evaluates fresh on every call so a valid result from one entity cannot satisfy a request for another.
 
 ## recorded-path
 
@@ -135,6 +135,8 @@ The capability-prereq mechanism (`{kind: "capability", capability: "<slug>", ...
 ### Search — the "name → id" prereq specialization
 
 Single text-input UI that returns a result set after submit. Saved as its own capability AND used as a binding-oriented capability prereq for write capabilities that need an id but only know a human-facing name.
+
+The first-class retrieval families (`search_<entity>`, `lookup_<entity>`, and `list_<entity>`) own the request or page surface that produces their result. A downstream capability must reference that saved capability through `{kind: "capability"}` instead of inlining the same lookup.
 
 The capability:
 

@@ -1,6 +1,6 @@
 # Runtime architecture
 
-Klura runs as a long-lived background **daemon**. The CLI is a thin HTTP client — every command (except `daemon start/stop/status`) auto-starts the daemon if it isn't running and forwards the request. The daemon listens on either a unix socket (`~/.klura/klura.sock`, default) or TCP (`0.0.0.0:9400`, configured via `daemon.listen`). TCP mode lets the LLM and klura run on different machines. The daemon owns browser sessions, WebSocket listeners, and the token cache, so state persists across CLI invocations.
+Klura's factory product runs as a long-lived background **daemon**. Factory CLI commands (except `daemon start/stop/status`) auto-start it if needed and forward requests over a unix socket (`~/.klura/klura.sock`, default) or configured TCP listener. The local consumer CLI route is separate: `installed`, `remove`, `call`, and `doctor` operate on immutable package state without starting the daemon. TCP mode lets the LLM and factory runtime run on different machines. The daemon owns browser sessions, WebSocket listeners, and the token cache, so factory state persists across CLI invocations.
 
 For driver internals, see [drivers.md](drivers.md). For pool internals, see [pool.md](pool.md).
 
@@ -66,7 +66,7 @@ LLM calls klura tool for the first time
   └─ Send request, wait for response
 ```
 
-The daemon shuts down after `daemon.idleTimeout` seconds with no active sessions or listeners (default 1800 = 30 min). Active listeners keep the daemon alive indefinitely. The session-level `pool.idleTimeout` (default 300 = 5 min) is a separate timer for individual session hang-detection.
+The daemon shuts down after `runtime.idleTimeout` seconds with no active sessions, listeners, or consumer execution (default 1800 = 30 min). Active listeners and consumer execution keep the daemon alive until their terminal work completes. The session-level `pool.idleTimeout` (default 300 = 5 min) is a separate timer for individual session hang-detection.
 
 ## Tool interface — what the LLM sees
 
@@ -123,7 +123,7 @@ Eight tools wrapping CDP's `Debugger` domain. See [reverse-engineering.md#source
 
 | Tool | Purpose |
 | --- | --- |
-| `list_loaded_scripts({session_id})` | Every script the page loaded, deduped + sorted by size. |
+| `list_loaded_scripts({session_id})` | Every external script observed during the session, deduped in load order with encoded byte counts when available. |
 | `search_js_source({session_id, url, pattern})` | Literal substring search across a cached bundle body. |
 | `read_js_function({session_id, url, line})` | Bracket-match-based function extraction. |
 | `get_js_source({session_id, url, line, context?})` | Windowed source read. |
@@ -269,7 +269,7 @@ The URL is optionally wrapped in a cloudflared tunnel so clients on other device
 
 **Isolation is logical, not real.** Browser contexts share a single Chrome process; compromise of one context could in principle reach another. For personal-automation workloads on your own machine driving your own accounts this is fine — the threat model assumes you trust the skills you're running.
 
-**Network capture** uses CDP `Network.enable` via the shared `runtime/src/drivers/cdp-network-capture.ts` module. CDP catches requests from iframes, service workers (when not blocked), Turbo/Relay submissions, and unusual custom submission mechanisms that Playwright's higher-level `page.on('request')` misses. Each PlaywrightDriver session owns a dedicated Network CDP session separate from the touch and screencast sessions, so detaching one doesn't disturb the others.
+**Network capture** uses CDP `Network.enable` via the shared `runtime/src/drivers/cdp-network-capture.ts` module. CDP catches requests from iframes, service workers (when not blocked), Turbo/Relay submissions, and unusual custom submission mechanisms that Playwright's higher-level `page.on('request')` misses. Each PlaywrightDriver session owns a dedicated Network CDP session separate from the touch and screencast sessions, so detaching one doesn't disturb the others. The same event stream writes Script resources to a separate per-session ledger: `get_network_log` remains focused on documents and data traffic, while `list_loaded_scripts` retains external bundle URLs across document navigations.
 
 ## Drivers
 

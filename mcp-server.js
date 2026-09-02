@@ -13,6 +13,7 @@
 // `@klura/mcp` is now a thin stdio wrapper over this factory.
 
 const path = require('path');
+const { version: runtimePackageVersion } = require('./package.json');
 
 // Resolve the compiled runtime barrel. mcp-server.js ships inside the
 // @klura/runtime package, so `dist/` is a sibling.
@@ -20,10 +21,14 @@ function loadRuntime() {
   return require(path.join(__dirname, 'dist'));
 }
 
-async function createKluraMcpServer() {
+async function createKluraMcpServer(options = {}) {
   const { Server } = await import('@modelcontextprotocol/sdk/server/index.js');
-  const { ListToolsRequestSchema, CallToolRequestSchema, ListResourcesRequestSchema, ReadResourceRequestSchema } =
-    await import('@modelcontextprotocol/sdk/types.js');
+  const {
+    ListToolsRequestSchema,
+    CallToolRequestSchema,
+    ListResourcesRequestSchema,
+    ReadResourceRequestSchema,
+  } = await import('@modelcontextprotocol/sdk/types.js');
   const klura = loadRuntime();
 
   // SKILL.md (compact) is the always-loaded orientation. REFERENCE.md
@@ -32,18 +37,13 @@ async function createKluraMcpServer() {
   // the fragment-based section addressing.
   const skillMd = klura.getSkillMd().replace(/^---[\s\S]*?---\s*/, ''); // strip frontmatter
 
-  // Front-load a terse per-platform capability catalog so agents see what
-  // klura already knows BEFORE the first tool call. The list_platform_skills
-  // _hint only fires when the agent calls the tool, but the load-bearing
-  // failure mode (observed in field) is the agent skipping that call entirely
-  // and going straight to start_session for work an existing capability
-  // already covers. The deliberate principle break + always-save framing live
-  // in the rendered string itself (see getSavedSkillsSummaryMd).
-  const savedSkills = klura.getSavedSkillsSummaryMd();
-  const instructions = savedSkills ? `${skillMd}\n\n${savedSkills}` : skillMd;
+  // Consumer instructions intentionally do not inject mutable factory skill
+  // state. Managed packages are discoverable through the consumer tool set;
+  // discovery remains an explicit authoring transition.
+  const instructions = skillMd;
 
   const server = new Server(
-    { name: '@klura/mcp', version: '0.1.0' },
+    { name: '@klura/mcp', version: runtimePackageVersion },
     { capabilities: { tools: {}, resources: {} }, instructions },
   );
 
@@ -96,11 +96,25 @@ async function createKluraMcpServer() {
   // handler. Tools that own a runtime gate (interruption / checkpoint) opt out
   // of the generic pre-call assertion via `skipInterruptionGate` /
   // `skipCheckpointGate` on the TOOL_DEF.
-  const tools = klura.TOOL_REGISTRY;
+  // Consumer definitions are rebuilt for this MCP server so tests and
+  // embedding hosts can provide their own daemon-only client. Factory tool
+  // definitions remain the shared static registry.
+  const { createConsumerMcpTools } = require(
+    path.join(__dirname, 'dist', 'consumer', 'mcp-tools.js'),
+  );
+  const tools = [
+    ...createConsumerMcpTools(options.consumerClient),
+    ...klura.TOOL_REGISTRY.filter((tool) => tool.responseSurface !== 'consumer'),
+  ];
   const toolByName = new Map(tools.map((t) => [t.name, t]));
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
+    tools: tools.map(({ name, description, inputSchema, annotations }) => ({
+      name,
+      description,
+      inputSchema,
+      ...(annotations ? { annotations } : {}),
+    })),
   }));
 
   // OpenAI-style tool_calls deliver `arguments` as a JSON string parsed once
@@ -264,6 +278,17 @@ async function createKluraMcpServer() {
       }
 
       let result = await tool.handler(args, { progress });
+
+      if (tool.responseSurface === 'consumer') {
+        const kind =
+          result && typeof result === 'object' && typeof result.kind === 'string'
+            ? result.kind
+            : 'consumer_result';
+        return {
+          content: [{ type: 'text', text: `Consumer result: ${kind}` }],
+          structuredContent: result,
+        };
+      }
 
       // Inject sticky LIFT obligation reminder. Fires on every tool response
       // between the first mutating perform_action and either a successful

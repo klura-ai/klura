@@ -1019,10 +1019,21 @@ export async function saveStrategy(
     // login earlier this same drive) instead of the stale on-disk state from a
     // prior end_drive flush. Best-effort; the probe falls back to on-disk state.
     let probeIdentity: string | undefined;
+    let probeDeclaredArgs: Record<string, unknown> | undefined;
     if (sessionId) {
       try {
         const liveSession = pool.getSession(sessionId);
         probeIdentity = liveSession.identity;
+        const declaration = liveSession.declaredCapabilities?.find(
+          (entry) => entry.capability === capability,
+        );
+        if (declaration?.args && Object.keys(declaration.args).length > 0) {
+          // Ephemeral only: probeStrategySelectors uses these values to
+          // exercise caller-dependent read expressions, then discards them.
+          // Secret-shaped fields are replaced with stand-ins before entering
+          // the probe page and are never included in errors or runtime_meta.
+          probeDeclaredArgs = declaration.args;
+        }
         await pool
           .driverFor(sessionId)
           .saveStorageState(liveSession, skills.storageStatePath(platform, liveSession.identity));
@@ -1036,6 +1047,7 @@ export async function saveStrategy(
         platform,
         pool,
         ...(probeIdentity ? { identity: probeIdentity } : {}),
+        ...(probeDeclaredArgs ? { declaredArgs: probeDeclaredArgs } : {}),
       });
     } catch (err) {
       timings.probe_ms = Date.now() - tProbeStart;
@@ -1182,7 +1194,8 @@ export async function saveStrategy(
       if (unsatisfied.size > 0) {
         const placeholderList = [...unsatisfied].map((n) => '{{' + n + '}}').join(', ');
         postSaveValidation = {
-          ok: true,
+          ok: false,
+          classification: 'not_run',
           status: 0,
           archived: false,
           message:
@@ -1201,7 +1214,8 @@ export async function saveStrategy(
         session.pendingPostSaveValidation = undefined;
         skills.stampRuntimeMeta(platform, capability, { post_save_validation: 'skipped' });
         postSaveValidation = {
-          ok: true,
+          ok: false,
+          classification: 'not_run',
           status: 0,
           archived: false,
           message:
@@ -1223,8 +1237,8 @@ export async function saveStrategy(
             context: {
               kind: 'post_save_validation_consent',
               capability,
-              pendingAction: `the runtime re-running the saved \`${capability}\` strategy once, end-to-end, to verify it returns 2xx`,
-              contextSummary: `Strategy tier: ${(data as { strategy?: string }).strategy ?? 'unknown'}${mutating ? ', mutating-shaped — re-running repeats a real side effect, classify Tier 2 unless the action is genuinely idempotent' : ' — likely Tier 1 if the request is idempotent'}. On your consent (ack_checkpoint, non-cancelled) the RUNTIME itself re-runs the saved strategy end-to-end and asserts 2xx — a non-2xx archives it as broken and you fix + re-save this session. You do not fire anything yourself; classify Tier 1 (idempotent/read — ack immediately) vs Tier 2 (mutation / real-account side-effect / third-party recipient — explain, then ack only on user OK)`,
+              pendingAction: `the runtime re-running the saved \`${capability}\` strategy once, end-to-end, to verify transport and any explicit body.ok result`,
+              contextSummary: `Strategy tier: ${(data as { strategy?: string }).strategy ?? 'unknown'}${mutating ? ', mutating-shaped — re-running repeats a real side effect, classify Tier 2 unless the action is genuinely idempotent' : ' — likely Tier 1 if the request is idempotent'}. On your consent (ack_checkpoint, non-cancelled) the RUNTIME itself re-runs the saved strategy end-to-end. A non-2xx or explicit body.ok:false archives it as broken; 2xx without boolean body.ok is recorded as transport-only, not semantic success. You do not fire anything yourself; classify Tier 1 (idempotent/read — ack immediately) vs Tier 2 (mutation / real-account side-effect / third-party recipient — explain, then ack only on user OK)`,
               declineHandler: `the save stands but is recorded unverified (runtime_meta.post_save_validation: "declined"); a later session can re-validate. Add a discovery note saying why consent was withheld.`,
               ...(validation ? { validation_target: validation } : {}),
             },
@@ -1247,7 +1261,8 @@ export async function saveStrategy(
             // session can re-validate later.
             skills.stampRuntimeMeta(platform, capability, { post_save_validation: 'declined' });
             postSaveValidation = {
-              ok: true,
+              ok: false,
+              classification: 'not_run',
               status: 0,
               archived: false,
               message:

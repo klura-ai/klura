@@ -14,7 +14,7 @@ Graphs are data — `runtime/src/graphs/<name>.ts` exports each as a `Graph` lit
 | --- | --- | --- |
 | **discover** (default) | `drive → triage → lift → terminal{closed}` | None special — the canonical reverse-engineering flow. |
 | **map** | `drive → triage → lift → terminal{closed}` | `lift_observed_capability` opens the opt-in triage/lift cycle. `end_drive` can close from drive, triage, or lift. `gateMutatingActions: true`, `skipAutoSynth: true`, `inferObservedCapabilitiesAtClose: true`, `skipDeclarationGuard: true`, `rePersistenceThreshold: {reCalls: 1, actions: 5}`, `obligationStyle: 'flush_reminder'`. |
-| **execute** | `execute → triage → lift → terminal{closed \| failed}` | The `execute_failed` event has a guarded transition (rediscover-failure gate fires → triage) and an unguarded fallback (terminal{failed}). |
+| **execute** | `execute → triage → lift → terminal{closed \| failed}` | The `execute_failed` event has a guarded transition (explicit local failure, typed stale-shape diagnosis, or degraded health → triage) and an unguarded fallback (terminal{failed}). |
 
 ## The four phases
 
@@ -64,7 +64,7 @@ lift   ──[resolved_via_save]────────────────
 
 ```
 execute ──[execute_succeeded]──→ terminal{closed}
-execute ──[execute_failed]─────→ triage              (when rediscoverFailureGate predicate returns true)
+execute ──[execute_failed]─────→ triage              (explicit body.ok:false, typed stale shape, or degraded health)
 execute ──[execute_failed]─────→ terminal{failed}    (otherwise — arg/auth/structural failures)
 triage  ──[plan_submitted]──────→ triage              (same as discover from here)
 triage  ──[plan_handoff]────────→ lift
@@ -77,7 +77,7 @@ lift    ──[resolved_via_save]───→ terminal{closed}
 
 **No `plan_rejected` event.** The runtime never classifies the user's ack reply as approve / reject — that's the agent's job. The agent reads `user_response` from `ack_checkpoint`, decides, and either calls `submit_triage_plan` again (`plan_submitted` re-enters triage) or proceeds with RE moves (the original `plan_handoff` already transitioned to LIFT).
 
-**Guarded transitions.** A single `(from, on)` pair can declare multiple destinations with a `when(session, payload)` predicate. The first matching entry wins; an unguarded entry serves as the fallback. This is how `execute_failed` routes between triage and `terminal{failed}` in the execute graph: the guard wraps `runtime/src/graphs/guards/rediscover.ts`, which checks the saved-strategy's rolling success rate against `pool.rediscoverThreshold`. Stale strategies fall into triage with the failure as defense-surface input; structurally bad calls (wrong args, expired auth) terminate `failed`.
+**Guarded transitions.** A single `(from, on)` pair can declare multiple destinations with a `when(session, payload)` predicate. The first matching entry wins; an unguarded entry serves as the fallback. This is how `execute_failed` routes between triage and `terminal{failed}` in the execute graph. The guard in `runtime/src/graphs/guards/rediscover.ts` first reads typed structural signals: stale-shape diagnoses enter triage, while `auth_failed` stays terminal. A local factory result classified as `explicit_failure` from boolean `body.ok:false` also enters triage on the first failure; its application-defined `code` and prose remain uninterpreted for the LLM to assess. Results without either signal use the saved strategy's rolling success rate against `pool.rediscoverThreshold`. Wrong args, expired auth, and non-repairable structural calls terminate `failed`.
 
 Anything not in any graph's transition table is illegal for that graph — `dispatch` throws `SessionPhaseTransitionError`. Programmer bugs surface loudly.
 
@@ -135,12 +135,12 @@ Counter resets on every transition INTO the phase (including self-loops on `plan
 1. Validate args (shape check via `parseArgs` — capability declared, surface_label non-empty, defense_surface fields present, expected_tier in the closed enum).
 2. Look up session, assert phase is `triage` or `lift`.
 3. **Cite-validate `tier_justification`** — must reference at least one verbatim artifact actually present in `session.intercepted` / `session.domNavigations` (origin, script URL, script filename, cookie name, or observed nav URL). Empty or uncited justifications reject with the candidate list. The agent's verdict has to be grounded.
-4. **Server-derive `observed_at_urls`** from `session.domNavigations` between triage entry and submission — the agent doesn't supply visit lists; the runtime knows.
+4. **Server-derive `observed_at_urls`** from the runtime-observed current URL plus `session.domNavigations` between triage entry and submission — the agent doesn't supply visit lists; the runtime knows. Including the current URL binds the navigation that triggered `surface_changed`, which necessarily occurred immediately before triage entry.
 5. Persist to `per_capability[<cap>].triage_plans_by_surface[<surface_label>]` in the per-platform logbook. Prior plan for the same surface rotates into `triage_plan_history_by_surface[<surface_label>]` (capped at 5 per surface).
 6. **Bind URLs to surface** — every URL in `observed_at_urls` is added to `session.surfaceMap` keyed by canonical `urlKey()` (origin + pathname; query / hash stripped). Subsequent navigations that land on these URLs don't re-fire `surface_changed`.
 7. **Step A — drop back to triage.** `dispatch(session, { kind: 'plan_submitted' })`. From triage, this is a self-loop that resets the counter; from lift, it transitions back to triage. Either way: `currentPhase === 'triage'`, `roundsSinceEntry === 0`. This is the symmetric re-plan invariant — re-plans look identical to first plans from the state machine's perspective.
-8. **Step B — fire the `triage_plan` checkpoint.** Default handler resolves `handover` (real human flow → surfaces `summary_for_user` as ask-user prose); benchmark / autonomous stub resolves `continue` (silent).
-9. **Step C — transition to LIFT.** `dispatch(session, { kind: 'plan_approved' })` → phase becomes `lift`. Return `{ ok: true, phase: 'lift', _checkpoint }`. The agent surfaces the prompt to the user, the user replies in any language, the agent calls `ack_checkpoint({checkpoint_token, user_response: <verbatim reply>})` and **classifies the reply themselves**: clean approve → proceed with RE moves; reject → call `submit_triage_plan` again with revised plan; approve-with-comment → incorporate before first RE move. The runtime never keyword-matches the reply — that's the LLM's job.
+8. **Step B — resolve plan handover.** `map` sessions are user-pre-authorized platform onboarding and continue without a per-capability handover. A structurally trivial public-read surface also continues directly. Otherwise the runtime fires the `triage_plan` checkpoint: the default handler resolves `handover`, while an autonomous embedder may resolve `continue`.
+9. **Step C — transition to LIFT.** `dispatch(session, { kind: 'plan_handoff' })` → phase becomes `lift`. A handover response includes `_checkpoint` and `relay_to_user_before_proceeding`; a direct continuation includes neither. After a handover, the agent relays the prompt, calls `ack_checkpoint({checkpoint_token, user_response: <verbatim reply>})`, and **classifies the reply themselves**: clean approve → proceed with RE moves; reject → call `submit_triage_plan` again with revised plan; approve-with-comment → incorporate before the first RE move. The runtime never keyword-matches the reply — that's the LLM's job. Map's separate mutating-action consent gates remain active.
 
 Tier suggestion is **informational, not gating** — the agent still aims T0 (fetch) → T1 (page-script) → T2 (recorded-path) in lift in order. The verdict shapes user expectation + escalation hygiene; on aggressive surfaces, T0 / T1 attempts may burn the session and the agent should retry from a fresh ephemeral context.
 

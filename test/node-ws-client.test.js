@@ -76,6 +76,23 @@ test('sendNodeWebSocketFrame: ack-timeout when server never sends matching ack',
   }
 });
 
+test('sendNodeWebSocketFrame: total deadline closes an otherwise-open ack wait', async () => {
+  const srv = await startEchoServer({ delayMs: 500 });
+  try {
+    const r = await sendNodeWebSocketFrame(
+      srv.url,
+      {},
+      'deadline',
+      { ackMatch: 'echo: deadline', ackTimeoutMs: 1_000, timeoutMs: 25 },
+    );
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.code, 'request_timeout');
+    assert.match(r.error, /ws_request_timeout: 25ms/);
+  } finally {
+    await srv.close();
+  }
+});
+
 test('sendNodeWebSocketFrame: open-timeout when server unreachable', async () => {
   // No server listening on 127.0.0.1:1 — the low reserved port is a quick
   // reject. We expect either an error event or an open_timeout; both

@@ -41,6 +41,7 @@ import {
 } from './save-warnings-parameterization';
 import { detectUnreferencedPrereqBinding } from './save-warnings-unreferenced-binding';
 import { detectLookupSiblingNotReferenced } from './save-warnings-lookup-sibling';
+import { isLookupSurfaceOwnerCapability } from './save-audit-lookup';
 
 export {
   detectEnumValueInCapabilitySlug,
@@ -382,9 +383,9 @@ export function detectInlineMultiFetchPrereqs(data: Strategy): SaveWarning[] {
  * {"<entity>_id": "<dot.path>"}}` prereq. Inline lookups don't compose — future capabilities
  * that need the same search have to re-inline the expression.
  *
- * Suppressed when the containing capability slug is itself a lookup (ends
- * with `_search`, starts with `lookup_`) — a lookup capability that fetches
- * a search endpoint is the whole point of that capability.
+ * Suppressed when the containing capability slug owns a retrieval surface
+ * (`search_<entity>`, `lookup_<entity>`, `list_<entity>`, or the equivalent
+ * `<entity>_search`) — fetching a search endpoint is the capability itself.
  *
  * Emits `kind: "lookup_embedded_in_prereq"`. The Detector is wired with
  * `ackReason: 'none'` in `save-strategy.ts` — there is no `save_warnings_acked`
@@ -395,13 +396,9 @@ export function detectLookupEmbeddedInPrereq(data: Strategy, capability?: string
   const warnings: SaveWarning[] = [];
   const obj = data as Record<string, unknown>;
 
-  // Suppress when the capability itself is a lookup — e.g. `lookup_thread_by_name`
-  // or `member_search`. A lookup capability saving its own search endpoint is
-  // correct, not inlined.
-  if (typeof capability === 'string') {
-    if (/_search$/.test(capability)) return warnings;
-    if (/^lookup_/.test(capability)) return warnings;
-  }
+  // A first-class retrieval capability owns the search/list surface. The
+  // same inline shape in a downstream capability still emits the warning.
+  if (typeof capability === 'string' && isLookupSurfaceOwnerCapability(capability)) return warnings;
 
   // /search or /lookup as a path segment — bounded on both sides so
   // `/api/researcher` doesn't false-positive.

@@ -85,3 +85,172 @@ test('page-script: session already on target origin → zero navigates before fe
   const fetches = driver.calls.filter((c) => c[0] === 'fetch');
   assert.equal(fetches.length, 1);
 });
+
+test('browser fetches share the configured local origin admission queue', async () => {
+  fs.writeFileSync(
+    path.join(TMP, 'config.json'),
+    JSON.stringify({ traffic: { max_concurrency: 1, burst: 1 } }),
+  );
+  let started;
+  let releaseFirst;
+  const firstStarted = new Promise((resolve) => {
+    started = resolve;
+  });
+  const firstDriver = {
+    async getUrl() {
+      return 'https://api.example.com/ready';
+    },
+    async fetchInBrowser(_session, url) {
+      started();
+      return await new Promise((resolve) => {
+        releaseFirst = () => resolve({ ok: true, status: 200, body: { first: true }, finalUrl: url });
+      });
+    },
+    async saveStorageState() {},
+  };
+  let secondFetches = 0;
+  const secondDriver = {
+    async getUrl() {
+      return 'https://api.example.com/ready';
+    },
+    async fetchInBrowser(_session, url) {
+      secondFetches += 1;
+      return { ok: true, status: 200, body: { second: true }, finalUrl: url };
+    },
+    async saveStorageState() {},
+  };
+  const poolFor = (driver) => ({
+    async createSession() {
+      return { id: 'session' };
+    },
+    driverFor() {
+      return driver;
+    },
+    async endDrive() {},
+  });
+  const strategy = {
+    strategy: 'page-script',
+    baseUrl: 'https://api.example.com',
+    endpoint: '/v1/me',
+    method: 'GET',
+    headers: {},
+  };
+
+  const first = executeFetchInBrowser(
+    strategy,
+    {},
+    'shared-browser-origin',
+    'first',
+    poolFor(firstDriver),
+    null,
+    0,
+  );
+  await firstStarted;
+  const second = executeFetchInBrowser(
+    strategy,
+    {},
+    'shared-browser-origin',
+    'second',
+    poolFor(secondDriver),
+    null,
+    0,
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(secondFetches, 0, 'second browser fetch must remain queued');
+  releaseFirst();
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  assert.equal(firstResult.status, 200);
+  assert.equal(secondResult.status, 200);
+  assert.equal(secondFetches, 1);
+});
+
+test('browser fetch surfaces a configured in-page request deadline', async () => {
+  fs.writeFileSync(
+    path.join(TMP, 'config.json'),
+    JSON.stringify({ traffic: { request_timeout_ms: 1_000 } }),
+  );
+  let receivedTimeout = null;
+  const driver = {
+    async getUrl() {
+      return 'https://api.example.com/ready';
+    },
+    async fetchInBrowser(_session, _url, options) {
+      receivedTimeout = options.timeout_ms;
+      return { ok: false, error: 'AbortError: aborted', timed_out: true };
+    },
+    async saveStorageState() {},
+  };
+  const pool = {
+    async createSession() {
+      return { id: 'timeout-session' };
+    },
+    driverFor() {
+      return driver;
+    },
+    async endDrive() {},
+  };
+  const strategy = {
+    strategy: 'page-script',
+    baseUrl: 'https://api.example.com',
+    endpoint: '/v1/me',
+    method: 'GET',
+    headers: {},
+  };
+
+  await assert.rejects(
+    () => executeFetchInBrowser(strategy, {}, 'browser-timeout', 'me', pool, null, 0),
+    /timed out after 1000ms/,
+  );
+  assert.equal(receivedTimeout, 1_000);
+});
+
+test('browser navigation receives the configured driver deadline', async () => {
+  fs.writeFileSync(
+    path.join(TMP, 'config.json'),
+    JSON.stringify({ traffic: { request_timeout_ms: 1_000 } }),
+  );
+  let receivedTimeout = null;
+  const driver = {
+    async getUrl() {
+      return 'about:blank';
+    },
+    async navigate(_session, _url, options) {
+      receivedTimeout = options.timeout_ms;
+      throw new Error('navigation stopped by driver deadline');
+    },
+    async fetchInBrowser() {
+      throw new Error('fetch must not start after the navigation deadline');
+    },
+    async saveStorageState() {},
+  };
+  const pool = {
+    async createSession() {
+      return { id: 'navigation-timeout-session' };
+    },
+    driverFor() {
+      return driver;
+    },
+    async endDrive() {},
+  };
+  const strategy = {
+    strategy: 'page-script',
+    baseUrl: 'https://api.example.com',
+    endpoint: '/v1/me',
+    method: 'GET',
+    headers: {},
+    prerequisites: [
+      {
+        name: 'page_token',
+        kind: 'page-extract',
+        url: 'https://api.example.com/token',
+        vars: { page_token: { selector: '#token' } },
+      },
+    ],
+  };
+
+  await assert.rejects(
+    () => executeFetchInBrowser(strategy, {}, 'browser-navigation-timeout', 'me', pool, null, 0),
+    /navigation stopped by driver deadline/,
+  );
+  assert.equal(receivedTimeout, 1_000);
+});

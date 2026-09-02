@@ -403,3 +403,145 @@ test('executing the page-script tier without a pool fails cleanly (Node fetch mo
     restoreFetch();
   }
 });
+
+test('trusted local node execution admits one concurrent request per configured origin', async () => {
+  fs.writeFileSync(
+    path.join(TMP, 'config.json'),
+    JSON.stringify({ traffic: { max_concurrency: 1, burst: 1 } }),
+  );
+  seedStrategy('exnode-scheduler-first', 'search', {
+    baseUrl: 'https://scheduler.example.test',
+  });
+  seedStrategy('exnode-scheduler-second', 'search', {
+    baseUrl: 'https://scheduler.example.test',
+  });
+
+  let requestCount = 0;
+  let releaseFirst;
+  const firstStarted = new Promise((resolve) => {
+    globalThis.fetch = async () => {
+      requestCount += 1;
+      if (requestCount > 1) {
+        return new Response(JSON.stringify({ ordinal: requestCount }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      resolve();
+      return await new Promise((finish) => {
+        releaseFirst = () =>
+          finish(
+            new Response(JSON.stringify({ ordinal: 1 }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            }),
+          );
+      });
+    };
+  });
+
+  try {
+    const first = execute('exnode-scheduler-first', 'search', { query: 'one' });
+    await firstStarted;
+    const second = execute('exnode-scheduler-second', 'search', { query: 'two' });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(requestCount, 1, 'second request must remain in the shared origin queue');
+    releaseFirst();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    assert.strictEqual(firstResult.status, 200);
+    assert.strictEqual(secondResult.status, 200);
+    assert.strictEqual(requestCount, 2);
+  } finally {
+    restoreFetch();
+  }
+});
+
+test('trusted local node execution aborts an overdue request instead of reporting success', async () => {
+  fs.writeFileSync(
+    path.join(TMP, 'config.json'),
+    JSON.stringify({ traffic: { request_timeout_ms: 1_000 } }),
+  );
+  seedStrategy('exnode-timeout', 'search', {
+    baseUrl: 'https://timeout.example.test',
+  });
+  globalThis.fetch = async (_url, init = {}) =>
+    await new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(new Error('request aborted by deadline')), {
+        once: true,
+      });
+    });
+
+  try {
+    const result = await execute('exnode-timeout', 'search', { query: 'late' });
+    assert.equal(result.body.error, 'all_strategies_failed');
+    assert.match(JSON.stringify(result.body), /timed out/);
+  } finally {
+    restoreFetch();
+  }
+});
+
+test('trusted local node execution schedules each redirect hop and follows at most five', async () => {
+  installMockFetch();
+  try {
+    seedStrategy('exnode-redirects', 'search', {
+      baseUrl: 'https://redirect.example.test',
+    });
+    const responses = [
+      new Response(null, { status: 302, headers: { location: '/second' } }),
+      new Response(JSON.stringify({ page: 'second' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ];
+    globalThis.fetch = async (url, init = {}) => {
+      fetchCalls.push({
+        url: String(url),
+        method: init.method ?? 'GET',
+        headers: { ...(init.headers ?? {}) },
+        body: init.body,
+        redirect: init.redirect,
+      });
+      const response = responses.shift();
+      assert.ok(response, 'redirect sequence must not make an unplanned request');
+      return response;
+    };
+
+    const result = await execute('exnode-redirects', 'search', { query: 'redirect' });
+    assert.equal(result.status, 200);
+    assert.equal(fetchCalls.length, 2);
+    assert.equal(fetchCalls[0].url, 'https://redirect.example.test/search?q=redirect');
+    assert.equal(fetchCalls[1].url, 'https://redirect.example.test/second');
+    assert.deepEqual(
+      fetchCalls.map((call) => call.redirect),
+      ['manual', 'manual'],
+    );
+  } finally {
+    restoreFetch();
+  }
+});
+
+test('trusted local node execution stops before a sixth redirect hop', async () => {
+  installMockFetch();
+  try {
+    seedStrategy('exnode-redirect-limit', 'search', {
+      baseUrl: 'https://redirect-limit.example.test',
+    });
+    globalThis.fetch = async (url, init = {}) => {
+      fetchCalls.push({
+        url: String(url),
+        method: init.method ?? 'GET',
+        headers: { ...(init.headers ?? {}) },
+        body: init.body,
+        redirect: init.redirect,
+      });
+      return new Response(null, { status: 302, headers: { location: '/again' } });
+    };
+
+    const result = await execute('exnode-redirect-limit', 'search', { query: 'redirect' });
+    assert.equal(result.body.error, 'fetch_failed');
+    assert.match(JSON.stringify(result.body), /redirect limit of 5 hops is exhausted/);
+    assert.equal(fetchCalls.length, 6);
+  } finally {
+    restoreFetch();
+  }
+});

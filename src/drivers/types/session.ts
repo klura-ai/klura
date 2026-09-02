@@ -582,6 +582,18 @@ export interface Session {
    */
   extractedContentBytes?: number;
   /**
+   * Source and diagnostic state for the most recent accessibility-tree read.
+   * The built-in driver prefers the browser's computed accessibility snapshot,
+   * then falls back to an inert serialized-DOM tree if that native read fails.
+   * `unavailable` means both paths failed; start_session still returns the live
+   * session so callers can inspect it through other read surfaces.
+   */
+  accessibilitySnapshot?: {
+    source: 'native' | 'static_dom' | 'unavailable';
+    at: number;
+    warning?: string;
+  };
+  /**
    * Active graph — selects the FSM topology + per-phase configuration for
    * this session. See runtime/src/graphs/. `'discover'`
    * (default) walks drive→triage→lift→closed; `'map'` walks drive→closed

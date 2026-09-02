@@ -1,7 +1,7 @@
 // Detector: capability slug has a lookup-implying segment (`_by_X` /
 // `_for_X` / `lookup_X`) AND the platform has a saved sibling capability
-// whose slug looks lookup-shaped (`^lookup_*`, `*_search`, `^find_*_by_*`,
-// `^get_*_by_*`) AND this strategy declares no
+// whose slug looks lookup-shaped (`^lookup_*`, `^search_*`, `*_search`,
+// `^find_*_by_*`, `^get_*_by_*`) AND this strategy declares no
 // `prerequisites[{kind: "capability"}]` entry referencing it.
 //
 // Catches the OMITTED-prereq shape: agent saved the sibling lookup
@@ -15,6 +15,7 @@
 
 import type { Strategy } from '../strategies/skills';
 import { findLookupSegments } from './save-audit';
+import { isLookupSurfaceOwnerCapability } from './save-audit-lookup';
 import type { SaveWarning } from './save-warnings';
 
 export function detectLookupSiblingNotReferenced(
@@ -23,6 +24,7 @@ export function detectLookupSiblingNotReferenced(
   listSavedCapabilityNames: (() => string[]) | undefined,
 ): SaveWarning[] {
   if (!listSavedCapabilityNames) return [];
+  if (isLookupSurfaceOwnerCapability(capability)) return [];
   const lookupSegments = findLookupSegments(capability);
   if (lookupSegments.length === 0) return [];
 
@@ -38,6 +40,7 @@ export function detectLookupSiblingNotReferenced(
 
   const lookupShape = (slug: string): boolean =>
     slug.startsWith('lookup_') ||
+    slug.startsWith('search_') ||
     /_search$/.test(slug) ||
     /^find_\w+_by_\w+$/.test(slug) ||
     /^get_\w+_by_\w+$/.test(slug);

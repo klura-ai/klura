@@ -20,6 +20,18 @@ export interface GraduationConfig {
   observation_threshold: number;
 }
 
+/** Limits applied to trusted local HTTP(S) execution outside signed packages. */
+export interface TrafficConfig {
+  request_timeout_ms: number;
+  max_concurrency: number;
+  requests_per_second: number;
+  burst: number;
+  min_delay_ms: number;
+  transient_failure_threshold: number;
+  transient_window_ms: number;
+  cooldown_ms: number;
+}
+
 export interface LiftConfig {
   /** Per-phase round budget. 0 = unlimited (default). When >0, the
    *  middleware soft-blocks tools outside `allowedToolsWhenExhausted` once
@@ -156,6 +168,7 @@ export interface AgentConfig {
 export interface DaemonConfig {
   runtime: RuntimeBootConfig;
   graduation: GraduationConfig;
+  traffic: TrafficConfig;
   drive: DriveConfig;
   triage: TriageConfig;
   lift: LiftConfig;
@@ -172,6 +185,16 @@ export interface DaemonConfig {
 export const CONFIG_DEFAULTS: DaemonConfig = {
   runtime: { idleTimeout: 1800, listen: 'unix' },
   graduation: { observation_threshold: 3 },
+  traffic: {
+    request_timeout_ms: 30_000,
+    max_concurrency: 4,
+    requests_per_second: 5,
+    burst: 4,
+    min_delay_ms: 0,
+    transient_failure_threshold: 5,
+    transient_window_ms: 60_000,
+    cooldown_ms: 60_000,
+  },
   drive: { max_rounds: 0 },
   triage: { max_rounds: 10 },
   lift: { max_rounds: 0 },
@@ -235,6 +258,73 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     default: CONFIG_DEFAULTS.graduation.observation_threshold,
     description:
       'Consecutive recorded-path runs with the same POST shape before synthesizing a fetch strategy.',
+    needsRestart: false,
+  },
+  {
+    path: 'traffic.request_timeout_ms',
+    type: 'number',
+    range: [1_000, 120_000],
+    default: CONFIG_DEFAULTS.traffic.request_timeout_ms,
+    description:
+      'Deadline in milliseconds for one trusted local HTTP(S) request, including response body.',
+    needsRestart: false,
+  },
+  {
+    path: 'traffic.max_concurrency',
+    type: 'number',
+    range: [1, 4],
+    default: CONFIG_DEFAULTS.traffic.max_concurrency,
+    description: 'Maximum concurrent trusted local HTTP(S) requests to one origin.',
+    needsRestart: false,
+  },
+  {
+    path: 'traffic.requests_per_second',
+    type: 'number',
+    range: [0.1, 5],
+    default: CONFIG_DEFAULTS.traffic.requests_per_second,
+    description: 'Maximum trusted local HTTP(S) request admissions per second to one origin.',
+    needsRestart: false,
+  },
+  {
+    path: 'traffic.burst',
+    type: 'number',
+    range: [1, 4],
+    default: CONFIG_DEFAULTS.traffic.burst,
+    description: 'Maximum initial trusted local HTTP(S) request burst to one origin.',
+    needsRestart: false,
+  },
+  {
+    path: 'traffic.min_delay_ms',
+    type: 'number',
+    range: [0, 60_000],
+    default: CONFIG_DEFAULTS.traffic.min_delay_ms,
+    description:
+      'Minimum delay in milliseconds between trusted local HTTP(S) admissions to one origin.',
+    needsRestart: false,
+  },
+  {
+    path: 'traffic.transient_failure_threshold',
+    type: 'number',
+    range: [1, 10],
+    default: CONFIG_DEFAULTS.traffic.transient_failure_threshold,
+    description:
+      'Transient failures at one origin before trusted local HTTP(S) execution opens its circuit.',
+    needsRestart: false,
+  },
+  {
+    path: 'traffic.transient_window_ms',
+    type: 'number',
+    range: [1_000, 300_000],
+    default: CONFIG_DEFAULTS.traffic.transient_window_ms,
+    description: 'Rolling window in milliseconds for trusted local HTTP(S) transient failures.',
+    needsRestart: false,
+  },
+  {
+    path: 'traffic.cooldown_ms',
+    type: 'number',
+    range: [1_000, 900_000],
+    default: CONFIG_DEFAULTS.traffic.cooldown_ms,
+    description: 'Circuit-open cooldown in milliseconds for trusted local HTTP(S) execution.',
     needsRestart: false,
   },
   {
@@ -519,6 +609,7 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
 ];
 
 const CONFIG_PATH_REL = 'config.json';
+const OWNER_ONLY_FILE_MODE = 0o600;
 
 function configPath(): string {
   return path.join(getKluraHome(), CONFIG_PATH_REL);
@@ -533,6 +624,7 @@ function mergeWithDefaults(loaded: unknown): DaemonConfig {
   return {
     runtime: { ...CONFIG_DEFAULTS.runtime, ...(src.runtime ?? {}) },
     graduation: { ...CONFIG_DEFAULTS.graduation, ...(src.graduation ?? {}) },
+    traffic: { ...CONFIG_DEFAULTS.traffic, ...(src.traffic ?? {}) },
     drive: { ...CONFIG_DEFAULTS.drive, ...(src.drive ?? {}) },
     triage: { ...CONFIG_DEFAULTS.triage, ...(src.triage ?? {}) },
     lift: { ...CONFIG_DEFAULTS.lift, ...(src.lift ?? {}) },
@@ -571,7 +663,8 @@ export function saveConfig(cfg: DaemonConfig): void {
   fs.mkdirSync(getKluraHome(), { recursive: true });
   const p = configPath();
   const tmp = `${p}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));
+  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), { mode: OWNER_ONLY_FILE_MODE });
+  fs.chmodSync(tmp, OWNER_ONLY_FILE_MODE);
   fs.renameSync(tmp, p);
 }
 

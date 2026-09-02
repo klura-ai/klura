@@ -108,6 +108,111 @@ test('non-data resource types (Image, Stylesheet, Script, Media, Font, etc.) are
   }
 });
 
+test('Script resources populate the separate ledger across navigations', async () => {
+  const cdp = makeFakeCdp();
+  const sink = [];
+  const scripts = [];
+  await attachCdpNetworkCapture(cdp, sink, scripts);
+
+  cdp.emit('Network.requestWillBeSent', {
+    requestId: 'script-before-nav',
+    request: {
+      url: 'https://assets.example.test/app.js',
+      method: 'GET',
+      headers: {},
+    },
+    type: 'Script',
+    wallTime: 1_700_000_000,
+  });
+  cdp.emit('Network.loadingFinished', {
+    requestId: 'script-before-nav',
+    encodedDataLength: 1234,
+  });
+
+  // The same CDP target continues emitting resource events when its document
+  // changes. An extensionless module URL must still be classified by the
+  // browser's Script resource type.
+  cdp.emit('Network.requestWillBeSent', {
+    requestId: 'script-after-nav',
+    request: {
+      url: 'https://assets.example.test/chunks/module?id=42',
+      method: 'GET',
+      headers: {},
+    },
+    type: 'Script',
+    wallTime: 1_700_000_005,
+  });
+  cdp.emit('Network.loadingFinished', {
+    requestId: 'script-after-nav',
+    encodedDataLength: 5678,
+  });
+
+  assert.deepEqual(sink, [], 'passive script traffic must stay out of get_network_log');
+  assert.deepEqual(scripts, [
+    {
+      url: 'https://assets.example.test/app.js',
+      loaded_at: 1_700_000_000_000,
+      bytes: 1234,
+    },
+    {
+      url: 'https://assets.example.test/chunks/module?id=42',
+      loaded_at: 1_700_000_005_000,
+      bytes: 5678,
+    },
+  ]);
+});
+
+test('Script redirects keep the final executable resource URL', async () => {
+  const cdp = makeFakeCdp();
+  const sink = [];
+  const scripts = [];
+  await attachCdpNetworkCapture(cdp, sink, scripts);
+
+  cdp.emit('Network.requestWillBeSent', {
+    requestId: 'script-redirect',
+    request: { url: 'https://example.test/bundle', method: 'GET', headers: {} },
+    type: 'Script',
+    wallTime: 1_700_000_000,
+  });
+  cdp.emit('Network.requestWillBeSent', {
+    requestId: 'script-redirect',
+    request: { url: 'https://cdn.example.test/bundle.v2.js', method: 'GET', headers: {} },
+    type: 'Script',
+    redirectResponse: {
+      status: 302,
+      headers: { location: 'https://cdn.example.test/bundle.v2.js' },
+    },
+  });
+  cdp.emit('Network.loadingFinished', {
+    requestId: 'script-redirect',
+    encodedDataLength: 900,
+  });
+
+  assert.deepEqual(scripts, [
+    {
+      url: 'https://cdn.example.test/bundle.v2.js',
+      loaded_at: 1_700_000_000_000,
+      bytes: 900,
+    },
+  ]);
+});
+
+test('failed Script resources do not appear as loaded', async () => {
+  const cdp = makeFakeCdp();
+  const sink = [];
+  const scripts = [];
+  await attachCdpNetworkCapture(cdp, sink, scripts);
+
+  cdp.emit('Network.requestWillBeSent', {
+    requestId: 'failed-script',
+    request: { url: 'https://assets.example.test/failed.js', method: 'GET', headers: {} },
+    type: 'Script',
+  });
+  cdp.emit('Network.loadingFailed', { requestId: 'failed-script' });
+
+  assert.deepEqual(scripts, []);
+});
+
 test('GET to a non-/api/ path is captured when type=XHR (regression: bauhaus /search/ajax/suggest)', async () => {
   // The prior shape filtered GETs by pathname.includes("/api/") which
   // dropped real signal on sites using /ajax/ / /storelocator/ etc.
@@ -138,7 +243,11 @@ test('GET to /api/ still captured (no regression on api-prefixed paths)', async 
   await attachCdpNetworkCapture(cdp, sink);
   cdp.emit('Network.requestWillBeSent', {
     requestId: '1',
-    request: { url: 'https://x.com/api/users', method: 'GET', headers: { accept: 'application/json' } },
+    request: {
+      url: 'https://x.com/api/users',
+      method: 'GET',
+      headers: { accept: 'application/json' },
+    },
     type: 'XHR',
   });
   const entries = getInterceptedFromSink({ intercepted: sink });
@@ -249,7 +358,7 @@ test('redirect chain: same requestId reused, prev entry finalized', async () => 
 test('loadingFinished fetches JSON response body', async () => {
   const cdp = makeFakeCdp();
   cdp._responseBodies = {
-    '1': { body: '{"ok":true,"id":42}' },
+    1: { body: '{"ok":true,"id":42}' },
   };
   const sink = [];
   await attachCdpNetworkCapture(cdp, sink);
@@ -275,7 +384,7 @@ test('loadingFinished stores non-JSON body as raw string (HTML, form, plain)', a
   // can find the message literal regardless of Content-Type.
   const cdp = makeFakeCdp();
   cdp._responseBodies = {
-    '1': { body: '<html>hi</html>' },
+    1: { body: '<html>hi</html>' },
   };
   const sink = [];
   await attachCdpNetworkCapture(cdp, sink);
@@ -301,7 +410,7 @@ test('loadingFinished clips oversized bodies with a marker', async () => {
   const cdp = makeFakeCdp();
   const giant = 'x'.repeat(400 * 1024);
   cdp._responseBodies = {
-    '1': { body: giant },
+    1: { body: giant },
   };
   const sink = [];
   await attachCdpNetworkCapture(cdp, sink);

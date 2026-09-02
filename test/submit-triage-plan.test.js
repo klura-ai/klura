@@ -160,6 +160,34 @@ test('surface-binding side effect: observed URLs bound to the surface label', as
   }
 });
 
+test('surface-binding includes the current URL when its navigation preceded triage entry', async () => {
+  const currentUrl =
+    'https://shop.example.com/search/coffee/@59.3341831,18.0708368,12z/data=!3m1!4b1';
+  const session = triageSession({ urls: [], cookieNames: ['__sd_pix'] });
+  session.lastSurfaceUrl = currentUrl;
+  session.domNavigations = [
+    {
+      at: (session.triage?.enteredAt ?? 1) - 1,
+      url: currentUrl,
+      via: 'nav',
+    },
+  ];
+  const restore = patchPool(session);
+  try {
+    await submitTriagePlan({
+      session_id: session.id,
+      capability: 'complete_checkout',
+      ...plan({ surface_label: 'search-results', expected_tier: 'page-script' }),
+    });
+    const lb = loadLogbook(session.platform);
+    const saved = lb.per_capability['complete_checkout'].triage_plans_by_surface['search-results'];
+    assert.deepEqual(saved.observed_at_urls, [currentUrl]);
+    assert.equal(session.surfaceMap.get(currentUrl), 'search-results');
+  } finally {
+    restore();
+  }
+});
+
 // ---- tier_above_inferred_floor advisory ----
 
 test('tier_above_inferred_floor: page-script declared but fetch inferred → warning', async () => {
@@ -269,8 +297,35 @@ test('fast-path: trivial-surface plan skips checkpoint and emits _hint', async (
     assert.equal(r.ok, true);
     assert.equal(r.phase, 'lift');
     assert.equal(r._checkpoint, undefined, 'no checkpoint on trivial surface');
+    assert.equal(
+      r.relay_to_user_before_proceeding,
+      undefined,
+      'no relay field without a handover checkpoint',
+    );
+    assert.doesNotMatch(r.message, /Relay this summary/);
     assert.ok(typeof r._hint === 'string', '_hint present on trivial surface');
     assert.match(r._hint, /Trivial surface detected/);
+  } finally {
+    restore();
+  }
+});
+
+test('map graph: non-trivial plan is pre-authorized without a user handover', async () => {
+  const session = triageSession({ cookieNames: ['__sd_pix'] });
+  session.graph = 'map';
+  const restore = patchPool(session);
+  try {
+    const r = await submitTriagePlan({
+      session_id: session.id,
+      capability: 'complete_checkout',
+      ...plan(),
+    });
+    assert.equal(r.ok, true);
+    assert.equal(r.phase, 'lift');
+    assert.equal(r._checkpoint, undefined);
+    assert.equal(r.relay_to_user_before_proceeding, undefined);
+    assert.match(r._hint, /Map graph is user-pre-authorized/);
+    assert.doesNotMatch(r.message, /Relay this summary/);
   } finally {
     restore();
   }

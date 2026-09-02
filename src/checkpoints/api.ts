@@ -13,6 +13,7 @@ import {
   verifySavedStrategy,
   type VerifySavedStrategyResult,
 } from '../strategies/verify-saved-strategy';
+import { describeFactoryExecutionFailure } from '../execution/result-classification';
 import { performAbortTeardown } from '../tools/abort_session';
 import type { Session } from '../drivers/types/session';
 export { assertNoPendingCheckpoint } from '../checkpoints';
@@ -30,12 +31,12 @@ export interface AckCheckpointResult {
   ok: true;
   _hint: string;
   /** Present only when acking a `post_save_validation_consent` checkpoint with
-   *  consent — the outcome of the runtime's post-commit 2xx verification. */
+   *  consent — the outcome of the runtime's post-commit factory verification. */
   post_save_validation?: VerifySavedStrategyResult;
 }
 
 /**
- * Run the deferred post-save 2xx verification staged on the session by
+ * Run the deferred post-save factory verification staged on the session by
  * `save_strategy`. Called when a `post_save_validation_consent` checkpoint is
  * acked. Consent (`!cancelled`) → run `verifySavedStrategy`; decline
  * (`cancelled`) → stamp the strategy unverified. Clears the staged payload
@@ -74,16 +75,25 @@ async function resolvePostSaveValidation(
     pending.args,
     pool,
   );
-  if (result.ok) {
+  if (result.classification === 'explicit_success') {
+    return {
+      ok: true,
+      _hint: `Post-save validation passed — \`${pending.capability}\` returned HTTP ${result.status} with explicit body.ok === true. Strategy verified locally.`,
+      post_save_validation: result,
+    };
+  }
+  if (result.classification === 'transport_accepted') {
     return {
       ok: true,
       _hint:
-        `Post-save validation passed — \`${pending.capability}\` returned HTTP ${result.status} ` +
-        `end-to-end. Strategy verified.`,
+        `Post-save validation is inconclusive — \`${pending.capability}\` returned HTTP ${result.status}, ` +
+        `but the body had no explicit boolean ok field. Inspect post_save_validation.body_preview now; ` +
+        `factory runtime did not classify its semantic outcome, and published outcome contracts are verified separately.`,
+      post_save_validation: result,
     };
   }
   if (result.archived) recordAbandonedSaveAttempt(session, pending.capability, 'archived');
-  const statusLabel = result.status === 0 ? 'a runtime error' : `HTTP ${result.status}`;
+  const statusLabel = describeFactoryExecutionFailure(result.classification, result.status);
   return {
     ok: true,
     _hint:

@@ -87,10 +87,12 @@ test('no warning: no sibling lookup-shaped capability saved on the platform', ()
   assert.deepEqual(warnings, []);
 });
 
-test('lookup-shape patterns recognized: lookup_*, *_search, find_*_by_*, get_*_by_*', () => {
+test('lookup-shape patterns recognized: lookup_*, search_*, *_search, find/get_*_by_*', () => {
   const variants = [
     ['lookup_member_by_name', true],
     ['lookup_user', true],
+    ['search_members', true],
+    ['search_filter', true],
     ['member_search', true],
     ['user_search', true],
     ['find_member_by_name', true],
@@ -100,7 +102,6 @@ test('lookup-shape patterns recognized: lookup_*, *_search, find_*_by_*, get_*_b
     // Non-lookup-shaped:
     ['list_members', false],
     ['create_member', false],
-    ['search_filter', false], // doesn't end with _search
     ['lookup', false], // no underscore-prefix payload
   ];
   for (const [slug, shouldFire] of variants) {
@@ -117,7 +118,7 @@ test('lookup-shape patterns recognized: lookup_*, *_search, find_*_by_*, get_*_b
   }
 });
 
-test('does NOT fire when this strategy IS the lookup (no self-reference)', () => {
+test('does NOT fire when this strategy owns the lookup surface', () => {
   const lookupStrategy = {
     strategy: 'fetch',
     method: 'GET',
@@ -125,27 +126,12 @@ test('does NOT fire when this strategy IS the lookup (no self-reference)', () =>
     endpoint: '/api/members/search?query={{recipient}}',
     notes: { params: { recipient: { kind: 'text' } } },
   };
-  // Slug has _by_name AND lookup_ siblings on disk, but ONE of those siblings
-  // is this strategy itself — should not flag itself.
   const warnings = detectLookupSiblingNotReferenced(
     lookupStrategy,
     'lookup_member_by_name',
     () => ['lookup_member_by_name', 'find_user_by_email'],
   );
-  // The detector still finds find_user_by_email as a lookup sibling for
-  // lookup_member_by_name — both are lookups. This is the "two lookups
-  // on the platform for different entities" case. The agent saved both
-  // correctly; chaining a sibling through itself isn't required.
-  // Acceptable behavior: the audit fires (agent acks "I'm the lookup; no
-  // further chain needed"). Verify the SIBLING reference points at the
-  // other strategy, not at the strategy being saved (slug-prefix mention
-  // is fine — that names the strategy under audit, not a chain target).
-  if (warnings.length > 0) {
-    assert.match(warnings[0].message, /find_user_by_email/);
-    // The hint's "wire it: capability: <slug>" example should not point
-    // at the strategy's own slug.
-    assert.doesNotMatch(warnings[0].hint, /capability: "lookup_member_by_name"/);
-  }
+  assert.deepEqual(warnings, []);
 });
 
 test('listSavedCapabilityNames callback is undefined → no warning (defensive)', () => {

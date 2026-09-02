@@ -90,6 +90,7 @@ export async function executeRecordedPath(
     strategy,
     args,
     platform,
+    capability,
     pool,
     tokenCache,
     ...(identity !== undefined ? { identity } : {}),

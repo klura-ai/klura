@@ -11,6 +11,7 @@ import {
 import { KLURA_DIR } from '../paths';
 
 const IDENTITIES_PATH = path.join(KLURA_DIR, 'identities.json');
+const OWNER_ONLY_FILE_MODE = 0o600;
 
 type IdentityStore = Record<string, Record<string, string>>;
 
@@ -104,7 +105,12 @@ function load(): IdentityStore {
 
 function save(data: IdentityStore): void {
   fs.mkdirSync(KLURA_DIR, { recursive: true });
-  fs.writeFileSync(IDENTITIES_PATH, JSON.stringify(data, null, 2));
+  const temporaryPath = `${IDENTITIES_PATH}.tmp`;
+  fs.writeFileSync(temporaryPath, JSON.stringify(data, null, 2), {
+    mode: OWNER_ONLY_FILE_MODE,
+  });
+  fs.chmodSync(temporaryPath, OWNER_ONLY_FILE_MODE);
+  fs.renameSync(temporaryPath, IDENTITIES_PATH);
 }
 
 /**

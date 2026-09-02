@@ -22,11 +22,23 @@ interface SendNodeWebSocketFrameOptions {
   ackTimeoutMs?: number;
   /** Upper bound on the WebSocket handshake. Default 5000. */
   openTimeoutMs?: number;
+  /** Upper bound on the complete handshake, send, and optional ack. */
+  timeoutMs?: number;
 }
+
+type NodeWebSocketFailureCode =
+  | 'ack_timeout'
+  | 'closed_before_ack'
+  | 'connection_error'
+  | 'construct_failed'
+  | 'open_timeout'
+  | 'request_timeout'
+  | 'send_failed'
+  | 'send_threw';
 
 type SendNodeWebSocketFrameResult =
   | { ok: true; ackPayload?: string }
-  | { ok: false; error: string };
+  | { ok: false; code: NodeWebSocketFailureCode; error: string };
 
 /**
  * Open a WebSocket to `url`, send `payload`, optionally wait for an ack
@@ -47,12 +59,14 @@ export async function sendNodeWebSocketFrame(
 ): Promise<SendNodeWebSocketFrameResult> {
   const ackTimeoutMs = opts.ackTimeoutMs ?? 5000;
   const openTimeoutMs = opts.openTimeoutMs ?? 5000;
+  const timeoutMs = opts.timeoutMs;
 
   return await new Promise<SendNodeWebSocketFrameResult>((resolve) => {
     let ws: WebSocketType | null = null;
     let settled = false;
     let openTimer: ReturnType<typeof setTimeout> | null = null;
     let ackTimer: ReturnType<typeof setTimeout> | null = null;
+    let requestTimer: ReturnType<typeof setTimeout> | null = null;
 
     const settle = (result: SendNodeWebSocketFrameResult): void => {
       if (settled) return;
@@ -65,6 +79,10 @@ export async function sendNodeWebSocketFrame(
         clearTimeout(ackTimer);
         ackTimer = null;
       }
+      if (requestTimer) {
+        clearTimeout(requestTimer);
+        requestTimer = null;
+      }
       try {
         ws?.close();
       } catch {
@@ -73,18 +91,30 @@ export async function sendNodeWebSocketFrame(
       resolve(result);
     };
 
+    if (timeoutMs !== undefined) {
+      requestTimer = setTimeout(() => {
+        settle({
+          ok: false,
+          code: 'request_timeout',
+          error: `ws_request_timeout: ${timeoutMs}ms`,
+        });
+      }, timeoutMs);
+      (requestTimer as unknown as { unref?: () => void }).unref?.();
+    }
+
     try {
       ws = new WebSocket(url, { headers });
     } catch (e) {
-      resolve({
+      settle({
         ok: false,
+        code: 'construct_failed',
         error: `ws_construct_failed: ${e instanceof Error ? e.message : String(e)}`,
       });
       return;
     }
 
     openTimer = setTimeout(() => {
-      settle({ ok: false, error: `ws_open_timeout: ${openTimeoutMs}ms` });
+      settle({ ok: false, code: 'open_timeout', error: `ws_open_timeout: ${openTimeoutMs}ms` });
     }, openTimeoutMs);
     (openTimer as unknown as { unref?: () => void }).unref?.();
 
@@ -99,7 +129,7 @@ export async function sendNodeWebSocketFrame(
       try {
         ws.send(payload, (err) => {
           if (err) {
-            settle({ ok: false, error: `ws_send_failed: ${err.message}` });
+            settle({ ok: false, code: 'send_failed', error: `ws_send_failed: ${err.message}` });
             return;
           }
           if (!opts.ackMatch) {
@@ -109,13 +139,14 @@ export async function sendNodeWebSocketFrame(
       } catch (e) {
         settle({
           ok: false,
+          code: 'send_threw',
           error: `ws_send_threw: ${e instanceof Error ? e.message : String(e)}`,
         });
         return;
       }
       if (opts.ackMatch) {
         ackTimer = setTimeout(() => {
-          settle({ ok: false, error: `ack_timeout: ${ackTimeoutMs}ms` });
+          settle({ ok: false, code: 'ack_timeout', error: `ack_timeout: ${ackTimeoutMs}ms` });
         }, ackTimeoutMs);
         (ackTimer as unknown as { unref?: () => void }).unref?.();
       }
@@ -135,7 +166,7 @@ export async function sendNodeWebSocketFrame(
     });
 
     ws.on('error', (err) => {
-      settle({ ok: false, error: `ws_error: ${err.message}` });
+      settle({ ok: false, code: 'connection_error', error: `ws_error: ${err.message}` });
     });
 
     ws.on('close', (code, reason) => {
@@ -146,6 +177,7 @@ export async function sendNodeWebSocketFrame(
       const reasonPart = reasonStr ? ` reason=${reasonStr}` : '';
       settle({
         ok: false,
+        code: 'closed_before_ack',
         error: `ws_closed_before_ack: code=${code}${reasonPart}`,
       });
     });

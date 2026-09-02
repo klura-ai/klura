@@ -5,20 +5,54 @@ import { assertReturnShape, asReturnShape, type JsEvalReturnShape } from '../js-
 import { JS_EVAL_TIMEOUT_DEFAULT_MS, JS_EVAL_TIMEOUT_HARD_CAP_MS } from '../skills';
 import { isLoginWallUrl, tryGetUrl } from '../../response/auth-wall';
 import { isTransientNavigationError } from './errors';
+import { lookupPlaceholderPath, replacePlaceholders } from '../../execution/placeholders';
+import { isSecretLeafKey } from '../../gate/credential-secrets';
 
-/** Build a stand-in `args` object for probe-time evaluation of a per-call
- *  js-eval prereq. The probe runs without a real caller scope (no execute()
- *  payload exists at save time), so each declared key is bound to a benign
- *  string placeholder. The expression gets to run end-to-end — proving the
- *  signer is reachable and returns a value matching `return_shape` — without
- *  requiring fixture data per-prereq. The shape is the same shape the runtime
- *  hands the expression at execute time: `{<key>: <value>}`. */
-function stubArgsForProbe(template: Record<string, unknown>): Record<string, unknown> {
-  const stub: Record<string, unknown> = {};
-  for (const key of Object.keys(template)) {
-    stub[key] = '__klura_probe_stub__';
+const PROBE_ARG_STUB = '__klura_probe_stub__';
+
+/** Recursively replace structurally secret-shaped fields with a benign
+ *  stand-in before caller data enters the probe page. Save-time probing only
+ *  needs a representative read input; it must never replay credentials merely
+ *  to validate an expression. */
+function sanitizeGroundedProbeValue(value: unknown, path: string): unknown {
+  if (isSecretLeafKey(path)) return PROBE_ARG_STUB;
+  if (value === null || typeof value === 'string' || typeof value === 'number') return value;
+  if (typeof value === 'boolean') return value;
+  if (Array.isArray(value)) {
+    return value.map((entry, index) =>
+      sanitizeGroundedProbeValue(entry, `${path}[${String(index)}]`),
+    );
   }
-  return stub;
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      const childPath = path.length > 0 ? `${path}.${key}` : key;
+      out[key] = sanitizeGroundedProbeValue(entry, childPath);
+    }
+    return out;
+  }
+  return PROBE_ARG_STUB;
+}
+
+/** Resolve a per-call `args_template` against inputs already grounded in the
+ *  save session. Missing placeholders retain the safe stand-in. This mirrors
+ *  execute-time interpolation for caller values while deliberately leaving
+ *  password-manager placeholders unresolved and replacing secret-shaped
+ *  source/output fields with stand-ins. The resulting object is ephemeral:
+ *  it is handed directly to `evaluateExpression` and is never persisted or
+ *  included in a rejection message. */
+function argsForProbe(
+  template: Record<string, unknown>,
+  groundedInputs: Record<string, unknown>,
+): Record<string, unknown> {
+  const serialized = JSON.stringify(template);
+  const resolved = replacePlaceholders(serialized, (path) => {
+    const raw = lookupPlaceholderPath(groundedInputs, path);
+    const safe = raw === undefined ? PROBE_ARG_STUB : sanitizeGroundedProbeValue(raw, path);
+    const asString = typeof safe === 'string' ? safe : JSON.stringify(safe);
+    return JSON.stringify(asString).slice(1, -1);
+  });
+  return sanitizeGroundedProbeValue(JSON.parse(resolved), '') as Record<string, unknown>;
 }
 
 /** Compare two URLs by origin. Both must parse as valid URLs and resolve to
@@ -109,6 +143,7 @@ export async function probeOneJsEvalPrereq(
   session: Session,
   prereq: JsEvalPrereq,
   warnings: string[],
+  groundedInputs: Record<string, unknown> = {},
 ): Promise<void> {
   // Retry-once on transient context-destroyed errors. Observed failure mode
   // (2026-04-21 wiki edit flow): page finishes async rehydration after
@@ -119,6 +154,9 @@ export async function probeOneJsEvalPrereq(
   // rethrow carries the real error.
   let lastErr: unknown;
   let raw: unknown;
+  const probeArgs = prereq.args_template
+    ? argsForProbe(prereq.args_template, groundedInputs)
+    : undefined;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       // Reuse the session's existing page when its origin already matches the
@@ -168,7 +206,7 @@ export async function probeOneJsEvalPrereq(
     try {
       raw = await driver.evaluateExpression(session, prereq.expression, {
         timeoutMs: Math.min(prereq.timeout_ms, JS_EVAL_TIMEOUT_HARD_CAP_MS),
-        ...(prereq.args_template ? { args: stubArgsForProbe(prereq.args_template) } : {}),
+        ...(probeArgs ? { args: probeArgs } : {}),
         ...(prereq.frame ? { frame: prereq.frame } : {}),
       });
       lastErr = undefined;
@@ -216,7 +254,7 @@ export async function probeOneJsEvalPrereq(
           try {
             raw = await driver.evaluateExpression(session, prereq.expression, {
               timeoutMs: Math.min(prereq.timeout_ms, JS_EVAL_TIMEOUT_HARD_CAP_MS),
-              ...(prereq.args_template ? { args: stubArgsForProbe(prereq.args_template) } : {}),
+              ...(probeArgs ? { args: probeArgs } : {}),
               ...(prereq.frame ? { frame: prereq.frame } : {}),
             });
             lastErr = undefined;

@@ -27,12 +27,19 @@ export interface StrategyResponseLike {
   extract?: unknown;
 }
 
+/** Return the non-empty `response.from` binding, or null when it is absent. */
+export function responseFromBinding(
+  strategy: { response?: StrategyResponseLike } | null | undefined,
+): string | null {
+  const from = strategy?.response?.from;
+  return typeof from === 'string' && from.length > 0 ? from : null;
+}
+
 /** True if the strategy's `response.from` is set and non-empty. */
 export function hasResponseFrom(
   strategy: { response?: StrategyResponseLike } | null | undefined,
 ): boolean {
-  const from = strategy?.response?.from;
-  return typeof from === 'string' && from.length > 0;
+  return responseFromBinding(strategy) !== null;
 }
 
 /** Resolve `strategy.response.from` against the prereq-result map and return

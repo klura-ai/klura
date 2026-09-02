@@ -32,6 +32,13 @@ import type { ExecuteResult, FetchStrategy, Prerequisite, RequestStrategy, AnyPo
 import type { TokenCache } from '../strategies/tokens';
 import { resolveGenerated } from '../strategies/generators';
 import { applyResponseFrom, hasResponseFrom } from './response-from';
+import {
+  acquireLocalOriginPermit,
+  LocalRequestTimeoutError,
+  localTrafficPolicyForUrl,
+  localRequestTimeoutMs,
+} from './local-traffic';
+import { OriginSchedulerError, type SchedulerCompletionV1 } from './origin-scheduler';
 
 // Wraps the graduation-layer counter bump with the side-effect of rewriting the
 // saved strategy from `fetch` to `page-script` when the threshold crosses. This
@@ -162,6 +169,134 @@ function buildNodeHeaders(
   return out;
 }
 
+interface AdmittedNodeResponse {
+  response: Response;
+  release(completion: SchedulerCompletionV1): void;
+  timed_out(): boolean;
+}
+
+async function fetchWithOriginAdmission(
+  url: string,
+  workloadId: string,
+  init: RequestInit,
+): Promise<AdmittedNodeResponse> {
+  let currentUrl = url;
+  let currentInit: RequestInit = { ...init, redirect: 'manual' };
+  let redirectHops = 0;
+  for (;;) {
+    const admitted = await fetchOneWithOriginAdmission(currentUrl, workloadId, currentInit);
+    const response = admitted.response;
+    if (!isRedirectResponse(response.status)) return admitted;
+
+    const maxRedirectHops = localTrafficPolicyForUrl(currentUrl).max_redirect_hops;
+    if (redirectHops >= maxRedirectHops) {
+      await discardRedirectResponse(admitted);
+      throw new LocalRedirectError(`redirect limit of ${maxRedirectHops} hops is exhausted`);
+    }
+    const location = response.headers.get('location');
+    if (!location) return admitted;
+
+    let nextUrl: string;
+    try {
+      nextUrl = new URL(location, currentUrl).toString();
+    } catch {
+      await discardRedirectResponse(admitted);
+      throw new LocalRedirectError('redirect response has an invalid Location header');
+    }
+    await discardRedirectResponse(admitted);
+    currentInit = redirectedRequestInit(currentInit, currentUrl, nextUrl, response.status);
+    currentUrl = nextUrl;
+    redirectHops += 1;
+  }
+}
+
+async function fetchOneWithOriginAdmission(
+  url: string,
+  workloadId: string,
+  init: RequestInit,
+): Promise<AdmittedNodeResponse> {
+  const permit = await acquireLocalOriginPermit(url, workloadId);
+  const timeoutMs = localRequestTimeoutMs();
+  const deadline = new AbortController();
+  const timer = setTimeout(() => {
+    deadline.abort();
+  }, timeoutMs);
+  const signal = init.signal ? AbortSignal.any([init.signal, deadline.signal]) : deadline.signal;
+  try {
+    const response = await fetch(url, { ...init, signal });
+    let released = false;
+    return {
+      response,
+      release(completion): void {
+        if (released) return;
+        released = true;
+        clearTimeout(timer);
+        permit.release(deadline.signal.aborted ? 'transient_failure' : completion);
+      },
+      timed_out(): boolean {
+        return deadline.signal.aborted;
+      },
+    };
+  } catch (error) {
+    clearTimeout(timer);
+    permit.release('transient_failure');
+    if (deadline.signal.aborted) throw new LocalRequestTimeoutError(timeoutMs);
+    throw error;
+  }
+}
+
+async function discardRedirectResponse(admitted: AdmittedNodeResponse): Promise<void> {
+  try {
+    await admitted.response.body?.cancel();
+  } catch {
+    // The admission still releases below. The fetch deadline remains armed
+    // until that point, so a stalled body cannot make the permit reusable.
+  } finally {
+    admitted.release(admitted.timed_out() ? 'transient_failure' : 'success');
+  }
+  if (admitted.timed_out()) throw new LocalRequestTimeoutError(localRequestTimeoutMs());
+}
+
+function isRedirectResponse(status: number): boolean {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+}
+
+function redirectedRequestInit(
+  init: RequestInit,
+  currentUrl: string,
+  nextUrl: string,
+  status: number,
+): RequestInit {
+  const headers = new Headers(init.headers);
+  let method = (init.method ?? 'GET').toUpperCase();
+  let body = init.body;
+  if (status === 303 || ((status === 301 || status === 302) && method === 'POST')) {
+    method = 'GET';
+    body = undefined;
+    headers.delete('content-type');
+    headers.delete('content-length');
+  }
+  if (new URL(currentUrl).origin !== new URL(nextUrl).origin) {
+    headers.delete('authorization');
+    headers.delete('cookie');
+    headers.delete('proxy-authorization');
+  }
+  return {
+    ...init,
+    method,
+    body,
+    headers: Object.fromEntries(headers.entries()),
+    redirect: 'manual',
+  };
+}
+
+class LocalRedirectError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LocalRedirectError';
+  }
+}
+
 interface FireNodeOptions {
   /** Override body serialization — used when an assisted synthetic strategy
    *  already has the body resolved. */
@@ -174,6 +309,7 @@ async function fireRequestFromNode(
   strategy: RequestStrategy,
   args: Record<string, unknown>,
   platform: string,
+  capability: string,
   options: FireNodeOptions = {},
 ): Promise<ExecuteResult> {
   const prepared = prepareRequest(strategy, args);
@@ -192,19 +328,15 @@ async function fireRequestFromNode(
     url,
   );
 
-  let response: Response;
+  let admitted: AdmittedNodeResponse;
   try {
-    response = await fetch(url, {
+    admitted = await fetchWithOriginAdmission(url, `${platform}/${capability}`, {
       method,
       headers,
       body: serializedBody,
-      // redirect: 'follow' is the Node fetch default — mirror what a browser
-      // does on a same-origin redirect chain. cross-origin redirects strip the
-      // Authorization header automatically, which matches the in-browser fetch
-      // path as well.
-      redirect: 'follow',
     });
   } catch (err) {
+    if (err instanceof OriginSchedulerError || err instanceof LocalRequestTimeoutError) throw err;
     const signal = classifyFetchThrow(err);
     if (signal) {
       throw new TransportFailureError(
@@ -222,59 +354,65 @@ async function fireRequestFromNode(
     };
   }
 
-  // Persist any Set-Cookie headers the response issued. `getSetCookie()` is the
-  // Node 20+ API that returns the individual values without splitting on commas
-  // inside Expires attribute values — the critical difference from
-  // `headers.get('set-cookie')`.
-  const getSetCookie = (response.headers as unknown as { getSetCookie?: () => string[] })
-    .getSetCookie;
-  if (typeof getSetCookie === 'function') {
-    const values = getSetCookie.call(response.headers);
-    if (Array.isArray(values) && values.length > 0) {
-      skills.writeStorageStateCookies(platform, values, url, options.identity);
-    }
-  }
-
-  const contentType = (response.headers.get('content-type') ?? '').toLowerCase();
-  let body: unknown;
+  const response = admitted.response;
   try {
-    const bodyText = await response.text();
-    if (bodyText.length === 0) {
-      body = null;
-    } else if (contentType.includes('application/json') || contentType.includes('+json')) {
-      try {
-        body = JSON.parse(bodyText);
-      } catch {
-        // Content-Type lied — return the raw text so the caller sees what
-        // actually came back instead of an opaque parse error.
+    // Persist any Set-Cookie headers the response issued. `getSetCookie()` is the
+    // Node 20+ API that returns the individual values without splitting on commas
+    // inside Expires attribute values — the critical difference from
+    // `headers.get('set-cookie')`.
+    const getSetCookie = (response.headers as unknown as { getSetCookie?: () => string[] })
+      .getSetCookie;
+    if (typeof getSetCookie === 'function') {
+      const values = getSetCookie.call(response.headers);
+      if (Array.isArray(values) && values.length > 0) {
+        skills.writeStorageStateCookies(platform, values, url, options.identity);
+      }
+    }
+
+    const contentType = (response.headers.get('content-type') ?? '').toLowerCase();
+    let body: unknown;
+    try {
+      const bodyText = await response.text();
+      if (bodyText.length === 0) {
+        body = null;
+      } else if (contentType.includes('application/json') || contentType.includes('+json')) {
+        try {
+          body = JSON.parse(bodyText);
+        } catch {
+          // Content-Type lied — return the raw text so the caller sees what
+          // actually came back instead of an opaque parse error.
+          body = bodyText;
+        }
+      } else {
         body = bodyText;
       }
-    } else {
-      body = bodyText;
+    } catch (err) {
+      if (admitted.timed_out()) throw new LocalRequestTimeoutError(localRequestTimeoutMs());
+      return {
+        status: response.status,
+        body: {
+          error: 'body_read_failed',
+          details: err instanceof Error ? err.message : String(err),
+        },
+      };
     }
-  } catch (err) {
+
+    const extracted = applyHtmlExtract(strategy.response, body);
+    if (!extracted.ok) {
+      return {
+        status: response.status,
+        body: { error: extracted.code, details: extracted.details },
+      };
+    }
+
     return {
       status: response.status,
-      body: {
-        error: 'body_read_failed',
-        details: err instanceof Error ? err.message : String(err),
-      },
+      body: extracted.body,
+      finalUrl: response.url,
     };
+  } finally {
+    admitted.release(response.status >= 500 ? 'transient_failure' : 'success');
   }
-
-  const extracted = applyHtmlExtract(strategy.response, body);
-  if (!extracted.ok) {
-    return {
-      status: response.status,
-      body: { error: extracted.code, details: extracted.details },
-    };
-  }
-
-  return {
-    status: response.status,
-    body: extracted.body,
-    finalUrl: response.url,
-  };
 }
 
 // Fetch a prerequisite URL and run the extractors against its response body.
@@ -282,10 +420,12 @@ async function fireRequestFromNode(
 // dot-path — shares the existing extractByPath helper). The shared cookie jar
 // is read before and persisted after so auth cookies rotate correctly across
 // prereq + final-call sequences.
+// eslint-disable-next-line sonarjs/cognitive-complexity
 async function fetchPrereqFromNode(
   prereq: Prerequisite,
   args: Record<string, unknown>,
   platform: string,
+  capability: string,
   identity?: string,
 ): Promise<Record<string, string>> {
   if (!prereq.url) {
@@ -312,13 +452,12 @@ async function fetchPrereqFromNode(
       platform,
       resolvedUrl,
     );
-    let response: Response;
+    let admitted: AdmittedNodeResponse;
     try {
-      response = await fetch(resolvedUrl, {
+      admitted = await fetchWithOriginAdmission(resolvedUrl, `${platform}/${capability}`, {
         method: httpMethod,
         headers,
         body: bodyObj ? JSON.stringify(bodyObj) : undefined,
-        redirect: 'follow',
       });
     } catch (err) {
       const signal = classifyFetchThrow(err);
@@ -334,44 +473,50 @@ async function fetchPrereqFromNode(
         { cause: err },
       );
     }
-    const getSetCookie = (response.headers as unknown as { getSetCookie?: () => string[] })
-      .getSetCookie;
-    if (typeof getSetCookie === 'function') {
-      const values = getSetCookie.call(response.headers);
-      if (Array.isArray(values) && values.length > 0) {
-        skills.writeStorageStateCookies(platform, values, resolvedUrl, identity);
-      }
-    }
-    if (response.status < 200 || response.status >= 300) {
-      throw new Error(
-        `prereq "${prereq.name}" (fetch-extract): HTTP ${response.status} from ${resolvedUrl}`,
-      );
-    }
-    let json: unknown;
+    const response = admitted.response;
     try {
-      json = await response.json();
-    } catch (err) {
-      throw new Error(
-        `prereq "${prereq.name}" (fetch-extract): response was not JSON: ${err instanceof Error ? err.message : String(err)}`,
-        { cause: err },
-      );
-    }
-    const tokens: Record<string, string> = {};
-    for (const [varName, rawPath] of Object.entries(prereq.vars)) {
-      if (typeof rawPath !== 'string' || rawPath.length === 0) {
+      const getSetCookie = (response.headers as unknown as { getSetCookie?: () => string[] })
+        .getSetCookie;
+      if (typeof getSetCookie === 'function') {
+        const values = getSetCookie.call(response.headers);
+        if (Array.isArray(values) && values.length > 0) {
+          skills.writeStorageStateCookies(platform, values, resolvedUrl, identity);
+        }
+      }
+      if (response.status < 200 || response.status >= 300) {
         throw new Error(
-          `prereq "${prereq.name}" (fetch-extract): var "${varName}" must be a non-empty dot-path string`,
+          `prereq "${prereq.name}" (fetch-extract): HTTP ${response.status} from ${resolvedUrl}`,
         );
       }
-      const value = extractByPath(json, rawPath);
-      if (value === undefined) {
+      let json: unknown;
+      try {
+        json = await response.json();
+      } catch (err) {
+        if (admitted.timed_out()) throw new LocalRequestTimeoutError(localRequestTimeoutMs());
         throw new Error(
-          `prereq "${prereq.name}" (fetch-extract): var "${varName}" path "${rawPath}" did not resolve in response body`,
+          `prereq "${prereq.name}" (fetch-extract): response was not JSON: ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
         );
       }
-      tokens[varName] = value;
+      const tokens: Record<string, string> = {};
+      for (const [varName, rawPath] of Object.entries(prereq.vars)) {
+        if (typeof rawPath !== 'string' || rawPath.length === 0) {
+          throw new Error(
+            `prereq "${prereq.name}" (fetch-extract): var "${varName}" must be a non-empty dot-path string`,
+          );
+        }
+        const value = extractByPath(json, rawPath);
+        if (value === undefined) {
+          throw new Error(
+            `prereq "${prereq.name}" (fetch-extract): var "${varName}" path "${rawPath}" did not resolve in response body`,
+          );
+        }
+        tokens[varName] = value;
+      }
+      return tokens;
+    } finally {
+      admitted.release(response.status >= 500 ? 'transient_failure' : 'success');
     }
-    return tokens;
   }
 
   // page-extract: HTML fetch + cheerio selector.
@@ -395,9 +540,12 @@ async function fetchPrereqFromNode(
   // what a real browser navigation sends.
   headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
 
-  let response: Response;
+  let admitted: AdmittedNodeResponse;
   try {
-    response = await fetch(resolvedUrl, { method: 'GET', headers, redirect: 'follow' });
+    admitted = await fetchWithOriginAdmission(resolvedUrl, `${platform}/${capability}`, {
+      method: 'GET',
+      headers,
+    });
   } catch (err) {
     const signal = classifyFetchThrow(err);
     if (signal) {
@@ -412,70 +560,83 @@ async function fetchPrereqFromNode(
       { cause: err },
     );
   }
-
-  const getSetCookie = (response.headers as unknown as { getSetCookie?: () => string[] })
-    .getSetCookie;
-  if (typeof getSetCookie === 'function') {
-    const values = getSetCookie.call(response.headers);
-    if (Array.isArray(values) && values.length > 0) {
-      skills.writeStorageStateCookies(platform, values, resolvedUrl, identity);
-    }
-  }
-
-  if (response.status < 200 || response.status >= 300) {
-    throw new Error(
-      `prereq "${prereq.name}" (page-extract): HTTP ${response.status} from ${resolvedUrl}`,
-    );
-  }
-
-  const html = await response.text();
-  // Build the cheerio selector spec from prereq.vars shape.
-  const selectorSpec: Record<string, { selector: string; attr?: string }> = {};
-  for (const [varName, rawSpec] of Object.entries(prereq.vars)) {
-    if (!rawSpec || typeof rawSpec !== 'object') {
-      throw new Error(`prereq "${prereq.name}": var "${varName}" must be {selector, attr?}`);
-    }
-    const spec = rawSpec as { selector?: unknown; attr?: unknown };
-    if (typeof spec.selector !== 'string' || spec.selector.length === 0) {
-      throw new Error(`prereq "${prereq.name}": var "${varName}" requires a "selector" string`);
-    }
-    const specOut: { selector: string; attr?: string } = { selector: spec.selector };
-    if (typeof spec.attr === 'string' && spec.attr.length > 0) specOut.attr = spec.attr;
-    selectorSpec[varName] = specOut;
-  }
-
-  let extracted: Record<string, unknown>;
+  const response = admitted.response;
   try {
-    extracted = extractFromHtml(html, selectorSpec);
-  } catch (err) {
-    throw new Error(
-      `prereq "${prereq.name}" (page-extract): cheerio parse failed: ${err instanceof Error ? err.message : String(err)}`,
-      { cause: err },
-    );
-  }
-
-  const tokens: Record<string, string> = {};
-  for (const [varName, value] of Object.entries(extracted)) {
-    let stringValue: string;
-    if (typeof value === 'string') {
-      stringValue = value;
-    } else if (Array.isArray(value)) {
-      stringValue = value.map((v) => (typeof v === 'string' ? v : '')).join(',');
-    } else {
-      stringValue = '';
+    const getSetCookie = (response.headers as unknown as { getSetCookie?: () => string[] })
+      .getSetCookie;
+    if (typeof getSetCookie === 'function') {
+      const values = getSetCookie.call(response.headers);
+      if (Array.isArray(values) && values.length > 0) {
+        skills.writeStorageStateCookies(platform, values, resolvedUrl, identity);
+      }
     }
-    if (stringValue === '') {
+
+    if (response.status < 200 || response.status >= 300) {
       throw new Error(
-        `prereq "${prereq.name}" (page-extract): var "${varName}" selector ` +
-          `"${selectorSpec[varName]?.selector}" did not resolve on ${resolvedUrl}. ` +
-          `Either the selector is wrong, the token isn't in the server-shipped HTML ` +
-          `(JS-generated — switch the strategy tier to page-script), or the page gated ` +
-          `behind an auth wall.`,
+        `prereq "${prereq.name}" (page-extract): HTTP ${response.status} from ${resolvedUrl}`,
       );
     }
-    tokens[varName] = stringValue;
+
+    let html: string;
+    try {
+      html = await response.text();
+    } catch (err) {
+      if (admitted.timed_out()) throw new LocalRequestTimeoutError(localRequestTimeoutMs());
+      throw new Error(
+        `prereq "${prereq.name}" (page-extract): response body could not be read: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err },
+      );
+    }
+    // Build the cheerio selector spec from prereq.vars shape.
+    const selectorSpec: Record<string, { selector: string; attr?: string }> = {};
+    for (const [varName, rawSpec] of Object.entries(prereq.vars)) {
+      if (!rawSpec || typeof rawSpec !== 'object') {
+        throw new Error(`prereq "${prereq.name}": var "${varName}" must be {selector, attr?}`);
+      }
+      const spec = rawSpec as { selector?: unknown; attr?: unknown };
+      if (typeof spec.selector !== 'string' || spec.selector.length === 0) {
+        throw new Error(`prereq "${prereq.name}": var "${varName}" requires a "selector" string`);
+      }
+      const specOut: { selector: string; attr?: string } = { selector: spec.selector };
+      if (typeof spec.attr === 'string' && spec.attr.length > 0) specOut.attr = spec.attr;
+      selectorSpec[varName] = specOut;
+    }
+
+    let extracted: Record<string, unknown>;
+    try {
+      extracted = extractFromHtml(html, selectorSpec);
+    } catch (err) {
+      throw new Error(
+        `prereq "${prereq.name}" (page-extract): cheerio parse failed: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err },
+      );
+    }
+
+    const tokens: Record<string, string> = {};
+    for (const [varName, value] of Object.entries(extracted)) {
+      let stringValue: string;
+      if (typeof value === 'string') {
+        stringValue = value;
+      } else if (Array.isArray(value)) {
+        stringValue = value.map((v) => (typeof v === 'string' ? v : '')).join(',');
+      } else {
+        stringValue = '';
+      }
+      if (stringValue === '') {
+        throw new Error(
+          `prereq "${prereq.name}" (page-extract): var "${varName}" selector ` +
+            `"${selectorSpec[varName]?.selector}" did not resolve on ${resolvedUrl}. ` +
+            `Either the selector is wrong, the token isn't in the server-shipped HTML ` +
+            `(JS-generated — switch the strategy tier to page-script), or the page gated ` +
+            `behind an auth wall.`,
+        );
+      }
+      tokens[varName] = stringValue;
+    }
+    return tokens;
+  } finally {
+    admitted.release(response.status >= 500 ? 'transient_failure' : 'success');
   }
-  return tokens;
 }
 
 // --- fetch executor (Node transport) --- Runs prerequisites and the final
@@ -508,6 +669,7 @@ export async function executeFetchNode(
     strategy.prerequisites,
     args,
     platform,
+    capability,
     tokenCache,
     pool,
     depth,
@@ -569,13 +731,14 @@ export async function executeFetchNode(
     // with a search-results row-group extract.
     response: strategy.response,
   };
-  return await fireRequestFromNode(fireStrategy, mergedArgs, platform, { identity });
+  return await fireRequestFromNode(fireStrategy, mergedArgs, platform, capability, { identity });
 }
 
 export async function resolveNodeCompatiblePrereqs(
   prerequisites: Prerequisite[] | undefined,
   args: Record<string, unknown>,
   platform: string,
+  capability: string,
   tokenCache: TokenCache | null,
   pool: AnyPool | null,
   depth: number,
@@ -623,6 +786,7 @@ export async function resolveNodeCompatiblePrereqs(
       prereq,
       { ...tokens, ...args },
       platform,
+      capability,
       identity,
     );
     Object.assign(tokens, extractedTokens);

@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'klura-daemon-ip-'));
 process.env.KLURA_HOME = TMP;
@@ -24,15 +25,23 @@ fs.writeFileSync(
 );
 
 const { startDaemon, sendToDaemon } = await import('../dist/daemon.js');
+const require = createRequire(import.meta.url);
+const FACTORY_INDEX = path.resolve(
+  new URL(import.meta.url).pathname,
+  '..',
+  '..',
+  'dist',
+  'index.js',
+);
 
 // Stub process.exit BEFORE startDaemon so the internal shutdown() cleanup
 // runs to completion without killing the test process.
 const realExit = process.exit;
 let stubExitCalledWith = null;
-process.exit = ((code) => {
+process.exit = (code) => {
   stubExitCalledWith = code ?? 0;
   // Don't actually exit — let the test runner continue.
-});
+};
 
 // Stub the SIGTERM/SIGINT handlers too — startDaemon registers them, but
 // when the test runner sends them later we don't want to double-handle.
@@ -47,7 +56,9 @@ test.after(async () => {
   // stub; that's fine, the test process keeps running until node's runner
   // finishes and exits naturally.
   process.exit = realExit;
-  try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {}
+  try {
+    fs.rmSync(TMP, { recursive: true, force: true });
+  } catch {}
   // Remove all SIGTERM/SIGINT handlers startDaemon installed so they don't
   // fire later.
   process.removeAllListeners('SIGTERM');
@@ -64,6 +75,14 @@ test('daemon boots and responds to /status', async () => {
   const result = await sendToDaemon('GET', '/status');
   assert.strictEqual(typeof result, 'object');
   assert.strictEqual(typeof result.uptime, 'number');
+  assert.strictEqual(require.cache[FACTORY_INDEX], undefined);
+});
+
+test('consumer daemon route rejects malformed input without loading factory state', async () => {
+  const result = await sendToDaemon('POST', '/consumer/call', { unexpected: true });
+  assert.strictEqual(typeof result, 'object');
+  assert.ok(result.error);
+  assert.strictEqual(require.cache[FACTORY_INDEX], undefined);
 });
 
 test('handleRequest error path: malformed body returns 500', async () => {

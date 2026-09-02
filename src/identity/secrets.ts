@@ -1,11 +1,7 @@
 import { execSync } from 'child_process';
 import { asNonEmptyBoundedString, ValidationError } from '../validators';
 import { loadConfig, updateSecrets } from '../config/handler';
-
-// Scheme names are used as map keys and as substrings of the interpolated
-// {{secret:<scheme>:<ref>}} placeholder. Tight regex so we can't accidentally
-// end up with `{{secret:foo bar:x}}` that parses weird downstream.
-const SCHEME_RE = /^[a-zA-Z0-9_-]+$/;
+import { isValidSecretReferenceScheme, replaceSecretReferences } from './secret-reference';
 
 // Shell metacharacters forbidden in resolver command templates. We build the
 // command via string replace, so anything that gives the shell an opportunity
@@ -24,7 +20,7 @@ export function listSecretResolvers(): Record<string, string> {
 export function addSecretResolver(scheme: string, command: string): void {
   try {
     asNonEmptyBoundedString(scheme, 'scheme', 64);
-    if (!SCHEME_RE.test(scheme)) {
+    if (!isValidSecretReferenceScheme(scheme)) {
       throw new ValidationError(
         'scheme',
         `= ${JSON.stringify(scheme)} must match /^[a-zA-Z0-9_-]+$/ (letters, digits, dash, underscore)`,
@@ -103,10 +99,5 @@ export function resolveSecret(scheme: string, ref: string): string {
  * the string with secrets substituted.
  */
 export function resolveSecrets(template: string): string {
-  return template.replace(
-    /\{\{secret:(\w+):([^}]+)\}\}/g,
-    (_match, scheme: string, ref: string) => {
-      return resolveSecret(scheme, ref);
-    },
-  );
+  return replaceSecretReferences(template, ({ scheme, ref }) => resolveSecret(scheme, ref));
 }

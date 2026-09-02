@@ -4,6 +4,10 @@ import { asPlatformSlug } from '../validators';
 import * as skills from '../strategies/skills';
 import { execute as executeStrategy } from '../execution';
 import type { ExecuteResult } from '../execution/types';
+import {
+  classifyFactoryExecutionResult,
+  factoryExecutionWasAccepted,
+} from '../execution/result-classification';
 import { pickProbeUrl, probeAuthState } from '../auth/probe';
 import { classifyAutoExecDiagnosis, applyDiagnosisToBody } from '../execution';
 import { invokeCheckpointAndGate } from '../checkpoints';
@@ -248,6 +252,16 @@ export interface StartSessionResult {
   a11yTree: string;
   a11y_total_chars: number;
   a11y_truncated: boolean;
+  /**
+   * Present only when the browser's native accessibility snapshot was
+   * degraded or unavailable. A `static_dom` source means the returned tree is
+   * the inert serialized-DOM fallback; `unavailable` means the session remains
+   * live but `a11yTree` is empty and callers should use another read surface.
+   */
+  a11y_snapshot?: {
+    source: 'static_dom' | 'unavailable';
+    warning: string;
+  };
   url: string;
   /**
    * Discovery artifacts on disk for this platform, keyed by capability name.
@@ -308,9 +322,9 @@ export interface StartSessionResult {
   auto_execute_reason?: string;
   /**
    * True when the FSM has reached terminal{closed} as part of this start_session
-   * call — fires after a graph:'execute' session whose saved strategy returned
-   * ok. Capability is fully discharged for this turn; no LIFT, no audit, no
-   * additional save. Agents should end their turn after relaying the result.
+   * call — fires after a graph:'execute' session whose saved strategy completed
+   * with explicit `body.ok:true` or transport-only HTTP 2xx. The latter is not
+   * a semantic-success assertion; agents must inspect the returned body.
    */
   session_terminal?: boolean;
   /**
@@ -1297,16 +1311,14 @@ export function dispatchExecuteGraphOutcome(
   const er = result.execute_result;
   const body =
     er?.body && typeof er.body === 'object' ? (er.body as Record<string, unknown>) : null;
-  // Success: explicit body.ok flag OR HTTP 2xx status. Same dual signal used by
-  // the unmissable hint above — github's /_graphql returns {data, errors:[]}
-  // without a top-level ok field, so body.ok alone misclassifies a successful
-  // GraphQL mutation as failure (which then re-routes through the rediscover
-  // gate and leaves the FSM in execute/triage instead of terminal{closed}).
-  const okBody = body && body.ok === true;
-  const okStatus = typeof er?.status === 'number' && er.status >= 200 && er.status < 300;
-  const ok = okBody || okStatus;
+  // A boolean body.ok is an explicit local-factory signal and therefore wins
+  // over HTTP status. Without it, 2xx means only that transport completed; the
+  // agent must inspect the body because local strategies do not carry the
+  // signed outcome contracts used by public packages.
+  const classification = classifyFactoryExecutionResult(er);
+  const accepted = factoryExecutionWasAccepted(classification);
 
-  if (result.executed === true && ok) {
+  if (result.executed === true && accepted) {
     dispatch(session, { kind: 'execute_succeeded' });
     return;
   }
@@ -1355,6 +1367,7 @@ export function dispatchExecuteGraphOutcome(
       platform,
       capability,
       error: errorSummary,
+      result_classification: classification,
       ...(diagnosisKind ? { diagnosis_kind: diagnosisKind } : {}),
     },
   });
@@ -1364,7 +1377,7 @@ export function dispatchExecuteGraphOutcome(
  * Cap the `body` field of an in-flight `execute_result` to the agent-runtime
  * output budget. Three body shapes are handled, each preserving the agent's
  * primary decision signals (the surrounding `status`, top-level
- * `body.ok` for object bodies, and `_hint` siblings):
+ * `body.ok` as a `body_ok` sibling for object bodies, and `_hint` siblings):
  *
  *  - object body: JSON.stringify into a preview slice + sibling
  *    `body_preview` / `body_total_chars` / `body_truncated`; the original
@@ -1378,19 +1391,6 @@ export function dispatchExecuteGraphOutcome(
  * still attach a huge `body.original_body` (raw response captured for
  * diagnosis) that needs the same cap.
  */
-/** Did an execute_result actually succeed? body.ok === true OR a 2xx status.
- *  Same dual signal dispatchExecuteGraphOutcome uses. Tolerant of the loose
- *  shape on result.execute_result. */
-function executeResultLooksOk(er: { body?: unknown; status?: unknown } | undefined): boolean {
-  if (!er) return false;
-  const okBody =
-    typeof er.body === 'object' &&
-    er.body !== null &&
-    (er.body as Record<string, unknown>).ok === true;
-  const okStatus = typeof er.status === 'number' && er.status >= 200 && er.status < 300;
-  return okBody || okStatus;
-}
-
 export function compactExecuteResultBody(er: Record<string, unknown>): void {
   const body = er.body;
   if (body === null || body === undefined) return;
@@ -1399,8 +1399,12 @@ export function compactExecuteResultBody(er: Record<string, unknown>): void {
   // a mid-execute checkpoint (e.g. recorded_step_failed) must reach the agent
   // and downstream tooling even when the body is replaced by a marker string.
   if (typeof body === 'object' && !Array.isArray(body)) {
-    const cp = (body as Record<string, unknown>)._checkpoint;
+    const bodyObject = body as Record<string, unknown>;
+    const cp = bodyObject._checkpoint;
     if (cp !== undefined && er._checkpoint === undefined) er._checkpoint = cp;
+    if (typeof bodyObject.ok === 'boolean' && er.body_ok === undefined) {
+      er.body_ok = bodyObject.ok;
+    }
   }
 
   if (typeof body === 'string') {
@@ -1449,9 +1453,29 @@ export function compactExecuteResultBody(er: Record<string, unknown>): void {
   }
 }
 
-function applyAutoExecuteHint(
+function describeFactoryExecutionResult(
+  classification: ReturnType<typeof classifyFactoryExecutionResult>,
+  status: number,
+): string {
+  switch (classification) {
+    case 'explicit_success':
+      return `execute_result.body.ok === true — the local strategy explicitly reports success.`;
+    case 'transport_accepted':
+      return (
+        `execute_result.status === ${status} (HTTP 2xx) — transport completed, but factory ` +
+        `execution has no declared semantic outcome contract. Inspect execute_result.body before reporting success.`
+      );
+    case 'explicit_failure':
+      return `execute_result.body.ok === false — the local strategy explicitly reports failure.`;
+    case 'transport_failure':
+    case 'not_run':
+      return `execute_result.status === ${status} — transport did not complete successfully.`;
+  }
+}
+
+export function applyAutoExecuteHint(
   result: StartSessionResult,
-  session: { graph?: string },
+  session: { graph?: string; phase?: string; status?: string },
   opts: StartSessionOptions,
 ): void {
   if (result.executed === false && result.auto_execute_reason) {
@@ -1462,19 +1486,8 @@ function applyAutoExecuteHint(
 
   const er = result.execute_result;
   const tier = er.tier ?? 'unknown';
-  // Success signal for the unmissable hint. Two complementary checks:
-  //   - body.ok === true: explicit success flag from websocket sends and
-  //     strategies that wrap their response in {ok, ...}.
-  //   - HTTP 2xx status: covers raw page-script/fetch responses (GraphQL,
-  //     REST, etc.) whose body shape is the server's, not klura's. github's
-  //     /_graphql returns {data, errors:[]} with no top-level ok — body.ok
-  //     alone misclassifies that as a partial failure.
-  // Either signal counts as "the request landed and the server accepted it."
-  const okBody = Boolean(
-    er.body && typeof er.body === 'object' && (er.body as { ok?: unknown }).ok === true,
-  );
-  const okStatus = er.status >= 200 && er.status < 300;
-  const ok: boolean = okBody || okStatus;
+  const classification = classifyFactoryExecutionResult(er);
+  const accepted = factoryExecutionWasAccepted(classification);
   const fired = (() => {
     if (!er.body || typeof er.body !== 'object') return [];
     const f = (er.body as { interrupts_fired?: unknown }).interrupts_fired;
@@ -1482,39 +1495,55 @@ function applyAutoExecuteHint(
   })();
   const firedNote =
     fired.length > 0 ? ` Interrupts fired: ${fired.map((n) => JSON.stringify(n)).join(', ')}.` : '';
-  const successNote = okBody
-    ? `execute_result.body.ok === true — the strategy claims success.`
-    : `execute_result.status === ${er.status} (HTTP 2xx) — the request landed and the server accepted it.`;
+  const resultNote = describeFactoryExecutionResult(classification, er.status);
   const head = `AUTO-EXECUTED the saved ${tier} strategy for ${opts.platform}/${opts.capability}.`;
 
-  if (ok && session.graph === 'execute') {
-    // graph:'execute' + saved-strategy ok → FSM is in terminal{closed}.
-    // Capability is fully discharged for this turn. Agent should call
-    // end_drive and end the turn — no LIFT, no save, no re-drive.
+  if (accepted && session.graph === 'execute') {
+    // graph:'execute' + an accepted result → FSM is in terminal{closed}. A
+    // transport-only result still requires the agent to interpret the body;
+    // signed package outcome contracts are evaluated on the consumer path.
     result.session_terminal = true;
-    result._hint =
-      `${head} ${successNote}${firedNote}` +
-      ` SESSION IS TERMINAL. The capability is fully discharged for this turn. ` +
-      `Call end_drive({session_id: "${result.sessionId}"}) and end your text turn — that's it. ` +
-      `Do NOT open another start_session for ${opts.platform}/${opts.capability}. ` +
-      `Do NOT call save_strategy — a working strategy already exists on disk. ` +
-      `Do NOT attempt to "lift to a better tier" — the saved tier was chosen for the actual signal source ` +
-      `(e.g. page-script when the auth signal lives in a meta tag set by JS). Re-discovery is only ` +
-      `appropriate when execute_result indicates a real failure on a future call.`;
+    if (classification === 'transport_accepted') {
+      result._hint =
+        `${head} ${resultNote}${firedNote}` +
+        ` The execute session is terminal because the saved request completed. ` +
+        `If the typed body represents a failure or partial result, do NOT report success; open a discovery session and repair the strategy. ` +
+        `Otherwise call end_drive({session_id: "${result.sessionId}"}) and relay the body.`;
+    } else {
+      result._hint =
+        `${head} ${resultNote}${firedNote}` +
+        ` SESSION IS TERMINAL. The capability explicitly succeeded for this turn. ` +
+        `Call end_drive({session_id: "${result.sessionId}"}) and relay the result. ` +
+        `Re-discovery is appropriate only when a later execute_result explicitly fails.`;
+    }
     return;
   }
-  if (ok) {
-    // Non-execute graph (discover/map) auto-executed because args matched.
-    // Strategy succeeded but the session is still in DRIVE.
+  if (accepted) {
+    // Non-execute graph (discover/map) auto-executed because args matched. A
+    // transport-only body stays an agent judgment rather than a runtime claim.
     result._hint =
-      `${head} ${successNote}${firedNote}` +
-      ` Do NOT re-drive the UI manually unless the execute_result indicates failure — if the on-screen ` +
-      `state looks wrong despite a successful execute, the saved strategy has a bug; fix it via patch_step ` +
-      `or save a new one, don't ad-hoc-redo the flow.`;
+      `${head} ${resultNote}${firedNote}` +
+      ` Inspect the body before deciding whether to end or repair; do not infer semantic success from HTTP status.`;
+    return;
+  }
+  if (session.graph === 'execute' && session.phase === 'triage' && session.status !== 'failed') {
+    result._hint =
+      `${head} ${resultNote}${firedNote}` +
+      ` SESSION REMAINS ACTIVE IN TRIAGE. Inspect the typed failure and the live page with read-only diagnostics; ` +
+      `do not infer the cause from the application-defined code alone. Submit a surface-bound triage plan, then ` +
+      `repair the saved fetch/page-script with update_strategy in lift (or use the recorded-step checkpoint flow when one is present).`;
+    return;
+  }
+  if (session.graph === 'execute' && session.status === 'failed') {
+    result.session_terminal = true;
+    result._hint =
+      `${head} ${resultNote}${firedNote}` +
+      ` SESSION IS TERMINAL because the failure was not structurally classified as repairable in place. ` +
+      `Follow any typed diagnosis or checkpoint in the response; otherwise open a discovery session to gather fresh evidence.`;
     return;
   }
   result._hint =
-    `${head} execute_result.body.ok is NOT true — the strategy may have partially failed.${firedNote}` +
+    `${head} ${resultNote}${firedNote}` +
     ` Inspect execute_result before driving the UI; if the saved strategy is broken, patch_step or ` +
     `save a new one rather than ad-hoc-redoing the flow.`;
 }
@@ -1544,6 +1573,64 @@ function recoverOrphanedCaptureJournals(): void {
   } catch {
     /* swallow */
   }
+}
+
+/**
+ * Accessibility is contextual output, not the browser session's lifecycle
+ * boundary. Keep a successfully-created, navigated session usable when both
+ * the native snapshot and the driver's fallback fail; callers can still use
+ * screenshots, targeted DOM reads, and js_eval against the live page.
+ */
+async function captureStartAccessibilityTree(
+  driver: ReturnType<typeof pool.driverFor>,
+  session: Session,
+): Promise<string> {
+  try {
+    return await driver.getAccessibilityTree(session);
+  } catch (error) {
+    if (session.accessibilitySnapshot?.source !== 'unavailable') {
+      const message = error instanceof Error ? error.message : String(error);
+      session.accessibilitySnapshot = {
+        source: 'unavailable',
+        at: Date.now(),
+        warning:
+          `The accessibility snapshot failed, but the browser session is still live. ` +
+          `Use get_screenshot, find_in_page, or js_eval to inspect the page. Failure: ${message}`,
+      };
+    }
+    return '';
+  }
+}
+
+function attachAccessibilitySnapshotDiagnostic(result: StartSessionResult, session: Session): void {
+  const snapshot = session.accessibilitySnapshot;
+  if (snapshot?.source !== 'static_dom' && snapshot?.source !== 'unavailable') return;
+  result.a11y_snapshot = {
+    source: snapshot.source,
+    warning:
+      snapshot.warning ?? 'The native accessibility snapshot was not available for this response.',
+  };
+}
+
+function compactAutoExecuteA11y(result: StartSessionResult, session: Session): void {
+  if (result.executed !== true || JSON.stringify(result).length <= MAX_TOOL_OUTPUT_CHARS) return;
+  const a11yChars = result.a11y_total_chars;
+  const classification = classifyFactoryExecutionResult(result.execute_result);
+  const fetchHint = `Fetch the full ${a11yChars}-char tree via get_a11y_tree({session_id: "${session.id}", page: 1}) if you need it.`;
+  switch (classification) {
+    case 'explicit_success':
+      result.a11yTree = `<dropped: auto-exec explicitly succeeded; the page UI isn't load-bearing here. ${fetchHint}>`;
+      break;
+    case 'transport_accepted':
+      result.a11yTree = `<dropped: auto-exec transport completed; inspect execute_result.body for the semantic outcome. Page UI dropped for budget. ${fetchHint}>`;
+      break;
+    case 'explicit_failure':
+    case 'transport_failure':
+    case 'not_run':
+      result.a11yTree = `<dropped: auto-exec ran but failed — read execute_result for the outcome. Page UI dropped for budget. ${fetchHint}>`;
+      break;
+  }
+  result.a11y_truncated = true;
 }
 
 export async function startSession(
@@ -1701,7 +1788,7 @@ export async function startSession(
   // in performAction.
   await captureAndAppendForms(session, driver);
 
-  const rawTree = await driver.getAccessibilityTree(session);
+  const rawTree = await captureStartAccessibilityTree(driver, session);
   // `trimmed` + `currentUrl` may be re-snapped below if the initial
   // detection fires on a JS-challenge shape that auto-resolves.
   let trimmed = trimA11yTree(rawTree, DEFAULT_A11Y_BUDGET);
@@ -1738,7 +1825,7 @@ export async function startSession(
   // clear, the advisory stands.
   if (originBlocked && isResolvableChallengeShape(originBlocked, trimmed.tree, navStatus)) {
     await new Promise((r) => setTimeout(r, CHALLENGE_RESOLVE_WAIT_MS));
-    const rawTreeAfter = await driver.getAccessibilityTree(session);
+    const rawTreeAfter = await captureStartAccessibilityTree(driver, session);
     const trimmedAfter = trimA11yTree(rawTreeAfter, DEFAULT_A11Y_BUDGET);
     const currentUrlAfter = await driver.getUrl(session).catch(() => currentUrl);
     harvestLinkUrlObservations(session.id, rawTreeAfter, currentUrlAfter);
@@ -1775,6 +1862,10 @@ export async function startSession(
       originBlocked = advisoryAfter;
     }
   }
+  // The requested URL is only an initial seed: redirects and in-page
+  // navigation can change the landing URL before start_session returns.
+  // Surface triage must bind the page the runtime actually observed.
+  session.lastSurfaceUrl = currentUrl;
   const visibilityAnomalies = await snapVisibilityAnomalies(driver, session);
   const result: StartSessionResult = {
     sessionId: session.id,
@@ -1785,6 +1876,7 @@ export async function startSession(
     nav_status: navStatus,
     visibility_anomalies: visibilityAnomalies,
   };
+  attachAccessibilitySnapshotDiagnostic(result, session);
   if (originBlocked) result.origin_blocked = originBlocked;
   if (opts.platform) populatePlatformResponseFields(result, opts.platform);
   result.graph = session.graph;
@@ -1805,25 +1897,12 @@ export async function startSession(
   // loses its primary signal. Drop the a11y tree first (recoverable via
   // get_a11y_tree(session_id)); if still oversized, compact the body too.
   // Aligns with principles.md §"Respect the MCP output budget".
-  if (result.executed === true && JSON.stringify(result).length > MAX_TOOL_OUTPUT_CHARS) {
-    const a11yChars = result.a11y_total_chars;
-    // Only claim "succeeded" when the result actually succeeded (body.ok or
-    // 2xx). A failed auto-exec (e.g. a recorded_step_failed checkpoint) is still
-    // oversized; mislabeling it "succeeded" hides the failure from the agent.
-    const succeeded = executeResultLooksOk(
-      result.execute_result as { body?: unknown; status?: unknown } | undefined,
-    );
-    const fetchHint = `Fetch the full ${a11yChars}-char tree via get_a11y_tree({session_id: "${session.id}", page: 1}) if you need it.`;
-    result.a11yTree = succeeded
-      ? `<dropped: auto-exec succeeded; the page UI isn't load-bearing here. ${fetchHint}>`
-      : `<dropped: auto-exec ran but did NOT clearly succeed — read execute_result for the outcome. Page UI dropped for budget. ${fetchHint}>`;
-    result.a11y_truncated = true;
-  }
+  compactAutoExecuteA11y(result, session);
   // Body compaction runs regardless of `executed`-state — a failed auto-exec
   // can still carry a huge `body.original_body` (raw response captured for
   // diagnosis), and the a11y-drop above only fires on success. Replace
   // oversized body content with a budget-bounded preview + sibling metadata so
-  // the agent's primary signals (`status`, `body.ok` for object bodies,
+  // the agent's primary signals (`status`, hoisted `body_ok` for object bodies,
   // `_hint`) remain intact while the bulk is dropped. See
   // principles.md §"Respect the MCP output budget".
   if (result.execute_result) {
@@ -1862,7 +1941,7 @@ export async function startSession(
           `A saved ${savedTier} strategy already exists for ${opts.platform}/${opts.capability}. ` +
           `To run it, call start_session with graph:'execute' and the same args — the runtime fires ` +
           `the saved strategy directly, no UI walk needed. Re-discovery (this discover session) only ` +
-          `pays off when execute_result.body.ok comes back false on a real call. If you're trying to ` +
+          `pays off when execute_result explicitly fails or its typed body shows a semantic failure. If you're trying to ` +
           `"upgrade tier," remember: the saved tier was chosen for the actual signal source ` +
           `(e.g. page-script when the auth value lives in DOM-set meta tags). Driving the UI again ` +
           `to save a different tier is almost always wasted rounds.`,
@@ -1986,7 +2065,7 @@ import { TOOL_NAMES } from '../vocab';
 import type { ToolDef } from '../tools/types';
 
 const graphModesList = GRAPH_MODES.map((g) => `"${g}"`).join(', ');
-const startSessionDescription = `Start a klura session: open a browser and navigate to the given URL. Returns \`{sessionId, a11yTree, url, artifacts?, executed?, execute_result?, graph?}\`. The \`graph\` parameter selects one of: ${graphModesList}. **Default is "discover" — pick that for ANY user-driven request, including ones where the agent has to navigate around an unfamiliar site to find the right page.** "discover": drive→triage→lift→closed, the standard goal-directed reverse-engineering flow ending in a saved strategy. "map": drive→closed, **only for deliberate platform onboarding with no specific user goal** (e.g. "walk this site so future sessions can use it") — has no triage/lift phase and rejects \`capability\` declarations; mutating-action consent gates and skipped auto-synth. "execute": execute→triage→lift→closed (or terminal{failed}), runs a saved strategy and falls into triage on stale-strategy failure so the agent can re-plan and re-lift. When you pass \`{capability, args}\` and a complete saved strategy covers that capability, the runtime auto-runs the strategy in-session and returns \`executed: true\` with the result — call end_drive and you are done.`;
+const startSessionDescription = `Start a klura session: open a browser and navigate to the given URL. Returns \`{sessionId, a11yTree, url, artifacts?, executed?, execute_result?, graph?}\`. The \`graph\` parameter selects one of: ${graphModesList}. **Default is "discover" — pick that for ANY user-driven request, including ones where the agent has to navigate around an unfamiliar site to find the right page.** "discover": drive→triage→lift→closed, the standard goal-directed reverse-engineering flow ending in a saved strategy. "map": drive→triage→lift→closed for deliberate platform onboarding with no single capability declared up front; record candidates with \`record_observed_capability\`, then enter a save cycle with \`lift_observed_capability\`. Map saves are pre-authorized, mutating actions retain consent gates, and close-time auto-synth is skipped. "execute": execute→triage→lift→closed (or terminal{failed}), runs a saved strategy and falls into triage on stale-strategy failure so the agent can re-plan and re-lift. When you pass \`{capability, args}\` and a complete saved strategy covers that capability, the runtime auto-runs the strategy in-session and returns \`executed: true\` with the result. Inspect \`execute_result.body\`: local factory execution treats an explicit boolean \`body.ok\` as authoritative, while HTTP 2xx without it proves transport acceptance only.`;
 
 export const TOOL_DEF: ToolDef = {
   name: TOOL_NAMES.startSession,
@@ -2056,7 +2135,7 @@ export const TOOL_DEF: ToolDef = {
         type: 'string',
         enum: [...GRAPH_MODES],
         description:
-          'Default: "discover". **Pick "discover" for any user-driven request, even ones requiring navigation through an unfamiliar site to find the right page** — the goal-directedness is what matters, not whether the path is known. "map" is ONLY for deliberate platform onboarding with no user goal in flight; declaring a `capability` on a `map` session is rejected (map has no lift phase). "discover": drive→triage→lift→closed. "map": drive→closed; mutating actions gate on a one-time session-wide consent checkpoint, auto-synth is skipped at close, the re-persistence gate fires when ≥5 perform_actions land with zero persistence calls. "execute": execute→triage→lift→closed (or terminal{failed}); runs a saved strategy and on stale-strategy failure transitions into triage with the failure as defense-surface input — arg/auth/structural failures terminate with status: failed.',
+          'Default: "discover". Pick "discover" for a specific user goal, even when reaching it requires unfamiliar navigation. Pick "map" for broad, user-authorized platform onboarding with no capability declared up front: explore in drive, record candidates with `record_observed_capability`, then call `lift_observed_capability` for triage + lift + save. Map saves are pre-authorized, mutating actions retain consent gates, auto-synth is skipped at close, and the re-persistence gate fires when ≥5 perform_actions land with zero persistence calls. "discover": drive→triage→lift→closed. "map": drive→triage→lift→closed. "execute": execute→triage→lift→closed (or terminal{failed}); runs a saved strategy and on stale-strategy failure transitions into triage with the failure as defense-surface input — arg/auth/structural failures terminate with status: failed.',
       },
       identity: {
         type: 'string',

@@ -7,6 +7,7 @@ import type { NetworkLogOptions } from './drivers/types/network';
 import { KLURA_DIR } from './paths';
 import { markStandaloneDaemon } from './runtime-state/process-role';
 import { errorText } from './utils/error-text';
+import { canonicalJson, type JsonValueV1 } from './public/contracts/json';
 const PID_FILE = path.join(KLURA_DIR, 'daemon.pid');
 const SOCKET_PATH = path.join(KLURA_DIR, 'klura.sock');
 
@@ -74,6 +75,48 @@ interface KluraModule {
   _pool: { activeSessions: number; shutdown: () => Promise<void> };
 }
 
+interface ConsumerDaemonRoutes {
+  invoke(
+    method: string | undefined,
+    route: string,
+    body: unknown,
+    signal?: AbortSignal,
+  ): Promise<unknown>;
+  followItems?: (body: unknown, signal?: AbortSignal) => AsyncIterable<unknown>;
+  activeRunCount?: () => number;
+}
+
+type ConsumerDaemonInvoker = (
+  method: string | undefined,
+  route: string,
+  body: unknown,
+  signal?: AbortSignal,
+) => Promise<unknown>;
+
+type ConsumerItemStreamInvoker = (body: unknown, signal?: AbortSignal) => AsyncIterable<unknown>;
+
+const CONSUMER_ROUTES = new Set([
+  'POST /consumer/search',
+  'POST /consumer/show',
+  'POST /consumer/install',
+  'POST /consumer/installed',
+  'POST /consumer/remove',
+  'POST /consumer/doctor',
+  'POST /consumer/session/clear',
+  'POST /consumer/login/open',
+  'POST /consumer/login/complete',
+  'POST /consumer/call',
+  'POST /consumer/run',
+  'POST /consumer/runs/resume',
+  'POST /consumer/runs/wait',
+  'POST /consumer/runs/wait-state',
+  'POST /consumer/runs/cancel',
+  'POST /consumer/runs/show',
+  'POST /consumer/runs/list',
+  'POST /consumer/runs/items',
+  'POST /consumer/runs/discard',
+]);
+
 interface RequestParams {
   url?: string;
   platform?: string;
@@ -119,6 +162,7 @@ export function startDaemon(): void {
   markStandaloneDaemon();
   const config = loadConfig();
   fs.mkdirSync(KLURA_DIR, { recursive: true });
+  recoverConsumerRunsBeforeIpc();
 
   const useUnix = config.runtime.listen === 'unix';
   if (useUnix) {
@@ -129,22 +173,102 @@ export function startDaemon(): void {
     }
   }
 
-  // Pool/driver settings come from config.json directly via createPool() when
-  // index.ts requires below — no env var bridging needed.
-
-  // Dynamic require to avoid circular deps — index.ts creates a pool on load
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const klura = require('./index') as KluraModule;
+  let factory: KluraModule | null = null;
+  let consumer: ConsumerDaemonRoutes | null = null;
+  const getFactory = (): KluraModule => {
+    if (factory !== null) return factory;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    factory = require('./index') as KluraModule;
+    return factory;
+  };
+  const activeFactorySessions = (): number => factory?._pool.activeSessions ?? 0;
+  const activeConsumerRuns = (): number => consumer?.activeRunCount?.() ?? 0;
+  const getConsumer = (): ConsumerDaemonRoutes => {
+    if (consumer !== null) return consumer;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const loaded = require('./consumer/daemon-routes') as {
+      ConsumerDaemonRoutesV1: new (
+        services?: unknown,
+        runInspection?: unknown,
+        onActiveRunChange?: () => void,
+      ) => ConsumerDaemonRoutes;
+    };
+    consumer = new loaded.ConsumerDaemonRoutesV1(undefined, undefined, touch);
+    return consumer;
+  };
   let lastActivity = Date.now();
+  let activeConsumerRequests = 0;
+  let activeConsumerStreams = 0;
   const startTime = Date.now();
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
   function touch(): void {
     lastActivity = Date.now();
+    armIdleShutdown();
   }
+
+  function armIdleShutdown(): void {
+    if (idleTimer !== null) clearTimeout(idleTimer);
+    idleTimer = null;
+    if (config.runtime.idleTimeout === 0) return;
+    const timeoutMs = config.runtime.idleTimeout * 1_000;
+    const delayMs = Math.max(0, timeoutMs - (Date.now() - lastActivity));
+    idleTimer = setTimeout(() => {
+      idleTimer = null;
+      if (
+        activeFactorySessions() > 0 ||
+        activeConsumerRequests > 0 ||
+        activeConsumerStreams > 0 ||
+        activeConsumerRuns() > 0
+      ) {
+        return;
+      }
+      console.log('Idle timeout reached, shutting down');
+      void shutdown();
+    }, delayMs);
+  }
+
+  const invokeConsumer: ConsumerDaemonInvoker = async (method, route, body, signal) => {
+    activeConsumerRequests += 1;
+    try {
+      return await getConsumer().invoke(method, route, body, signal);
+    } finally {
+      activeConsumerRequests -= 1;
+      touch();
+    }
+  };
+  const streamConsumerItems: ConsumerItemStreamInvoker = (body, signal) => {
+    const consumerRoutes = getConsumer();
+    if (consumerRoutes.followItems === undefined) {
+      throw new Error('consumer item stream is unavailable');
+    }
+    const events = consumerRoutes.followItems(body, signal);
+    return {
+      async *[Symbol.asyncIterator](): AsyncGenerator {
+        activeConsumerStreams += 1;
+        try {
+          for await (const event of events) yield event;
+        } finally {
+          activeConsumerStreams -= 1;
+          touch();
+        }
+      },
+    };
+  };
 
   const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
     touch();
-    handleRequest(req, res, klura, startTime, lastActivity, shutdown).catch((err: unknown) => {
+    handleRequest(
+      req,
+      res,
+      getFactory,
+      invokeConsumer,
+      streamConsumerItems,
+      activeFactorySessions,
+      startTime,
+      lastActivity,
+      shutdown,
+    ).catch((err: unknown) => {
       // Defence in depth: handleRequest catches its own routing errors, so this
       // only fires if the request/response plumbing itself rejects (e.g. a
       // client that resets the socket mid-body). Log and keep serving — a
@@ -157,6 +281,7 @@ export function startDaemon(): void {
   if (useUnix) {
     server.listen(SOCKET_PATH, () => {
       fs.writeFileSync(PID_FILE, String(process.pid));
+      announceDaemonReady();
       console.log(`klura daemon started (pid ${process.pid})`);
       console.log(`  socket: ${SOCKET_PATH}`);
       console.log(`  idle timeout: ${config.runtime.idleTimeout}s`);
@@ -167,29 +292,21 @@ export function startDaemon(): void {
       fs.writeFileSync(PID_FILE, String(process.pid));
       // Write the listen address so sendToDaemon can find it
       fs.writeFileSync(path.join(KLURA_DIR, 'daemon.addr'), config.runtime.listen);
+      announceDaemonReady();
       console.log(`klura daemon started (pid ${process.pid})`);
       console.log(`  listen: ${host}:${port}`);
       console.log(`  idle timeout: ${config.runtime.idleTimeout}s`);
     });
   }
 
-  const idleCheck = setInterval(() => {
-    const idleMs = Date.now() - lastActivity;
-    if (klura._pool.activeSessions > 0) {
-      touch();
-      return;
-    }
-    if (idleMs > config.runtime.idleTimeout * 1000) {
-      console.log('Idle timeout reached, shutting down');
-      void shutdown();
-    }
-  }, 60000);
+  armIdleShutdown();
 
   async function shutdown(): Promise<void> {
-    clearInterval(idleCheck);
+    if (idleTimer !== null) clearTimeout(idleTimer);
+    idleTimer = null;
     console.log('klura daemon shutting down...');
     try {
-      await klura._pool.shutdown();
+      await factory?._pool.shutdown();
     } catch {
       // Best effort
     }
@@ -228,10 +345,25 @@ export function startDaemon(): void {
   });
 }
 
+function announceDaemonReady(): void {
+  if (typeof process.send === 'function') process.send({ kind: 'ready' });
+}
+
+function recoverConsumerRunsBeforeIpc(): void {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const consumerRecovery = require('./consumer/scrape/startup-recovery') as {
+    interruptUnfinishedRunsAtStartup: (home: string) => unknown;
+  };
+  consumerRecovery.interruptUnfinishedRunsAtStartup(KLURA_DIR);
+}
+
 async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
-  klura: KluraModule,
+  getFactory: () => KluraModule,
+  invokeConsumer: ConsumerDaemonInvoker,
+  streamConsumerItems: ConsumerItemStreamInvoker,
+  activeFactorySessions: () => number,
   startTime: number,
   lastActivity: number,
   shutdown: () => Promise<void>,
@@ -255,6 +387,33 @@ async function handleRequest(
     const params: RequestParams = body ? (JSON.parse(body) as RequestParams) : {};
     const url = new URL(req.url ?? '/', 'http://localhost');
 
+    if (req.method === 'GET' && url.pathname === '/status') {
+      json({
+        uptime: Math.floor((Date.now() - startTime) / 1000),
+        activeSessions: activeFactorySessions(),
+        idleSince: Math.floor((Date.now() - lastActivity) / 1000),
+      });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/shutdown') {
+      json({ ok: true });
+      void shutdown();
+      return;
+    }
+
+    if (
+      await handleConsumerRequest(
+        req,
+        res,
+        url.pathname,
+        params,
+        invokeConsumer,
+        streamConsumerItems,
+      )
+    )
+      return;
+
+    const klura = getFactory();
     if (req.method === 'POST' && url.pathname === '/session/start') {
       json(
         await klura.startSession(params.url ?? '', {
@@ -364,18 +523,6 @@ async function handleRequest(
       json(klura.listPlatformSkills());
     } else if (req.method === 'GET' && url.pathname === '/lift-rate') {
       json(klura.liftRate());
-    } else if (req.method === 'GET' && url.pathname === '/status') {
-      json({
-        uptime: Math.floor((Date.now() - startTime) / 1000),
-        activeSessions: klura.status().activeSessions,
-        idleSince: Math.floor((Date.now() - lastActivity) / 1000),
-      });
-    } else if (req.method === 'POST' && url.pathname === '/shutdown') {
-      // Respond first so the client sees {ok:true}, then run the async
-      // shutdown() which closes the server, drains the pool, and exits cleanly
-      // with process.exit(0). Bare process.exit(0) here would skip all of that.
-      json({ ok: true });
-      void shutdown();
     } else {
       error(404, `Unknown endpoint: ${req.method ?? 'UNKNOWN'} ${url.pathname}`);
     }
@@ -384,6 +531,91 @@ async function handleRequest(
     // as an inexplicable crash to the agent and is what it can least act on.
     error(500, errorText(err));
   }
+}
+
+async function handleConsumerRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  pathname: string,
+  body: unknown,
+  invokeConsumer: ConsumerDaemonInvoker,
+  streamConsumerItems: ConsumerItemStreamInvoker,
+): Promise<boolean> {
+  if (request.method === 'POST' && pathname === '/consumer/runs/items/follow') {
+    const abort = createRequestAbortSignal(request, response);
+    try {
+      const events = streamConsumerItems(body, abort.signal);
+      response.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8' });
+      for await (const event of events) {
+        if (!(await writeNdjsonLine(response, event, abort.signal))) return true;
+      }
+      if (!response.destroyed) response.end();
+    } finally {
+      abort.dispose();
+    }
+    return true;
+  }
+  if (!CONSUMER_ROUTES.has(`${request.method ?? 'UNKNOWN'} ${pathname}`)) return false;
+  const abort = createRequestAbortSignal(request, response);
+  try {
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(
+      JSON.stringify(await invokeConsumer(request.method, pathname, body, abort.signal)),
+    );
+  } finally {
+    abort.dispose();
+  }
+  return true;
+}
+
+async function writeNdjsonLine(
+  response: ServerResponse,
+  value: unknown,
+  signal: AbortSignal,
+): Promise<boolean> {
+  if (response.destroyed || signal.aborted) return false;
+  const encoded = `${canonicalJson(value as JsonValueV1)}\n`;
+  if (response.write(encoded)) return true;
+  return await new Promise<boolean>((resolve) => {
+    const finish = (writable: boolean): void => {
+      response.removeListener('drain', onDrain);
+      response.removeListener('close', onClose);
+      signal.removeEventListener('abort', onAbort);
+      resolve(writable);
+    };
+    const onDrain = (): void => {
+      finish(true);
+    };
+    const onClose = (): void => {
+      finish(false);
+    };
+    const onAbort = (): void => {
+      finish(false);
+    };
+    response.once('drain', onDrain);
+    response.once('close', onClose);
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (response.destroyed || signal.aborted) finish(false);
+  });
+}
+
+function createRequestAbortSignal(
+  req: IncomingMessage,
+  res: ServerResponse,
+): { signal: AbortSignal; dispose(): void } {
+  const controller = new AbortController();
+  const abort = (): void => {
+    controller.abort();
+  };
+  req.once('aborted', abort);
+  res.once('close', abort);
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      req.removeListener('aborted', abort);
+      res.removeListener('close', abort);
+    },
+  };
 }
 
 export function isDaemonRunning(): boolean {

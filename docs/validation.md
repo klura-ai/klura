@@ -26,11 +26,18 @@ Plus deep checks on optional fields: `generated` entries must be `{code}` XOR `{
 
 **Layer 5 — save-time DOM probe.** `runtime/src/strategies/probe.ts` spins up a real browser session with the platform's saved cookies and actually verifies LLM-written artifacts against the live DOM / the live API. Read-only by design — never clicks submit buttons, never fires POSTs.
 
-- **`page-extract` prereqs**: navigate to the prereq URL (interpolated from `notes.params.example` values), run each var's selector via `getAttribute`/`getText`, reject the save with the failing selector if anything returns empty. Closes the "agent invented a selector from a header name" class.
+- **`page-extract` prereqs**: navigate to the prereq URL (interpolated from the live session's declared capability args, with `notes.params.example` values as fallback), run each var's selector via `getAttribute`/`getText`, reject the save with the failing selector if anything returns empty. Closes the "agent invented a selector from a header name" class.
 - **`fetch-extract` prereqs**: only when `http_method` is GET or missing (never probe POST/PUT/DELETE at save time — side effects). Fire the fetch from inside a browser session with `credentials:"omit"`, verify 2xx and that every dot-path resolves in the response body. Closes the "agent saved a public-REST lookup for a private resource" (HTTP 404) class and the "dot-path doesn't match the response shape" class.
+- **`js-eval` prereqs**: navigate to the prereq URL and evaluate the expression against the live page. Per-call `args_template` values resolve from the session's declared capability args, then `notes.params.example`; unavailable values use a benign stand-in. Credential-shaped inputs are always replaced with stand-ins and the ephemeral probe scope is neither persisted nor included in rejection text.
 - **`recorded-path` steps**: walk the steps in order. `navigate` and `wait-for-selector` actually execute (read-only). For the first mutating `click`/`type`/`select`, verify the selector resolves via `waitForSelector` but **do NOT perform the action**, then stop — subsequent steps depend on state changes we deliberately skipped, and verifying them would false-flag a valid strategy.
 
 The probe runs in ~5–15 seconds per save depending on prereq count. Every rejection names the specific failing selector or dot-path so the LLM can correct it in the same discovery turn, rather than shipping a strategy that silently fails at warm-execute time when the session is long gone.
+
+## Post-save factory verification
+
+The post-save run distinguishes explicit local semantics from transport. A 2xx object with `body.ok:true` is an explicit local success; `body.ok:false` is an explicit failure and archives the strategy even though HTTP transport succeeded. A 2xx response without a boolean `body.ok` is stamped `runtime_meta.post_save_validation:"transport_passed"` and returned as `ok:false`, `classification:"transport_accepted"` with a bounded `body_preview`: the request and prerequisite chain worked, but verification is inconclusive and factory runtime makes no claim about the semantic body.
+
+Local factory strategies intentionally do not duplicate public outcome contracts. Signed public packages declare their structural matchers, projections, assertions, and outcome classes in the package manifest, and the consumer evaluator requires exactly one matching case. During factory discovery, the LLM reads any richer typed body and decides whether it represents the intended result; runtime never maps words such as `failure`, `partial`, or `empty` to classes.
 
 ---
 

@@ -10,6 +10,22 @@ import type { Strategy } from '../strategies/skills';
 // agent to respond to.
 const LOOKUP_SEGMENT_REGEX = /(?:^|_)(by_[a-z]+|for_[a-z]+|lookup_[a-z]+)/g;
 
+const LOOKUP_SURFACE_OWNER_VERBS = new Set(['search', 'lookup', 'list']);
+
+/**
+ * Return whether a capability slug names a first-class retrieval surface.
+ *
+ * `search_<entity>`, `lookup_<entity>`, and `list_<entity>` are the canonical
+ * capability families. `<entity>_search` is the suffix-oriented equivalent.
+ * Matching is on complete underscore-delimited slug segments, so
+ * `research_<entity>` is unrelated.
+ */
+export function isLookupSurfaceOwnerCapability(capability: string): boolean {
+  const segments = capability.split('_');
+  if (segments.length < 2 || segments.some((segment) => segment.length === 0)) return false;
+  return LOOKUP_SURFACE_OWNER_VERBS.has(segments[0] ?? '') || segments.at(-1) === 'search';
+}
+
 export function findLookupSegments(capability: string): string[] {
   const matches: string[] = [];
   for (const m of capability.matchAll(LOOKUP_SEGMENT_REGEX)) {
@@ -72,6 +88,7 @@ export function validateLookupPrereqsAreCapabilities(
   data: Strategy,
   capturedEndpointPaths: Set<string>,
 ): string[] {
+  if (isLookupSurfaceOwnerCapability(capability)) return [];
   if (findLookupSegments(capability).length === 0) return [];
   if (capturedEndpointPaths.size === 0) return [];
   const prereqs = (data as Record<string, unknown>).prerequisites;

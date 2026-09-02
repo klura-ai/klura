@@ -26,7 +26,8 @@ import {
   recordNodeTransportFailure,
   resolveNodeCompatiblePrereqs,
 } from './fetch-node';
-import { runBrowserPrereqs, scanCachedPrereqs } from './fetch-browser';
+import { navigateWithOriginAdmission, runBrowserPrereqs, scanCachedPrereqs } from './fetch-browser';
+import { acquireLocalOriginPermit, localRequestTimeoutMs } from './local-traffic';
 import { runInlineRecordedSteps } from './step-runner';
 import { interpolateVars, resolveHeaders } from './vars';
 import type { ExecuteResult, WebSocketStrategy, RecordedPathStep, AnyPool } from './types';
@@ -287,6 +288,7 @@ async function executeWebSocketBrowser(
         session,
         driver,
         platform,
+        capability,
         args,
         pool,
         tokenCache,
@@ -325,7 +327,13 @@ async function executeWebSocketBrowser(
         };
       }
       try {
-        await driver.navigate(session, originForNav, { waitUntil: 'domcontentloaded' });
+        await navigateWithOriginAdmission(
+          session,
+          driver,
+          originForNav,
+          `${platform}/${capability}`,
+          { waitUntil: 'domcontentloaded' },
+        );
       } catch (err) {
         return {
           status: 0,
@@ -483,6 +491,7 @@ async function executeWebSocketNode(
           strategy.prerequisites,
           args,
           platform,
+          capability,
           tokenCache,
           pool,
           depth,
@@ -515,26 +524,34 @@ async function executeWebSocketNode(
       ? Uint8Array.from(Buffer.from(frameResolution.frame, 'base64'))
       : frameResolution.frame;
 
-  const result = await sendNodeWebSocketFrame(resolvedWsUrl, resolvedHeaders, framePayload, {
-    ackMatch: strategy.ackMatch,
-    ackTimeoutMs: strategy.ackTimeoutMs ?? WS_ACK_DEFAULT_TIMEOUT_MS,
-    openTimeoutMs: 5000,
-  });
+  const timeoutMs = localRequestTimeoutMs();
+  const permit = await acquireLocalOriginPermit(resolvedWsUrl, `${platform}/${capability}`);
+  let result: Awaited<ReturnType<typeof sendNodeWebSocketFrame>>;
+  try {
+    result = await sendNodeWebSocketFrame(resolvedWsUrl, resolvedHeaders, framePayload, {
+      ackMatch: strategy.ackMatch,
+      ackTimeoutMs: strategy.ackTimeoutMs ?? WS_ACK_DEFAULT_TIMEOUT_MS,
+      openTimeoutMs: Math.min(5000, timeoutMs),
+      timeoutMs,
+    });
+    if (result.ok) {
+      permit.release('success');
+    } else {
+      permit.release(isWebSocketTransportFailure(result.code) ? 'transient_failure' : 'neutral');
+    }
+  } catch (error) {
+    permit.release('transient_failure');
+    throw error;
+  }
 
   if (!result.ok) {
     // Classify handshake failures as transport-shaped so the dispatcher retries
     // in browser (captures the fingerprint-block case automatically, same as
     // HTTP-Node).
-    if (
-      result.error.startsWith('ws_construct_failed') ||
-      result.error.startsWith('ws_open_timeout')
-    ) {
+    if (isWebSocketTransportFailure(result.code)) {
       throw new TransportFailureError('ws_handshake_failed', result.error);
     }
-    if (result.error.startsWith('ws_error') || result.error.startsWith('ws_closed_before_ack')) {
-      throw new TransportFailureError('ws_handshake_failed', result.error);
-    }
-    if (result.error.startsWith('ack_timeout')) {
+    if (result.code === 'ack_timeout') {
       return {
         status: 0,
         body: {
@@ -562,6 +579,18 @@ async function executeWebSocketNode(
       ...(result.ackPayload ? { ack: { payload: truncateString(result.ackPayload, 2048) } } : {}),
     },
   };
+}
+
+function isWebSocketTransportFailure(
+  code: Exclude<Awaited<ReturnType<typeof sendNodeWebSocketFrame>>, { ok: true }>['code'],
+): boolean {
+  return (
+    code === 'construct_failed' ||
+    code === 'open_timeout' ||
+    code === 'connection_error' ||
+    code === 'closed_before_ack' ||
+    code === 'request_timeout'
+  );
 }
 
 async function waitForWsOpen(

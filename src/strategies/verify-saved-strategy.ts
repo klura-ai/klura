@@ -7,29 +7,35 @@
 // bad endpoint) is archived to `.broken.json` here, in the same turn, so it
 // never reaches another session's warm run.
 //
-// "Works" is not "HTTP 2xx" — a 2xx only proves the call left the building.
-// `execute()` loads the strategy from disk and runs the full prereq chain,
-// enforcing the strategy's own declared success contract (prereq `return_shape`,
-// `response.from`, `response.extract`): a failed contract *throws*. So failure
-// here is "execute threw OR non-2xx", which already inherits that enforcement —
-// including failures buried inside a `js-eval` prerequisite's own `fetch()`,
-// which no save-time shape check can see. The irreducible "did the mutation hit
-// the right entity" question is not checked here — that stays the
-// `mutating_verification_required` (agent-declared) + user layer.
+// `execute()` loads the strategy from disk and runs the full prereq chain.
+// A boolean `body.ok` is the local factory's explicit semantic signal: false
+// fails validation even on HTTP 2xx. A 2xx body without that field proves only
+// end-to-end transport; published semantic outcomes remain the signed package
+// manifest's responsibility. The irreducible "did the mutation hit the right
+// entity" question stays at the mutating-verification + user layer.
 
 import { execute } from '../execution';
+import {
+  classifyFactoryExecutionResult,
+  describeFactoryExecutionFailure,
+  type FactoryExecutionClassification,
+} from '../execution/result-classification';
 import { loadStrategy, archiveStrategy, stampRuntimeMeta } from './skills';
 import type { BrowserPool } from '../drivers/types/session';
 import { refUrl, REF_LINKS } from '../vocab';
 
 export interface VerifySavedStrategyResult {
-  /** True when `execute()` returned a 2xx status. */
+  /** True only when the local strategy explicitly returned `body.ok:true`. */
   ok: boolean;
+  /** Structural strength of the factory-side verification. */
+  classification: FactoryExecutionClassification;
   /** The HTTP status `execute()` returned; 0 when execute threw. */
   status: number;
-  /** True when a non-2xx result caused the strategy to be archived. */
+  /** True when transport failure or explicit `body.ok:false` caused archival. */
   archived: boolean;
-  /** Agent-facing rejection envelope — present only when `ok` is false. */
+  /** Bounded response evidence for LLM review; absent when validation was not run. */
+  body_preview?: string;
+  /** Agent-facing reason or rejection envelope for non-passed results. */
   message?: string;
 }
 
@@ -49,9 +55,10 @@ function previewBody(body: unknown): string {
 
 /**
  * Run the just-saved `{platform, capability}` strategy via `execute()`. On a
- * clean run (no throw, 2xx) the active file is stamped
- * `runtime_meta.post_save_validation: "passed"`. On an execute throw or a
- * non-2xx status the strategy is archived to `.broken.json` and a
+ * clean explicit run the active file is stamped
+ * `runtime_meta.post_save_validation: "passed"`. A transport-only 2xx is
+ * stamped `"transport_passed"`. On an execute throw, non-2xx status, or
+ * explicit `body.ok:false`, the strategy is archived to `.broken.json` and a
  * `post_save_validation_failed:` envelope is returned for the agent to fix and
  * re-save this session.
  */
@@ -63,21 +70,34 @@ export async function verifySavedStrategy(
 ): Promise<VerifySavedStrategyResult> {
   let status: number;
   let bodyPreview: string;
+  let classification: FactoryExecutionClassification = 'transport_failure';
   try {
     const result = await execute(platform, capability, args, pool);
     status = result.status;
     bodyPreview = previewBody(result.body);
+    classification = classifyFactoryExecutionResult(result);
   } catch (err) {
     status = 0;
     bodyPreview = err instanceof Error ? err.message : String(err);
   }
 
-  if (status >= 200 && status < 300) {
+  if (classification === 'explicit_success') {
     stampRuntimeMeta(platform, capability, { post_save_validation: 'passed' });
-    return { ok: true, status, archived: false };
+    return { ok: true, classification, status, archived: false, body_preview: bodyPreview };
   }
 
-  const statusLabel = status === 0 ? 'a runtime error' : `HTTP ${status}`;
+  if (classification === 'transport_accepted') {
+    stampRuntimeMeta(platform, capability, { post_save_validation: 'transport_passed' });
+    return {
+      ok: false,
+      classification,
+      status,
+      archived: false,
+      body_preview: bodyPreview,
+    };
+  }
+
+  const statusLabel = describeFactoryExecutionFailure(classification, status);
   const strat = loadStrategy(platform, capability);
   let archived = false;
   if (strat) {
@@ -92,8 +112,10 @@ export async function verifySavedStrategy(
 
   return {
     ok: false,
+    classification,
     status,
     archived,
+    body_preview: bodyPreview,
     message:
       `post_save_validation_failed: the saved \`${capability}\` strategy returned ${statusLabel} ` +
       `when executed end-to-end — it does not work as saved` +

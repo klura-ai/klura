@@ -24,6 +24,7 @@ import { validateNotesParamsShape, validateBaseUrlScheme, validateNotesAllowlist
 import { validateCacheShape } from './cache';
 import { validateProvidesShape } from './provides';
 import { validateFetchPrereqKinds } from './fetch-prereq-kinds';
+import { validateSecretReferences } from './secret-references';
 
 const EXPRESSION_PLACEHOLDER_RE = /\{\{(\w+(?:\.\w+)*)\}\}/g;
 
@@ -232,6 +233,9 @@ export function validateStrategyShape(data: unknown): asserts data is Strategy {
   });
   runDeep(() => {
     validateFetchPrereqKinds(data, tier);
+  });
+  runDeep(() => {
+    validateSecretReferences(data);
   });
   const [firstErr, ...rest] = deepErrors;
   if (firstErr && rest.length === 0) {
