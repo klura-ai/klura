@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { signalPidFile } from './helpers/child-process.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -22,13 +23,7 @@ function invoke(home, args) {
 }
 
 function stopConsumerDaemon(home) {
-  const pidPath = path.join(home, 'daemon.pid');
-  if (!existsSync(pidPath)) return;
-  try {
-    process.kill(Number(readFileSync(pidPath, 'utf8').trim()), 'SIGTERM');
-  } catch {
-    // The process may have exited before test cleanup.
-  }
+  signalPidFile(path.join(home, 'daemon.pid'), 'SIGTERM');
 }
 
 async function invokeWithRegistryService(args, registryService) {
@@ -128,6 +123,13 @@ test('consumer CLI pages installed packages with a structural cursor', () => {
     assert.deepEqual(
       firstPage.items.map((item) => item.package_id),
       ['acme', 'ikea'],
+    );
+    assert.deepEqual(
+      firstPage.items.map((item) => item.provenance),
+      [
+        { kind: 'registry', source_index_digest: 'c'.repeat(64) },
+        { kind: 'registry', source_index_digest: 'c'.repeat(64) },
+      ],
     );
     assert.equal(typeof firstPage.next_cursor, 'string');
 

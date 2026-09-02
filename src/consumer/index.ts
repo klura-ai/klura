@@ -1,11 +1,16 @@
 export {
+  LOCAL_PACKAGE_ID_PREFIX_V1,
   PUBLIC_CONTRACT_LIMITS,
   PublicContractError,
   comparePackageVersions,
+  isLocalPackageId,
+  localPackageIdForPlatform,
   parseCapabilityId,
   parseJsonPointer,
+  parseLocalPackageId,
   parsePackageId,
   parsePackageVersion,
+  parseRegistryPackageId,
   parseRfc3339Instant,
   parseRuntimeRange,
   parseSessionName,
@@ -83,7 +88,10 @@ export type {
   ScrapePaginationV1,
   ScrapeTaskKindV1,
 } from '../public/contracts/collection-topology';
-export { parseCollectionRunContract } from '../public/contracts/collection';
+export {
+  COLLECTION_CONTRACT_KEYS,
+  parseCollectionRunContract,
+} from '../public/contracts/collection';
 export type { CollectionRunContractV1, CsvColumnV1 } from '../public/contracts/collection';
 export {
   deriveInlineOutputBound,
@@ -414,10 +422,13 @@ export type {
 export { defaultConsumerHome, PackageStoreV1, parseInstalledState } from './store/package-store';
 export type {
   InstalledPackageV1,
+  InstalledProvenanceV1,
   InstalledStateV1,
   PackageStorePathsV1,
   PutVerifiedPackageInputV1,
 } from './store/package-store';
+export { LocalPackageInstallerV1, LocalPackageInstallError } from './local-package';
+export type { InstallLocalPackageResultV1, LocalPackageInstallInputV1 } from './local-package';
 export {
   CALLER_BOUND_KEYS,
   CONSUMER_BOUNDS,

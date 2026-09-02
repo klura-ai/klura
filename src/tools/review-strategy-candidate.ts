@@ -3,6 +3,7 @@ import { sliceLargeString } from '../response/response-size';
 import {
   loadStrategyCandidate,
   loadStrategyCandidateReviewContext,
+  loadStrategyCandidateVerification,
   promoteStrategyCandidate,
   recordStrategyCandidateSemanticReview,
   resolveStrategyCandidateRef,
@@ -12,7 +13,10 @@ import {
 } from '../strategies/strategy-candidates';
 import {
   assessDeclaredCollectionEmptiness,
-  describeDeclaredCollectionEmptiness,
+  assessUniformNullFields,
+  describeCollectionIntegrityFinding,
+  SEMANTIC_REVIEW_REASONS,
+  type CollectionIntegrityFinding,
 } from '../execution/collection-emptiness';
 import { markHealed } from '../strategies/health';
 import { DECISION_VALUES, REF_LINKS, TOOL_NAMES, refUrl } from '../vocab';
@@ -105,32 +109,66 @@ function reviewPayload(context: StrategyCandidateReviewContext): CandidateReview
 }
 
 /**
- * Re-derive why this candidate needs a human verdict, from the same two
- * digest-bound artifacts the reviewer is looking at: the candidate strategy
- * bytes and the exact evidence body. Derivation beats a persisted copy — the
- * reason cannot drift out of agreement with the evidence it explains.
+ * Every collection-integrity finding this candidate carries.
+ *
+ * Body-only assessments are re-derived from the two digest-bound artifacts the
+ * reviewer is looking at — the candidate strategy bytes and the exact evidence
+ * body — because derivation cannot drift out of agreement with the evidence it
+ * explains. Multi-run assessments compare two executions, which the single
+ * stored body cannot reproduce, so those are read back from the verification
+ * sidecar and merged in.
  */
+function collectionIntegrityFindings(
+  context: StrategyCandidateReviewContext,
+): CollectionIntegrityFinding[] {
+  const findings: CollectionIntegrityFinding[] = [];
+  if (context.evidence.body_kind === 'json' && context.evidence.body_text !== undefined) {
+    let body: unknown;
+    try {
+      body = JSON.parse(context.evidence.body_text);
+      const candidate = loadStrategyCandidate(context.ref);
+      const emptiness = assessDeclaredCollectionEmptiness(candidate, body);
+      if (emptiness) findings.push(emptiness);
+      else findings.push(...assessUniformNullFields(candidate, body));
+    } catch {
+      /* an unparseable body derives nothing; the sidecar findings still apply */
+    }
+  }
+  const derivedReasons = new Set(findings.map((finding) => finding.reason));
+  const persisted =
+    loadStrategyCandidateVerification(context.ref)?.candidate_verification?.collection_integrity ??
+    [];
+  findings.push(...persisted.filter((finding) => !derivedReasons.has(finding.reason)));
+  return findings;
+}
+
+/** Why this candidate needs a verdict, in the shape the review response carries. */
 function semanticReviewReason(
   context: StrategyCandidateReviewContext,
 ): Record<string, unknown> | null {
-  if (context.evidence.body_kind !== 'json' || context.evidence.body_text === undefined) {
-    return null;
+  const findings = collectionIntegrityFindings(context);
+  const first = findings[0];
+  if (!first) return null;
+  let detail: string;
+  if (first.reason === SEMANTIC_REVIEW_REASONS.declaredCollectionEmpty) {
+    detail =
+      `${describeCollectionIntegrityFinding(first)}. Transport succeeded; whether zero rows is the ` +
+      `correct answer for these arguments is what your verdict decides.`;
+  } else {
+    const checks =
+      findings.length === 1 ? '1 structural check' : `${findings.length} structural checks`;
+    detail =
+      `Transport succeeded and rows came back, but the collection failed ${checks}: ` +
+      `${findings.map(describeCollectionIntegrityFinding).join('; ')}. Whether each one is a real ` +
+      `defect or correct for this site is what your verdict decides.`;
   }
-  let body: unknown;
-  try {
-    body = JSON.parse(context.evidence.body_text);
-  } catch {
-    return null;
-  }
-  const candidate = loadStrategyCandidate(context.ref);
-  const emptiness = assessDeclaredCollectionEmptiness(candidate, body);
-  if (!emptiness) return null;
   return {
-    semantic_review_reason: emptiness.reason,
-    collection_keys: emptiness.keys,
-    semantic_review_detail:
-      `${describeDeclaredCollectionEmptiness(emptiness)}. Transport succeeded; whether zero rows is the ` +
-      `correct answer for these arguments is what your verdict decides.`,
+    semantic_review_reason: first.reason,
+    ...(first.reason === SEMANTIC_REVIEW_REASONS.declaredCollectionEmpty
+      ? { collection_keys: first.keys }
+      : {}),
+    collection_integrity: findings,
+    semantic_review_detail: detail,
   };
 }
 

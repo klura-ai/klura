@@ -13,6 +13,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import cp from 'node:child_process';
+import { terminateChild, waitForChildExit } from './helpers/child-process.js';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'klura-daemon-test-'));
 
@@ -44,9 +45,14 @@ let daemon;
 async function waitForSocket(deadline) {
   while (Date.now() < deadline) {
     if (fs.existsSync(SOCKET)) return;
+    if (daemon && (daemon.exitCode !== null || daemon.signalCode !== null)) {
+      throw new Error(
+        `primary daemon exited before it opened ${SOCKET} (code ${daemon.exitCode}, signal ${daemon.signalCode})`,
+      );
+    }
     await new Promise(r => setTimeout(r, 50));
   }
-  throw new Error('daemon socket did not appear in time');
+  throw new Error(`daemon socket ${SOCKET} did not appear in time`);
 }
 
 function ipc(method, urlPath, body) {
@@ -86,14 +92,17 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  if (daemon && !daemon.killed) {
+  if (daemon) {
     // SIGTERM triggers the in-daemon `shutdown()` handler (covers server
     // close + pid/socket/addr cleanup branches). SIGKILL would bypass them.
-    const exited = new Promise((resolve) => daemon.once('exit', resolve));
-    try { daemon.kill('SIGTERM'); } catch {}
-    // Wait for the process to actually exit — up to 5s so V8 has time to
-    // flush coverage to NODE_V8_COVERAGE.
-    await Promise.race([exited, new Promise((r) => setTimeout(r, 5000))]);
+    // Cleanup must not fail the file, so a daemon that ignores SIGTERM is
+    // reported and then abandoned rather than thrown from the hook.
+    try {
+      await terminateChild(daemon, { label: 'primary daemon', timeoutMs: 15_000 });
+    } catch (err) {
+      console.error(`[daemon-ipc] cleanup: ${err.message}`);
+      try { daemon.kill('SIGKILL'); } catch {}
+    }
   }
   try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {}
 });
@@ -136,7 +145,7 @@ test('a second daemon over the same KLURA_HOME refuses to start', async () => {
     env: { ...process.env, KLURA_HOME: TMP },
     stdio: 'ignore',
   });
-  const [code] = await new Promise((resolve) => second.once('exit', (c, s) => resolve([c, s])));
+  const { code } = await waitForChildExit(second, { label: 'second daemon' });
   assert.notStrictEqual(code, 0, 'second daemon must exit with a failure code');
   assert.ok(fs.existsSync(SOCKET), 'live daemon socket must survive the refused start');
   const { status } = await ipc('GET', '/status');
@@ -750,10 +759,16 @@ test('POST /shutdown returns {ok:true} and exits the daemon', async () => {
     stdio: 'ignore',
   });
   // Wait for socket
-  const deadline = Date.now() + 10000;
+  const deadline = Date.now() + 15000;
   while (Date.now() < deadline && !fs.existsSync(SOCKET2)) {
+    if (d2.exitCode !== null || d2.signalCode !== null) {
+      throw new Error(
+        `shutdown-test daemon exited before it opened ${SOCKET2} (code ${d2.exitCode}, signal ${d2.signalCode})`,
+      );
+    }
     await new Promise((r) => setTimeout(r, 50));
   }
+  assert.ok(fs.existsSync(SOCKET2), `shutdown-test daemon never opened ${SOCKET2}`);
   // Hit /shutdown via raw http
   const { status, body } = await new Promise((resolve, reject) => {
     const req = http.request(
@@ -782,9 +797,7 @@ test('primary daemon still alive after /shutdown on a second daemon', () => {
 // path, resolving on the child's ready IPC message rather than by watching
 // the filesystem.
 test('ensureDaemon: spawns a daemon and resolves on its ready IPC message', async () => {
-  const exited = new Promise((resolve) => daemon.once('exit', resolve));
-  daemon.kill('SIGTERM');
-  await exited;
+  await terminateChild(daemon, { label: 'primary daemon' });
   assert.strictEqual(isDaemonRunning(), false, 'primary daemon stopped');
 
   await ensureDaemon();

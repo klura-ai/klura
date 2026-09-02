@@ -5,10 +5,11 @@
 // `create_issue`, which already has a saved strategy from a prior session.
 // The agent re-drives the UI, saves nothing new, then calls end_drive. The
 // drive→triage handoff is skipped (capability resolved), so the agent acks
-// the triage_acknowledgment classifier — and then hit `silent_no_save`, whose
-// premise ("closing would leave nothing on disk") is false: the prior
-// strategy is still there. That deadlocked the session: save_strategy and
-// submit_triage_plan are both inadmissible from drive.
+// the triage_acknowledgment warning — and `silent_no_save` must not fire
+// after it, because its premise ("closing would leave nothing on disk") is
+// false: the prior strategy is still there. Firing there deadlocks the
+// session, since save_strategy and submit_triage_plan are both inadmissible
+// from drive.
 //
 // The guard now gates on `triageWouldFire` — it fires only when a declared
 // capability is genuinely unresolved (no non-stale saved strategy on disk).
@@ -104,29 +105,27 @@ test('silent_no_save: closes clean when the declared capability is already saved
   const restore = patchPool(session);
   try {
     // First end_drive: the capability is resolved → triage handoff would be
-    // skipped → the triage_acknowledgment classifier fires. Extract its token.
+    // skipped → the triage_acknowledgment warning fires.
     const first = await endDrive(session.id, {});
     assert.equal(
       first.phase,
       'end_drive_audit',
       `expected audit gate, got ${JSON.stringify(first)}`,
     );
-    const tokenMatch = /audit_token:\s*(\S+)/.exec(first.message ?? '');
-    assert.ok(tokenMatch, `expected an audit_token in the rejection, got: ${first.message}`);
+    assert.match(
+      first.message ?? '',
+      /triage_acknowledgment/,
+      `expected the triage_acknowledgment warning, got: ${first.message}`,
+    );
 
     // Second end_drive: ack the triage skip. The audit passes; auto-synth
-    // produces nothing (empty action history). Pre-fix, the silent_no_save
-    // guard fired here and deadlocked the session. Post-fix, triageWouldFire
-    // is false (capability resolved on disk) so the guard stays silent and
-    // the session closes.
+    // produces nothing (empty action history). triageWouldFire is false
+    // (capability resolved on disk), so the silent_no_save guard stays silent
+    // and the session closes.
     const second = await endDrive(session.id, {
-      auditToken: tokenMatch[1],
-      auditAnswers: {
-        triage_acknowledgment: {
-          acknowledged: true,
-          reason:
-            'create_issue already has a saved fetch strategy on disk; no graduation candidate observed',
-        },
+      acks: {
+        triage_acknowledgment:
+          'create_issue already has a saved fetch strategy on disk; no graduation candidate observed',
       },
     });
     assert.ok(

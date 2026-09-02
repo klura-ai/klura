@@ -3,12 +3,37 @@
 // echoes token + answers on the second; framework validates hash + delegates
 // structural check to the consumer's `validateAnswers`.
 //
-// Level-2 (acked-warning) save-time concerns are now consumed by the
-// `Audit` class (runtime/src/audit/index.ts) — Detector specs with
+// Level-2 (acked-warning) save-time concerns are consumed by the `Audit`
+// class (runtime/src/audit/index.ts) — Detector specs with
 // `ackReason: 'required'` give the same Level-2 semantics under one
 // rejection envelope. Reach for `Audit` for save-time gates; reach for
 // `buildTokenGate` directly for lifecycle gates outside that envelope
 // (e.g. `trigger_reference_send` consent, `checkpoint_ack`).
+//
+// The first call here is ALWAYS `pending`, and deliberately so — the
+// asymmetry with `Audit`, whose Classifiers may accept answers on the first
+// call (`Classifier.firstCallAnswerable`, gated on `audit.firstCallAnswers`),
+// is structural rather than a tuning difference:
+//
+//   - An `Audit` Classifier asks the agent to classify items the runtime
+//     derived from the payload the SAME call carried. The agent authored that
+//     payload, so it can answer in the breath that submits it, and the
+//     classifier's `validate()` cross-checks the answer against the very bytes
+//     it describes. The token proves the answer describes the hashed payload;
+//     when both arrive together that proof is already structural.
+//   - Every `buildTokenGate` consumer binds an artifact the RUNTIME authored
+//     and the agent must read before it can answer: the checkpoint event
+//     (`checkpoint_ack`), the interruption context (`interruption_ack`), the
+//     candidate's execution evidence (`strategy_candidate.semantic_review`),
+//     the rendered action sequence a real submit will fire
+//     (`trigger_reference_send.consent`). The first call is the call that
+//     hands that artifact over. An answer supplied before it describes
+//     nothing the agent has seen, so accepting one would grade a review that
+//     never happened.
+//
+// So: no first-call-answer path in this factory. A new consumer that wants
+// one is a consumer whose payload the agent authored — that belongs in an
+// `Audit` instance, not here.
 
 import { hashGatePayload } from './hash';
 import { issueToken, lookupToken, consumeToken } from './store';

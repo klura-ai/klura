@@ -37,8 +37,15 @@ function fixture() {
   return root;
 }
 
+// A byte-for-byte copy of the checkout, outside the repository. Keeping it in
+// os.tmpdir() means a run that dies mid-test cannot leave an untracked
+// multi-megabyte directory behind in the working tree, and nothing that walks
+// the repository root can observe it appearing and vanishing. `node_modules` is
+// symlinked rather than copied so `require` inside the copy still resolves the
+// runtime's third-party dependencies.
 function checkoutFixture() {
-  const root = fs.mkdtempSync(path.join(runtimeRoot, '.mcp-build-guard-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'klura-mcp-build-guard-'));
+  fs.symlinkSync(path.join(runtimeRoot, 'node_modules'), path.join(root, 'node_modules'), 'dir');
   const copyEntries = [
     'src',
     'dist',

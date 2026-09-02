@@ -11,6 +11,11 @@ import { assertReturnShape, type JsEvalReturnShape } from '../strategies/js-eval
 import { JS_EVAL_TIMEOUT_HARD_CAP_MS } from '../strategies/skills';
 import { ValidationError as ValidatorError } from '../validators';
 import type { AnyPool, Prerequisite } from './types';
+import {
+  assessNavigationReach,
+  describeNavigationReachMiss,
+  NavigationReachError,
+} from './navigation-reach';
 
 /**
  * Cache key for a js-eval prereq's minted value. Keyed on the binding name AND
@@ -66,6 +71,33 @@ interface JsEvalRuntimeArgs {
   navigate?: (url: string) => Promise<void>;
 }
 
+/**
+ * Interpret the one failure shape that reads as a coding mistake and is not:
+ * an in-page fetch parsed as JSON that was handed a document instead.
+ *
+ * The engine reports it as a SyntaxError about an unexpected `<`, which sends
+ * the author to check their parsing. The parsing is fine — the endpoint refused
+ * the request and answered with markup: an interstitial, a login wall, or a
+ * gated API path. Observed across eight consecutive saves in one session, each
+ * one re-deriving the same fetch because nothing said the response was a page.
+ *
+ * Matching the engine's error text is narrow but real coupling. It is admissible
+ * here because the string comes from the JS runtime in a stable format, not from
+ * a site or a model, and because both halves must hold: a JSON-parse failure AND
+ * an offending token that opens a tag. A miss costs the generic advice below.
+ */
+function describeMarkupWhereJsonExpected(detail: string): string | null {
+  const parseFailed = /is not valid JSON|JSON\.parse|Unexpected token/.test(detail);
+  const gotMarkup = /Unexpected token .?<|"<[a-zA-Z!/]/.test(detail);
+  if (!parseFailed || !gotMarkup) return null;
+  return (
+    `The response was markup, not JSON — the parse is not the problem. Something answered this ` +
+    `request with a document: an endpoint that refuses unauthenticated or non-browser callers, a ` +
+    `consent or anti-abuse interstitial, or a login wall. Check what that document is before ` +
+    `changing the expression. If the endpoint is gated, the data a caller needs is often in the ` +
+    `page the site does serve — read that instead of the API path.`
+  );
+}
 /**
  * Run a js-eval prereq's expression against an existing session. Navigates to
  * the prereq's declared URL if the session isn't already there, evaluates the
@@ -149,6 +181,21 @@ export async function runJsEvalPrereq(
         { cause: err },
       );
     }
+
+    // Navigation resolving proves a document loaded, not that it is the right
+    // one. An origin that gates some visitors serves the gate under a 200 and
+    // the expression would run against it, so the arrival is checked before
+    // anything is evaluated. Only a navigation this call performed is checked:
+    // the warm-reuse path above already matched origin + pathname.
+    let miss = null;
+    try {
+      miss = assessNavigationReach(args.url, await driver.getUrl(session));
+    } catch {
+      /* the driver could not report a URL — proceed rather than accuse */
+    }
+    if (miss) {
+      throw new NavigationReachError(describeNavigationReachMiss(miss, args.name), miss, args.name);
+    }
   }
 
   const cappedTimeout = Math.max(1, Math.min(args.timeoutMs, JS_EVAL_TIMEOUT_HARD_CAP_MS));
@@ -161,13 +208,14 @@ export async function runJsEvalPrereq(
       ...(args.frame ? { frame: args.frame } : {}),
     });
   } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
     throw new Error(
-      `prereq "${args.name}" (js-eval): expression evaluation failed: ${
-        err instanceof Error ? err.message : String(err)
-      }. The expression was: ${JSON.stringify(args.expression)}. ` +
-        `Common causes: the global the expression references doesn't exist on this page, ` +
-        `the page hasn't finished loading enough for the minter to be defined, ` +
-        `or the expression threw at runtime.`,
+      `prereq "${args.name}" (js-eval): expression evaluation failed: ${detail}. ` +
+        `The expression was: ${JSON.stringify(args.expression)}. ` +
+        (describeMarkupWhereJsonExpected(detail) ??
+          `Common causes: the global the expression references doesn't exist on this page, ` +
+            `the page hasn't finished loading enough for the minter to be defined, ` +
+            `or the expression threw at runtime.`),
       { cause: err },
     );
   }

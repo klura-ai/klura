@@ -17,6 +17,7 @@ Klura's default product surface is a signed local-tool registry and local execut
 | Start and inspect a durable collection | `start_scrape_run`, `get_scrape_run`, `wait_scrape_run`, `list_scrape_runs`, `list_scrape_run_items` |
 | Continue, stop, or discard a run | `resume_scrape_run`, `cancel_scrape_run`, `discard_scrape_run` |
 | Inspect local state and live origin contention | `run_consumer_doctor` |
+| Run a skill you authored yourself through this same surface | `install_local_package` — see [local package](klura://reference#local-package) |
 
 These tools accept only closed structural inputs and return bounded typed results. A package is selected by separate `package_id` and `capability` fields; no consumer adapter accepts a combined selector. `search`, `show`, and `install` use the runtime-owned registry authority. Calls and runs use only the currently active immutable local package and never refresh or replace it.
 
@@ -44,6 +45,38 @@ A successful export writes only:
 - `tools/<package_id>/fixtures/*.run.json`
 
 Fixture responses, expected typed results, and expected run items come from the successful smoke executions rather than hand-authored examples, and every captured fixture file is validated against the public fixture contract before it is written. The export never signs, installs, publishes, stages Git changes, creates a branch, or opens a pull request. An existing target directory is rejected instead of overwritten; updates require a separately reviewed version-update workflow.
+
+Export is for a package a maintainer will publish. To run a skill you authored yourself — durably, with resume and dedup — install it locally instead; see [local package](klura://reference#local-package).
+
+## local package
+
+`install_local_package` turns the reviewed subset of one platform's active saved capabilities into an unsigned, locally provenanced package in the same local store `install_package` writes. Once installed, the whole consumer surface works unchanged: `call_package_capability`, `open_package_login` / `complete_package_login`, `start_scrape_run`, `wait_scrape_run`, `list_scrape_run_items`, `resume_scrape_run`, `remove_package`. This is how a locally authored skill gets a durable, bounded, resumable collection run instead of one execute call at a time.
+
+The package ID is derived mechanically as `local-<platform>` and cannot be authored. That prefix is reserved: a signed registry index that carries it fails to parse, and `search_packages`, `show_package`, and `install_package` reject it with a typed `package_not_found` pointing at `list_installed_packages`. A local package is never signed, never published, and never appears in the catalog. Its provenance travels with the ID — into every run artifact reference, journal frame, session directory name, and CLI or MCP envelope.
+
+**Input.** `{platform, version, authentication_contracts, capabilities}`. `capabilities` maps each reviewed capability ID to `{contract, page_script}` — the same two reviewed leaves the export review carries, with the same key sets. There is no `tools_repository_path`, no `catalog`, and no fixtures: nothing is being published, so there is nothing to capture smoke evidence for. The compatibility window is derived from the running runtime, never authored — an authored range that excluded this runtime would strand an interrupted run. The saved page-script strategy is read from disk by the runtime; the review supplies only the public contract discovery cannot safely infer.
+
+**What the local path skips is distribution trust only:** the Ed25519 signature, the index validity window, the same-origin package URL, the download digest, the signed catalog projection, the release state, fixture capture, and post-save proof freshness. Every one of those describes a publisher this path does not have.
+
+**What it does not skip is execution safety.** The compile step is the same `compilePublicPackageSource` → `parsePublicToolPackage` chain the export path runs: declared request and navigation origins, per-origin traffic policy, browser egress rules and byte budgets, call timeouts, typed outcome coverage, one authentication realm per collection, `safe_read` on every collection task's strategies, and an acyclic fan-out graph within `max_fanout_depth`. Nothing is relaxed for a local package. A rejection from that depth names the exact public-contract field path (`package.capabilities.<id>.collection.task_kinds.<task>.capability`), which is more precise than any shape sketch.
+
+**Post-save verification is advisory here, not a gate.** A missing or stale post-save proof returns a `_hint` on the success envelope rather than a rejection: the run itself is the verification, bounded by the collection's `run_policy`, the caller's bounds, and the origin scheduler. Read the first committed items with `list_scrape_run_items` before trusting the output.
+
+**End to end.** Only step 7 is new; everything around it is existing tooling.
+
+```
+1-4.   start_session → discovery → save_strategy → end_drive
+5-6.   list_platform_skills / get_strategy      (read what the contract must describe)
+7.     install_local_package({platform, version, authentication_contracts, capabilities})
+         → {kind: "local_package_installed", package_id: "local-acme-store", ...}
+8.     open_package_login → complete_package_login   (authenticated sites only)
+9.     start_scrape_run({package_id: "local-acme-store", capability, input, options})
+10-12. wait_scrape_run / list_scrape_run_items / resume_scrape_run
+```
+
+**Result.** Success returns `local_package_installed` with the derived `package_id`, `version`, `action` (`installed` / `activated` / `already_active`), the package and manifest digests, the `source_digest` and `source_path` of the canonical reviewed source persisted at `~/.klura/skills/<platform>/local-package.json`, the compiled capability list, and `signed: false, published: false`. A structural failure returns one batched `local_package_audit_failed` with `issues[]` of `{code, path, message, remedy}` and installs nothing.
+
+Re-authoring a capability and reinstalling writes new package bytes under a new digest. Runs already in flight resolve their package by digest, not by the active pointer, so they cannot be swapped underneath — and `remove_package` removes only the pointer, so an in-flight local run can always be resumed.
 
 ## graphs
 
@@ -1178,6 +1211,14 @@ The slug names what the capability does in the abstract: verb + noun, maybe a qu
 The wrong shape silently bakes a value into the capability identity, so when a future caller asks for a different value the agent fabricates a parallel capability slug instead of re-using the one that's already saved with the right param shape. Runtime catches this at save via `enum_value_baked_into_slug` (no ack-bypass — fix the slug or remove the param from `notes.params`).
 
 When the values come from a listing endpoint (e.g. `/api/categories` returning the available choices), save that endpoint as its own `list_<entity>` capability and point the param at it via `source: "capability:list_<entity>"`. The values are then live (refreshed on every warm execute) instead of frozen at discovery time.
+
+### Declaring a paginating param
+
+When a param advances a page/offset window over the same collection rather than selecting different data, declare `notes.params.<name>.paginates: true`. Post-save verification then proves it: it executes the strategy at your argument and again at the next consecutive integer, and requires the two row sets to be disjoint. An overlap — including an identical result — means the param never took effect, which a single page-1 call cannot distinguish from a working one.
+
+**The answer is required, not optional.** Any param you template (`{{name}}`) into the request whose `example` is an integer must carry an explicit `paginates: true` or `paginates: false`; a save that leaves one unanswered is rejected with `unanswered_pagination_question` (no ack path — write the boolean). The requirement exists because an absent declaration is unfalsifiable: "no param here paginates" and "the question was never considered" produce identical bytes, so an opt-in flag reports full coverage over an empty set. An explicit `false` is a real answer and is always accepted; what cannot be accepted is silence.
+
+Runtime picks the params to ask about structurally — templated into the request, integer example — never by matching names against a page/offset vocabulary. A param outside that set may still declare `paginates: true`: an opaque cursor token cannot be stepped without knowing the site's grammar, so it is left unproven rather than probed with a guess, and nothing is required of it.
 
 ### Red flags
 

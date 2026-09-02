@@ -41,6 +41,33 @@ test('update_strategy: rejects when no saved strategy exists, points at save_str
   );
 });
 
+// A missing or misshapen `strategy` arg is an agent mistake with an obvious
+// remedy, so it has to arrive as a typed rejection carrying that remedy rather
+// than as a raw property-access TypeError the agent can only guess at.
+for (const [label, payload] of [
+  ['undefined', undefined],
+  ['null', null],
+  ['an array', []],
+  ['a string', 'fetch'],
+]) {
+  test(`update_strategy: rejects ${label} as \`strategy\` with a typed rejection`, async () => {
+    skills.saveStrategy('site-shape', 'list_items', fakeStrategy('/api/v1/items'));
+    await assert.rejects(
+      () => updateStrategy('site-shape', 'list_items', payload, 'changelog', 'sess_x'),
+      (err) => {
+        assert.ok(
+          err instanceof SaveStrategyRejection,
+          `expected SaveStrategyRejection, got ${err?.constructor?.name}: ${err?.message}`,
+        );
+        assert.match(err.message, /invalid_strategy/);
+        assert.match(err.message, /full replacement strategy object/i);
+        assert.match(err.message, /klura:\/\/reference#/);
+        return true;
+      },
+    );
+  });
+}
+
 test('update_strategy: amends an existing strategy in place (delegates to the save path)', async () => {
   // Seed an existing strategy via the low-level writer.
   skills.saveStrategy('site-amend', 'list_items', fakeStrategy('/api/v1/messages'));

@@ -26,8 +26,8 @@ import {
   parsePlatform,
   parseToolsRepositoryPath,
   type ParsedExportReviewV1,
-  type ParsedFixtureReviewV1,
 } from './export-review';
+import { buildCapabilitySource, type ParsedFixtureReviewV1 } from './capability-review';
 import type { PublicHttpResponseV1 } from '../../consumer/execution/node-http';
 import {
   PublicHttpExecutionError,
@@ -55,7 +55,6 @@ import {
 } from '../../strategies/post-save-verification-proof';
 import {
   compilePublicPackageSource,
-  exportReviewedLocalPageScriptStrategySource,
   type CompiledPublicPackageV1,
   type PublicPackageSourceV1,
   type PublicReadCapabilitySourceV1,
@@ -356,20 +355,7 @@ function buildPackageSource(
         'page-script disappeared after export audit',
       );
     }
-    const publicStrategy = exportReviewedLocalPageScriptStrategySource({
-      local_strategy: local,
-      input_schema: capabilityReview.contract.input_schema,
-      strategy_id: capabilityReview.page_script.strategy_id,
-      wait: capabilityReview.page_script.wait,
-      interaction: capabilityReview.page_script.interaction,
-      expect: capabilityReview.page_script.expect,
-      request_body_limits: capabilityReview.page_script.request_body_limits,
-      replay: capabilityReview.page_script.replay,
-    });
-    capabilities[capabilityId] = {
-      ...capabilityReview.contract,
-      strategies: [publicStrategy],
-    };
+    capabilities[capabilityId] = buildCapabilitySource(local, capabilityReview);
   }
   const source: PublicPackageSourceV1 = {
     package_source_schema_version: 1,

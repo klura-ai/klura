@@ -16,6 +16,7 @@ export {
   CONFIG_FIELDS,
   type AbortEscalationConfig,
   type AgentConfig,
+  type AuditConfig,
   type ConfigFieldSpec,
   type ConnectConfig,
   type DaemonConfig,
@@ -76,6 +77,7 @@ function mergeWithDefaults(loaded: unknown): DaemonConfig {
       },
     },
     remote: { ...CONFIG_DEFAULTS.remote, ...(src.remote ?? {}) },
+    audit: { ...CONFIG_DEFAULTS.audit, ...(src.audit ?? {}) },
     ...(src.secrets ? { secrets: { ...src.secrets } } : {}),
     ...(src.agent ? { agent: { ...src.agent } } : {}),
   };

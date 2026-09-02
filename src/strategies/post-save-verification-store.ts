@@ -86,6 +86,32 @@ export function stampPostSaveValidationProof(
   });
 }
 
+/**
+ * Stamp why a strategy was archived onto the strategy itself.
+ *
+ * The event stream records archival, but a `.broken.json` is what someone
+ * actually opens when they find one — an agent resuming next session, a person
+ * reading the home. A file that records no reason for its own archival forces
+ * them to go find a separate log to learn why it stopped being used, assuming
+ * they know that log exists. The reason belongs where the evidence is.
+ */
+export function archivedStrategyWithReason(
+  strategy: Strategy,
+  detail: string,
+  tier: string,
+): Strategy {
+  const meta = (strategy as { runtime_meta?: Record<string, unknown> }).runtime_meta ?? {};
+  return {
+    ...strategy,
+    runtime_meta: {
+      ...meta,
+      archived_reason: detail,
+      archived_at: Date.now(),
+      archived_from_tier: tier,
+    },
+  } as Strategy;
+}
+
 export function archivePostSaveValidationTarget(
   proof: PostSaveVerificationProofV1,
   detail: string,
@@ -108,7 +134,11 @@ export function archivePostSaveValidationTarget(
       subdir,
       `${proof.capability}.broken.json`,
     );
-    fs.renameSync(activePath, archivedPath);
+    fs.writeFileSync(
+      archivedPath,
+      JSON.stringify(archivedStrategyWithReason(strategy, detail, proof.tier), null, 2),
+    );
+    fs.rmSync(activePath, { force: true });
     appendStrategyEvent(proof.platform, proof.capability, {
       strategy: proof.tier,
       kind: 'archived',

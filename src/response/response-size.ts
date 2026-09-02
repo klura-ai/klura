@@ -38,6 +38,19 @@ export const HEALABLE_A11Y_BUDGET = 8_000;
 export const ATTRIBUTE_VALUE_BUDGET = 10_000;
 
 /**
+ * Cap on an `execute_result.body` delivered inline to an agent. A larger body is
+ * compacted field-by-field, and replaced by a truncation notice when compaction
+ * cannot bring it under.
+ *
+ * This is the size a capability's result has to fit for its caller to receive
+ * rows rather than an envelope, which makes it a property of the strategy and
+ * not only of the delivery path — so post-save verification reads it too, and
+ * measures the result it just produced against the budget that will be applied
+ * to it later. Keeping the number here is what stops those two from drifting.
+ */
+export const EXECUTE_RESULT_BODY_INLINE_BUDGET = 3_000;
+
+/**
  * Truncate a string to at most `max` characters, appending `suffix` so the
  * reader knows the tail was clipped. Safe when `max < suffix.length`: returns
  * the suffix-only. Used by any tool that needs "cap this value" semantics.

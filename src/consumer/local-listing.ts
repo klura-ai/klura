@@ -24,7 +24,7 @@ export interface InstalledPackageArtifactV1 {
   version: InstalledPackageV1['version'];
   package_digest: InstalledPackageV1['package_digest'];
   manifest_digest: InstalledPackageV1['manifest_digest'];
-  source_index_digest: InstalledPackageV1['source_index_digest'];
+  provenance: InstalledPackageV1['provenance'];
   installed_at: InstalledPackageV1['installed_at'];
 }
 
@@ -267,7 +267,7 @@ function projectInstalledArtifact(entry: InstalledPackageV1): InstalledPackageAr
     version: entry.version,
     package_digest: entry.package_digest,
     manifest_digest: entry.manifest_digest,
-    source_index_digest: entry.source_index_digest,
+    provenance: entry.provenance,
     installed_at: entry.installed_at,
   };
 }

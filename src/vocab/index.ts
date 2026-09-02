@@ -73,6 +73,7 @@ export const TOOL_NAMES = {
   getStrategyHealth: 'get_strategy_health',
   inspectWsFrame: 'inspect_ws_frame',
   installPageInitScript: 'install_page_init_script',
+  installLocalPackage: 'install_local_package',
   installPackage: 'install_package',
   jsEval: 'js_eval',
   liftObservedCapability: 'lift_observed_capability',
@@ -228,7 +229,10 @@ export const WARNING_KINDS = {
   parameterizationDisclosureRequired: 'parameterization_disclosure_required',
   unreferencedPrereqBinding: 'unreferenced_prereq_binding',
   hardcodedPaginationValue: 'hardcoded_pagination_value',
+  unansweredPaginationQuestion: 'unanswered_pagination_question',
   sideEffectPrereqUnproven: 'side_effect_prereq_unproven',
+  callerArgBaked: 'caller_arg_baked',
+  requiredParamWithoutExample: 'required_param_without_example',
 } as const;
 
 export type WarningKind = (typeof WARNING_KINDS)[keyof typeof WARNING_KINDS];
@@ -305,6 +309,7 @@ export const REF_LINKS = {
   interruptions: 'interruptions',
   interrupts: 'interrupts',
   jsEval: 'js-eval',
+  localPackage: 'local-package',
   networkLogDiscoveryWorkflow: 'network-log-discovery-workflow',
   pageScriptAnchors: 'page-script-anchors',
   pageScriptSchema: 'page-script-schema',

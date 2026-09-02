@@ -52,6 +52,57 @@ export function parsePackageId(value: unknown, field: string): PackageIdV1 {
   return text as PackageIdV1;
 }
 
+/** Package-id prefix reserved for locally authored, unsigned packages. A
+ *  signed registry index can never carry an id under it, so provenance is
+ *  visible in every surface the id reaches. */
+export const LOCAL_PACKAGE_ID_PREFIX_V1 = 'local-';
+
+/** True when a package id sits in the reserved local namespace. */
+export function isLocalPackageId(value: string): boolean {
+  return value.startsWith(LOCAL_PACKAGE_ID_PREFIX_V1);
+}
+
+/** Parses a package id that must sit in the reserved local namespace. */
+export function parseLocalPackageId(value: unknown, field: string): PackageIdV1 {
+  const packageId = parsePackageId(value, field);
+  if (!isLocalPackageId(packageId)) {
+    throw new PublicContractError(
+      field,
+      `must start with ${JSON.stringify(LOCAL_PACKAGE_ID_PREFIX_V1)}, the reserved prefix for locally authored packages`,
+    );
+  }
+  return packageId;
+}
+
+/** Parses a package id a signed registry is allowed to name. The reserved
+ *  local namespace is rejected here, so a local package is structurally
+ *  unrepresentable in an index, a search page, or an install selector. */
+export function parseRegistryPackageId(value: unknown, field: string): PackageIdV1 {
+  const packageId = parsePackageId(value, field);
+  if (isLocalPackageId(packageId)) {
+    throw new PublicContractError(
+      field,
+      `must not start with ${JSON.stringify(LOCAL_PACKAGE_ID_PREFIX_V1)}, which is reserved for locally authored packages the registry never carries`,
+    );
+  }
+  return packageId;
+}
+
+/** Derives the reserved package id of a locally authored platform skill. The
+ *  derivation is mechanical so no caller can author an id of its own. */
+export function localPackageIdForPlatform(platform: unknown, field: string): PackageIdV1 {
+  const slug = parseAsciiString(platform, field, PUBLIC_CONTRACT_LIMITS.identifierBytes);
+  const maximumSlugBytes =
+    PUBLIC_CONTRACT_LIMITS.identifierBytes - LOCAL_PACKAGE_ID_PREFIX_V1.length;
+  if (slug.length > maximumSlugBytes) {
+    throw new PublicContractError(
+      field,
+      `must be at most ${maximumSlugBytes} characters so ${JSON.stringify(LOCAL_PACKAGE_ID_PREFIX_V1)} plus the platform fits a ${PUBLIC_CONTRACT_LIMITS.identifierBytes}-character package id`,
+    );
+  }
+  return parseLocalPackageId(`${LOCAL_PACKAGE_ID_PREFIX_V1}${slug}`, field);
+}
+
 export function parseCapabilityId(value: unknown, field: string): CapabilityIdV1 {
   return parseStableIdentifier(value, field) as CapabilityIdV1;
 }

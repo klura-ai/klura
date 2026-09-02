@@ -11,13 +11,18 @@ import {
 import { InstallPackageError, PackageInstallerV1, type PackageInstallSelectorV1 } from './install';
 import { PackageDownloadError, RegistryClientError, RegistryClientV1 } from './registry/client';
 import {
+  parseRegistrySelectedPackageId,
   RegistryCatalogError,
   RegistryCatalogV1,
   type CatalogPackageSummaryV1,
   type SearchRegistryPackagesInputV1,
   type ShowRegistryPackageResultV1,
 } from './registry/catalog';
-import { PackageStoreV1, type InstalledPackageV1 } from './store/package-store';
+import {
+  PackageStoreV1,
+  type InstalledPackageV1,
+  type InstalledProvenanceV1,
+} from './store/package-store';
 
 export type ConsumerRegistryOperationV1 = 'search' | 'show' | 'install';
 
@@ -65,7 +70,7 @@ export interface InstalledArtifactV1 {
   version: PackageVersionV1;
   package_digest: Sha256DigestV1;
   manifest_digest: Sha256DigestV1;
-  source_index_digest: Sha256DigestV1;
+  provenance: InstalledProvenanceV1;
   installed_at: string;
 }
 
@@ -158,13 +163,14 @@ function parseInstallInput(input: unknown): PackageInstallSelectorV1 {
       throw new PublicContractError('install', 'is missing required key "package_id"');
     }
     return {
-      package_id: parsePackageId(record.package_id, 'install.package_id'),
+      package_id: parseRegistrySelectedPackageId(record.package_id, 'install.package_id'),
       version:
         record.version === undefined
           ? undefined
           : parsePackageVersion(record.version, 'install.version'),
     };
   } catch (error) {
+    if (error instanceof RegistryCatalogError) throw error;
     throw new RegistryCatalogError('invalid_options', errorMessage(error));
   }
 }
@@ -276,7 +282,7 @@ function projectInstalledArtifact(installed: InstalledPackageV1): InstalledArtif
     version: installed.version,
     package_digest: installed.package_digest,
     manifest_digest: installed.manifest_digest,
-    source_index_digest: installed.source_index_digest,
+    provenance: installed.provenance,
     installed_at: installed.installed_at,
   };
 }

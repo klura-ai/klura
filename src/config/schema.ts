@@ -165,6 +165,62 @@ export interface PoolConfig {
   brokenProbationHours: number;
 }
 
+/**
+ * Save-time / close-time audit behavior. Both knobs are deterrence-vs-friction
+ * trade-offs measured over the fixture suite, so they live in config rather
+ * than being hardcoded.
+ */
+export interface AuditConfig {
+  /**
+   * Whether a token-gated Classifier may accept the agent's answers on the
+   * FIRST call (the call that would otherwise only mint a token and reject
+   * `pending`).
+   *
+   *  - `'off'` — never. Every classifier round-trips: mint on call 1, validate
+   *    on call 2. `Classifier.firstCallAnswerable` is read but ignored.
+   *  - `'safe_subset'` — only classifiers that declare
+   *    `firstCallAnswerable: true`, i.e. the ones whose answers classify items
+   *    derived from the same call's payload.
+   *  - `'all_except_confirmation'` — every classifier except the ones that
+   *    explicitly opt out with `firstCallAnswerable: false` (the consent-shaped
+   *    ones, whose answer is composed against a payload no token has bound
+   *    yet).
+   *
+   * A call with no answers always mints and rejects `pending` regardless of
+   * this setting — the first-call accept is reachable only when the agent
+   * actually supplied answers.
+   */
+  firstCallAnswers: 'off' | 'safe_subset' | 'all_except_confirmation';
+  /**
+   * Run the end-drive `triage_acknowledgment` concern as a Level-2 Detector
+   * (agent supplies `acks: {triage_acknowledgment: "<reason>"}`) instead of a
+   * Level-3 token-gated Classifier. The ack IS the acknowledgment, so the
+   * separate `acknowledged: true` assertion and the token round-trip carry no
+   * signal a once-per-session gate needs.
+   */
+  triageAckAsDetector: boolean;
+  /**
+   * Post-save verification executes a collection-returning strategy a second
+   * time with identical args and routes a disagreement about rows to semantic
+   * review. Costs one extra execution inside the run-scoped verification
+   * context, once per capability lifetime. Default true: the alternative is a
+   * scroll- or timing-dependent feed that silently returns a different row set
+   * on every later call.
+   */
+  verifyCollectionStability: boolean;
+  /**
+   * Post-save verification executes a second page of a strategy that declares
+   * a paginating caller param (`notes.params.<name>.paginates: true`, which the
+   * save audit requires an explicit answer for on every param it could prove)
+   * and routes an overlap between the two pages to semantic review. Costs one
+   * extra execution
+   * for such strategies only, once per capability lifetime. Default true: a
+   * single page-1 call is byte-for-byte what a strategy that ignores its page
+   * param returns, so nothing else distinguishes the two.
+   */
+  verifyPaginationDisjointness: boolean;
+}
+
 export interface RuntimeBootConfig {
   idleTimeout: number;
   listen: string;
@@ -204,6 +260,7 @@ export interface DaemonConfig {
   lift: LiftConfig;
   pool: PoolConfig;
   remote: RemoteConfig;
+  audit: AuditConfig;
   /** Map of scheme → shell command template. Managed via addSecretResolver /
    *  removeSecretResolver (which validate scheme + shell metachars). The
    *  configure tool treats this as opaque — use the dedicated helpers. */
@@ -249,6 +306,12 @@ export const CONFIG_DEFAULTS: DaemonConfig = {
     connect: { enabled: false, mode: 'spawn' },
   },
   remote: { mode: 'auto', timeout: 600, auto_open: 'on_local', short_url: true },
+  audit: {
+    firstCallAnswers: 'off',
+    triageAckAsDetector: true,
+    verifyCollectionStability: true,
+    verifyPaginationDisjointness: true,
+  },
 };
 
 /** Describes one leaf config field. Drives validation, describe_config,
@@ -630,6 +693,56 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     description:
       'Surface a short single-use redirect URL to the agent instead of the full JWT URL. ' +
       'Short URLs (16-char base32, 60s TTL, single-use) survive LLM relay where the 250-400-char JWT does not.',
+    needsRestart: false,
+  },
+  {
+    path: 'audit.firstCallAnswers',
+    type: 'enum',
+    enum: ['off', 'safe_subset', 'all_except_confirmation'] as const,
+    default: CONFIG_DEFAULTS.audit.firstCallAnswers,
+    description:
+      'Whether a token-gated audit classifier may accept answers on the first call instead of ' +
+      'minting a token and rejecting `pending`. "off" (default) always round-trips. ' +
+      '"safe_subset" accepts only classifiers whose answers describe items derived from the same ' +
+      "call's payload, so validation cross-checks the very bytes the answer describes. " +
+      '"all_except_confirmation" additionally accepts every classifier that has not explicitly ' +
+      'opted out (the consent-shaped ones). A call carrying no answers always mints and rejects, ' +
+      'whatever this is set to.',
+    needsRestart: false,
+  },
+  {
+    path: 'audit.triageAckAsDetector',
+    type: 'boolean',
+    default: CONFIG_DEFAULTS.audit.triageAckAsDetector,
+    description:
+      'Run the end_drive `triage_acknowledgment` concern as a Level-2 acked warning ' +
+      '(`acks: {triage_acknowledgment: "<reason ≥20 chars>"}`) instead of a Level-3 token-gated ' +
+      'classifier. Default true — supplying the ack IS the acknowledgment, so a once-per-session ' +
+      'gate gains nothing from the extra token round-trip.',
+    needsRestart: false,
+  },
+  {
+    path: 'audit.verifyCollectionStability',
+    type: 'boolean',
+    default: CONFIG_DEFAULTS.audit.verifyCollectionStability,
+    description:
+      'At post-save verification, execute a collection-returning strategy a second time with ' +
+      'identical args and route a disagreement about rows (row count, or the multiset of a scalar ' +
+      "field's values) to semantic review. Catches nondeterministic extraction — flaky selectors, " +
+      'scroll- or timing-dependent feeds; it cannot catch a row the extractor drops on every run. ' +
+      'One extra execution inside the run-scoped verification context, once per capability lifetime. ' +
+      'Default true.',
+    needsRestart: false,
+  },
+  {
+    path: 'audit.verifyPaginationDisjointness',
+    type: 'boolean',
+    default: CONFIG_DEFAULTS.audit.verifyPaginationDisjointness,
+    description:
+      'At post-save verification, execute a second page of a strategy that declares a paginating ' +
+      'caller param (`notes.params.<name>.paginates: true`) and route an overlap between the two ' +
+      'pages to semantic review. Only fires for such strategies, and only when the argument is an ' +
+      'integer that can be advanced. One extra execution, once per capability lifetime. Default true.',
     needsRestart: false,
   },
   {

@@ -79,12 +79,6 @@ export interface LiteralItem {
    *  audit fills it in from this value. Set explicitly to the same shape
    *  to override (rare). */
   auto_classified?: LiteralClassification;
-  /** Informational only (NOT auto-applied): set when a STATIC-looking literal's
-   *  value exactly matches a value the caller passed to start_session, hinting
-   *  the agent likely baked a caller arg that should be templated as
-   *  {{<arg>}} / classified {caller_input: "<arg>"}. Never part of the token
-   *  hash — purely a nudge the agent reads. */
-  caller_arg_hint?: string;
 }
 
 export interface NameSegmentItem {
@@ -898,7 +892,15 @@ export function validateCallerInputKindsAndEnums(
    *  match shape. */
   mutatingActionCount?: number,
 ): string[] {
-  const callerInputParams = new Set<string>();
+  // Iterate the union of (a) every param the agent's answers pointed at and
+  // (b) every param the strategy DECLARES in notes.params. (b) is what makes
+  // the kind / enum-grounding checks unskippable: an answer sheet that
+  // classifies everything as "static" contributes no refs at all, and without
+  // the declared side the loop body would never run — every declared caller
+  // param would sail past validateCallerInputParamKind and the URL-bypass
+  // detector. A param is a caller param because the strategy says so, not
+  // because the agent's classification admitted it.
+  const callerInputParams = new Set<string>(listDeclaredParamNames(data));
   for (const classification of Object.values(provenance)) {
     if (typeof classification === 'object' && 'caller_input' in classification) {
       callerInputParams.add(classification.caller_input);

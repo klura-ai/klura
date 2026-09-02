@@ -5,8 +5,8 @@ import {
   parseCapabilityId,
   parseExactRecord,
   parseInteger,
-  parsePackageId,
   parsePackageVersion,
+  parseRegistryPackageId,
   parseRfc3339Instant,
   parseRuntimeRange,
   parseSha256Digest,
@@ -164,7 +164,7 @@ export function parseRegistryIndex(value: unknown): RegistryIndexV1 {
     RegistryPackageV1
   >;
   for (const [key, packageValue] of Object.entries(packages)) {
-    const packageId = parsePackageId(key, `signed_index.payload.packages.${key}`);
+    const packageId = parseRegistryPackageId(key, `signed_index.payload.packages.${key}`);
     const parsedPackage = parseRegistryPackage(
       packageValue,
       `signed_index.payload.packages.${key}`,
@@ -190,7 +190,7 @@ function parseRegistryPackage(value: unknown, field: string): RegistryPackageV1 
     'stable_version',
     'versions',
   ]);
-  const packageId = parsePackageId(record.package_id, `${field}.package_id`);
+  const packageId = parseRegistryPackageId(record.package_id, `${field}.package_id`);
   const versionsRecord = parseBoundedRecord(
     record.versions,
     `${field}.versions`,

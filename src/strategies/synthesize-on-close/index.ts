@@ -203,6 +203,13 @@ function collectImplicitVEsFromJsEvalHistory(session: Session): EvaluatedVE[] {
  * declaration timestamp. A declared-but-not-saved capability still gets
  * synthesized so sessions where the agent drove the browser correctly but
  * forgot to call save_strategy still land a recorded-path strategy.
+ *
+ * A capability whose saves landed as inactive candidates is NOT that case. The
+ * agent did the work and the bytes are on disk awaiting a verdict; synthesizing
+ * over it puts an unverified guess in the active slot while audited work sits
+ * unpromoted beside it, and the guess is what every caller then executes.
+ * `savedCandidates` is the signal — it records staged candidates the way
+ * `savedCapabilities` records promoted ones.
  */
 function buildSaveMarkers(session: Session): SaveMarker[] {
   const fromSaves = (session.savedCapabilities ?? []).map((s) => ({
@@ -215,17 +222,20 @@ function buildSaveMarkers(session: Session): SaveMarker[] {
   // history. The declaration timestamp (session start) would produce an empty
   // window.
   const nowTs = Date.now();
-  const fromDeclares = (session.declaredCapabilities ?? []).map((d) => ({
-    capability: d.capability,
-    at: nowTs,
-    tier: 'declared',
-    args: Object.fromEntries(
-      Object.entries(d.args).filter((entry): entry is [string, string] => {
-        const value = entry[1];
-        return typeof value === 'string';
-      }),
-    ),
-  }));
+  const staged = new Set((session.savedCandidates ?? []).map((c) => c.capability));
+  const fromDeclares = (session.declaredCapabilities ?? [])
+    .filter((d) => !staged.has(d.capability))
+    .map((d) => ({
+      capability: d.capability,
+      at: nowTs,
+      tier: 'declared',
+      args: Object.fromEntries(
+        Object.entries(d.args).filter((entry): entry is [string, string] => {
+          const value = entry[1];
+          return typeof value === 'string';
+        }),
+      ),
+    }));
   // Union: if both lists have the same capability name, the explicit save wins
   // (it has a real tier); its `at` is the later of the two, which is what the
   // recorded-path window partition wants.

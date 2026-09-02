@@ -24,11 +24,25 @@ import { AUDIT_KINDS, TOOL_NAMES, WARNING_KINDS } from '../../vocab';
 /** Same-family rejections allowed before the bounce. The 3rd is the bounce. */
 export const DEAD_END_THRESHOLD = 3;
 
+/** Counter value marking a family whose one-time first-call grace has been
+ *  spent: the family is on record (so the grace can never be granted twice)
+ *  but has scored zero substantive rejections. The next rejection in the
+ *  family counts as the 1st, exactly as if the graced call had been the
+ *  token-less `pending` round it replaced. */
+const GRACE_RECORDED = 0;
+
 /** Rejection reasons that are audit-flow bookkeeping, not substantive
  *  failures of the strategy's shape: `pending` is the first-call checklist
  *  mint (the agent hasn't answered anything yet) and `payload_changed` means
  *  the agent DID change the shape (the opposite of a cosmetic retry). Neither
- *  counts toward the dead-end budget. */
+ *  counts toward the dead-end budget.
+ *
+ *  `answers_inconsistent` is deliberately absent: it is the substantive
+ *  rejection the whole bounce exists to count. The first-call-answers path
+ *  gets a one-time per-family grace instead (see
+ *  `trackRejectionAndMaybeBounce`) — a blanket exemption here would gut the
+ *  bounce, and exempting token-less calls unconditionally would let an agent
+ *  that never echoes a token loop forever. */
 const NON_SUBSTANTIVE_REASONS: ReadonlySet<AuditRejection['reason']> = new Set([
   'pending',
   'payload_changed',
@@ -218,6 +232,15 @@ function composeDeadEnd(
  * else `null` (the caller throws the normal rejection message). No-op (returns
  * `null`) for saves with no session, and for the non-substantive `pending` /
  * `payload_changed` rejection reasons.
+ *
+ * One-time per-family grace for the first-call-answers path: a call carrying
+ * answers but no token can be scored `answers_inconsistent`, which is a
+ * substantive reason and would silently spend one of three strikes on a round
+ * the agent could not know was being scored — a token-less first call is free
+ * by design. So the FIRST such rejection per family records the grace and does
+ * not count; every later rejection in that family counts normally,
+ * token-bearing or not. The budget is therefore exactly as generous as the
+ * mint-then-echo flow's, and omitting the token repeatedly buys nothing.
  */
 export function trackRejectionAndMaybeBounce(
   session: Session | null,
@@ -233,6 +256,11 @@ export function trackRejectionAndMaybeBounce(
   if (family === null) return null;
   const key = `${capability}::${family}`;
   const counts = (session.saveRejectionFamilyCounts ??= {});
+  const seen = Object.prototype.hasOwnProperty.call(counts, key);
+  if (rejection.first_call_answers === true && !seen) {
+    counts[key] = GRACE_RECORDED;
+    return null;
+  }
   const next = (counts[key] ?? 0) + 1;
   counts[key] = next;
   if (next < DEAD_END_THRESHOLD) return null;
@@ -240,10 +268,12 @@ export function trackRejectionAndMaybeBounce(
 }
 
 /**
- * Clear every dead-end family counter for one capability. Called when a new
- * triage plan generation is accepted for the capability — a revised plan is a
- * deliberate pivot, and its saves get a fresh budget instead of inheriting
- * the pre-pivot rejection counts.
+ * Clear every dead-end family counter for one capability, including the
+ * spent-grace records (they live under the same `<capability>::<family>` keys,
+ * marked by a zero count). Called when a new triage plan generation is
+ * accepted for the capability — a revised plan is a deliberate pivot, and its
+ * saves get a fresh budget instead of inheriting the pre-pivot rejection
+ * counts.
  */
 export function resetSaveRejectionFamilies(session: Session, capability: string): void {
   const counts = session.saveRejectionFamilyCounts;

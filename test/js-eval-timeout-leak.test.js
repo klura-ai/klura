@@ -58,7 +58,14 @@ test('evaluateExpression clears its timeout — a burst of large-return evals do
     t.skip(`browser unavailable: ${skip[1].trim()}`);
     return;
   }
-  assert.strictEqual(res.status, 0, `burst child exited ${res.status}: ${out}`);
+  // `status` is null when the child died by signal rather than exiting, so the
+  // signal has to be in the message — otherwise a child that crashed reads as
+  // "null !== 0" with no output and looks like a leak regression.
+  assert.strictEqual(
+    res.status,
+    0,
+    `burst child exited status=${res.status} signal=${res.signal}${res.error ? ` error=${res.error.message}` : ''}: ${out}`,
+  );
   const m = out.match(/GROWTH:(-?\d+)/);
   assert.ok(m, `burst child did not report heap growth: ${out}`);
   const growthMB = Number(m[1]);

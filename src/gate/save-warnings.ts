@@ -40,6 +40,7 @@ import {
   collectParameterizationAnchors,
 } from './save-warnings-parameterization';
 import { detectUnreferencedPrereqBinding } from './save-warnings-unreferenced-binding';
+import { detectRequiredParamsWithoutExample } from './save-warnings-param-example';
 import { detectLookupSiblingNotReferenced } from './save-warnings-lookup-sibling';
 import { isLookupSurfaceOwnerCapability } from './save-audit-lookup';
 
@@ -52,6 +53,7 @@ export {
   detectParameterizationDisclosureRequired,
   collectParameterizationAnchors,
   detectUnreferencedPrereqBinding,
+  detectRequiredParamsWithoutExample,
   detectLookupSiblingNotReferenced,
   VERIFICATION_SHAPE_TAGS,
   CLAIMING_VERIFICATION_TAGS,

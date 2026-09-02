@@ -23,12 +23,14 @@ test.after(() => {
 
 function makeDriver(returnValue = 'minted-value-of-sufficient-length-for-defaults') {
   const calls = [];
+  let landed = 'about:blank';
   const driver = {
     async navigate(_session, url) {
       calls.push({ kind: 'navigate', url });
+      landed = url;
     },
     async getUrl() {
-      return 'about:blank';
+      return landed;
     },
     async evaluateExpression(_session, expression, options) {
       calls.push({ kind: 'evaluateExpression', expression, options });
@@ -174,12 +176,18 @@ test('js-eval per-call mode skips cache reads and writes', async () => {
 test('js-eval per-call mode mints fresh on every dispatch (no cache reuse)', async () => {
   // Two consecutive runs — different args, both should hit the driver.
   let mintCount = 0;
+  let landed = 'about:blank';
   const driver = {
-    async navigate() {},
-    async getUrl() {
-      return 'about:blank';
+    async navigate(_session, url) {
+      landed = url;
     },
-    async evaluateExpression(_s, _expr, options) {
+    async getUrl() {
+      return landed;
+    },
+    async evaluateExpression(_s, expr, options) {
+      // The warm-reuse fast path probes document.readyState before deciding to
+      // navigate. That is a lifecycle question, not a mint.
+      if (expr === 'document.readyState') return 'complete';
       mintCount += 1;
       return `sig-for-${options.args.body}`;
     },

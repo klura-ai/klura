@@ -104,7 +104,7 @@ export class PackageInstallerV1 {
       version: indexedVersion.version,
       package_digest: indexedVersion.package_digest,
       manifest_digest: indexedVersion.manifest_digest,
-      source_index_digest: verifiedIndex.source_digest,
+      provenance: { kind: 'registry', source_index_digest: verifiedIndex.source_digest },
       runtime_range: indexedVersion.runtime_range,
       installed_at: nowAsRfc3339Seconds(now),
     };
@@ -117,7 +117,8 @@ export class PackageInstallerV1 {
   }
 }
 
-function nowAsRfc3339Seconds(value: Date): Rfc3339InstantV1 {
+/** Rounds an install instant to the second precision installed.json stores. */
+export function nowAsRfc3339Seconds(value: Date): Rfc3339InstantV1 {
   if (!Number.isFinite(value.getTime())) {
     throw new PublicContractError('install.now', 'must be a valid instant');
   }

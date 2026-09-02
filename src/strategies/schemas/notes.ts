@@ -30,6 +30,12 @@ export const paramDocSchema = z
       .describe(
         'true when this param is a filter the caller may omit (e.g. an optional `?cuisine=` query). Optional params are NOT reported as missing at execute time when absent, and the unsatisfied-placeholder check skips them. Omit (defaults to required).',
       ),
+    paginates: z
+      .boolean()
+      .optional()
+      .describe(
+        'whether this param advances a page/offset window over the same collection rather than selecting different data. REQUIRED — true or false — for any param you template into the request whose example is an integer; omitting it fails the save, because "nothing paginates" and "nobody asked" are otherwise the same bytes. true routes the param into post-save verification, which executes the next consecutive integer and requires the two row sets to be disjoint.',
+      ),
     observed_values: z
       .array(
         z

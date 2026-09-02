@@ -30,7 +30,7 @@ import {
   type SaveEvidence,
 } from '../audit/lift/save-policy';
 import type { Session } from '../drivers/types/session';
-import { SAVE_ORIGINS, TOOL_NAMES } from '../vocab';
+import { REF_LINKS, SAVE_ORIGINS, TOOL_NAMES, refUrl } from '../vocab';
 import { rejectionToErrorMessage } from '../audit';
 import type { AuditRejection } from '../audit';
 import { getRegisteredSaveConfirmationDecider } from '../audit/lift/save-confirmation-decider';
@@ -51,7 +51,8 @@ import { enumerateStringParams, readCurrentUrl } from './_internals';
 import { collectScannedFields } from '../strategies/validate/helpers';
 import { assessReadCandidateEligibility } from '../strategies/read-candidate-eligibility';
 import { rejectAgentEmittedRuntimeMeta } from '../strategies/validate/notes';
-import type { LiteralClassification } from '../gate/save-audit';
+import type { LiteralClassification, ObservedSiblingItem } from '../gate/save-audit';
+import { collectUnsavedHotXhrEndpoints } from '../audit/drive/xhr-noise';
 import { detectAuthGatedWithoutAuthPrereq } from '../gate/save-warnings';
 import { composeBudgetWarning } from '../session-obligations/budget-warning';
 import {
@@ -73,6 +74,75 @@ export interface SaveStrategyTimings {
   audit_postcheck_ms: number;
   probe_skipped: boolean;
   audit_postcheck_skipped: boolean;
+}
+
+/** Path templates the strategy itself targets, as `/`-split segment lists. A
+ *  `{{placeholder}}` segment matches any concrete segment. */
+function ownPathTemplates(data: Strategy): string[][] {
+  const out: string[][] = [];
+  const push = (raw: string): void => {
+    const withoutMethod = raw.includes(' ') ? raw.split(' ').slice(1).join(' ') : raw;
+    const withoutOrigin = withoutMethod.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]+/i, '');
+    const path = withoutOrigin.split('?')[0] ?? '';
+    if (path.length === 0) return;
+    out.push(path.split('/'));
+  };
+  const s = data as Record<string, unknown>;
+  if (typeof s.endpoint === 'string') push(s.endpoint);
+  const prereqs = Array.isArray(s.prerequisites) ? s.prerequisites : [];
+  for (const raw of prereqs) {
+    if (!raw || typeof raw !== 'object') continue;
+    const url = (raw as { url?: unknown }).url;
+    if (typeof url === 'string') push(url);
+  }
+  return out;
+}
+
+function pathMatchesTemplate(urlPath: string, template: readonly string[]): boolean {
+  const segments = urlPath.split('/');
+  if (segments.length !== template.length) return false;
+  return template.every((t, i) => t.includes('{{') || t === segments[i]);
+}
+
+/** Captured 2xx endpoints this session hit that NO saved strategy covers and
+ *  that the strategy being saved does not itself target. Feeds the
+ *  `observed_siblings` classifier: the agent commits to `recorded` or
+ *  `not_worth_recording:<reason>` per endpoint, so a session that surfaced
+ *  several distinct operations can't quietly lift one and drop the rest.
+ *
+ *  Subtracting the strategy's own path templates is what makes the checklist
+ *  answerable: on a first save the capability isn't on disk yet, so without
+ *  this the agent would be asked to classify the very endpoint the call is
+ *  saving. A path segment templated with `{{...}}` matches any concrete
+ *  segment; anything else is an exact segment match.
+ *
+ *  Exported so the wiring between the capture inventory and the classifier's
+ *  checklist is directly assertable — it is the whole content of the
+ *  `observed_siblings` dimension, and a silently-empty list makes the
+ *  classifier inert without failing anything. */
+export function collectObservedSiblingsForAudit(
+  session: Session | null,
+  platform: string,
+  data: Strategy,
+): ObservedSiblingItem[] {
+  if (!session || !platform) return [];
+  const hot = collectUnsavedHotXhrEndpoints(
+    session.intercepted,
+    session.savedCapabilities,
+    platform,
+  );
+  if (hot.length === 0) return [];
+  const own = ownPathTemplates(data);
+  const out: ObservedSiblingItem[] = [];
+  for (const endpoint of hot) {
+    if (own.some((t) => pathMatchesTemplate(endpoint.urlPath, t))) continue;
+    out.push({
+      method: endpoint.method,
+      url: endpoint.sampleUrl,
+      key: `${endpoint.method} ${endpoint.urlPath}`,
+    });
+  }
+  return out;
 }
 
 /** Error subclass that carries `SaveStrategyTimings` on rejected save
@@ -515,7 +585,7 @@ export async function saveStrategyFromCapture(args: {
   const evidenceForAudit: SaveEvidence = {
     sessionId: args.session_id,
     session,
-    observedSiblings: [],
+    observedSiblings: collectObservedSiblingsForAudit(session, args.platform, strategy as Strategy),
     observedParamValues: getAllParamObservations(args.session_id),
     capturedEndpointPaths,
     observedUrls: observedUrlsForAudit,
@@ -918,7 +988,7 @@ export async function saveStrategy(
   const auditEvidence: SaveEvidence = {
     sessionId: sessionId ?? '',
     session: sessionForAudit,
-    observedSiblings: [],
+    observedSiblings: collectObservedSiblingsForAudit(sessionForAudit, platform, data),
     observedParamValues: observedParamValues ?? {},
     capturedEndpointPaths: capturedEndpointPaths ?? new Set<string>(),
     observedUrls: observedUrlsForAudit,
@@ -1359,6 +1429,29 @@ export async function saveStrategy(
   // capabilities to build fallbacks for. Only the capability name + tier +
   // timestamp are kept here — the synthesizer re-loads the saved strategy from
   // disk when it needs the full body.
+  if (sessionId && !active && candidateId) {
+    // An inactive candidate is still a strategy this session put on disk. It
+    // is recorded separately from savedCapabilities so auto-synthesis keeps
+    // ignoring it, but close-time can see that the save path reached disk —
+    // promotion runs in review_strategy_candidate, which holds no session.
+    try {
+      const session = pool.getSession(sessionId);
+      if (!session.savedCandidates) session.savedCandidates = [];
+      const tier =
+        typeof (data as { strategy?: unknown }).strategy === 'string'
+          ? (data as { strategy: string }).strategy
+          : 'unknown';
+      session.savedCandidates.push({
+        capability,
+        at: Date.now(),
+        tier,
+        candidateId,
+      });
+    } catch {
+      // Session may already be torn down (programmatic save from a test, etc.)
+    }
+  }
+
   if (sessionId && active) {
     try {
       const session = pool.getSession(sessionId);
@@ -1748,7 +1841,10 @@ function computeRunnablePrereqBinds(data: Strategy, baseSatisfiable: Set<string>
   return runnable;
 }
 
-function findUnsatisfiedPlaceholders(data: Strategy, args: Record<string, unknown>): Set<string> {
+export function findUnsatisfiedPlaceholders(
+  data: Strategy,
+  args: Record<string, unknown>,
+): Set<string> {
   const argKeys = new Set(
     Object.keys(args).filter((k) => {
       const v = args[k];
@@ -1893,6 +1989,26 @@ export async function updateStrategy(
       `no_saved_strategy_to_update: ${platform}/${capability} has no saved strategy to amend. ` +
         `update_strategy improves an EXISTING strategy; to create the first one, run the ` +
         `discover → lift → save_strategy flow.`,
+      newTimings(),
+    );
+  }
+  // Typed `Strategy` for internal callers, but the MCP handler forwards whatever
+  // arrived on the wire — so the shape is checked on a widened view rather than
+  // trusted from the signature.
+  const submittedPayload: unknown = data;
+  if (
+    submittedPayload === null ||
+    typeof submittedPayload !== 'object' ||
+    Array.isArray(submittedPayload)
+  ) {
+    throw new SaveStrategyRejection(
+      `invalid_strategy: ${TOOL_NAMES.updateStrategy} received ${
+        Array.isArray(submittedPayload) ? 'an array' : String(submittedPayload)
+      } as \`strategy\`. The amend carries the FULL replacement strategy object — ` +
+        `tier field plus the operational body for that tier — not a patch of the changed keys. ` +
+        `Load the current one with ${TOOL_NAMES.getStrategy}, edit it, and send the whole object. ` +
+        `Tier schemas: ${refUrl(REF_LINKS.fetchSchema)}, ${refUrl(REF_LINKS.pageScriptSchema)}, ` +
+        `${refUrl(REF_LINKS.recordedPathSchema)}.`,
       newTimings(),
     );
   }

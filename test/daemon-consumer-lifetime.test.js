@@ -32,7 +32,7 @@ function waitForSocket(deadline) {
     const timeout = setTimeout(
       () => {
         watch.close();
-        reject(new Error('daemon socket did not appear in time'));
+        reject(new Error(`daemon socket ${socketPath} did not appear in time`));
       },
       Math.max(0, deadline - Date.now()),
     );
@@ -80,7 +80,9 @@ test('a consumer request keeps the daemon alive through its idle deadline', asyn
   });
   const exited = new Promise((resolve) => daemon.once('exit', resolve));
   try {
-    await waitForSocket(Date.now() + 5_000);
+    // Daemon boot pulls in the browser pool, so the budget has to survive a
+    // machine running the rest of the suite in parallel.
+    await waitForSocket(Date.now() + 15_000);
     const response = postConsumerCall();
     await new Promise((resolve) => setTimeout(resolve, 1_100));
     assert.equal(fs.existsSync(socketPath), true);

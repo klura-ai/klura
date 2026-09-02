@@ -1,27 +1,23 @@
 // Parsing for the platform-export input: the platform slug, the
-// tools-repository path, and the reviewed package contract with its
-// per-capability page-script and fixture reviews. Every failure is a
-// PublicContractError naming the exact reviewed path, raised before any
+// tools-repository path, and the reviewed package contract, whose
+// per-capability page-script and fixture reviews come from the shared
+// capability-review contract under this input's field prefix. Every failure is
+// a PublicContractError naming the exact reviewed path, raised before any
 // smoke traffic or file writes.
 import fs from 'node:fs';
 import path from 'node:path';
 import {
   parseBoundedRecord,
   parseExactRecord,
-  parsePackageId,
   parsePackageVersion,
+  parseRegistryPackageId,
   parseRuntimeRange,
-  parseStableContractId,
   PublicContractError,
-  PUBLIC_CONTRACT_LIMITS,
   runtimeSupportsVersion,
   type PackageIdV1,
   type PackageVersionV1,
-  type StableContractIdV1,
 } from '../../public/contracts/common';
 import { readConsumerRuntimeVersion } from '../../consumer/runtime-version';
-import { assertJsonValue, type JsonValueV1 } from '../../public/contracts/json';
-import { PACKAGE_FIXTURE_KINDS } from '../../public/contracts/fixture';
 import {
   parseRegistryCatalogManifest,
   parseRegistryReleaseState,
@@ -31,64 +27,9 @@ import {
 } from '../../public/contracts/registry-catalog';
 import { TOOLS_PACKAGE_LAYOUT_V1 } from './tools-layout';
 import { asPlatformSlug, ValidationError } from '../../validators';
-import type { PublicReadCapabilitySourceV1 } from './compiler';
+import { parseCapabilityReview, type ParsedCapabilityReviewV1 } from './capability-review';
 
-const CAPABILITY_CONTRACT_KEYS = [
-  'description',
-  'visibility',
-  'effect',
-  'authentication',
-  'request_origins',
-  'navigation_origins',
-  'origin_traffic_policies',
-  'browser_resources',
-  'max_target_requests_per_call',
-  'max_encoded_outcome_bytes',
-  'call_timeouts',
-  'input_schema',
-  'call_retry_policy',
-  'outcomes',
-  'control',
-  'collection',
-] as const;
-
-const PAGE_SCRIPT_REVIEW_KEYS = [
-  'tier',
-  'strategy_id',
-  'wait',
-  'interaction',
-  'expect',
-  'request_body_limits',
-  'replay',
-] as const;
-
-export type ParsedFixtureReviewV1 =
-  | {
-      kind: typeof PACKAGE_FIXTURE_KINDS.call;
-      fixture_id: StableContractIdV1;
-      input: JsonValueV1;
-    }
-  | {
-      kind: typeof PACKAGE_FIXTURE_KINDS.run;
-      fixture_id: StableContractIdV1;
-      input: JsonValueV1;
-      caller_bounds: JsonValueV1;
-      input_mode_id: StableContractIdV1 | null;
-    };
-
-export interface ParsedCapabilityReviewV1 {
-  contract: Omit<PublicReadCapabilitySourceV1, 'strategies'>;
-  page_script: {
-    tier: 'page-script';
-    strategy_id: StableContractIdV1;
-    wait: unknown;
-    interaction: unknown;
-    expect: unknown;
-    request_body_limits: unknown;
-    replay: unknown;
-  };
-  fixtures: ParsedFixtureReviewV1[];
-}
+const EXPORT_CAPABILITIES_FIELD = 'platform_export.review.capabilities';
 
 export interface ParsedExportReviewV1 {
   package_id: PackageIdV1;
@@ -188,27 +129,26 @@ export function parseExportReview(value: unknown): ParsedExportReviewV1 {
     },
     'platform_export.review.catalog',
   );
-  const rawCapabilities = parseBoundedRecord(
-    review.capabilities,
-    'platform_export.review.capabilities',
-    32,
-  );
+  const rawCapabilities = parseBoundedRecord(review.capabilities, EXPORT_CAPABILITIES_FIELD, 32);
   if (Object.keys(rawCapabilities).length === 0) {
     throw new PublicContractError(
-      'platform_export.review.capabilities',
+      EXPORT_CAPABILITIES_FIELD,
       'must contain at least one reviewed capability',
     );
   }
   const capabilities: Record<string, ParsedCapabilityReviewV1> = {};
-  // The fixture_id namespace is package-wide: every fixture file lands in the
-  // package's single flat fixtures/ directory, so one shared set rejects a
-  // collision here — before any smoke traffic — instead of at file-write time.
+  // One shared fixture-ID set across the whole review rejects a collision here
+  // — before any smoke traffic — instead of at file-write time.
   const fixtureIds = new Set<string>();
   for (const [capabilityId, value] of Object.entries(rawCapabilities)) {
-    capabilities[capabilityId] = parseCapabilityReview(value, capabilityId, fixtureIds);
+    capabilities[capabilityId] = parseCapabilityReview(value, {
+      field_prefix: EXPORT_CAPABILITIES_FIELD,
+      capability_id: capabilityId,
+      seen_fixture_ids: fixtureIds,
+    });
   }
   return {
-    package_id: parsePackageId(review.package_id, 'platform_export.review.package_id'),
+    package_id: parseRegistryPackageId(review.package_id, 'platform_export.review.package_id'),
     version,
     authentication_contracts: parseBoundedRecord(
       review.authentication_contracts,
@@ -217,97 +157,5 @@ export function parseExportReview(value: unknown): ParsedExportReviewV1 {
     ),
     registry_manifest: registryManifest,
     capabilities,
-  };
-}
-
-function parseCapabilityReview(
-  value: unknown,
-  capabilityId: string,
-  seenFixtureIds: Set<string>,
-): ParsedCapabilityReviewV1 {
-  const field = `platform_export.review.capabilities.${capabilityId}`;
-  const review = parseExactRecord(value, field, ['contract', 'page_script', 'fixtures']);
-  const contract = parseExactRecord(review.contract, `${field}.contract`, CAPABILITY_CONTRACT_KEYS);
-  const pageScript = parseExactRecord(
-    review.page_script,
-    `${field}.page_script`,
-    PAGE_SCRIPT_REVIEW_KEYS,
-  );
-  if (pageScript.tier !== 'page-script') {
-    throw new PublicContractError(`${field}.page_script.tier`, 'must be page-script');
-  }
-  if (
-    !Array.isArray(review.fixtures) ||
-    review.fixtures.length === 0 ||
-    review.fixtures.length > 8
-  ) {
-    throw new PublicContractError(`${field}.fixtures`, 'must contain one to eight fixtures');
-  }
-  const fixtures = review.fixtures.map((candidate, index) =>
-    parseFixtureReview(candidate, `${field}.fixtures[${index}]`, seenFixtureIds),
-  );
-  return {
-    contract: contract as unknown as Omit<PublicReadCapabilitySourceV1, 'strategies'>,
-    page_script: {
-      tier: 'page-script',
-      strategy_id: parseStableContractId(
-        pageScript.strategy_id,
-        `${field}.page_script.strategy_id`,
-      ),
-      wait: pageScript.wait,
-      interaction: pageScript.interaction,
-      expect: pageScript.expect,
-      request_body_limits: pageScript.request_body_limits,
-      replay: pageScript.replay,
-    },
-    fixtures,
-  };
-}
-
-function parseFixtureReview(
-  value: unknown,
-  field: string,
-  seenFixtureIds: Set<string>,
-): ParsedFixtureReviewV1 {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new PublicContractError(field, 'must be an object');
-  }
-  const kind = (value as Record<string, unknown>).kind;
-  if (kind !== PACKAGE_FIXTURE_KINDS.call && kind !== PACKAGE_FIXTURE_KINDS.run) {
-    throw new PublicContractError(
-      `${field}.kind`,
-      `must be ${PACKAGE_FIXTURE_KINDS.call} or ${PACKAGE_FIXTURE_KINDS.run}`,
-    );
-  }
-  const fixture = parseExactRecord(
-    value,
-    field,
-    kind === PACKAGE_FIXTURE_KINDS.call
-      ? ['fixture_id', 'kind', 'input']
-      : ['fixture_id', 'kind', 'input', 'caller_bounds', 'input_mode_id'],
-  );
-  const fixtureId = parseStableContractId(fixture.fixture_id, `${field}.fixture_id`);
-  if (seenFixtureIds.has(fixtureId)) {
-    throw new PublicContractError(
-      `${field}.fixture_id`,
-      'must be unique across every capability in this review: all fixture files share the package fixtures/ directory',
-    );
-  }
-  seenFixtureIds.add(fixtureId);
-  assertJsonValue(fixture.input, `${field}.input`, PUBLIC_CONTRACT_LIMITS.maxDepth);
-  if (kind === PACKAGE_FIXTURE_KINDS.call) {
-    return { kind, fixture_id: fixtureId, input: fixture.input };
-  }
-  assertJsonValue(fixture.caller_bounds, `${field}.caller_bounds`, PUBLIC_CONTRACT_LIMITS.maxDepth);
-  const inputModeId =
-    fixture.input_mode_id === null
-      ? null
-      : parseStableContractId(fixture.input_mode_id, `${field}.input_mode_id`);
-  return {
-    kind,
-    fixture_id: fixtureId,
-    input: fixture.input,
-    caller_bounds: fixture.caller_bounds,
-    input_mode_id: inputModeId,
   };
 }

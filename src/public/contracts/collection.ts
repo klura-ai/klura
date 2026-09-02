@@ -35,20 +35,23 @@ export interface CsvColumnV1 {
   pointer: JsonPointerV1;
 }
 
+/** Every key a collection run contract carries, in canonical order. */
+export const COLLECTION_CONTRACT_KEYS = [
+  'collection_schema_version',
+  'input_modes',
+  'start_url_templates',
+  'item_schema',
+  'item_identity',
+  'inline_output_bound',
+  'semantic_stops',
+  'csv_columns',
+  'task_kinds',
+  'max_fanout_depth',
+  'run_policy',
+] as const;
+
 export function parseCollectionRunContract(value: unknown, field: string): CollectionRunContractV1 {
-  const record = parseExactRecord(value, field, [
-    'collection_schema_version',
-    'input_modes',
-    'start_url_templates',
-    'item_schema',
-    'item_identity',
-    'inline_output_bound',
-    'semantic_stops',
-    'csv_columns',
-    'task_kinds',
-    'max_fanout_depth',
-    'run_policy',
-  ]);
+  const record = parseExactRecord(value, field, COLLECTION_CONTRACT_KEYS);
   if (record.collection_schema_version !== 1) {
     throw new PublicContractError(`${field}.collection_schema_version`, 'must be 1');
   }

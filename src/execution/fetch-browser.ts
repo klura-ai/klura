@@ -10,6 +10,7 @@ import type { Session } from '../drivers/types/session';
 import { resolveGenerated } from '../strategies/generators';
 import { JS_EVAL_TIMEOUT_DEFAULT_MS } from '../strategies/skills';
 import { trimA11yTree, MAX_TOOL_OUTPUT_CHARS, truncateString } from '../response/response-size';
+import { OVERSIZE_BODY_CODES } from './result-classification';
 import { fireInterrupts, type InterruptEntry } from '../strategies/interrupt-firing';
 import { applyResponseFrom, hasResponseFrom, responseFromBinding } from './response-from';
 import type { TokenCache } from '../strategies/tokens';
@@ -932,7 +933,7 @@ async function fireRequestInSession(
         return {
           status: evalResult.status,
           body: {
-            error: 'response_too_large_html_trimmed',
+            error: OVERSIZE_BODY_CODES[1],
             total_chars: body.length,
             a11y_tree: trimmed.tree,
             a11y_tree_truncated: trimmed.truncated,
@@ -954,7 +955,7 @@ async function fireRequestInSession(
     return {
       status: evalResult.status,
       body: {
-        error: 'response_too_large',
+        error: OVERSIZE_BODY_CODES[0],
         total_chars: serialized.length,
         preview: truncateString(serialized, 2000, '…'),
         hint:

@@ -1,11 +1,13 @@
 import {
+  isLocalPackageId,
   parseExactRecord,
   parseCapabilityId,
   parseInteger,
-  parsePackageId,
   parsePackageVersion,
+  parseRegistryPackageId,
   parseSha256Digest,
   parseString,
+  LOCAL_PACKAGE_ID_PREFIX_V1,
   PublicContractError,
   type CapabilityIdV1,
   type PackageIdV1,
@@ -37,6 +39,7 @@ import {
   type VerifiedRegistryIndexV1,
 } from './client';
 import { parseVerifiedRegistryPackage } from './package-verification';
+import { TOOL_NAMES } from '../../vocab';
 
 const SEARCH_QUERY_BYTES_V1 = 512;
 const SEARCH_CURSOR_BYTES_V1 = 1_024;
@@ -156,6 +159,19 @@ export class RegistryCatalogError extends PublicContractError {
     super('registry_catalog', message);
     this.name = 'RegistryCatalogError';
   }
+}
+
+/** Parses the package id of a registry selector. The reserved local namespace
+ *  answers as a typed miss before any network work, because a locally authored
+ *  package only ever exists in local installed state. */
+export function parseRegistrySelectedPackageId(value: unknown, field: string): PackageIdV1 {
+  if (typeof value === 'string' && isLocalPackageId(value)) {
+    throw new RegistryCatalogError(
+      'package_not_found',
+      `${field} names the reserved ${JSON.stringify(LOCAL_PACKAGE_ID_PREFIX_V1)} namespace, which the signed registry never carries: call ${TOOL_NAMES.listInstalledPackages} to read locally authored packages`,
+    );
+  }
+  return parseRegistryPackageId(value, field);
 }
 
 interface SearchCursorV1 {
@@ -387,7 +403,10 @@ function parseSearchCursor(value: unknown, query: string): SearchCursorV1 | null
       operation: 'search',
       query: cursorQuery,
       source_digest: parseSha256Digest(cursor.source_digest, 'search.cursor.source_digest'),
-      last_package_id: parsePackageId(cursor.last_package_id, 'search.cursor.last_package_id'),
+      last_package_id: parseRegistryPackageId(
+        cursor.last_package_id,
+        'search.cursor.last_package_id',
+      ),
     };
   } catch (error) {
     if (error instanceof RegistryCatalogError) throw error;
@@ -520,7 +539,7 @@ function parseShowInput(input: unknown): ShowRegistryPackageInputV1 {
       throw new PublicContractError('show', 'is missing required key "package_id"');
     }
     return {
-      package_id: parsePackageId(record.package_id, 'show.package_id'),
+      package_id: parseRegistrySelectedPackageId(record.package_id, 'show.package_id'),
       version:
         record.version === undefined
           ? undefined
@@ -531,6 +550,7 @@ function parseShowInput(input: unknown): ShowRegistryPackageInputV1 {
           : parseCapabilityId(record.capability, 'show.capability'),
     };
   } catch (error) {
+    if (error instanceof RegistryCatalogError) throw error;
     throw new RegistryCatalogError('invalid_options', asError(error).message);
   }
 }

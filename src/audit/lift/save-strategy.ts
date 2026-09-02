@@ -2,7 +2,8 @@
 // Composes save-warning detectors + token-gated classifiers under one
 // rejection envelope. See runtime/src/audit/index.ts for the Audit class.
 
-import { Audit, type Detector, type ShapeCheck, type Issue, type AuditResult } from '../index';
+import { Audit } from '../index';
+import type { AuditResult, Classifier, Detector, Issue, ShapeCheck } from '../index';
 import { AUDIT_KINDS, WARNING_KINDS } from '../../vocab';
 import { TIER_RANK } from '../concerns/tier-rank';
 import { findTriageVerdict } from '../concerns/triage-verdict';
@@ -43,6 +44,7 @@ import {
   detectEnumValueInCapabilitySlug,
   detectSessionScopedIdExtraction,
   detectUnreferencedPrereqBinding,
+  detectRequiredParamsWithoutExample,
   detectLookupSiblingNotReferenced,
   detectUnreferencedParams,
   type SaveWarning,
@@ -50,7 +52,12 @@ import {
 import { detectSensitiveActionShape } from '../../gate/save-warnings-sensitive-shape';
 import { detectUselessCapabilityPrereq } from '../../gate/save-warnings-useless-prereq';
 import { detectSideEffectPrereqUnproven } from '../../gate/save-warnings-side-effect-prereq';
-import { detectHardcodedPaginationValue } from '../../gate/save-warnings-pagination';
+import {
+  detectHardcodedPaginationValue,
+  detectUnansweredPaginationQuestion,
+} from '../../gate/save-warnings-pagination';
+import { detectPopupAddressingWithoutTrigger } from '../../gate/save-warnings-popup';
+import { detectCallerArgBaked } from '../../gate/save-warnings-caller-arg';
 import {
   validateLookupPrereqsAreCapabilities,
   type ObservedSiblingItem,
@@ -420,6 +427,30 @@ const hardcodedPaginationDetector: Detector<Strategy, SaveStrategyCtx> = {
   ackReason: 'required',
 };
 
+// ackReason: 'none'. There is no legitimate "I decline to say" — the remedy is
+// one boolean on a param doc, and an ack path would let the strategy commit
+// while leaving the question exactly as unanswered as omitting it. Warn-tier
+// unattended: auto-synth and graduation cannot author param documentation, and
+// stripping a working fallback over a missing declaration would trade a real
+// capability for a check.
+const unansweredPaginationDetector: Detector<Strategy, SaveStrategyCtx> = {
+  kind: WARNING_KINDS.unansweredPaginationQuestion,
+  detect: (data) => asIssues(detectUnansweredPaginationQuestion(data)),
+  ackReason: 'none',
+  unattendedPolicy: 'warn',
+};
+
+// A whole field baked with the value this caller passed to start_session /
+// declare_capability. Detector rather than a literal_provenance validation
+// issue so it fires in Stage 1, before any classifier token mints — the agent
+// re-templates on a token-free rejection instead of invalidating a fresh token
+// by fixing the body. The ack covers "fixed for every caller."
+const callerArgBakedDetector: Detector<Strategy, SaveStrategyCtx> = {
+  kind: WARNING_KINDS.callerArgBaked,
+  detect: (data, ctx) => asIssues(detectCallerArgBaked(data, ctx.session?.declaredCapabilities)),
+  ackReason: 'required',
+};
+
 // Catches js-eval prereqs whose declared `binds` name is never referenced
 // elsewhere on the strategy. The shape silently corrupts warm execute:
 // the prereq does real work (often firing the actual fetch + parse
@@ -440,6 +471,19 @@ const unreferencedPrereqBindingDetector: Detector<Strategy, SaveStrategyCtx> = {
 const unreferencedParamsDetector: Detector<Strategy, SaveStrategyCtx> = {
   kind: 'params_key_unreferenced',
   detect: (data) => asIssues(detectUnreferencedParams(data)),
+  ackReason: 'required',
+};
+
+// A required caller param with no `example` is the only thing standing between
+// a saved capability and a caller who cannot invoke it: `example` is where the
+// shape is documented, and post-save verification falls back to it when the
+// session declares no args, so a param with neither leaves the strategy saved
+// and never executed once. ackReason: 'required' — the one legitimate ack is a
+// credential param, which must not carry an example because that would persist
+// a secret to disk in plaintext.
+const requiredParamWithoutExampleDetector: Detector<Strategy, SaveStrategyCtx> = {
+  kind: WARNING_KINDS.requiredParamWithoutExample,
+  detect: (data) => asIssues(detectRequiredParamsWithoutExample(data)),
   ackReason: 'required',
 };
 
@@ -650,7 +694,7 @@ const endpointCollidesWithSavedCapabilityDetector: Detector<Strategy, SaveStrate
 // is bypassable when the agent's canned reason happens to overlap a candidate
 // anchor; token binding closes that bypass.
 
-// ---------- Unconditional detector (was validateLookupPrereqsAreCapabilities) ----------
+// ---------- Unconditional detector ----------
 
 // Every endpoint / prereq URL in the saved strategy must match a host+path
 // the agent saw in the discovery session's network log (or a top-level
@@ -759,75 +803,6 @@ const lookupPrereqMustBeCapabilityDetector: Detector<Strategy, SaveStrategyCtx> 
 // as the parameterization / mutating-verification migration above —
 // anti-canned-ack substring matching alone is bypassable.
 
-// ---------- Popup-addressing-without-trigger detector ----------
-
-// Recorded-path strategies can pin individual steps to a tracked sub-page
-// (e.g. an OAuth consent popup) via `step.page: "popup-1"`. At warm replay,
-// the runtime needs `popup-1` to actually open at the right point in the
-// flow — usually because an earlier step clicked the trigger that fired
-// `window.open()` / followed a `target=_blank` link. When the discovery
-// session never observed any popup at all (`session.subPages` is empty or
-// missing), saving a strategy that depends on `popup-1` is virtually
-// guaranteed to fail at warm-replay: nothing in the flow opens the popup
-// the saved steps target. Surface as a save_warning so the agent can fix
-// the steps (or ack with a reason — e.g. they're saving a strategy whose
-// popup is opened via a side channel like a browser extension; rare but
-// not zero). ackReason: 'required'.
-function detectPopupAddressingWithoutTrigger(
-  data: Strategy,
-  session: Session | null | undefined,
-): SaveWarning[] {
-  if (data.strategy !== 'recorded-path') return [];
-  const steps = (data as { steps?: unknown }).steps;
-  if (!Array.isArray(steps)) return [];
-  const stepArray = steps as unknown[];
-  const offending: Array<{ index: number; id: string; page: string }> = [];
-  for (let i = 0; i < stepArray.length; i += 1) {
-    const step = stepArray[i];
-    if (!step || typeof step !== 'object') continue;
-    const page = (step as { page?: unknown }).page;
-    if (typeof page !== 'string' || page === 'main') continue;
-    offending.push({
-      index: i,
-      id:
-        typeof (step as { id?: unknown }).id === 'string'
-          ? (step as { id: string }).id
-          : `step_${i}`,
-      page,
-    });
-  }
-  if (offending.length === 0) return [];
-  // Distinct popup handles the steps reference.
-  const referenced = Array.from(new Set(offending.map((o) => o.page)));
-  // Did the discovery session observe any of these popups?
-  const observed = new Set((session?.subPages ?? []).map((p) => p.id));
-  const unobserved = referenced.filter((id) => !observed.has(id));
-  if (unobserved.length === 0) return [];
-  const referencedFmt = referenced.map((p) => JSON.stringify(p)).join(', ');
-  const unobservedFmt = unobserved.map((p) => JSON.stringify(p)).join(', ');
-  const stepsFmt = offending
-    .filter((o) => unobserved.includes(o.page))
-    .map((o) => `steps[${o.index}] (id ${JSON.stringify(o.id)}, page ${JSON.stringify(o.page)})`)
-    .join('; ');
-  return [
-    {
-      kind: 'popup_addressing_without_trigger',
-      message:
-        `Recorded-path references popup handles [${referencedFmt}] but the discovery session ` +
-        `never observed [${unobservedFmt}] — no step in this flow opens the popup that these ` +
-        `steps target, so warm replay will fail at the first popup-pinned step. Offending: ` +
-        `${stepsFmt}.`,
-      hint:
-        `Either (a) add the click that triggers window.open() / opens the target=_blank link ` +
-        `as a step before the popup-pinned ones, (b) re-discover the flow so the popup is ` +
-        `actually observed (session.subPages will fill in), or (c) ack via ` +
-        `notes.save_warnings_acked: [{kind: "popup_addressing_without_trigger", reason: "..."}] ` +
-        `if the popup is opened by a side channel (browser extension, prior tab) — describe ` +
-        `the channel. See klura://reference#popups.`,
-    },
-  ];
-}
-
 const popupAddressingWithoutTriggerDetector: Detector<Strategy, SaveStrategyCtx> = {
   kind: 'popup_addressing_without_trigger',
   detect: (data, ctx) => asIssues(detectPopupAddressingWithoutTrigger(data, ctx.session ?? null)),
@@ -880,6 +855,23 @@ const noSelectorSelfReferenceCheck: ShapeCheck<Strategy, SaveStrategyCtx> = {
 
 // ---------- Audit instance ----------
 
+/** First-call answerability, assigned here so the policy reads as one table.
+ *  `true` — the answer classifies items the runtime derived from the very
+ *  payload this call carried, so validate() cross-checks it against the same
+ *  bytes the answer describes. `false` — consent-shaped: `user_confirmation`'s
+ *  hash binds the strategy identity the user approved
+ *  (extractUserConfirmationSlice) and `mutating_verification` is a verdict about
+ *  an effect the runtime cannot re-observe, so both compose their answer against
+ *  a payload no token has bound yet. Unassigned for `observed_siblings`, whose
+ *  checklist comes from ctx (captured endpoints), not the payload. See
+ *  `Classifier.firstCallAnswerable` + `audit.firstCallAnswers`. */
+function firstCallAnswerable(
+  classifier: Classifier<Strategy, SaveStrategyCtx, unknown>,
+  answerable: boolean,
+): Classifier<Strategy, SaveStrategyCtx, unknown> {
+  return { ...classifier, firstCallAnswerable: answerable };
+}
+
 export const saveStrategyAudit = new Audit<Strategy, SaveStrategyCtx>({
   kind: 'save_strategy',
   shapeChecks: [
@@ -902,6 +894,7 @@ export const saveStrategyAudit = new Audit<Strategy, SaveStrategyCtx>({
     authGatedWithoutAuthPrereqDetector,
     unreferencedPrereqBindingDetector,
     unreferencedParamsDetector,
+    requiredParamWithoutExampleDetector,
     uselessCapabilityPrereqDetector,
     sideEffectPrereqUnprovenDetector,
     recordedPathInlinesLookupDetector,
@@ -916,16 +909,18 @@ export const saveStrategyAudit = new Audit<Strategy, SaveStrategyCtx>({
     lookupPrereqMustBeCapabilityDetector,
     popupAddressingWithoutTriggerDetector,
     hardcodedPaginationDetector,
+    unansweredPaginationDetector,
+    callerArgBakedDetector,
   ],
   classifiers: [
-    parameterizationDisclosureClassifier,
-    mutatingVerificationClassifier,
-    observedPropertyKeysClassifier,
-    observedLiteralValuesClassifier,
-    literalProvenanceClassifier,
-    capabilityNameJustificationClassifier,
+    firstCallAnswerable(parameterizationDisclosureClassifier, true),
+    firstCallAnswerable(mutatingVerificationClassifier, false),
+    firstCallAnswerable(observedPropertyKeysClassifier, true),
+    firstCallAnswerable(observedLiteralValuesClassifier, true),
+    firstCallAnswerable(literalProvenanceClassifier, true),
+    firstCallAnswerable(capabilityNameJustificationClassifier, true),
     observedSiblingsClassifier,
-    userConfirmationClassifier,
+    firstCallAnswerable(userConfirmationClassifier, false),
   ],
 });
 

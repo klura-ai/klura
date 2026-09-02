@@ -14,6 +14,7 @@ import { STRATEGY_SUBDIR_MAP as SUBDIR_MAP, stageStrategyCandidate } from './str
 import { withCapabilityMutationLock, writeJsonAtomically } from './capability-mutation';
 import { snapshotEnumObservationsIntoSave } from './enum-snapshot';
 import type { PostSaveVerificationProofV1 } from './post-save-verification-proof';
+import type { CollectionIntegrityFinding } from '../execution/collection-emptiness';
 import { commitPreparedStrategy } from './strategy-commit';
 export { KLURA_DIR, SKILLS_DIR };
 
@@ -219,6 +220,12 @@ export interface RuntimeMeta {
     evidence_digest?: string;
     /** False when exact evidence exceeded the local review artifact bound. */
     evidence_reviewable?: boolean;
+    /**
+     * Collection-integrity findings that routed this candidate to semantic
+     * review. Retained because the multi-run checks compare two executions and
+     * cannot be re-derived from the single stored evidence body.
+     */
+    collection_integrity?: CollectionIntegrityFinding[];
   };
   /** LLM judgment over exact candidate evidence; runtime validates only the binding. */
   semantic_review?: {
@@ -663,6 +670,8 @@ export function loadStrategy(platform: string, capability: string): Strategy | n
   return all[0] ?? null;
 }
 
+import { archivedStrategyWithReason } from './post-save-verification-store';
+
 export {
   capturePostSaveVerificationTarget,
   loadCurrentPostSaveVerificationTarget,
@@ -697,6 +706,18 @@ export function demoteFetchToPageScript(platform: string, capability: string): v
     }
     if (parsed.strategy !== 'fetch') return;
     parsed.strategy = 'page-script';
+    // Record that this tier was chosen for it, not by it. Without the stamp the
+    // result is an ordinary-looking page-script, and the next author has no way
+    // to tell that `fetch` was already tried here and failed persistently — the
+    // graduation path would read it as an obvious upgrade candidate and send it
+    // straight back to the tier it was demoted out of.
+    const demotionMeta = (parsed.runtime_meta ?? {}) as Record<string, unknown>;
+    parsed.runtime_meta = {
+      ...demotionMeta,
+      demoted_from_tier: 'fetch',
+      demoted_at: Date.now(),
+      demoted_reason: 'persistent Node-fire failures (TLS / bot-check) on the fetch transport',
+    };
     validateStrategyShape(parsed);
     const dstDir = path.join(SKILLS_DIR, platform, SUBDIR_MAP['page-script'] ?? 'scripts');
     ensureDir(dstDir);
@@ -849,11 +870,26 @@ export function archiveStrategy(
     const active = path.join(SKILLS_DIR, platform, subdir, `${baseCapability}.json`);
     const archived = path.join(SKILLS_DIR, platform, subdir, `${baseCapability}.broken.json`);
     if (fs.existsSync(active)) {
-      fs.renameSync(active, archived);
+      const reason = detail || 'archived as broken';
+      // The reason rides on the file as well as the event stream — see
+      // `archivedStrategyWithReason`. A rename alone leaves a `.broken.json`
+      // that cannot say why it is broken.
+      try {
+        const strategy = JSON.parse(fs.readFileSync(active, 'utf8')) as Strategy;
+        fs.writeFileSync(
+          archived,
+          JSON.stringify(archivedStrategyWithReason(strategy, reason, strategyType), null, 2),
+        );
+        fs.rmSync(active, { force: true });
+      } catch {
+        // Unreadable or malformed on disk: still get it out of the active slot,
+        // which is the part that matters for correctness.
+        fs.renameSync(active, archived);
+      }
       appendStrategyEvent(platform, baseCapability, {
         strategy: strategyType,
         kind: 'archived',
-        detail: detail || 'archived as broken',
+        detail: reason,
       });
     }
   });

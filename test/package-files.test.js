@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
@@ -23,24 +23,36 @@ test('published runtime contains deterministic build metadata and its verifier',
   assert.ok(packageJson.files.includes('scripts/write-build-info.js'));
 });
 
+// `npm pack` is the one subprocess in the suite that reads the whole checkout.
+// Its stderr is the only place it explains itself, so capture it and put it in
+// the assertion — otherwise a failure here surfaces as a bare "Command failed"
+// with no way to tell a packaging regression from an environment problem.
+function packRuntime(destination) {
+  const result = spawnSync(
+    'npm',
+    [
+      '--cache',
+      path.join(destination, 'npm-cache'),
+      'pack',
+      '--ignore-scripts',
+      '--json',
+      '--pack-destination',
+      destination,
+    ],
+    { cwd: root, encoding: 'utf8' },
+  );
+  assert.equal(
+    result.status,
+    0,
+    `npm pack failed (status ${result.status}, signal ${result.signal}):\n${result.stderr}`,
+  );
+  return result.stdout;
+}
+
 test('packed runtime resolves consumer, compiler, MCP, and agent entrypoints', () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'klura-runtime-pack-'));
   try {
-    const packed = JSON.parse(
-      execFileSync(
-        'npm',
-        [
-          '--cache',
-          path.join(temporary, 'npm-cache'),
-          'pack',
-          '--ignore-scripts',
-          '--json',
-          '--pack-destination',
-          temporary,
-        ],
-        { cwd: root, encoding: 'utf8' },
-      ),
-    );
+    const packed = JSON.parse(packRuntime(temporary));
     assert.equal(packed.length, 1);
     const archive = path.join(temporary, packed[0].filename);
     execFileSync('tar', ['-xzf', archive, '-C', temporary]);

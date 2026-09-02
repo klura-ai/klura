@@ -230,6 +230,36 @@ test('assertNoPendingCheckpoint: accepts matching token + user_response', () =>
     assertNoPendingCheckpoint(sid, {});
   }));
 
+// A pending checkpoint blocks every session-scoped tool, `abort_session`
+// included, and a token is minted only when a NEW checkpoint fires — which no
+// blocked call can reach. So the replacement the gate issues on an expired
+// token is the session's only exit, and it has to reach the agent.
+test('assertNoPendingCheckpoint: an unusable token still yields a usable replacement', () =>
+  withFakeSession((sid) => {
+    mintCheckpointToken({ kind: 'abort_session_consent', session_id: sid, context: {} });
+    let message = '';
+    try {
+      assertNoPendingCheckpoint(sid, {
+        checkpoint_token: 'expired-or-unknown',
+        user_response: 'no, keep going',
+      });
+      assert.fail('expected the stale token to be rejected');
+    } catch (err) {
+      message = err.message;
+    }
+    assert.match(message, /token_unknown_or_expired/);
+    const replacement = message.match(/checkpoint_token: (\S+?) —/)?.[1];
+    assert.ok(replacement, `rejection must carry a replacement token, got: ${message}`);
+
+    // The replacement must actually clear the checkpoint — otherwise the
+    // session stays wedged and the token is decoration.
+    assertNoPendingCheckpoint(sid, {
+      checkpoint_token: replacement,
+      user_response: 'no, keep going',
+    });
+    assertNoPendingCheckpoint(sid, {});
+  }));
+
 test('assertNoPendingCheckpoint: accepts cancelled with reason', () =>
   withFakeSession((sid) => {
     const token = mintCheckpointToken({ kind: 'triage_plan', session_id: sid, context: {} });

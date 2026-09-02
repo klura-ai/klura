@@ -27,6 +27,7 @@ import {
 import { buildPlatformMapSummary, type PlatformMapSummary } from '../response/platform-map-summary';
 import { harvestLinkUrlObservations } from '../response/session-observations';
 import { detectOriginBlocked, isResolvableChallengeShape } from '../phases/origin-blocked-detector';
+import { recordOriginBlockedObservation } from '../phases/origin-blocked-observations';
 import { ESCALATION_ABORT_KINDS } from './abort_session';
 import { loadConfig } from '../config/handler';
 import type { VisibilityAnomaly } from '../phases/visibility';
@@ -47,6 +48,7 @@ import {
 import {
   trimA11yTree,
   trimOversizedObjectBody,
+  EXECUTE_RESULT_BODY_INLINE_BUDGET,
   sliceLargeString,
   enforceFinalBudget,
   DEFAULT_A11Y_BUDGET,
@@ -71,7 +73,6 @@ export const GRAPH_MODES = ['discover', 'map', 'execute'] as const;
  *  design — the field is a teaser pointing at the platform_logbook for
  *  full detail, not a primary surface. */
 const RECENT_ABORTS_BUDGET = 5;
-const EXECUTE_RESULT_BODY_INLINE_BUDGET = 3_000;
 
 /** Populate the platform-keyed response fields (artifacts, platform_map,
  *  recent_aborts) from the on-disk logbook. Inlined into start_session so
@@ -1992,7 +1993,10 @@ export async function startSession(
     visibility_anomalies: visibilityAnomalies,
   };
   attachAccessibilitySnapshotDiagnostic(result, session);
-  if (originBlocked) result.origin_blocked = originBlocked;
+  if (originBlocked) {
+    result.origin_blocked = originBlocked;
+    recordOriginBlockedObservation(session, originBlocked);
+  }
   if (opts.platform && opts.graph !== 'execute') {
     populatePlatformResponseFields(result, opts.platform);
   }

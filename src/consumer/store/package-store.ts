@@ -24,21 +24,37 @@ import { canonicalJson, parseStrictJson, type JsonValueV1 } from '../../public/c
 import { parsePublicToolPackage } from '../../public/contracts/package';
 import { withOwnerFileLock } from '../../utils/owner-file-lock';
 
-const INSTALLED_SCHEMA_VERSION_V1 = 1;
+const INSTALLED_SCHEMA_VERSION_V1 = 2;
 const INSTALLED_STATE_BYTES_V1 = 1024 * 1024;
+
+const INSTALLED_PACKAGE_KEYS_V1 = [
+  'package_id',
+  'version',
+  'package_digest',
+  'manifest_digest',
+  'runtime_range',
+  'installed_at',
+] as const;
+
+/** Where an installed artifact came from. A tagged union rather than a flag:
+ *  a locally authored package carries no `source_index_digest` key at all, so
+ *  no reader can mistake it for a signed-registry install. */
+export type InstalledProvenanceV1 =
+  | { kind: 'registry'; source_index_digest: Sha256DigestV1 }
+  | { kind: 'local'; source_digest: Sha256DigestV1 };
 
 export interface InstalledPackageV1 {
   package_id: PackageIdV1;
   version: PackageVersionV1;
   package_digest: Sha256DigestV1;
   manifest_digest: Sha256DigestV1;
-  source_index_digest: Sha256DigestV1;
+  provenance: InstalledProvenanceV1;
   runtime_range: RuntimeRangeV1;
   installed_at: Rfc3339InstantV1;
 }
 
 export interface InstalledStateV1 {
-  installed_schema_version: 1;
+  installed_schema_version: 2;
   packages: Record<PackageIdV1, InstalledPackageV1>;
 }
 
@@ -91,7 +107,7 @@ export class PackageStoreV1 {
     if (parsedPackage.package_id !== input.package_id || parsedPackage.version !== input.version) {
       throw new PublicContractError(
         'package_bytes',
-        'package identity does not match the selected registry version',
+        'package identity does not match the selected version',
       );
     }
     if (parsedPackage.manifest_digest !== input.manifest_digest) {
@@ -260,9 +276,10 @@ export function parseInstalledState(value: unknown): InstalledStateV1 {
     'installed_schema_version',
     'packages',
   ]);
-  if (record.installed_schema_version !== INSTALLED_SCHEMA_VERSION_V1) {
-    throw new PublicContractError('installed.json.installed_schema_version', 'must be 1');
+  if (record.installed_schema_version !== 1 && record.installed_schema_version !== 2) {
+    throw new PublicContractError('installed.json.installed_schema_version', 'must be 1 or 2');
   }
+  const schemaVersion = record.installed_schema_version;
   const packagesRecord = parseBoundedRecord(
     record.packages,
     'installed.json.packages',
@@ -274,7 +291,11 @@ export function parseInstalledState(value: unknown): InstalledStateV1 {
   >;
   for (const [key, candidate] of Object.entries(packagesRecord)) {
     const packageId = parsePackageId(key, `installed.json.packages.${key}`);
-    const parsed = parseInstalledPackage(candidate, `installed.json.packages.${key}`);
+    const parsed = parseInstalledPackage(
+      candidate,
+      `installed.json.packages.${key}`,
+      schemaVersion,
+    );
     assertMapKey(key, parsed.package_id, `installed.json.packages.${key}`);
     packages[packageId] = parsed;
   }
@@ -285,28 +306,61 @@ export function defaultConsumerHome(): string {
   return process.env.KLURA_HOME || path.join(os.homedir(), '.klura');
 }
 
-function parseInstalledPackage(value: unknown, field: string): InstalledPackageV1 {
+/** Reads one installed pointer. Schema 1 states a registry install through a
+ *  bare `source_index_digest`, which lifts into the registry provenance
+ *  branch; schema 2 states provenance directly. Writing always emits 2. */
+function parseInstalledPackage(
+  value: unknown,
+  field: string,
+  schemaVersion: 1 | 2,
+): InstalledPackageV1 {
   const record = parseExactRecord(value, field, [
-    'package_id',
-    'version',
-    'package_digest',
-    'manifest_digest',
-    'source_index_digest',
-    'runtime_range',
-    'installed_at',
+    ...INSTALLED_PACKAGE_KEYS_V1,
+    schemaVersion === 1 ? 'source_index_digest' : 'provenance',
   ]);
   return {
     package_id: parsePackageId(record.package_id, `${field}.package_id`),
     version: parsePackageVersion(record.version, `${field}.version`),
     package_digest: parseSha256Digest(record.package_digest, `${field}.package_digest`),
     manifest_digest: parseSha256Digest(record.manifest_digest, `${field}.manifest_digest`),
-    source_index_digest: parseSha256Digest(
-      record.source_index_digest,
-      `${field}.source_index_digest`,
-    ),
+    provenance:
+      schemaVersion === 1
+        ? {
+            kind: 'registry',
+            source_index_digest: parseSha256Digest(
+              record.source_index_digest,
+              `${field}.source_index_digest`,
+            ),
+          }
+        : parseInstalledProvenance(record.provenance, `${field}.provenance`),
     runtime_range: parseRuntimeRange(record.runtime_range, `${field}.runtime_range`),
     installed_at: parseRfc3339Instant(record.installed_at, `${field}.installed_at`),
   };
+}
+
+function parseInstalledProvenance(value: unknown, field: string): InstalledProvenanceV1 {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new PublicContractError(field, 'must be an object');
+  }
+  const kind = (value as Record<string, unknown>).kind;
+  if (kind === 'registry') {
+    const record = parseExactRecord(value, field, ['kind', 'source_index_digest']);
+    return {
+      kind: 'registry',
+      source_index_digest: parseSha256Digest(
+        record.source_index_digest,
+        `${field}.source_index_digest`,
+      ),
+    };
+  }
+  if (kind === 'local') {
+    const record = parseExactRecord(value, field, ['kind', 'source_digest']);
+    return {
+      kind: 'local',
+      source_digest: parseSha256Digest(record.source_digest, `${field}.source_digest`),
+    };
+  }
+  throw new PublicContractError(`${field}.kind`, 'must be "registry" or "local"');
 }
 
 function emptyInstalledState(): InstalledStateV1 {

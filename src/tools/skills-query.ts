@@ -1,4 +1,6 @@
 import * as skills from '../strategies/skills';
+import { verificationStatus, type VerificationStatus } from '../strategies/verification-status';
+import { getHealth, successRate } from '../strategies/health';
 import { STRATEGY_TIERS, type StrategyTier } from '../vocab';
 import type { Strategy, SkillInfo } from '../strategies/skills';
 import { loadLogbook as loadLogbookForPlatform } from '../working-dir/logbook';
@@ -65,6 +67,57 @@ export interface ListPlatformSkillsArgs {
   platform?: string;
 }
 
+/**
+ * Verification status for a capability, taken from its highest-tier saved
+ * strategy — the one `get_strategy` returns by default and the one a caller
+ * executes. A capability with no saved strategy, or one carrying no stamp,
+ * reports nothing rather than an empty shape.
+ */
+function verificationStatusForCapability(
+  platform: string,
+  capability: string,
+): VerificationStatus | null {
+  const strategy = skills.loadStrategy(platform, capability);
+  if (!strategy) return null;
+  return verificationStatus(strategy, { platform, capability });
+}
+
+/**
+ * Last-execution health for a capability's saved tier.
+ *
+ * A verification stamp describes the moment a strategy was saved; it says
+ * nothing about whether the capability has worked since. A corpus can rot
+ * silently between the two — the site changes, the strategy stops returning
+ * rows, and every surface an agent consults still reports the original stamp.
+ * Surfacing the outcome beside the stamp is what makes "saved" and "working"
+ * distinguishable at the moment a caller decides whether to trust a capability.
+ *
+ * Reports nothing when the capability has never executed: no record is honest
+ * about absence, whereas a synthesized "healthy" would assert something the
+ * runtime has not observed.
+ */
+function healthForCapability(platform: string, capability: string): Record<string, unknown> | null {
+  const strategy = skills.loadStrategy(platform, capability);
+  if (!strategy) return null;
+  const tier = (strategy as { strategy?: unknown }).strategy;
+  if (typeof tier !== 'string') return null;
+  const status = getHealth(platform, capability, tier);
+  const everRan = typeof status.lastSuccess === 'number' || typeof status.lastFailure === 'number';
+  if (!everRan) return null;
+  const rate = successRate(status);
+  return {
+    status: status.status,
+    ...(typeof status.lastSuccess === 'number'
+      ? { last_success: new Date(status.lastSuccess).toISOString() }
+      : {}),
+    ...(typeof status.lastFailure === 'number'
+      ? { last_failure: new Date(status.lastFailure).toISOString() }
+      : {}),
+    ...(rate !== null ? { recent_success_rate: Number(rate.toFixed(2)) } : {}),
+    ...(status.lastError ? { last_error: status.lastError } : {}),
+  };
+}
+
 export function listPlatformSkills(args: ListPlatformSkillsArgs = {}): ListPlatformSkillsResult {
   const wanted = typeof args.platform === 'string' ? args.platform : null;
   const fullList = skills.listPlatformSkills();
@@ -75,6 +128,13 @@ export function listPlatformSkills(args: ListPlatformSkillsArgs = {}): ListPlatf
   // klura://reference#discovery-artifact for the full mechanics.
   for (const skill of list) {
     for (const cap of skill.capabilities) {
+      // A `passed` stamp read on its own does not say which verifier granted
+      // it, and a stamp from a retired contract looks exactly like a fresh one
+      // at the moment a reader decides whether to trust the capability.
+      const status = verificationStatusForCapability(skill.platform, cap.name);
+      if (status) (cap as unknown as Record<string, unknown>).verification = status;
+      const health = healthForCapability(skill.platform, cap.name);
+      if (health) (cap as unknown as Record<string, unknown>).health = health;
       const artifact = readArtifactFromDisk(skill.platform, cap.name);
       if (artifact) {
         const inlined = inlineArtifactForResponse(

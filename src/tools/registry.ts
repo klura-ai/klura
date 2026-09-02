@@ -62,6 +62,7 @@ import { TOOL_DEF as resumeExecution } from './execute';
 import { TOOL_DEFS as configTools } from './config-tools';
 import { TOOL_DEFS as interruptionTools } from './interruption-tools';
 import { TOOL_DEF as exportPlatformPackage } from './export-platform-package';
+import { TOOL_DEF as installLocalPackage } from './install-local-package';
 import { TOOL_DEFS as consumerTools } from '../consumer/mcp-tools';
 
 export const TOOL_REGISTRY: ToolDef[] = [
@@ -91,4 +92,5 @@ export const TOOL_REGISTRY: ToolDef[] = [
   ...configTools,
   ...interruptionTools,
   exportPlatformPackage,
+  installLocalPackage,
 ];

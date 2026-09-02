@@ -18,6 +18,33 @@ export interface FactoryExecutionResultLike {
   body_ok?: unknown;
 }
 
+/**
+ * Error codes the runtime itself substitutes for a body that blew the tool
+ * output budget. Recognising them is structural rather than heuristic: these
+ * are the runtime's own strings, not site prose, so a match cannot drift with
+ * a vendor's wording or a translation. Produced in `execution/fetch-browser`.
+ */
+export const OVERSIZE_BODY_CODES = [
+  'response_too_large',
+  'response_too_large_html_trimmed',
+] as const;
+
+/**
+ * True when a body IS the runtime's oversize envelope rather than a site
+ * payload. Requires both the known code and the `total_chars` the runtime
+ * always attaches, so a site field that happens to be called `error` cannot
+ * be mistaken for one.
+ */
+export function isOversizeBodyEnvelope(body: unknown): boolean {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  const record = body as Record<string, unknown>;
+  return (
+    typeof record.error === 'string' &&
+    (OVERSIZE_BODY_CODES as readonly string[]).includes(record.error) &&
+    typeof record.total_chars === 'number'
+  );
+}
+
 export class FactoryExecutionStateError extends Error {
   constructor(
     readonly executionState: 'not_run' | 'sent_unconfirmed',
@@ -45,6 +72,11 @@ export function classifyFactoryExecutionResult(
   const explicit = typeof inline === 'boolean' ? inline : result.body_ok;
   if (explicit === true) return 'explicit_success';
   if (explicit === false) return 'explicit_failure';
+  // An oversize envelope is the runtime reporting that it produced no usable
+  // body at all. That is a definite failure, not transport acceptance with
+  // unknown semantics — treating it as the latter lets a strategy that can
+  // never return a row reach semantic review and be approved into active.
+  if (isOversizeBodyEnvelope(result.body)) return 'explicit_failure';
   return 'transport_accepted';
 }
 
@@ -57,8 +89,12 @@ export function factoryExecutionWasAccepted(
 export function describeFactoryExecutionFailure(
   classification: FactoryExecutionClassification,
   status: number,
+  body?: unknown,
 ): string {
   if (classification === 'explicit_failure') {
+    if (isOversizeBodyEnvelope(body)) {
+      return `HTTP ${status} with a body that exceeded the output budget and declared no extraction`;
+    }
     return `HTTP ${status} with body.ok === false`;
   }
   if (classification === 'not_run') return 'request was not sent';

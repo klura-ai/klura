@@ -182,10 +182,18 @@ export function assertNoPendingCheckpoint(sessionId: string, args: CheckpointAck
   const issues = rejection.issues?.join('; ') ?? '';
   const diff = rejection.payload_diff?.join('; ') ?? '';
   const detail = [issues, diff ? `payload_diff: ${diff}` : ''].filter(Boolean).join(' — ');
+  // The gate re-issues a token against the current payload whenever the echoed
+  // one is unknown or expired, and that replacement is the session's only way
+  // out: the pending entry blocks every session-scoped tool, `abort_session`
+  // included, and a fresh token is minted only when a NEW checkpoint fires —
+  // which no blocked call can reach. Dropping it here wedges the session for
+  // good, so it rides the rejection the agent is already reading.
+  const replacement = rejection.token;
   throw new Error(
     `invalid_strategy: pending_checkpoint, acknowledge before continuing ` +
       `(${reasonTag}${detail ? ': ' + detail : ''}). Echo checkpoint_token + ` +
-      `user_response / viewer_result, or cancel with {cancelled: true, reason}.`,
+      `user_response / viewer_result, or cancel with {cancelled: true, reason}.` +
+      (replacement ? ` Use checkpoint_token: ${replacement} — it replaces the one you sent.` : ''),
   );
 }
 

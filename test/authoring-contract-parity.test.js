@@ -103,6 +103,23 @@ const AUDIT_ONLY = new Set([
   'lookup_prereq_must_be_capability',
   'popup_addressing_without_trigger',
   'hardcoded_pagination_value',
+  // Its candidate set is derived from the strategy body — which params the
+  // request templates, and which of those document an integer example. None of
+  // that exists at compose time. The authoring surface for the requirement is
+  // the `paginates` field's own schema description, which the agent reads while
+  // writing `notes.params`.
+  'unanswered_pagination_question',
+  // Fires on an exact match between a strategy field and a declared arg
+  // value — evidence that only exists once a strategy body does, which the
+  // contract has not at compose time. Its complement `literal_provenance` IS
+  // projected and already teaches the caller-input classification.
+  'caller_arg_baked',
+  // Reads which params the strategy declares and which of those carry an
+  // `example` — both facts come from the strategy body, so neither exists at
+  // compose time. The authoring surface for the requirement is the `example`
+  // field's own schema description, which the agent reads while writing
+  // `notes.params`.
+  'required_param_without_example',
   // Classifiers
   'parameterization_disclosure_required',
   'mutating_verification_required',

@@ -570,6 +570,26 @@ export interface Session {
    */
   savedCapabilities?: Array<{ capability: string; at: number; tier: string }>;
   /**
+   * Safe-read strategies this session wrote to disk as INACTIVE candidates,
+   * awaiting a `review_strategy_candidate` verdict before promotion. Kept
+   * separate from `savedCapabilities` because auto-synthesis keys off that
+   * field and must not treat an unpromoted candidate as a live strategy.
+   *
+   * A candidate is still a strategy file this session produced, so the
+   * end_drive `save_attempted_none_landed` Detector counts it as landed: the
+   * failure mode that Detector guards is "the agent hammered save, nothing
+   * reached disk, and the stale prior strategy silently survives", which a
+   * written candidate refutes. Promotion happens in
+   * `review_strategy_candidate`, which has no session handle — recording at
+   * write time is what lets close-time see the whole path.
+   */
+  savedCandidates?: Array<{
+    capability: string;
+    at: number;
+    tier: string;
+    candidateId: string;
+  }>;
+  /**
    * Post-save validation outcomes that left a capability in a non-working
    * state — either `archived` (verifySavedStrategy returned non-2xx, the
    * `.json` was moved to `.broken.json`) or `declined` (the agent acked

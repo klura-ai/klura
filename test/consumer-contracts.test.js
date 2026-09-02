@@ -1202,7 +1202,10 @@ test('installer requires a fresh verified index then activates only its projecte
     const first = await installer.install({ package_id: 'ikea' }, now);
     assert.equal(first.action, 'installed');
     assert.equal(first.artifact.manifest_digest, packageValue.manifest_digest);
-    assert.equal(store.getInstalled('ikea').source_index_digest, sha256Digest(indexBytes));
+    assert.deepEqual(store.getInstalled('ikea').provenance, {
+      kind: 'registry',
+      source_index_digest: sha256Digest(indexBytes),
+    });
     assert.equal(packageDownloads, 1);
 
     const second = await installer.install({ package_id: 'ikea' }, now);
@@ -5141,7 +5144,7 @@ test('consumer scrape runs pin one encrypted session generation until their term
       version: '1.0.0',
       package_digest: packageDigest,
       manifest_digest: value.manifest_digest,
-      source_index_digest: 'c'.repeat(64),
+      provenance: { kind: 'registry', source_index_digest: 'c'.repeat(64) },
       runtime_range: { minimum_inclusive: '0.6.0', maximum_exclusive: '1.0.0' },
       installed_at: '2026-07-27T12:00:00Z',
     });
@@ -5255,7 +5258,7 @@ test('package store preserves verified bytes and makes installed state an active
       version: '1.0.0',
       package_digest: packageDigest,
       manifest_digest: value.manifest_digest,
-      source_index_digest: 'c'.repeat(64),
+      provenance: { kind: 'registry', source_index_digest: 'c'.repeat(64) },
       runtime_range: { minimum_inclusive: '0.6.0', maximum_exclusive: '1.0.0' },
       installed_at: '2026-07-27T12:00:00Z',
     };
@@ -5301,7 +5304,7 @@ test('package store serializes installed-pointer changes through a fail-closed a
           version: '1.0.0',
           package_digest: packageDigest,
           manifest_digest: value.manifest_digest,
-          source_index_digest: 'c'.repeat(64),
+          provenance: { kind: 'registry', source_index_digest: 'c'.repeat(64) },
           runtime_range: { minimum_inclusive: '0.6.0', maximum_exclusive: '1.0.0' },
           installed_at: '2026-07-27T12:00:00Z',
         }),
@@ -5333,7 +5336,7 @@ test('installed resolver rechecks the immutable pointer and signed runtime range
       version: '1.0.0',
       package_digest: packageDigest,
       manifest_digest: value.manifest_digest,
-      source_index_digest: 'c'.repeat(64),
+      provenance: { kind: 'registry', source_index_digest: 'c'.repeat(64) },
       runtime_range: { minimum_inclusive: '0.6.0', maximum_exclusive: '1.0.0' },
       installed_at: '2026-07-27T12:00:00Z',
     });
@@ -6295,7 +6298,7 @@ test('consumer call service checks a selected local browser session before an au
       version: '1.0.0',
       package_digest: packageDigest,
       manifest_digest: value.manifest_digest,
-      source_index_digest: 'c'.repeat(64),
+      provenance: { kind: 'registry', source_index_digest: 'c'.repeat(64) },
       runtime_range: { minimum_inclusive: '0.6.0', maximum_exclusive: '1.0.0' },
       installed_at: '2026-07-27T12:00:00Z',
     });
@@ -6414,7 +6417,7 @@ test('consumer login commits browser state only after the declared structural ch
       version: '1.0.0',
       package_digest: packageDigest,
       manifest_digest: value.manifest_digest,
-      source_index_digest: 'c'.repeat(64),
+      provenance: { kind: 'registry', source_index_digest: 'c'.repeat(64) },
       runtime_range: { minimum_inclusive: '0.6.0', maximum_exclusive: '1.0.0' },
       installed_at: '2026-07-27T12:00:00Z',
     });
@@ -6483,7 +6486,7 @@ test('consumer call service binds a result to the installed immutable artifact',
       version: '1.0.0',
       package_digest: packageDigest,
       manifest_digest: value.manifest_digest,
-      source_index_digest: 'c'.repeat(64),
+      provenance: { kind: 'registry', source_index_digest: 'c'.repeat(64) },
       runtime_range: { minimum_inclusive: '0.6.0', maximum_exclusive: '1.0.0' },
       installed_at: '2026-07-27T12:00:00Z',
     });

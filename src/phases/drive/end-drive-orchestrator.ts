@@ -6,6 +6,7 @@ import {
   synthesizeFallbacksOnClose,
   type AutoSynthResult as SynthLedgerEntry,
 } from '../../strategies/synthesize-on-close';
+import type { SynthDiagnosticEntry } from '../../strategies/synthesize-on-close/types';
 import { ingestCaptureEvents } from '../../working-dir/writer';
 import {
   readObservedCapabilities,
@@ -31,8 +32,13 @@ import {
 import { endDriveAudit, buildEndDrivePayload } from '../../audit/drive/end-drive';
 import { collectRecurringCoveredReads } from '../../audit/drive/xhr-noise';
 import { collectDataLoadCandidates } from '../../strategies/synthesize-on-close/data-loads';
+import { verifySavedStrategy } from '../../strategies/verify-saved-strategy';
+import { collectParamExamples } from '../../strategies/probe-helpers';
+import { findUnsatisfiedPlaceholders } from '../../tools/save-strategy';
+import { isMutatingStrategy } from '../../gate/save-warnings-mutating-verification';
 import { rejectionToErrorMessage } from '../../audit';
 import { graphConfig, currentGraph } from '../registry';
+import { TOOL_NAMES } from '../../vocab';
 
 /**
  * Adapter between the live agent-driven session and the working-dir's
@@ -222,6 +228,162 @@ function collectFailedNavUrls(
   return failedUrls;
 }
 
+export interface PendingCandidatesAdvisory {
+  candidates: Array<{ capability: string; tier: string; candidate_id: string }>;
+  advisory: string;
+}
+
+/**
+ * Name the candidates this session staged that never reached the active slot.
+ *
+ * For a verifiable tier the save path ends at `review_strategy_candidate`, not
+ * at `save_strategy` — staging writes the bytes, a typed verdict promotes them.
+ * Close stays admissible with one pending (`save_attempted_none_landed` counts a
+ * candidate as landed, correctly — something did reach disk), so the agent gets
+ * no rejection to read. A session that stops at the stage step therefore closes
+ * clean while the capability has nothing to execute and the work sits one call
+ * away.
+ *
+ * An existing active strategy does NOT make a staged candidate uninteresting.
+ * Promotion stamps `runtime_meta`, so the promoted bytes no longer hash to the
+ * candidate's id and there is no cheap exact signal for "this candidate is the
+ * active one". Suppressing on "something is active" was the wrong way to spend
+ * that uncertainty: a session was observed saving one strategy that went active
+ * without its pagination cursor, then staging eight corrected candidates that
+ * were never reviewed — every one suppressed, because the first save had left
+ * something active. The caller silently kept the worse strategy.
+ *
+ * So candidates are reported, and the advisory says whether an active strategy
+ * exists rather than deciding on the agent's behalf. A redundant reminder costs
+ * a sentence; a dropped one costs the session's work.
+ */
+export function collectPendingCandidates(
+  session: Pick<ReturnType<typeof pool.getSession>, 'savedCandidates'>,
+  platform: string | undefined,
+): PendingCandidatesAdvisory | undefined {
+  if (!platform) return undefined;
+  const staged = session.savedCandidates ?? [];
+  if (staged.length === 0) return undefined;
+
+  const withActive = staged.filter((c) => skills.loadStrategy(platform, c.capability)).length;
+  const subject = staged.length === 1 ? 'it' : 'them';
+  const holder = staged.length === 1 ? 'the capability has' : 'those capabilities have';
+  const everyOneHasActive = withActive === staged.length;
+  const consequence = everyOneHasActive
+    ? `An active strategy already exists for ${subject} — if it is the one you meant to leave ` +
+      `behind, nothing more is needed; if these candidates were the correction, they are not live ` +
+      `and callers still get the older strategy.`
+    : `Without a promotion ${holder} no active strategy to execute.`;
+
+  return {
+    candidates: staged.map((c) => ({
+      capability: c.capability,
+      tier: c.tier,
+      candidate_id: c.candidateId,
+    })),
+    advisory:
+      `${staged.length} strategy candidate(s) were staged this session and are still inactive. ` +
+      `${consequence} Staging writes the bytes; ${TOOL_NAMES.reviewStrategyCandidate} promotes ` +
+      `them on a typed verdict. Review each candidate_id above to finish the save.`,
+  };
+}
+
+/**
+ * Run post-save verification over what auto-synthesis just wrote.
+ *
+ * Auto-synth persists through the low-level writer, so its output lands in the
+ * active slot without passing the verification every agent save goes through.
+ * Nothing downstream re-checks it: the strategy is active, unattended, and the
+ * next caller executes it. A fallback that was never run once is a guess, and a
+ * guess in the active slot is indistinguishable from a working capability until
+ * someone reads the rows.
+ *
+ * `verifySavedStrategy` owns the outcome — a transport failure or an explicit
+ * `body.ok:false` archives the file to `.broken.json`. An archived entry leaves
+ * the returned ledger because it is no longer on disk, so the close response and
+ * the no-silent-close guard both see what actually survived.
+ *
+ * Two shapes are written but deliberately not run. A `recorded-path` replays UI
+ * actions, so verifying one at close would re-drive the browser against whatever
+ * the flow does. A mutating-shaped strategy would re-fire its side effect, which
+ * is the same reason the agent save path declines it non-interactively.
+ */
+export async function verifyAutoSynthesizedFallbacks(
+  session: ReturnType<typeof pool.getSession>,
+  platform: string | undefined,
+  synthesized: SynthLedgerEntry[],
+  diag: SynthDiagnosticEntry[],
+): Promise<SynthLedgerEntry[]> {
+  if (!platform) return synthesized;
+  const survived: SynthLedgerEntry[] = [];
+  for (const entry of synthesized) {
+    const skip = (outcome: string, detail: Record<string, unknown> = {}): void => {
+      diag.push({
+        pass: 'synth_fetch',
+        capability: entry.capability,
+        phase: 'skip',
+        outcome,
+        detail: { tier: entry.tier, ...detail },
+      });
+      survived.push(entry);
+    };
+
+    if (entry.tier !== 'fetch' && entry.tier !== 'page-script') {
+      skip('auto_synth_verification_tier_not_verifiable');
+      continue;
+    }
+    const saved = skills.loadStrategy(platform, entry.capability);
+    if (!saved) {
+      skip('auto_synth_verification_strategy_absent');
+      continue;
+    }
+    if (isMutatingStrategy(saved)) {
+      skip('auto_synth_verification_declined_mutating');
+      continue;
+    }
+
+    const declared = session.declaredCapabilities?.find((d) => d.capability === entry.capability);
+    const args: Record<string, unknown> =
+      declared?.args && Object.keys(declared.args).length > 0
+        ? declared.args
+        : collectParamExamples(saved as never);
+    const unsatisfied = findUnsatisfiedPlaceholders(saved, args);
+    if (unsatisfied.size > 0) {
+      skip('auto_synth_verification_args_unsatisfied', {
+        unsatisfied: [...unsatisfied],
+      });
+      continue;
+    }
+
+    try {
+      const result = await verifySavedStrategy(platform, entry.capability, args, pool);
+      diag.push({
+        pass: 'synth_fetch',
+        capability: entry.capability,
+        phase: 'save',
+        outcome: result.archived
+          ? 'auto_synth_verification_archived'
+          : 'auto_synth_verification_ran',
+        detail: {
+          tier: entry.tier,
+          ok: result.ok,
+          status: result.status,
+          classification: result.classification,
+          archived: result.archived,
+        },
+      });
+      if (!result.archived) survived.push(entry);
+    } catch (err) {
+      // A verification that throws leaves the strategy exactly as written; the
+      // fallback stays and the next session's health data reports on it.
+      skip('auto_synth_verification_threw', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return survived;
+}
+
 export async function endDrive(
   sessionId: string,
   opts: {
@@ -279,8 +441,8 @@ export async function endDrive(
     throw new Error(
       `invalid_args: end_drive received audit_token: ${JSON.stringify(opts.auditToken)} — ` +
         `that is not a valid token. Audit tokens are minted ONLY by a prior end_drive audit ` +
-        `rejection (the triage_acknowledgment Classifier). If no ` +
-        `prior call returned a token, drop the audit_token field entirely. end_drive is gated ` +
+        `rejection that returned one; Detector warnings are answered via \`acks\`, not a token. ` +
+        `If no prior call returned a token, drop the audit_token field entirely. end_drive is gated ` +
         `on save_strategy success, not on audit answers — fabricating an audit token will not ` +
         `unblock the LIFT handoff.`,
     );
@@ -500,6 +662,12 @@ export async function endDrive(
         synthDriver,
         synthDiag as never,
       );
+      autoSynthesized = await verifyAutoSynthesizedFallbacks(
+        session,
+        platform,
+        autoSynthesized,
+        synthDiag as never,
+      );
     }
   } catch (err) {
     synthDiag.push({
@@ -708,6 +876,10 @@ export async function endDrive(
       retry_hint: string;
     }>;
     recurring_read_advisory?: string[];
+    pending_candidates?: {
+      candidates: Array<{ capability: string; tier: string; candidate_id: string }>;
+      advisory: string;
+    };
     _diagnostics?: {
       synth: typeof synthDiag;
       declared_capabilities?: Array<{ capability: string; args: Record<string, unknown> }>;
@@ -717,6 +889,15 @@ export async function endDrive(
   if (artifactWrites.length > 0) result.artifacts_updated = artifactWrites;
   // Unconditional assign (undefined when none) — JSON omits it, no extra branch.
   result.recurring_read_advisory = recurringReadAdvisory;
+
+  // For a verifiable tier the save path ends at `review_strategy_candidate`, not
+  // at `save_strategy` — the candidate is written but inactive until a typed
+  // verdict promotes it. Close is admissible with one pending, so the agent gets
+  // no rejection to read, and a session that stops at the stage step leaves the
+  // capability with nothing active while the work sits on disk one call away.
+  // Name them on the response the agent is already reading at that exact moment.
+  const pendingCandidates = collectPendingCandidates(session, platform);
+  if (pendingCandidates) result.pending_candidates = pendingCandidates;
 
   // If end-drive skipped RE mode because user policy caps the tier, tell
   // the agent WHY close succeeded without a handoff.

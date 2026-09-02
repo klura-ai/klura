@@ -18,6 +18,8 @@ Three gate levels exist, in order of increasing friction and cost. Pick the lowe
 
 **Once-per-session vs N-per-session is the real Level-2-vs-Level-3 criterion.** The muscle-memory failure mode token-gating defends against requires the agent to see the gate fire MULTIPLE times within one session — call 1 rejected with rejection text; call 2 includes the canned ack from memory of call 1's rejection; call 3 with a different payload reuses the same canned ack without re-classifying. If a gate fires AT MOST ONCE per session (e.g., a per-session-lifecycle obligation, a one-shot consent), there's no prior firing to draw a canned answer from — the LLM sees the rejection text for the first time within the same session that resolves it. Level 2's tamper-evident reason field is sufficient. Reach for Level 3 specifically when (a) the gate can fire on the same session more than once, AND (b) cost of a canned cross-firing answer is high. Most save-time gates are multi-fire (any save_strategy can hit them) → Level 3. Most lifecycle gates are single-fire → Level 2.
 
+`triage_acknowledgment` on the `end_drive` audit is the worked example: it fires at most once per session (end_drive is the session's last act), so supplying the ack IS the acknowledgment and the token round-trip adds a rejection round without adding signal. `audit.triageAckAsDetector` (default `true`) selects the Level-2 Detector shape; setting it `false` selects the Level-3 Classifier shape. Exactly one is live per call — each consults the flag and stays silent when the other owns the concern — so the two can be measured against each other over the fixture suite.
+
 ## Token-gated gates (Level 3)
 
 `buildTokenGate<TPayload, TAnswers>(spec)` — the factory in `runtime/src/gate/build.ts`. Spec has three fields:
@@ -33,6 +35,26 @@ The factory wraps the two-phase pattern:
 3. **On commit.** `consumeToken(token)` — tokens are single-use.
 
 The hash function (`hashGatePayload`) is swappable — it can become a keyed HMAC without touching gate consumers. The token store (`issueToken` / `lookupToken` / `consumeToken`) is shared across gates, namespaced by `kind`, and TTL-swept.
+
+### First-call answers — when the round trip proves nothing
+
+The forced first rejection buys one thing: proof that the agent's answers describe the payload the runtime hashed. When the answers and the payload arrive in the SAME call, that proof is already structural — the classifier's `validate()` cross-checks the answer against the very bytes it describes, and there is no window in which the agent could swap the payload out from under an answer it already gave. `Classifier.firstCallAnswerable` marks the classifiers where that holds, and `audit.firstCallAnswers` decides whether the runtime acts on it:
+
+| `audit.firstCallAnswers` | Behavior |
+| --- | --- |
+| `off` (default) | Every classifier round-trips. `firstCallAnswerable` is read and ignored. |
+| `safe_subset` | Only `firstCallAnswerable: true` classifiers may be answered on the first call. |
+| `all_except_confirmation` | Every classifier except those that opt out with `firstCallAnswerable: false`. |
+
+Three invariants hold in all three modes:
+
+- **A call with no answers always mints and rejects `pending`.** The first-call accept is reachable only when the agent actually supplied answers, which keeps the whole mechanism away from the common case.
+- **Consent-shaped classifiers opt out.** `user_confirmation`'s `hashFields` binds the strategy identity the user approved; a first-call accept would let the prompt and quote be composed against a payload nothing has bound yet. `mutating_verification_required` is a verdict about an effect the runtime cannot re-observe. Both are `false`.
+- **Stage 0 and Stage 1 are untouched.** Shape checks and detectors still run first, and still short-circuit before any classifier — answers or not.
+
+A first call whose answers are inconsistent is rejected `answers_inconsistent` with a token, carrying the answerable subset's issues plus every active classifier's items, so one round fixes everything. That rejection also carries `first_call_answers: true`, which the bounce policy reads (see below).
+
+`buildTokenGate` deliberately has NO first-call-answer path. Its consumers (`checkpoint_ack`, `interruption_ack`, `strategy_candidate.semantic_review`, `trigger_reference_send.consent`) each bind an artifact the RUNTIME authored and the agent must read before it can answer; the first call is the call that hands that artifact over, so an answer supplied before it describes nothing the agent has seen. A new consumer that wants a first-call accept is a consumer whose payload the agent authored — that belongs in an `Audit` instance.
 
 Consumer pattern:
 
@@ -75,6 +97,7 @@ Detectors in the `runtime/src/gate/save-warnings*.ts` family (re-exported throug
 - `prereq_bind_key_mismatch` — `prereq.binds` doesn't match the placeholder names the strategy actually references.
 - `lookup_embedded_in_prereq` — a downstream capability inlines a lookup-shaped prereq; the lookup should be a capability sibling. First-class `search_<entity>`, `lookup_<entity>`, `list_<entity>`, and equivalent `<entity>_search` capabilities own their retrieval surface and are excluded.
 - `auth_gated_without_auth_prereq` — strategy targets an origin where the session captured cookie-setting requests, but declares no `{kind: "capability"}` or `{kind: "tag", tag: "auth"}` prereq, and the strategy itself doesn't advertise `provides: ["auth"]`.
+- `caller_arg_baked` — a whole strategy field is, verbatim, a value this caller passed to `start_session` / `declare_capability`. Crisp by construction: whole-field exact match against a declared arg value, minimum 3 characters, templated fields and secret references excluded. A Detector rather than a `literal_provenance` validation issue so it fires in Stage 1, before any classifier token mints — the agent re-templates on a token-free rejection instead of invalidating a fresh token by fixing the body. The ack path covers the one legitimate exception: the value is genuinely fixed for every caller and merely coincides with what this caller asked for.
 
 ## The Audit class — one machinery, all save-time concerns
 
@@ -83,7 +106,7 @@ Every save-time concern lives inside ONE `Audit` instance: `runtime/src/audit/li
 Two spec shapes:
 
 - **`Detector`** — pure structural check. `detect(payload, ctx) → Issue[]`. With `ackReason: 'required'`, the rejection asks for a `{kind, reason}` ack on each issue (Level 2). With `ackReason: 'none'`, the issue is unconditional (no ack-through path; agent fixes or save fails). Optional `validateAck(reason, emittedIssues)` enforces anti-canned-ack guards (the reason must reference a flagged value / key).
-- **`Classifier`** — the agent commits to a structural classification the runtime cross-checks. Emits a checklist on first call; second call must echo the token plus answers consistent with the payload. Per-classifier `hashFields` scopes which payload slices invalidate the token, so sibling concerns don't cascade-invalidate.
+- **`Classifier`** — the agent commits to a structural classification the runtime cross-checks. Emits a checklist on first call; second call must echo the token plus answers consistent with the payload. Per-classifier `hashFields` scopes which payload slices invalidate the token, so sibling concerns don't cascade-invalidate. `firstCallAnswerable` marks the classifiers whose answers describe items derived from the same call's payload — see "First-call answers" above for when the runtime acts on it.
 
 Adding a new save-time concern is one row: write the detector or classifier, register it in the audit's `detectors` / `classifiers` arrays. Runtime threads the token, formats the rejection, scopes the hash, and persists ack reasons onto `notes.save_warnings_acked` automatically.
 
@@ -105,6 +128,8 @@ The audit's rejection envelope is an iteration loop, and most agents clear it in
 
 The **family key** is a signature of what actively failed: the saved tier (`strategy.strategy` — a fetch → recorded-path pivot is a fresh family) plus the components carrying an active issue in _this_ rejection — unacked warning kinds on `unacked_warnings`; on `answers_inconsistent`, the classifier kinds (or `notes.params.<param>` paths for enum-grounding bullets) attributed from the issue bullets, never the full `items` checklist, so an auto-classified-and-resolved classifier doesn't inflate the family. `pending` and `payload_changed` rejections are audit-flow bookkeeping, not substantive failures — they never count.
 
+**One-time per-family grace for first-call answers.** `answers_inconsistent` is the substantive rejection the bounce exists to count, so it is NOT exempt. But a first call carrying answers and no token can be scored that way, and a token-less first call is free by design — the agent has no way to know that attempt is being graded. So the FIRST `answers_inconsistent` per family that carries `first_call_answers: true` records the grace on the session and does not count; every later rejection in that family counts normally, token-bearing or not. The budget is exactly as generous as the mint-then-echo flow's, and omitting the token repeatedly buys nothing — the grace can be earned once per `(capability, family)` and `resetSaveRejectionFamilies` clears the spent-grace records alongside the counts. Exempting `answers_inconsistent` wholesale would gut the bounce; exempting token-less calls unconditionally would let an agent that never echoes a token loop forever.
+
 The **exit menu leads with the rejection's own remedy**: active warning hints and liftable classifier remedies (`capability_alternative`, `observed_alternatives`, `cross_session_evidence`, `classification_options`) render as the first options, a return-to-drive option is added when the rejection is enum-grounding-shaped, and the generic defer (`add_discovery_note`) / tier-switch / abandon (`abort_session`) triad closes the list. The bounce fires on the _rejection_, never preemptively on the attempt — the 3rd retry is evaluated in full, so a genuine structural fix commits normally.
 
 Two integration points: `applySaveRejectionBounce` (`runtime/src/audit/lift/save-policy.ts`) is the origin-gated policy entry — only `agent_explicit` saves with a live session count (unattended origins have no agent looping); the `rejectAudit` funnel in `runtime/src/tools/save-strategy.ts` routes every rejection it throws to the agent through it, so internal policy evaluations (acker discovery, pre-probe checks) never spend the budget. An accepted `submit_triage_plan` for the capability calls `resetSaveRejectionFamilies` — a re-plan is a deliberate pivot and restarts the budget.
@@ -124,7 +149,7 @@ This is intentional and we're fine with it. The gate's job here isn't cryptograp
 | Gate | Level | Where | Why |
 | --- | --- | --- | --- |
 | `save_strategy` audit | 2 + 3 | `runtime/src/audit/lift/save-strategy.ts` | Single Audit instance composing every save-time detector + classifier, applied to every producer via the save policy. Wrong commit = silently-broken strategy every future caller runs. |
-| `end_drive` audit | 2 + 3 | `runtime/src/audit/drive/end-drive.ts` | Second Audit instance — `capability_declaration_required` Detector (`ackReason: 'none'`) + `re_persistence` Classifier (token-gated). Same machinery as save-strategy audit, different lifecycle decision point. |
+| `end_drive` audit | 2 (+ 3 behind config) | `runtime/src/audit/drive/end-drive.ts` | Second Audit instance — `capability_declaration_required` / `save_attempted_none_landed` / `re_persistence` / `map_session_no_observations` Detectors (`ackReason: 'none'`) plus the ackable `observed_capabilities_not_lifted`, `unsaved_xhr_endpoints`, `abandoned_save_attempts_not_retried` and `triage_acknowledgment`. Same machinery as save-strategy audit, different lifecycle decision point. Every concern here fires at most once per session, so Level 2 carries them; the Classifier shape of `triage_acknowledgment` stays reachable via `audit.triageAckAsDetector: false` for measurement. |
 | `trigger_reference_send` consent | 3 | `runtime/src/tools/trigger-reference-send.ts` | Re-fires a real submit on every call. Wrong commit = side-effect fired against a real service without user knowing. |
 
 **Centralization is non-negotiable.** All save-time concerns funnel through the `Audit` class — no roll-your-own gate factories, no roll-your-own rejection envelopes, no roll-your-own token threading. `buildTokenGate` is the underlying primitive; the `Audit` class wraps it with detector composition + ack handling for save-time gates, and standalone gates outside that envelope (`trigger_reference_send` consent, `checkpoint_ack`, `interruption_ack`) reuse `buildTokenGate` directly.

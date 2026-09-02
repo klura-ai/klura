@@ -117,12 +117,29 @@ export function unresolvedPlaceholderNames(value: string): string[] {
 export function assertNoUnresolvedPlaceholders(value: string, field: string): void {
   const unresolved = unresolvedPlaceholderNames(value);
   if (unresolved.length === 0) return;
+  // A generator placeholder left standing is a different mistake from a missing
+  // argument, and the generic advice for the latter — supply a value — cannot be
+  // followed for the former: no caller arg or `notes.params.example` can satisfy
+  // `{{__gen.X}}`. The shape that reaches for one is usually a query segment the
+  // caller sometimes omits, which `optional: true` already handles by dropping
+  // the whole parameter when its value is empty.
+  const generators = unresolved.filter((name) => name.startsWith('__gen.'));
+  const generatorNames = generators.map((name) => '`{{' + name + '}}`').join(', ');
+  const generatorNoun = generators.length === 1 ? 'is a generator' : 'are generators';
+  const generatorHint =
+    generators.length === 0
+      ? ''
+      : ` ${generatorNames} ${generatorNoun}, which no caller argument or ` +
+        `\`notes.params.<name>.example\` can satisfy. If the intent is a query segment that is ` +
+        `present on some calls and absent on others, declare the parameter \`optional: true\` ` +
+        `instead — the runtime drops an optional query parameter whose value is empty or omitted, ` +
+        `so the conditional does not need generating.`;
   throw new FactoryExecutionStateError(
     'not_run',
     'unresolved_placeholders',
     `unresolved_placeholders: ${field} still contains ${unresolved
       .map((name) => `{{${name}}}`)
-      .join(', ')} after argument and prerequisite resolution; request not sent`,
+      .join(', ')} after argument and prerequisite resolution; request not sent.${generatorHint}`,
     { field, unresolved },
   );
 }

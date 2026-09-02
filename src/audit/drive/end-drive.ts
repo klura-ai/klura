@@ -27,16 +27,17 @@
 //     always-save-by-default and "I judged this as nothing worth persisting" isn't
 //     the agent's verdict to make.
 //
-//   - triage_acknowledgment (Classifier, token-gated) — fires when end_drive
-//     would otherwise skip triage entirely (every declared capability already
-//     has a non-stale saved strategy, OR no triage handoff would fire). Triage
-//     is mandatory — agent doesn't get to decide "this was a one-off task,
-//     teardown without triage." Agent must either submit a triage_plan, or
-//     echo {triage_acknowledgment: {acknowledged: true, reason: "<own words
-//     explaining why no triage round was warranted, e.g. 'all capabilities
-//     have a fetch-tier saved strategy and no graduation candidates surfaced'>"}}.
-//     Token binds to {sessionId, declaredCapabilityCount, saveSuccessCount,
-//     endDriveAttempts}.
+//   - triage_acknowledgment (Detector, ackReason: 'required') — fires when
+//     end_drive would otherwise skip triage entirely (every declared capability
+//     already has a non-stale saved strategy, OR no triage handoff would fire).
+//     Triage is mandatory — agent doesn't get to decide "this was a one-off
+//     task, teardown without triage." Agent must either submit a triage_plan,
+//     or ack with acks {"triage_acknowledgment": "<own words explaining why no
+//     triage round was warranted, e.g. 'all capabilities have a fetch-tier
+//     saved strategy and no graduation candidates surfaced'>"}. Supplying the
+//     reason IS the acknowledgment. `audit.triageAckAsDetector: false` selects
+//     the token-gated Classifier form of the same concern instead, so the two
+//     can be measured against each other; exactly one is live per call.
 //
 // Same machinery as save-strategy-audit, different lifecycle. New
 // end-drive concerns become one Detector or Classifier entry on this
@@ -44,6 +45,8 @@
 // nothing (end-drive has no on-disk artifact equivalent to a strategy).
 
 import { Audit, type Classifier, type Detector } from '../index';
+import { AUDIT_KINDS } from '../../vocab';
+import { loadConfig } from '../../config/handler';
 import { graphFor } from '../../graphs';
 import { getObservedNamesForSession } from '../../working-dir/logbook';
 import { collectUnsavedHotXhrEndpoints } from './xhr-noise';
@@ -83,6 +86,12 @@ export interface EndDrivePayload {
   /** Successful save_strategy persistences (entries on
    *  session.savedCapabilities). */
   saveSuccessCount: number;
+  /** Safe-read strategies written to disk as inactive candidates this session
+   *  (entries on session.savedCandidates), awaiting a
+   *  `review_strategy_candidate` verdict. Counted as landed by
+   *  `save_attempted_none_landed`: the file exists, so the stale-strategy
+   *  failure mode that Detector guards cannot apply. */
+  saveCandidateCount: number;
   /** From the active graph's GraphConfig. When true, the
    *  capability_declaration_required detector short-circuits — surface-mapping
    *  graphs are allowed to land without declaring a capability. */
@@ -98,7 +107,7 @@ export interface EndDrivePayload {
   rePersistenceThreshold: { reCalls: number; actions: number } | undefined;
   /** Caller-computed: would the post-audit reverse-engineer handoff produce
    *  a non-null triage handoff? When false AND declaredCapabilityCount > 0,
-   *  the triage_acknowledgment classifier fires — the runtime forces the
+   *  the triage_acknowledgment gate fires — the runtime forces the
    *  agent to acknowledge that triage was considered even though the
    *  runtime would have skipped it. */
   triageWouldFire: boolean;
@@ -228,12 +237,19 @@ const declarationRequiredDetector: Detector<EndDrivePayload, EndDriveCtx> = {
 // ---------- Detector: save_attempted_none_landed ----------
 //
 // Refuses close when the agent called `save_strategy` at least once during
-// the session AND no save succeeded. This is the legacy-form-post failure
+// the session AND nothing reached disk. This is the legacy-form-post failure
 // mode: the agent hits a recoverable audit rejection, can't break out of
 // the loop, gives up, and `end_drive` would let the session close cleanly
 // — but the strategy on disk is whatever was there before the run started
 // (often a buggy strategy from a prior session). Future warm-execute
 // reuses that stale strategy without ever flagging the silent failure.
+//
+// "Reached disk" includes an inactive safe-read candidate. For a verifiable
+// tier the successful save path does not end at `save_strategy` — it ends at
+// `review_strategy_candidate` promoting the candidate on a typed verdict, and
+// that call carries no session handle. Counting candidates keeps the guard
+// pointed at its actual target (nothing was written) instead of firing on the
+// runtime's own designed flow.
 //
 // Same shape as `capability_declaration_required`: ackReason `'none'`
 // (no acceptable ack — agent must save successfully or hit the third
@@ -247,15 +263,17 @@ const saveAttemptedNoneLandedDetector: Detector<EndDrivePayload, EndDriveCtx> = 
     if (p.endDriveAttempts >= 2) return [];
     if (p.saveAttemptCount === 0) return [];
     if (p.saveSuccessCount > 0) return [];
+    if (p.saveCandidateCount > 0) return [];
     return [
       {
         kind: 'save_attempted_none_landed',
         message:
           `CANNOT CLOSE: ${p.saveAttemptCount} save_strategy attempt(s) on this session, ` +
-          `zero successful saves. Closing now would leave whatever strategy was on disk ` +
-          `before this session in place — including buggy strategies from earlier runs that ` +
-          `the agent's failed attempts here were trying to overwrite. Future warm execute ` +
-          `would silently use the stale strategy.`,
+          `and nothing reached disk — no active strategy and no inactive candidate. Closing ` +
+          `now would leave whatever strategy was on disk before this session in place — ` +
+          `including buggy strategies from earlier runs that the agent's failed attempts ` +
+          `here were trying to overwrite. Future warm execute would silently use the stale ` +
+          `strategy.`,
         hint:
           `Read the most recent save_strategy rejection's error message and fix the strategy ` +
           `body / audit_answers before retrying. If the audit keeps rejecting on the same ` +
@@ -269,6 +287,7 @@ const saveAttemptedNoneLandedDetector: Detector<EndDrivePayload, EndDriveCtx> = 
           platform: p.platform,
           save_attempt_count: p.saveAttemptCount,
           save_success_count: p.saveSuccessCount,
+          save_candidate_count: p.saveCandidateCount,
           end_drive_attempts: p.endDriveAttempts,
         },
       },
@@ -385,9 +404,10 @@ const mapSessionNoObservationsDetector: Detector<EndDrivePayload, EndDriveCtx> =
           `wall or WAF challenge) or the entry URL presents no machine-readable surface.`,
         hint:
           `Use \`abort_session({session_id, reason, kind})\` instead of end_drive. The kind ` +
-          `discriminator gets written to the platform's abort_events ledger; future sessions ` +
-          `read recent_aborts at start_session and short-circuit known-blocked starts without ` +
-          `re-driving the failed flow. Pick the kind that matches:\n` +
+          `discriminator gets written to the platform's abort_events ledger, which future ` +
+          `sessions read at start_session as informational history — a claim about a prior ` +
+          `attempt, weighted by whether the runtime itself observed the block. It does not ` +
+          `establish that this origin is blocked now. Pick the kind that matches:\n` +
           `  - "origin_blocked" — anti-bot wall / captcha / region gate (most common)\n` +
           `  - "site_dead" — site permanently down or no longer exposes the surface\n` +
           `  - "other" — none of the above; explain in reason\n` +
@@ -411,7 +431,7 @@ const mapSessionNoObservationsDetector: Detector<EndDrivePayload, EndDriveCtx> =
  * resolved to a non-stale saved strategy the runtime would skip the triage
  * handoff (`triageWouldFire === false`), so the session's RE work is baked
  * into those strategies — nothing is orphaned. (Same predicate the
- * triage_acknowledgment classifier reads for the "all saved" case. Known,
+ * triage_acknowledgment gate reads for the "all saved" case. Known,
  * accepted gap: speculative graduation RE done in a session that *also*
  * landed a recorded-path slips through — that work should be persisted
  * voluntarily via add_discovery_note / save_verified_expression, and the
@@ -443,32 +463,88 @@ function shouldRunRePersistence(p: EndDrivePayload): boolean {
   return false;
 }
 
-// ---------- Classifier: triage_acknowledgment ----------
+// ---------- triage_acknowledgment ----------
+//
+// Two shapes of the same concern, selected by `audit.triageAckAsDetector`.
+// The Detector is the default: the gate fires once per session, so supplying
+// the ack IS the acknowledgment and the token round-trip buys nothing. The
+// Classifier sits behind the config flag so the two can be measured against
+// each other over the fixture suite. Exactly one is live per call —
+// each consults the flag and stays silent when the other owns the concern.
 
 const TRIAGE_ACK_MIN_REASON_LENGTH = 20;
 
+const TRIAGE_ACK_PROMPT =
+  `end_drive ALWAYS goes through triage. Every declared capability on this session is ` +
+  `already saved (no unresolved work, no stale strategies), so the runtime would skip the ` +
+  `triage handoff — but triage is the runtime-mandated review point. The agent does not ` +
+  `get to decide "this was a one-off task, no triage needed." NOTE: submit_triage_plan is ` +
+  `admissible from drive only when work is still unresolved — when it would route to lift ` +
+  `after end_drive. In this all-saved case the audit's only forward path is the ` +
+  `acknowledgment; observed_capabilities and defense-surface metadata from any triage_plans ` +
+  `you submitted earlier this session are auto-recorded by the runtime when end_drive commits.`;
+
+function triageAckAsDetector(): boolean {
+  return loadConfig().audit.triageAckAsDetector;
+}
+
+/** Shared reason check for both shapes: a non-trivial, agent-authored sentence
+ *  explaining why no triage round is warranted. */
+function triageAckReasonIssues(reason: unknown): string[] {
+  if (typeof reason !== 'string' || reason.trim().length < TRIAGE_ACK_MIN_REASON_LENGTH) {
+    return [
+      `reason must be a non-trivial string (≥${TRIAGE_ACK_MIN_REASON_LENGTH} chars) ` +
+        `explaining in your own words why this session does not warrant a triage round. ` +
+        `Canned answers ("ok", "done", "no triage") do not satisfy.`,
+    ];
+  }
+  return [];
+}
+
+const triageAcknowledgmentDetector: Detector<EndDrivePayload, EndDriveCtx> = {
+  kind: AUDIT_KINDS.triageAcknowledgment,
+  ackReason: 'required',
+  // The check encodes an agent-workflow obligation — an unattended producer
+  // has no triage round to consider and nobody to write the reason.
+  unattendedPolicy: 'skip',
+  detect: (p) => {
+    if (!triageAckAsDetector()) return [];
+    if (!shouldRunTriageAcknowledgment(p)) return [];
+    return [
+      {
+        kind: AUDIT_KINDS.triageAcknowledgment,
+        message: TRIAGE_ACK_PROMPT,
+        hint:
+          `Acknowledge with acks {"${AUDIT_KINDS.triageAcknowledgment}": "<why no further triage ` +
+          `is warranted, ≥${TRIAGE_ACK_MIN_REASON_LENGTH} chars in your own words, e.g. 'all ` +
+          `declared caps are saved at fetch tier, no graduation candidate observed in captures'>"}. ` +
+          `Supplying the reason IS the acknowledgment — there is no separate flag to set.`,
+        context: {
+          session_id: p.sessionId,
+          declared_capability_count: p.declaredCapabilityCount,
+          saved_capability_count: p.saveSuccessCount,
+        },
+      },
+    ];
+  },
+  validateAck: (ack) => triageAckReasonIssues(ack.reason),
+};
+
 const triageAcknowledgmentClassifier: Classifier<EndDrivePayload, EndDriveCtx, unknown> = {
-  kind: 'triage_acknowledgment',
+  kind: AUDIT_KINDS.triageAcknowledgment,
   expectedAnswerShape:
     'triage_acknowledgment: {acknowledged: true, reason: "<your own words explaining why this session does not warrant a triage round, e.g. \'all declared capabilities have a fetch-tier saved strategy and the captures showed no graduation candidates\'>"}',
   buildItems: (p) => {
+    if (triageAckAsDetector()) return null;
     if (!shouldRunTriageAcknowledgment(p)) return null;
     return {
       session_id: p.sessionId,
       declared_capability_count: p.declaredCapabilityCount,
       saved_capability_count: p.saveSuccessCount,
       prompt:
-        `end_drive ALWAYS goes through triage. Every declared capability on this session is ` +
-        `already saved (no unresolved work, no stale strategies), so the runtime would skip the ` +
-        `triage handoff — but triage is the runtime-mandated review point. The agent does not ` +
-        `get to decide "this was a one-off task, no triage needed." Echo the audit_token + ` +
-        `acknowledge with a non-trivial reason explaining why no further triage is warranted ` +
-        `(e.g. "all declared caps are saved at fetch tier, no graduation candidate observed in ` +
-        `captures"). NOTE: submit_triage_plan is admissible from drive only when work is still ` +
-        `unresolved — when it would route to lift after end_drive. In this all-saved case the ` +
-        `audit's only forward path is the ack; observed_capabilities and defense-surface metadata ` +
-        `from any triage_plans you submitted earlier this session are auto-recorded by the ` +
-        `runtime when end_drive commits.`,
+        `${TRIAGE_ACK_PROMPT} Echo the audit_token + acknowledge with a non-trivial reason ` +
+        `explaining why no further triage is warranted (e.g. "all declared caps are saved at ` +
+        `fetch tier, no graduation candidate observed in captures").`,
       acknowledge_shape:
         '{triage_acknowledgment: {acknowledged: true, reason: "<your reason, ≥20 chars>"}}',
     };
@@ -487,14 +563,7 @@ const triageAcknowledgmentClassifier: Classifier<EndDrivePayload, EndDriveCtx, u
           `triage and chose to skip. Anything else means you have not made the choice consciously.`,
       ];
     }
-    if (typeof a.reason !== 'string' || a.reason.trim().length < TRIAGE_ACK_MIN_REASON_LENGTH) {
-      return [
-        `triage_acknowledgment.reason must be a non-trivial string (≥${TRIAGE_ACK_MIN_REASON_LENGTH} chars) ` +
-          `explaining in your own words why this session does not warrant a triage round. ` +
-          `Canned answers ("ok", "done", "no triage") do not satisfy.`,
-      ];
-    }
-    return [];
+    return triageAckReasonIssues(a.reason).map((i) => `triage_acknowledgment.${i}`);
   },
   hashFields: (p) => ({
     sessionId: p.sessionId,
@@ -624,6 +693,7 @@ export const endDriveAudit = new Audit<EndDrivePayload, EndDriveCtx>({
     mapSessionNoObservationsDetector,
     unsavedXhrEndpointsDetector,
     abandonedSaveAttemptsDetector,
+    triageAcknowledgmentDetector,
   ],
   classifiers: [triageAcknowledgmentClassifier],
 });
@@ -639,6 +709,7 @@ interface SessionLike {
   performActionHistory?: ReadonlyArray<{ action?: string; value?: unknown }>;
   saveAttemptCount?: number;
   savedCapabilities?: ReadonlyArray<{ capability?: string; at?: number }>;
+  savedCandidates?: ReadonlyArray<{ capability?: string; at?: number }>;
   abandonedSaveAttempts?: ReadonlyArray<{
     capability: string;
     kind: 'archived' | 'declined';
@@ -684,10 +755,10 @@ export function collectWriteActions(
  *
  * `triageWouldFire` is computed by the orchestrator just before this call
  * (see `wouldReverseEngineerHandoffFire` in end-drive/re-handoff.ts) — the
- * triage_acknowledgment classifier reads it to decide whether to require an
- * explicit ack token from the agent, and the re_persistence detector reads it
- * to decide whether the session's RE work is already reflected in saved
- * strategies.
+ * triage_acknowledgment gate reads it to decide whether to require an
+ * explicit acknowledgment from the agent, and the re_persistence detector
+ * reads it to decide whether the session's RE work is already reflected in
+ * saved strategies.
  */
 export function buildEndDrivePayload(
   session: SessionLike,
@@ -749,6 +820,7 @@ export function buildEndDrivePayload(
     actionCallCount: counts.actionCallCount,
     saveAttemptCount: session.saveAttemptCount ?? 0,
     saveSuccessCount: (session.savedCapabilities ?? []).length,
+    saveCandidateCount: (session.savedCandidates ?? []).length,
     skipDeclarationGuard: cfg.skipDeclarationGuard === true,
     // Fallback for graphs that don't set rePersistenceThreshold; both shipped
     // graphs (discover, map) override it. Assembled here so detectors see a

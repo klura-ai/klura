@@ -109,7 +109,7 @@ Each category maps to a fixed phase list (`CATEGORY_PHASES`):
 | `capability_declaration` | drive, triage, lift | declare_capability |
 | `escape_valve` | drive, triage, lift | abort_session |
 | `lift_re_active` | lift | try_generator(\_in_page), get_send_encoder, debugger family, install/remove_page_init_script, trigger_reference_send, patch_step (+execute via extraPhases), start/stop_listener, get_events |
-| `none` | never session-gated | consumer / package tools, get_strategy_health, review_strategy_candidate, export_platform_package |
+| `none` | never session-gated | consumer / package tools, get_strategy_health, review_strategy_candidate, export_platform_package, install_local_package |
 
 The execute phase's derived set is deliberately narrow — `end_drive`, `get_screenshot`, `patch_step`, `resume_execution`, `update_strategy`; auth recovery (`start_remote_session`, `wait_for_remote`, `get_secret`, ...) is universal and bypasses the spec.
 

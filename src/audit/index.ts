@@ -21,13 +21,17 @@
 //    ackReason: 'required'. Issue is shown; agent acks with {kind, reason}.
 //  - Level 3 (token-gated commitment) — Classifier. Token bound to
 //    hashFields(payload). Agent commits structured answers; runtime
-//    cross-checks for consistency.
+//    cross-checks for consistency. A classifier whose answers describe items
+//    derived from the same call's payload may declare
+//    `firstCallAnswerable` and skip the mint round when the agent already
+//    answered (gated on `audit.firstCallAnswers`).
 //
 // See runtime/docs/gates.md and runtime/docs/principles.md §pre-commit
 // gates for taxonomy rationale.
 
 import { hashGatePayload } from '../gate/hash';
 import { issueToken, lookupToken, consumeToken } from '../gate/store';
+import { loadConfig } from '../config/handler';
 import { extractBundledIssues } from '../strategies/validate/bundled-issues';
 import { diffSlices, itemsAreNonEmpty } from './slices';
 import { rejectionToErrorMessage } from './rejection-format';
@@ -203,6 +207,31 @@ export interface Classifier<TPayload, TCtx, TAnswer> {
    *  the hash-scoping precedent in
    *  runtime/test/pre-save-audit.test.js §"Hash scoping". */
   hashFields?: (payload: TPayload, ctx: TCtx) => unknown;
+  /** Whether this classifier's answers may be accepted on the FIRST call —
+   *  the call that carries no `audit_token` and would otherwise only mint one
+   *  and reject `pending`.
+   *
+   *  `true` is admissible exactly when the answer classifies items derived
+   *  from THIS call's payload: `validate()` then cross-checks the answer
+   *  against the same bytes the answer describes, so there is no
+   *  unbound-payload window for the token to close. The token's job is to
+   *  prove the agent answered about the payload the runtime hashed — when the
+   *  answer and the payload arrive in one call that proof is structural.
+   *
+   *  `false` is the explicit opt-out for consent-shaped classifiers: the
+   *  answer is composed against a payload the agent could still be mutating
+   *  (a user approving a strategy identity, a verdict about an effect the
+   *  runtime cannot re-observe), so the mint-then-echo round trip is what
+   *  binds the approval to a fixed shape.
+   *
+   *  Absent means "not yet classified" — accepted only under the
+   *  `all_except_confirmation` upper-bound mode.
+   *
+   *  Read only when `audit.firstCallAnswers` is not `'off'`; the shipped
+   *  default is `'off'`, which ignores this field entirely. The audit spec
+   *  may also assign the flag at composition time (see the classifier table
+   *  in `runtime/src/audit/lift/save-strategy.ts`). */
+  firstCallAnswerable?: boolean;
   /** Optional advisory projection for UNATTENDED runs. Classifiers are
    *  agent-commitment surfaces — with no agent to answer, the token flow
    *  is meaningless, so `Audit.runUnattended` skips classifiers by
@@ -313,11 +342,31 @@ export interface AuditRejection {
    *  rendered `how_to_respond:` line. Keyed by Classifier.kind, value is
    *  the raw shape string from `Classifier.expectedAnswerShape`. */
   classifier_answer_shapes?: Record<string, string>;
+  /** True when this rejection came from a call that carried answers but no
+   *  token — the first-call-answers path minted the token in the same breath
+   *  as reporting the inconsistency. The bounce policy reads it to grant one
+   *  free round per rejection family: without a token in hand the agent has
+   *  no way to know the runtime will score this attempt, and a token-less
+   *  first call is free by design. Set only on
+   *  `reason: 'answers_inconsistent'`. */
+  first_call_answers?: boolean;
   /** Paths that changed between the prior token's hashed slices and the
    *  current retry's slices. Present only on `reason: 'payload_changed'`
    *  rejections. Each entry is prefixed with `(<classifier_kind>) ` so
    *  the agent sees which dimension's hash slice the field belongs to. */
   payload_diff?: string[];
+}
+
+/** Which active classifiers may be answered on the first (token-less) call.
+ *  Reads `audit.firstCallAnswers` per call so the mode can be swept without a
+ *  daemon restart. */
+function firstCallAnswerableFor<TPayload, TCtx>(
+  classifier: Classifier<TPayload, TCtx, unknown>,
+): boolean {
+  const mode = loadConfig().audit.firstCallAnswers;
+  if (mode === 'off') return false;
+  if (mode === 'safe_subset') return classifier.firstCallAnswerable === true;
+  return classifier.firstCallAnswerable !== false;
 }
 
 export type AuditResult =
@@ -566,18 +615,60 @@ export class Audit<TPayload, TCtx> {
     const payloadHash = hashGatePayload(slices);
 
     if (!input.token) {
-      // First call: mint, reject.
-      const token = issueToken({ kind: this.kind, payloadHash, hashInput: slices });
-      return {
+      // First call. Minting a token and rejecting `pending` is the baseline;
+      // a first call that already carries answers can skip that round trip for
+      // the classifiers whose answers describe items derived from THIS call's
+      // payload (see Classifier.firstCallAnswerable).
+      const mintPending = (): AuditResult => ({
         status: 'rejected',
         rejection: {
           reason: 'pending',
-          token,
+          token: issueToken({ kind: this.kind, payloadHash, hashInput: slices }),
           items: this.collectItems(payload, ctx, activeClassifiers),
           warnings: allWarnings,
           classifier_remedies: this.collectRemedies(payload, ctx, activeClassifiers),
           classifier_answer_shapes: this.collectAnswerShapes(activeClassifiers),
           ...(ackIssues.length > 0 ? { ack_issues: ackIssues } : {}),
+        },
+      });
+
+      // No answers → nothing to validate against, so the call takes the round
+      // trip whatever the mode says. This is what keeps the bounce hazard away
+      // from the common case: an agent that hasn't answered yet still gets a
+      // free round.
+      const firstCallAnswers = input.answers as Record<string, unknown> | undefined;
+      if (!firstCallAnswers || Object.keys(firstCallAnswers).length === 0) {
+        return mintPending();
+      }
+
+      const answerable = activeClassifiers.filter((c) => firstCallAnswerableFor(c));
+      if (answerable.length === 0) return mintPending();
+
+      const firstCallIssues: string[] = [];
+      for (const c of answerable) {
+        firstCallIssues.push(...c.validate(payload, ctx, firstCallAnswers[c.kind]));
+      }
+
+      // Every active classifier answered, every answer consistent → commit
+      // without ever minting. Any classifier the mode defers still needs the
+      // round trip, so the token mints and the rejection reports `pending`
+      // for it — carrying the answerable subset's issues too, so one round
+      // fixes everything.
+      if (firstCallIssues.length === 0 && answerable.length === activeClassifiers.length) {
+        return { status: 'committed', warnings: allWarnings };
+      }
+      if (firstCallIssues.length === 0) return mintPending();
+      return {
+        status: 'rejected',
+        rejection: {
+          reason: 'answers_inconsistent',
+          token: issueToken({ kind: this.kind, payloadHash, hashInput: slices }),
+          items: this.collectItems(payload, ctx, activeClassifiers),
+          warnings: allWarnings,
+          classifier_issues: firstCallIssues,
+          classifier_remedies: this.collectRemedies(payload, ctx, activeClassifiers),
+          classifier_answer_shapes: this.collectAnswerShapes(activeClassifiers),
+          first_call_answers: true,
         },
       };
     }

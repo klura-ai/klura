@@ -41,7 +41,7 @@ When a tier is skipped, the cascade error names when it next becomes probe-eligi
 
 `markHealed` is the deliberate write that says "this capability works again": it resets the failure count, bumps `healCount`, appends a `healed` strategy event, and clears the probation clock. Three producers call it — a manual heal, a verified candidate promotion, and post-save verification of an **active** strategy on explicit success. The last one matters because health is keyed by capability + tier while a re-saved strategy is new bytes: without it, a strategy that broke, was fixed, and verified end-to-end would inherit the broken record of the bytes it replaced and be skipped on its first real call.
 
-Verification traffic is otherwise health-silent (`_suppressStrategyState`), so grading never pollutes caller-visible health; `markHealed` is the one narrow exception, and it does not fire when the verified result was an empty declared collection — that routes to semantic review instead (see [ARCHITECTURE.md](../ARCHITECTURE.md) "Empty declared collections").
+Verification traffic is otherwise health-silent (`_suppressStrategyState`), so grading never pollutes caller-visible health; `markHealed` is the one narrow exception, and it does not fire when the verified result failed a collection-integrity check — that routes to semantic review instead (see [ARCHITECTURE.md](../ARCHITECTURE.md) "Collection integrity").
 
 Healing also clears the capability's rediscover silence (`_dontAskRediscover`), as does `resetHealth`. A "don't ask again" answer was given about a strategy that was failing; keeping it after the capability demonstrably works would mute the gate for a future, unrelated rot.
 
@@ -80,3 +80,11 @@ Only fall back to full re-discovery if multiple steps are broken or the page str
 ## Scoring
 
 When asked about skill quality: `list_platform_skills()` and report strategy type distribution, health status, coverage. Example: "food-delivery: 6 capabilities, 4 fetch, 2 recorded-path. 5/6 healthy."
+
+## Health on the capability listing
+
+`list_platform_skills` reports a `health` block beside `verification` on every capability that has executed at least once: `status`, `last_success` / `last_failure`, the rolling `recent_success_rate`, and `last_error`.
+
+The two answer different questions and both are needed. A verification stamp describes the moment a strategy was saved; it says nothing about whether the capability has worked since. Between the two, a corpus rots silently — the site changes, rows stop coming back, and every surface an agent consults still reports the original stamp. Surfacing the outcome beside the stamp is what makes "saved" and "working" distinguishable at the moment a caller decides whether to trust a capability.
+
+A capability that has never executed reports no `health` block at all. No record is honest about absence; a synthesized `healthy` would assert something the runtime has not observed.

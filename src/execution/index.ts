@@ -515,6 +515,19 @@ interface ExecuteOpts {
    * health, archive, node-transport, or partial-replay state.
    */
   _suppressStrategyState?: boolean;
+  /**
+   * Fire the Node transport without the persisted cookie jar, and without
+   * writing Set-Cookie back into it.
+   *
+   * `withFreshVerificationPool` strips persisted storage so cookies left by
+   * discovery are not implicit inputs to a verification run. That stripping
+   * reaches the browser context; the Node fire path reads the jar straight off
+   * disk, so without this flag a strategy that only works because discovery
+   * warmed the jar verifies clean and then fails for every consumer that does
+   * not share it. A capability that genuinely needs a session declares a prereq
+   * that establishes one inside the run.
+   */
+  _suppressPersistedCookies?: boolean;
 }
 
 function notRunResult(body: Record<string, unknown>): ExecuteResult {
@@ -767,6 +780,7 @@ export async function execute(
               boundResolveCapabilityPrereq,
               stringifyScope,
               opts.identity,
+              opts._suppressPersistedCookies,
             );
             result.transport = 'node';
           } catch (err) {
@@ -916,6 +930,7 @@ export async function execute(
             depth,
             errors,
             opts.identity,
+            opts._suppressPersistedCookies,
           );
           if (retry) {
             retry.elapsedMs = Date.now() - startedAt;
@@ -1121,6 +1136,7 @@ async function tryRevisitPartialReplay(
   depth: number,
   errors: string[],
   identity?: string,
+  suppressPersistedCookies?: boolean,
 ): Promise<ExecuteResult | null> {
   if (!pool) {
     errors.push(`revisit-fallback: skipped (no pool for partial replay)`);
@@ -1202,6 +1218,7 @@ async function tryRevisitPartialReplay(
           boundResolveCapabilityPrereq,
           stringifyScope,
           identity,
+          suppressPersistedCookies,
         );
         retryResult.transport = 'node';
       } catch (err) {

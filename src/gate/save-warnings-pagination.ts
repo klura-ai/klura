@@ -1,4 +1,8 @@
-// Hardcoded-pagination save warning.
+// Pagination save warnings. Two independent concerns over the same domain:
+// a page size frozen at the discovery value, and a pagination question the
+// strategy left unanswered.
+//
+// ---------- Hardcoded page size ----------
 //
 // A cold agent asked "top three" bakes `size=3` / `hitsPerPage=10` into the
 // endpoint query string, freezing the page size at whatever one caller wanted
@@ -18,7 +22,8 @@
 
 import type { Strategy } from '../strategies/skills';
 import type { SaveWarning } from './save-warnings';
-import { WARNING_KINDS } from '../vocab';
+import { paginationCandidateParams } from '../execution/collection-emptiness';
+import { WARNING_KINDS, refUrl, REF_LINKS } from '../vocab';
 
 // Query-param keys that denote a page SIZE / result count — "how many results",
 // the lever a caller controls. Compared after lowercasing and stripping `_`/`-`,
@@ -95,6 +100,51 @@ export function detectHardcodedPaginationValue(data: Strategy): SaveWarning[] {
         `or drop the param and let the server default stand. Ack only if this capability ` +
         `intentionally returns a fixed count.`,
       context: { flagged },
+    },
+  ];
+}
+
+// ---------- Unanswered pagination question ----------
+//
+// `notes.params.<name>.paginates` is what routes a param into check C, the only
+// check that can prove a page window advances: a single page-1 call is
+// byte-for-byte what a strategy ignoring its page param returns.
+//
+// Absence of the key is unfalsifiable — "nothing here paginates" and "the
+// question was never considered" are the same bytes, so a runtime reading only
+// declarations sees full coverage over an empty set. Requiring an explicit
+// `true` or `false` on every param the proof could settle makes the two
+// distinguishable: silence becomes impossible, and a wrong `true` is caught by
+// check C executing the second page.
+//
+// The candidate set is structural (`paginationCandidateParams` — templated into
+// the request, integer example), never a page/offset name list.
+export function detectUnansweredPaginationQuestion(data: Strategy): SaveWarning[] {
+  const params = (data as { notes?: { params?: Record<string, unknown> } }).notes?.params ?? {};
+  const unanswered = paginationCandidateParams(data).filter((name) => {
+    const doc = params[name];
+    return !(doc && typeof doc === 'object' && 'paginates' in doc);
+  });
+  if (unanswered.length === 0) return [];
+
+  const named = unanswered.map((name) => `\`${name}\``).join(', ');
+  const first = unanswered[0] as string;
+  return [
+    {
+      kind: WARNING_KINDS.unansweredPaginationQuestion,
+      message:
+        `${named} ${unanswered.length === 1 ? 'is' : 'are'} templated into the request with an ` +
+        `integer example, so ${unanswered.length === 1 ? 'it could advance' : 'they could advance'} ` +
+        `a page window over the returned rows — and the strategy does not say whether ` +
+        `${unanswered.length === 1 ? 'it does' : 'they do'}. Without an answer the second page is ` +
+        `never executed, and a strategy that silently ignores its page param returns exactly what ` +
+        `a working one returns on page 1.`,
+      hint:
+        `Answer for each one — e.g. \`notes.params.${first}.paginates\`: \`true\` if it steps through the same ` +
+        `collection (post-save verification then executes the next consecutive integer and requires ` +
+        `the two row sets to be disjoint), \`false\` if it selects different data or shapes one ` +
+        `result set. See ${refUrl(REF_LINKS.capabilityParameters)} §"Declaring a paginating param".`,
+      context: { unanswered },
     },
   ];
 }

@@ -32,7 +32,7 @@
     "build": "node scripts/build-staged.js",
     "start": "node bin/klura.js daemon start --foreground",
     "pretest": "npm run build",
-    "test": "node --test --test-concurrency=4 test/*.test.js && npm run check:vocab && npm run check:tool-names && npm run check:no-static-synopses",
+    "test": "node scripts/run-tests.js && npm run check:vocab && npm run check:tool-names && npm run check:no-static-synopses",
     "check:vocab": "node scripts/check-ref-links.js",
     "check:tool-names": "node scripts/check-tool-names.js",
     "check:no-static-synopses": "node scripts/check-no-static-synopses.js",

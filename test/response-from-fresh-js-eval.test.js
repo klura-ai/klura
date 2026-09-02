@@ -198,11 +198,13 @@ test('response.from js-eval navigations share the local origin scheduler', async
   const firstStarted = new Promise((resolve) => {
     signalFirstStarted = resolve;
   });
+  let firstLanded = 'about:blank';
   const firstDriver = {
     async getUrl() {
-      return 'about:blank';
+      return firstLanded;
     },
-    async navigate() {
+    async navigate(_session, url) {
+      firstLanded = url;
       signalFirstStarted();
       await new Promise((resolve) => {
         releaseFirstNavigation = resolve;
@@ -214,11 +216,13 @@ test('response.from js-eval navigations share the local origin scheduler', async
     async saveStorageState() {},
   };
   let secondNavigations = 0;
+  let secondLanded = 'about:blank';
   const secondDriver = {
     async getUrl() {
-      return 'about:blank';
+      return secondLanded;
     },
-    async navigate() {
+    async navigate(_session, url) {
+      secondLanded = url;
       secondNavigations += 1;
     },
     async evaluateExpression() {

@@ -315,6 +315,18 @@ interface FireNodeOptions {
   preResolvedBody?: string;
   /** Account name on the platform — see klura://reference#identities. */
   identity?: string;
+  /**
+   * Fire without the persisted cookie jar, and without writing Set-Cookie back.
+   *
+   * Post-save verification runs inside `withFreshVerificationPool`, whose
+   * contract is that cookies and local storage left by discovery are not
+   * implicit inputs — a capability that needs a session re-establishes it
+   * through a declared prereq inside the run. That stripping applies to the
+   * browser context; this carries the same contract to the Node fire path,
+   * which otherwise reads the jar straight off disk and would verify a strategy
+   * using the very state the run is supposed to exclude.
+   */
+  withoutPersistedCookies?: boolean;
 }
 
 async function fireRequestFromNode(
@@ -329,7 +341,9 @@ async function fireRequestFromNode(
   const serializedBody = options.preResolvedBody ?? prepared.serializedBody;
 
   // Cookie jar: read once before the request, persist Set-Cookie after.
-  const jarBeforeRequest = skills.readStorageStateCookies(platform, url, options.identity);
+  const jarBeforeRequest = options.withoutPersistedCookies
+    ? { header: null, cookies: [] }
+    : skills.readStorageStateCookies(platform, url, options.identity);
   const strategyHeaders = resolveHeaders(
     strategy.headers,
     args,
@@ -397,9 +411,12 @@ async function fireRequestFromNode(
     // Node 20+ API that returns the individual values without splitting on commas
     // inside Expires attribute values — the critical difference from
     // `headers.get('set-cookie')`.
+    // A run that fires without the jar must not write to it either: warming the
+    // jar as a side effect would leave the next verification with exactly the
+    // implicit input this run excluded.
     const getSetCookie = (response.headers as unknown as { getSetCookie?: () => string[] })
       .getSetCookie;
-    if (typeof getSetCookie === 'function') {
+    if (typeof getSetCookie === 'function' && !options.withoutPersistedCookies) {
       const values = getSetCookie.call(response.headers);
       if (Array.isArray(values) && values.length > 0) {
         skills.writeStorageStateCookies(platform, values, url, options.identity);
@@ -735,6 +752,7 @@ export async function executeFetchNode(
   ) => Promise<Record<string, unknown> | null>,
   stringifyScope: (v: unknown) => string,
   identity?: string,
+  withoutPersistedCookies?: boolean,
 ): Promise<ExecuteResult> {
   const overrides = args._generated as Record<string, string> | undefined;
   const omittedOptionalParams = omittedOptionalParamNames(strategy, args);
@@ -807,7 +825,10 @@ export async function executeFetchNode(
     // with a search-results row-group extract.
     response: strategy.response,
   };
-  return await fireRequestFromNode(fireStrategy, mergedArgs, platform, capability, { identity });
+  return await fireRequestFromNode(fireStrategy, mergedArgs, platform, capability, {
+    identity,
+    withoutPersistedCookies,
+  });
 }
 
 export async function resolveNodeCompatiblePrereqs(

@@ -21,6 +21,7 @@ const { saveStrategyAudit } = await import('../dist/audit/lift/save-strategy.js'
 const { registerSaveConfirmationDecider } = await import(
   '../dist/audit/lift/save-confirmation-decider.js'
 );
+const { WARNING_KINDS } = await import('../dist/vocab/index.js');
 
 registerSaveConfirmationDecider({
   name: 'literal-provenance-test-default-approve',
@@ -62,12 +63,12 @@ test('first save: items expose auto_classified for templated fields', () => {
   assert.deepEqual(endpoint.auto_classified, { caller_input: 'query' });
 });
 
-test('static literal echoing a start_session arg value gets an informational caller_arg_hint', () => {
+test('static literal echoing a caller arg value fires the caller_arg_baked Detector in Stage 1', () => {
   const ctx = {
     ...baseCtx,
     session: {
       declaredCapabilities: [
-        { capability: 'search_restaurants', args: { amount: '20' }, declared_at: 0 },
+        { capability: 'search_restaurants', args: { amount: '2000' }, declared_at: 0 },
       ],
     },
   };
@@ -76,30 +77,62 @@ test('static literal echoing a start_session arg value gets an informational cal
     baseUrl: 'http://127.0.0.1:3315',
     endpoint: '/search?q={{query}}',
     response: { format: 'html', extract: { items: { selector: 'a', multiple: true } } },
-    body: { amount: '20' }, // baked the caller's amount instead of templating it
+    body: { amount: '2000' }, // baked the caller's amount instead of templating it
     notes: { params: { query: { kind: 'text', example: 'thai' } } },
   };
   const result = saveStrategyAudit.process(strategy, ctx, {});
   assert.equal(result.status, 'rejected');
-  const items = result.rejection.items.literal_provenance;
-  const amt = items.find((i) => i.path === 'body.amount');
-  assert.ok(amt, `expected body.amount item; got ${JSON.stringify(items)}`);
-  assert.match(amt.caller_arg_hint ?? '', /matches the start_session arg "amount"/);
+  // Stage 1 owns this: detector rejection, no classifier items, no token.
+  assert.equal(result.rejection.reason, 'unacked_warnings');
+  assert.equal(result.rejection.token, undefined);
+  assert.equal(result.rejection.items, undefined);
+  const warning = result.rejection.warnings.find((w) => w.kind === WARNING_KINDS.callerArgBaked);
+  assert.ok(warning, `expected caller_arg_baked; got ${JSON.stringify(result.rejection.warnings)}`);
+  assert.match(warning.message, /body\.amount/);
+  assert.match(warning.hint, /\{\{amount\}\}/);
 });
 
-test('no caller_arg_hint when no static literal matches a caller arg value', () => {
+test('caller_arg_baked stays silent when no literal matches a caller arg value', () => {
   const ctx = {
     ...baseCtx,
     session: {
       declaredCapabilities: [
-        { capability: 'search_restaurants', args: { amount: '99' }, declared_at: 0 },
+        { capability: 'search_restaurants', args: { amount: '9999' }, declared_at: 0 },
       ],
     },
   };
   const result = saveStrategyAudit.process(fetchStrategy(), ctx, {});
   assert.equal(result.status, 'rejected');
-  const items = result.rejection.items.literal_provenance;
-  assert.ok(items.every((i) => i.caller_arg_hint === undefined), 'no spurious hints');
+  assert.equal(result.rejection.reason, 'pending');
+  assert.ok(
+    !(result.rejection.warnings ?? []).some((w) => w.kind === WARNING_KINDS.callerArgBaked),
+    'no spurious caller_arg_baked warning',
+  );
+});
+
+test('caller_arg_baked ignores arg values shorter than the collision floor', () => {
+  const ctx = {
+    ...baseCtx,
+    session: {
+      declaredCapabilities: [
+        { capability: 'search_restaurants', args: { page: '20' }, declared_at: 0 },
+      ],
+    },
+  };
+  const strategy = {
+    strategy: 'fetch',
+    baseUrl: 'http://127.0.0.1:3315',
+    endpoint: '/search?q={{query}}',
+    response: { format: 'html', extract: { items: { selector: 'a', multiple: true } } },
+    body: { page: '20' },
+    notes: { params: { query: { kind: 'text', example: 'thai' } } },
+  };
+  const result = saveStrategyAudit.process(strategy, ctx, {});
+  assert.equal(result.status, 'rejected');
+  assert.ok(
+    !(result.rejection.warnings ?? []).some((w) => w.kind === WARNING_KINDS.callerArgBaked),
+    'two-char value must not be matchable',
+  );
 });
 
 test('agent can omit literal_provenance for auto-classified items', () => {
