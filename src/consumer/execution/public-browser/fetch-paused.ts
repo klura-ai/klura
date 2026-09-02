@@ -9,6 +9,8 @@ export interface BrowserFetchPausedV1 {
   method: string;
   resource_type: string;
   response_status: number | null;
+  /** Chromium's network error for a response-stage pause that carries no status. */
+  response_error: string | null;
   response_headers: Array<{ name: string; value: string }>;
   request_body: BrowserFetchRequestBodyV1;
   preflight_method: string | null;
@@ -52,6 +54,8 @@ export function parseBrowserFetchPaused(value: unknown): BrowserFetchPausedV1 | 
     method: requestRecord.method,
     resource_type: normalizeResourceType(record.resourceType),
     response_status: status === undefined ? null : status,
+    response_error:
+      typeof record.responseErrorReason === 'string' ? record.responseErrorReason : null,
     response_headers: headers,
     request_body: requestBody,
     preflight_method: parsePreflightMethod(requestRecord),

@@ -81,6 +81,7 @@ export async function openPublicLoginBrowser(
     page = await context.newPage();
     pageGuard = await installPublicSinglePageGuard(context, page);
     boundary = await installBrowserNetworkBoundary({
+      proxy_auth: { username: proxy.username, password: proxy.password },
       page,
       capability,
       options: {

@@ -130,6 +130,21 @@ export async function executeBrowserNavigationStrategyInBoundedPage(
       );
     }
     if (error instanceof PublicHttpExecutionError) throw error;
+    // A request the boundary refused surfaces to the page as a generic
+    // navigation error; the boundary's own verdict names the rule and phase.
+    try {
+      boundary.assertHealthy();
+    } catch (refused) {
+      if (refused instanceof PublicHttpExecutionError) {
+        throw new PublicHttpExecutionError(
+          refused.code,
+          refused.message,
+          targetRequests,
+          refused.interaction_failure,
+          refused.diagnostic,
+        );
+      }
+    }
     if (error instanceof BrowserProjectionError) {
       throw new PublicHttpExecutionError('response_invalid_json', error.message, targetRequests);
     }

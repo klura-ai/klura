@@ -24,6 +24,7 @@ import {
   createPublicBrowserContextOptions,
   installPublicSinglePageGuard,
   launchPublicBrowser,
+  type PublicSinglePageGuardV1,
 } from './context';
 import { evaluateOutcomeSelectors } from './outcome-selectors';
 import { type BrowserEgressRuleV1, type BrowserResourcePolicyV1 } from './resource-policy';
@@ -70,6 +71,8 @@ export interface BrowserPageScriptScopeV1 {
 export interface BrowserNetworkBoundaryV1 extends BrowserInteractionNetworkBoundaryV1 {
   cdp: CDPSession;
   target_requests(): number;
+  /** Page-initiated sub-resource requests refused because no rule admits them. */
+  denied_requests(): number;
   assertHealthy(): void;
   transition(
     capability: BrowserNetworkCapabilityV1,
@@ -170,6 +173,7 @@ export async function executeBrowserNavigationStrategy(
   let browser: Browser | null = null;
   let proxy: PinnedEgressProxyV1 | null = null;
   let boundary: BrowserNetworkBoundaryV1 | null = null;
+  let pageGuard: PublicSinglePageGuardV1 | null = null;
   try {
     if (signal.aborted) {
       throw new PublicHttpExecutionError('cancelled', 'caller cancelled before browser launch');
@@ -186,8 +190,9 @@ export async function executeBrowserNavigationStrategy(
     );
     await context.routeWebSocket('**/*', (webSocket) => webSocket.close());
     const page = await context.newPage();
-    const pageGuard = await installPublicSinglePageGuard(context, page);
+    pageGuard = await installPublicSinglePageGuard(context, page);
     boundary = await installBrowserNetworkBoundary({
+      proxy_auth: { username: proxy.username, password: proxy.password },
       page,
       capability,
       options: { ...options, signal },
@@ -259,6 +264,23 @@ export async function executeBrowserNavigationStrategy(
       );
     }
     if (error instanceof PublicHttpExecutionError) throw error;
+    // A request the guard or boundary refused reaches the page as a generic
+    // navigation error; their own verdicts name the rule and phase.
+    for (const verdict of [pageGuard, boundary]) {
+      try {
+        verdict?.assertHealthy();
+      } catch (refused) {
+        if (refused instanceof PublicHttpExecutionError) {
+          throw new PublicHttpExecutionError(
+            refused.code,
+            refused.message,
+            targetRequests,
+            refused.interaction_failure,
+            refused.diagnostic,
+          );
+        }
+      }
+    }
     if (error instanceof BrowserProjectionError) {
       throw new PublicHttpExecutionError('response_invalid_json', error.message, targetRequests);
     }
@@ -279,10 +301,19 @@ export async function executeBrowserNavigationStrategy(
   }
 }
 
+export interface BrowserProxyCredentialsV1 {
+  username: string;
+  password: string;
+}
+
 export async function installBrowserNetworkBoundary(input: {
   page: Page;
   capability: BrowserNetworkCapabilityV1;
   options: PublicBrowserExecutionOptionsV1 & { signal: AbortSignal };
+  /** Credentials for the pinned egress proxy. Interception owns the page's
+   *  Fetch domain, so the proxy's challenge is answered here, not by the
+   *  launch-time proxy configuration. */
+  proxy_auth?: BrowserProxyCredentialsV1;
 }): Promise<BrowserNetworkBoundaryV1> {
   if (input.capability.browser_resources === null)
     throw new PublicHttpExecutionError('invalid_request', 'browser resource policy is absent');
@@ -297,7 +328,29 @@ export async function installBrowserNetworkBoundary(input: {
       { urlPattern: '*', requestStage: 'Request' },
       { urlPattern: '*', requestStage: 'Response' },
     ],
+    handleAuthRequests: true,
   });
+  // Only the pinned proxy may challenge; a target site's own challenge is a
+  // refusal the package must classify, never something answered on its behalf.
+  cdp.on(
+    'Fetch.authRequired',
+    (event: { requestId: string; authChallenge: { source?: string } }) => {
+      const proxyChallenge =
+        event.authChallenge.source === 'Proxy' && input.proxy_auth !== undefined;
+      void cdp
+        .send('Fetch.continueWithAuth', {
+          requestId: event.requestId,
+          authChallengeResponse: proxyChallenge
+            ? {
+                response: 'ProvideCredentials',
+                username: input.proxy_auth?.username,
+                password: input.proxy_auth?.password,
+              }
+            : { response: 'CancelAuth' },
+        })
+        .catch(() => undefined);
+    },
+  );
   const admitted = new Map<string, AdmittedBrowserRequestV1>();
   const ruleRequests = new Map<string, number>();
   let targetRequests = 0;
@@ -377,6 +430,15 @@ export async function installBrowserNetworkBoundary(input: {
     notifyOperationSettled(admission.operation);
   };
 
+  let deniedRequests = 0;
+  const deny = async (requestId: string): Promise<void> => {
+    deniedRequests += 1;
+    try {
+      await cdp.send('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' });
+    } catch {
+      return;
+    }
+  };
   const fail = async (requestId: string, error: PublicHttpExecutionError): Promise<void> => {
     fatal ??= error;
     const admission = admitted.get(requestId);
@@ -437,6 +499,7 @@ export async function installBrowserNetworkBoundary(input: {
       },
       responseBodyQueue,
       fail,
+      deny,
       fatal: () => fatal,
       closed: () => closed,
       activityChanged: notifyActivity,
@@ -461,6 +524,7 @@ export async function installBrowserNetworkBoundary(input: {
   return {
     cdp,
     target_requests: () => targetRequests,
+    denied_requests: () => deniedRequests,
     assertHealthy: () => {
       if (fatal !== null) throw fatal;
     },
@@ -709,6 +773,8 @@ export interface FetchHandlerStateV1 {
   pendingAdmissions: number;
   responseBodyQueue: AsyncSerialQueueV1;
   fail(requestId: string, error: PublicHttpExecutionError): Promise<void>;
+  /** Refuses a request the page tried on its own without failing the task. */
+  deny(requestId: string): Promise<void>;
   fatal(): PublicHttpExecutionError | null;
   closed(): boolean;
   activityChanged(): void;
@@ -730,6 +796,19 @@ async function handleFetchPaused(raw: unknown, state: FetchHandlerStateV1): Prom
   const fatal = state.fatal();
   if (fatal !== null) {
     await state.fail(paused.request_id, fatal);
+    return;
+  }
+  // A response-stage pause that carries a network error instead of a status is
+  // the admitted request failing, not a new request: it must not be charged
+  // against the budget a second time.
+  if (paused.response_error !== null) {
+    await state.fail(
+      paused.request_id,
+      new PublicHttpExecutionError(
+        'transport_failure',
+        `browser request failed before a response: ${paused.response_error}`,
+      ),
+    );
     return;
   }
   if (paused.response_status === null) {

@@ -1164,3 +1164,160 @@ function testBrowserOptions(scheduler, maxTargetRequests) {
     signal: new AbortController().signal,
   };
 }
+
+function navigationOnlyCapability() {
+  const policy = parseBrowserResourcePolicy(
+    {
+      egress_rules: [
+        {
+          rule_id: 'front_page_document',
+          phase: 'navigation',
+          origin: 'https://example.test',
+          methods: ['GET'],
+          route: { path: { kind: 'exact', value: '/news' }, query: { kind: 'none' } },
+          resource_types: ['document'],
+          max_requests: 1,
+          max_encoded_request_body_bytes: 0,
+          max_encoded_response_bytes: 1024,
+        },
+      ],
+      max_requests_per_browser_task: 1,
+      max_encoded_request_body_bytes_per_browser_task: 0,
+      max_encoded_response_bytes_per_browser_task: 1024,
+      max_proxy_wire_bytes_per_browser_task: 2048,
+      max_single_request_body_bytes: 0,
+      max_single_response_bytes: 1024,
+      service_workers: 'block',
+      downloads: 'block',
+      popups: 'block',
+      websockets: 'block',
+      webtransport: 'block',
+      webrtc_direct_egress: 'block',
+      browser_cache: 'block',
+    },
+    'browser_resources',
+  );
+  return {
+    browser_resources: policy,
+    origin_traffic_policies: [
+      {
+        origin: 'https://example.test',
+        max_concurrency: 1,
+        requests_per_second: 1,
+        burst: 1,
+        min_delay_ms: 0,
+        max_redirect_hops: 0,
+        circuit_breaker: {
+          transient_failure_threshold: 1,
+          transient_window_ms: 1000,
+          cooldown_ms: 1000,
+        },
+      },
+    ],
+  };
+}
+
+test('an undeclared page sub-resource is refused without failing the task', async () => {
+  const sent = [];
+  class FakeCdp extends EventEmitter {
+    async send(method, payload) {
+      sent.push({ method, payload });
+      return {};
+    }
+
+    async detach() {}
+  }
+  const cdp = new FakeCdp();
+  const context = { newCDPSession: async () => cdp, close: async () => undefined };
+  const signal = new AbortController().signal;
+  const boundary = await installBrowserNetworkBoundary({
+    page: { context: () => context },
+    capability: navigationOnlyCapability(),
+    options: {
+      input: {},
+      bindings: {},
+      timeout_ms: 1000,
+      max_target_requests: 1,
+      scheduler: new OriginSchedulerV1(),
+      signal,
+    },
+  });
+  cdp.emit('Fetch.requestPaused', {
+    requestId: 'stylesheet',
+    request: { url: 'https://example.test/news.css?v=1', method: 'GET', hasPostData: false },
+    resourceType: 'Stylesheet',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    sent.filter((call) => call.method === 'Fetch.failRequest').map((call) => call.payload),
+    [{ requestId: 'stylesheet', errorReason: 'BlockedByClient' }],
+  );
+  boundary.assertHealthy();
+  assert.equal(boundary.denied_requests(), 1);
+  cdp.emit('Fetch.requestPaused', {
+    requestId: 'elsewhere',
+    request: { url: 'https://example.test/other', method: 'GET', hasPostData: false },
+    resourceType: 'Document',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.throws(
+    () => boundary.assertHealthy(),
+    (error) => error?.code === 'request_blocked' && error.diagnostic?.phase === 'navigation',
+  );
+  await boundary.close();
+});
+
+test('the boundary answers only the pinned proxy\'s authentication challenge', async () => {
+  const sent = [];
+  class FakeCdp extends EventEmitter {
+    async send(method, payload) {
+      sent.push({ method, payload });
+      return {};
+    }
+
+    async detach() {}
+  }
+  const cdp = new FakeCdp();
+  const context = { newCDPSession: async () => cdp, close: async () => undefined };
+  const boundary = await installBrowserNetworkBoundary({
+    page: { context: () => context },
+    capability: navigationOnlyCapability(),
+    options: {
+      input: {},
+      bindings: {},
+      timeout_ms: 1000,
+      max_target_requests: 1,
+      scheduler: new OriginSchedulerV1(),
+      signal: new AbortController().signal,
+    },
+    proxy_auth: { username: 'pinned', password: 'secret' },
+  });
+  assert.equal(
+    sent.find((call) => call.method === 'Fetch.enable')?.payload.handleAuthRequests,
+    true,
+  );
+  cdp.emit('Fetch.authRequired', {
+    requestId: 'proxy',
+    authChallenge: { source: 'Proxy', origin: 'http://127.0.0.1:1', scheme: 'basic', realm: '' },
+  });
+  cdp.emit('Fetch.authRequired', {
+    requestId: 'site',
+    authChallenge: { source: 'Server', origin: 'https://example.test', scheme: 'basic', realm: '' },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    sent.filter((call) => call.method === 'Fetch.continueWithAuth').map((call) => call.payload),
+    [
+      {
+        requestId: 'proxy',
+        authChallengeResponse: {
+          response: 'ProvideCredentials',
+          username: 'pinned',
+          password: 'secret',
+        },
+      },
+      { requestId: 'site', authChallengeResponse: { response: 'CancelAuth' } },
+    ],
+  );
+  await boundary.close();
+});

@@ -54,6 +54,13 @@ export async function handleBrowserRequestStage(
       });
   const originPolicy = findOriginPolicy(state.capability.origin_traffic_policies, paused.url);
   if (!rule || !originPolicy) {
+    // A sub-resource the page fetched on its own is refused and the page
+    // carries on without it; only the task's own traffic — navigation,
+    // interaction, runtime and page-script requests — is bound to be declared.
+    if (phase === 'resource') {
+      await state.deny(paused.request_id);
+      return;
+    }
     await state.fail(
       paused.request_id,
       new PublicHttpExecutionError(
