@@ -120,6 +120,24 @@ function pathMatchesTemplate(urlPath: string, template: readonly string[]): bool
  *  checklist is directly assertable — it is the whole content of the
  *  `observed_siblings` dimension, and a silently-empty list makes the
  *  classifier inert without failing anything. */
+/** Longest URL echoed into an audit checklist line.
+ *
+ *  A rejection is only useful if the agent can read it. Embedding whole sample
+ *  URLs is unbounded in both directions — one YouTube save produced a 2,067,711
+ *  character rejection from base64 prefetch URLs, which exceeded the tool-output
+ *  budget, reached the agent truncated, and burned every remaining turn on
+ *  retries against an error it could not see. A URL identifies an endpoint long
+ *  before its 200th character.
+ *
+ *  Length is the only unbounded dimension here: collectUnsavedHotXhrEndpoints
+ *  already caps the endpoint count. */
+const MAX_CHECKLIST_URL_CHARS = 200;
+
+function truncateForChecklist(value: string): string {
+  if (typeof value !== 'string' || value.length <= MAX_CHECKLIST_URL_CHARS) return value;
+  return `${value.slice(0, MAX_CHECKLIST_URL_CHARS)}…[${value.length} chars]`;
+}
+
 export function collectObservedSiblingsForAudit(
   session: Session | null,
   platform: string,
@@ -138,8 +156,8 @@ export function collectObservedSiblingsForAudit(
     if (own.some((t) => pathMatchesTemplate(endpoint.urlPath, t))) continue;
     out.push({
       method: endpoint.method,
-      url: endpoint.sampleUrl,
-      key: `${endpoint.method} ${endpoint.urlPath}`,
+      url: truncateForChecklist(endpoint.sampleUrl),
+      key: `${endpoint.method} ${truncateForChecklist(endpoint.urlPath)}`,
     });
   }
   return out;
@@ -211,8 +229,20 @@ function hasProbeablePrereqs(data: Strategy): boolean {
   if (Array.isArray(obj.steps) && obj.steps.length > 0) return true;
   const wsOpen = obj.wsOpen as { steps?: unknown } | undefined;
   if (wsOpen && Array.isArray(wsOpen.steps) && wsOpen.steps.length > 0) return true;
-  const response = obj.response as { format?: unknown } | undefined;
+  const response = obj.response as { format?: unknown; from?: unknown } | undefined;
   if (response?.format === 'html') return true;
+  // An explicit `format: "json"` on a GET is a claim about the response body,
+  // and the probe verifies it. Without the declaration there is no claim to
+  // check, so an undeclared fetch stays unprobed.
+  if (
+    response?.format === 'json' &&
+    typeof response.from !== 'string' &&
+    (typeof obj.method !== 'string' || obj.method.toUpperCase() === 'GET') &&
+    typeof obj.baseUrl === 'string' &&
+    typeof obj.endpoint === 'string'
+  ) {
+    return true;
+  }
   return false;
 }
 

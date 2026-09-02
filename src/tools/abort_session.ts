@@ -46,6 +46,7 @@ export const ABORT_KIND_VALUES: readonly AbortKind[] = [
   'anti_bot',
   'captcha',
   'auth_required',
+  'consent_required',
   'age_gate',
   'existing_capability_covers',
   'user_stop',
@@ -74,6 +75,7 @@ export const ESCALATION_ABORT_KINDS: ReadonlySet<AbortKind> = new Set([
   'anti_bot',
   'captcha',
   'auth_required',
+  'consent_required',
   'age_gate',
 ]);
 
@@ -337,6 +339,7 @@ export const TOOL_DEF: ToolDef = {
           `  - "anti_bot": bot-detection wall / fingerprint gate refused the session\n` +
           `  - "captcha": an interactive captcha challenge blocks progress\n` +
           `  - "auth_required": login/MFA needed and the primed session wasn't enough\n` +
+          `  - "consent_required": a cookie / privacy / ad-consent interstitial must be accepted once; no account needed\n` +
           `  - "age_gate": an age-verification gate blocks progress\n` +
           `  - "origin_blocked": generic origin refusal (HTTP failure / region gate) when no more specific kind above fits\n` +
           `  - "existing_capability_covers": klura already has a strategy for this task\n` +

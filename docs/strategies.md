@@ -41,6 +41,8 @@ A fetch may declare any number of prereqs, each resolving one or more named valu
 5. **`cached`** — read a value from the token cache (with optional static `value` fallback). `name` is required: it is both the token-cache key and the binding name the template references. Use for long-lived API keys or values shared across capabilities.
 6. **`capability`** — recursively invoke another saved capability and bind its return value. How name→id resolution works: a `send_message(recipient_name, text)` strategy that needs an opaque `thread_id` declares a capability prereq on `lookup_thread_by_name(name)`.
 
+**A prereq's `url` must not need the value that prereq produces.** `{kind: "js-eval", url: "/@{{user}}/video/{{video_id}}", binds: "video_id"}` is a cycle: the url has to resolve before the prereq runs, so `{{video_id}}` is still unresolved at that moment and the prereq can never mint it. Rejected at save time by `no_circular_prereq_binding`. It is worth rejecting rather than warning because nothing downstream catches it — a prereq-bound name counts as declared, so placeholder validation passes and the strategy saves clean, then returns nothing on replay. The cycle also hides a caller input: a placeholder satisfied by a bind never has to appear in `notes.params`, so the saved contract omits an argument the caller must supply. When a url embeds a value, that value almost always came from the caller — declare it as a caller input. Referencing an _earlier_ prereq's bind is ordinary chaining and stays allowed.
+
 ### What gets saved
 
 Preferred `page-extract` shape for a CSRF-gated mutation:
@@ -145,12 +147,15 @@ The capability:
 - **Tier `fetch`.** The submit fires an XHR; that XHR is templatable. Don't fall through to `recorded-path` even when the page handles the submit via JS — the network log has the real surface.
 - **Cacheable when stable.** Set `cache: {ttl: "5m"}` on stable result sets (member directories, product catalogs). Skip the cache on personal-feed-style searches.
 
-Two response shapes:
+Three response shapes:
 
 | Server response | Strategy shape |
 | --- | --- |
 | JSON results array (typical SPA) | `fetch` with `response: {format: "json"}` and dot-paths in `extract` for fields the agent needs surfaced |
 | HTML page with results inline (server-rendered, classic intranets) | `fetch` with `response: {format: "html", extract: {<name>: {selector, attr?, multiple?, fields?}}}` — sub-100ms warm runs, no browser session |
+| HTML page whose data lives in a `<script>` payload (`__NEXT_DATA__`, `__NUXT__`, ld+json, rehydration blobs) | `fetch` with `response: {format: "html", extract: {<name>: {selector: "#<script-id>", json: "dot.path"}}}` — parses the script text and returns raw JSON values |
+
+That third row is worth reaching for deliberately. A modern SPA usually renders the same fact twice: exactly in the rehydration blob and lossily in the markup (`422500` vs `"422.5K"`, an ISO timestamp vs `"3 days ago"`). A `json` leaf reads the exact one and keeps the capability on the `fetch` tier, where the alternative — a page global read through `js-eval` — would drag a browser into every call.
 
 The prereq specialization — how write capabilities consume search:
 

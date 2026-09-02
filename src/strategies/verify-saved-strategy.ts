@@ -153,6 +153,52 @@ interface VerificationRun {
    * failure classification: there is no evidence the strategy is wrong.
    */
   reachMiss: NavigationReachMiss | null;
+  /**
+   * Which browser state produced this run.
+   *
+   * `fresh` is the default and the stronger proof: nothing the authoring
+   * session established was available. `platform_session` means the fresh run
+   * was stopped by a gate holding the requested URL, and the platform's own
+   * primed session was used instead — a real proof of the strategy, under
+   * weaker conditions, and recorded as such rather than passed off as fresh.
+   */
+  sessionContext: 'fresh' | 'platform_session';
+}
+
+/**
+ * A gate standing in front of the page, as opposed to a page that moved.
+ *
+ * The distinction is structural, not a guess about the destination: when the
+ * origin carries the requested URL as a parameter on wherever it sent us, it is
+ * holding that URL to return to afterwards. Consent walls, login walls and
+ * interstitials all do this; a renamed or withdrawn page does not.
+ *
+ * It matters because a fresh verification context cannot clear a gate that
+ * wants a human. Reddit's JS challenge is machine-solvable and a fresh context
+ * re-solves it every time, so that path stays honest; a Google consent
+ * interstitial is not, and refusing the capability over it says nothing true
+ * about the strategy.
+ */
+function isGateInFront(miss: NavigationReachMiss | null): boolean {
+  return Boolean(miss?.requested_carried_as_parameter);
+}
+
+/**
+ * The same question, asked of a failed result rather than a thrown error.
+ *
+ * The cascade does not always throw: when a prereq's navigation misses, the
+ * error is usually folded into an `all_strategies_failed` body and the run
+ * returns normally. Reading only the throw path meant two google-maps
+ * capabilities sat behind a consent gate the retry was written to clear.
+ * `navigation_reach_misses` is the structured field the cascade stamps for
+ * exactly this — no prose is parsed.
+ */
+function resultShowsGateInFront(result: Awaited<ReturnType<typeof execute>> | null): boolean {
+  const body = result?.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  const misses = (body as { navigation_reach_misses?: unknown }).navigation_reach_misses;
+  if (!Array.isArray(misses)) return false;
+  return misses.some((m) => isGateInFront(m as NavigationReachMiss));
 }
 
 async function runVerification(
@@ -162,8 +208,36 @@ async function runVerification(
   args: Record<string, unknown>,
   pool: BrowserPool,
 ): Promise<VerificationRun> {
+  const fresh = await runVerificationIn(platform, capability, strategy, args, pool, 'fresh');
+  // Only a gate earns the second attempt. Every other failure — a bad selector,
+  // a stale endpoint, an empty collection — is a verdict on the strategy, and
+  // re-running it with more state would launder exactly the dependency the
+  // fresh context exists to expose.
+  if (!isGateInFront(fresh.reachMiss) && !resultShowsGateInFront(fresh.result)) return fresh;
+  const primed = await runVerificationIn(
+    platform,
+    capability,
+    strategy,
+    args,
+    pool,
+    'platform_session',
+  );
+  // A gate on the retry too: report the fresh run, whose reach-miss names the
+  // gate. Nothing was proved either way.
+  const primedStillGated = isGateInFront(primed.reachMiss) || resultShowsGateInFront(primed.result);
+  return primedStillGated ? fresh : primed;
+}
+
+async function runVerificationIn(
+  platform: string,
+  capability: string,
+  strategy: Strategy,
+  args: Record<string, unknown>,
+  pool: BrowserPool,
+  sessionContext: 'fresh' | 'platform_session',
+): Promise<VerificationRun> {
   const audit = loadConfig().audit;
-  return await withFreshVerificationPool(pool, async (verificationPool) => {
+  const runIn = async (verificationPool: BrowserPool): Promise<VerificationRun> => {
     const fire = (callArgs: Record<string, unknown>): ReturnType<typeof execute> =>
       execute(platform, capability, callArgs, verificationPool, null, {
         _strategyOverride: [strategy],
@@ -172,7 +246,7 @@ async function runVerification(
         // same exclusion to the Node fire path, which reads the cookie jar off
         // disk and would otherwise hand the run the discovery state it exists
         // to exclude.
-        _suppressPersistedCookies: true,
+        ...(sessionContext === 'fresh' ? { _suppressPersistedCookies: true } : {}),
       });
     let result: Awaited<ReturnType<typeof execute>>;
     try {
@@ -191,15 +265,30 @@ async function runVerification(
         emptiness: null,
         integrity: [],
         reachMiss: miss,
+        sessionContext,
       };
     }
     const classification = classifyFactoryExecutionResult(result);
     if (classification !== 'explicit_success') {
-      return { result, classification, emptiness: null, integrity: [], reachMiss: null };
+      return {
+        result,
+        classification,
+        emptiness: null,
+        integrity: [],
+        reachMiss: null,
+        sessionContext,
+      };
     }
     const emptiness = assessDeclaredCollectionEmptiness(strategy, result.body);
     if (emptiness) {
-      return { result, classification, emptiness, integrity: [emptiness], reachMiss: null };
+      return {
+        result,
+        classification,
+        emptiness,
+        integrity: [emptiness],
+        reachMiss: null,
+        sessionContext,
+      };
     }
     const integrity = await assessCollectionIntegrity({
       strategy,
@@ -213,8 +302,14 @@ async function runVerification(
       // own caller never receives.
       deliveryBudgetChars: EXECUTE_RESULT_BODY_INLINE_BUDGET,
     });
-    return { result, classification, emptiness: null, integrity, reachMiss: null };
-  });
+    return { result, classification, emptiness: null, integrity, reachMiss: null, sessionContext };
+  };
+
+  // The fresh pool is what strips browser storage; the platform-session attempt
+  // runs on the ordinary pool so the primed state is present.
+  return sessionContext === 'fresh'
+    ? await withFreshVerificationPool(pool, runIn)
+    : await runIn(pool);
 }
 
 /**
@@ -421,6 +516,7 @@ export async function verifySavedStrategy(
   let emptiness: DeclaredCollectionEmptiness | null = null;
   let integrity: CollectionIntegrityFinding[] = [];
   let reachMiss: NavigationReachMiss | null = null;
+  let sessionContext: 'fresh' | 'platform_session' = 'fresh';
   try {
     const run = await runVerification(platform, capability, strategy, args, pool);
     status = run.result.status;
@@ -429,6 +525,7 @@ export async function verifySavedStrategy(
     emptiness = run.emptiness;
     integrity = run.integrity;
     reachMiss = run.reachMiss;
+    sessionContext = run.sessionContext;
     // An explicit ok:true whose declared collection is empty, or carries rows
     // that fail a structural integrity check, carries exactly the strength of a
     // bare 2xx: transport worked, the semantic outcome is unproven. Route it
@@ -442,7 +539,11 @@ export async function verifySavedStrategy(
   }
 
   if (classification === 'explicit_success') {
-    const proofCurrent = stampPostSaveValidationProof(proof, 'passed', true);
+    // Stamp the conditions the proof was obtained under, so a gated platform's
+    // weaker proof is legible rather than indistinguishable from a fresh one.
+    const provenProof =
+      sessionContext === 'fresh' ? proof : { ...proof, session_context: sessionContext };
+    const proofCurrent = stampPostSaveValidationProof(provenProof, 'passed', true);
     if (proofCurrent) {
       // The verification run itself is health-silent (`_suppressStrategyState`),
       // which is what keeps grading traffic out of caller-visible health. This
@@ -626,9 +727,11 @@ export async function verifyStrategyCandidate(
   let emptiness: DeclaredCollectionEmptiness | null = null;
   let integrity: CollectionIntegrityFinding[] = [];
   let reachMiss: NavigationReachMiss | null = null;
+  let sessionContext: 'fresh' | 'platform_session' = 'fresh';
   try {
     const run = await runVerification(ref.platform, ref.capability, candidate, args, pool);
     reachMiss = run.reachMiss;
+    sessionContext = run.sessionContext;
     status = run.result.status;
     body = run.result.body;
     finalUrl = run.result.finalUrl;
@@ -667,13 +770,17 @@ export async function verifyStrategyCandidate(
     ref,
     {
       ...postSaveValidation,
-      post_save_verification: proof,
+      post_save_verification:
+        sessionContext === 'fresh' ? proof : { ...proof, session_context: sessionContext },
       candidate_verification: {
         ...evidence,
         // Checks B and C compare two executions, so the review gate cannot
         // re-derive them from the single stored evidence body the way it
         // re-derives the body-only assessments. Carry them on the sidecar.
         ...(integrity.length > 0 ? { collection_integrity: integrity } : {}),
+        // Whoever reviews this candidate needs to know a gate forced the
+        // weaker conditions; the evidence body alone does not say so.
+        ...(sessionContext === 'fresh' ? {} : { session_context: sessionContext }),
       },
     },
     {

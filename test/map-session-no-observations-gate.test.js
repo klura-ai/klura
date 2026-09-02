@@ -101,6 +101,7 @@ test('abort_session: ABORT_KIND_VALUES enum is exported with the canonical kinds
     'anti_bot',
     'auth_required',
     'captcha',
+    'consent_required',
     'existing_capability_covers',
     'origin_blocked',
     'other',

@@ -263,38 +263,39 @@ function auditPlatformExport(
   issues.push(...auditFixtureCoverage(review));
   for (const capability of reviewed) {
     const strategies = loadLocalStrategies(platform, capability);
-    const pageScript = strategies.find((strategy) => strategy.strategy === 'page-script');
-    if (!pageScript) {
+    // The reviewed block names the tier, so the audit looks for the strategy
+    // the maintainer actually reviewed rather than assuming one tier.
+    const reviewedTier = review.capabilities[capability]?.http ? 'fetch' : 'page-script';
+    const selected = strategies.find((strategy) => strategy.strategy === reviewedTier);
+    if (!selected) {
       issues.push({
         code: PACKAGE_EXPORT_AUDIT_CODES.strategyNotExportable,
         path: `skills.${platform}.${capability}`,
-        message: 'The current public exporter requires an active page-script strategy.',
-        remedy:
-          'Save and verify a page-script strategy for this read capability; unsupported tiers remain local.',
+        message: `This capability is reviewed as ${reviewedTier}, but no active ${reviewedTier} strategy is saved for it.`,
+        remedy: `Save and verify a ${reviewedTier} strategy for this read capability, or review it at the tier that is saved; unsupported tiers remain local.`,
       });
       continue;
     }
-    if (pageScript.runtime_meta?.post_save_validation !== 'passed') {
+    if (selected.runtime_meta?.post_save_validation !== 'passed') {
       issues.push({
         code: PACKAGE_EXPORT_AUDIT_CODES.strategyNotVerified,
         path: `skills.${platform}.${capability}.runtime_meta.post_save_validation`,
-        message: 'The selected page-script has not passed post-save semantic verification.',
+        message: `The selected ${reviewedTier} has not passed post-save semantic verification.`,
         remedy:
           'Run the saved capability with grounded sample input and complete its validation checkpoint.',
       });
     } else {
       const proofAssessment = assessPostSaveVerificationProof(
-        pageScript,
-        pageScript.runtime_meta.post_save_verification,
+        selected,
+        selected.runtime_meta.post_save_verification,
         { platform, capability },
       );
       if (proofAssessment.kind === POST_SAVE_PROOF_ASSESSMENT_KINDS.current) continue;
       issues.push({
         code: PACKAGE_EXPORT_AUDIT_CODES.strategyVerificationStale,
         path: `skills.${platform}.${capability}.runtime_meta.post_save_verification`,
-        message: `The selected page-script post-save proof is ${proofAssessment.kind}.`,
-        remedy:
-          'Run exact post-save verification for the current page-script; local saving and execution remain available.',
+        message: `The selected ${reviewedTier} post-save proof is ${proofAssessment.kind}.`,
+        remedy: `Run exact post-save verification for the current ${reviewedTier}; local saving and execution remain available.`,
       });
     }
   }
@@ -346,13 +347,14 @@ function buildPackageSource(
 ): { source: PublicPackageSourceV1; compiled: CompiledPublicPackageV1 } {
   const capabilities: Record<string, PublicReadCapabilitySourceV1> = {};
   for (const [capabilityId, capabilityReview] of Object.entries(review.capabilities)) {
+    const tier = capabilityReview.http ? 'fetch' : 'page-script';
     const local = loadLocalStrategies(platform, capabilityId).find(
-      (strategy) => strategy.strategy === 'page-script',
+      (strategy) => strategy.strategy === tier,
     );
     if (!local) {
       throw new PublicContractError(
         `skills.${platform}.${capabilityId}`,
-        'page-script disappeared after export audit',
+        `${tier} disappeared after export audit`,
       );
     }
     capabilities[capabilityId] = buildCapabilitySource(local, capabilityReview);

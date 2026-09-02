@@ -5,6 +5,7 @@
 import { getIdentity } from '../identity/identities';
 import { resolveSecrets } from '../identity/secrets';
 import { extractFromHtml } from '../response/html-extract';
+import { extractRawByPath } from '../response/json-path';
 import {
   collectInlinePlaceholderRefs,
   lookupPlaceholderPath,
@@ -13,33 +14,12 @@ import {
 } from '../execution/placeholders';
 import { FactoryExecutionStateError } from './result-classification';
 
-// Walk a dotted path into a nested object. Supports `response.items[0].node_id`
-// style. Returns undefined if the path doesn't resolve, or if the final value
-// isn't a string/number (we stringify numbers since request bodies expect
-// strings). Used by the fetch-extract prereq executor.
+// Scalar-coercing wrapper over `extractRawByPath` (path grammar lives there).
+// Returns undefined if the path doesn't resolve, or if the value at the end
+// isn't a scalar — numbers and booleans are stringified since request bodies
+// expect strings. Used by the fetch-extract prereq executor.
 export function extractByPath(obj: unknown, path: string): string | undefined {
-  const parts = path.split('.');
-  let cur: unknown = obj;
-  for (const rawPart of parts) {
-    if (cur === null || cur === undefined) return undefined;
-    // Handle `key[0]` array indexing in one segment.
-    const arrMatch = /^([^[]*)(\[(\d+)\])+$/.exec(rawPart);
-    if (arrMatch) {
-      const key = arrMatch[1] ?? '';
-      if (key.length > 0) {
-        if (typeof cur !== 'object') return undefined;
-        cur = (cur as Record<string, unknown>)[key];
-      }
-      const idxMatches = rawPart.matchAll(/\[(\d+)\]/g);
-      for (const m of idxMatches) {
-        if (!Array.isArray(cur)) return undefined;
-        cur = cur[Number(m[1])];
-      }
-      continue;
-    }
-    if (typeof cur !== 'object') return undefined;
-    cur = (cur as Record<string, unknown>)[rawPart];
-  }
+  const cur = extractRawByPath(obj, path);
   if (typeof cur === 'string') return cur;
   if (typeof cur === 'number' || typeof cur === 'boolean') return String(cur);
   return undefined;
@@ -517,7 +497,10 @@ export function applyHtmlExtract(
   responseSpec:
     | {
         format?: string;
-        extract?: Record<string, { selector: string; attr?: string; multiple?: boolean }>;
+        extract?: Record<
+          string,
+          { selector: string; attr?: string; multiple?: boolean; json?: string }
+        >;
       }
     | undefined,
   body: unknown,

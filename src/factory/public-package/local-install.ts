@@ -16,7 +16,6 @@ import {
   parseBoundedRecord,
   parseExactRecord,
   parsePackageVersion,
-  parseStableContractId,
   PublicContractError,
   sha256Digest,
   type CapabilityIdV1,
@@ -48,7 +47,8 @@ import { TOOL_NAMES } from '../../vocab';
 import {
   buildCapabilitySource,
   CAPABILITY_CONTRACT_KEYS,
-  PAGE_SCRIPT_REVIEW_KEYS,
+  parseStrategyBlocks,
+  selectStrategyBlockKey,
   type ParsedCapabilityReviewV1,
 } from './capability-review';
 import {
@@ -132,7 +132,7 @@ interface ParsedLocalInstallV1 {
   package_id: PackageIdV1;
   version: PackageVersionV1;
   authentication_contracts: Record<string, unknown>;
-  capabilities: Record<string, Pick<ParsedCapabilityReviewV1, 'contract' | 'page_script'>>;
+  capabilities: Record<string, Pick<ParsedCapabilityReviewV1, 'contract' | 'page_script' | 'http'>>;
 }
 
 /**
@@ -266,41 +266,23 @@ function parseLocalInstall(value: unknown): ParsedLocalInstallV1 {
 }
 
 /**
- * Validates one reviewed capability's two leaves against the shared key sets.
- * The local path carries no fixtures — a fixture is captured smoke evidence
- * for a package a maintainer will publish — so it parses the same `contract`
- * and `page_script` key sets the export review parses and hands the result to
- * the shared `buildCapabilitySource`.
+ * Validates one reviewed capability's leaves against the shared key sets. The
+ * local path carries no fixtures — a fixture is captured smoke evidence for a
+ * package a maintainer will publish — so it parses the same `contract` and
+ * strategy-block key sets the export review parses and hands the result to the
+ * shared `buildCapabilitySource`.
  */
 function parseReviewedCapability(
   value: unknown,
   capabilityId: string,
-): Pick<ParsedCapabilityReviewV1, 'contract' | 'page_script'> {
+): Pick<ParsedCapabilityReviewV1, 'contract' | 'page_script' | 'http'> {
   const field = `${LOCAL_INSTALL_CAPABILITIES_FIELD}.${capabilityId}`;
-  const review = parseExactRecord(value, field, ['contract', 'page_script']);
+  const blockKey = selectStrategyBlockKey(value, field);
+  const review = parseExactRecord(value, field, ['contract', blockKey]);
   const contract = parseExactRecord(review.contract, `${field}.contract`, CAPABILITY_CONTRACT_KEYS);
-  const pageScript = parseExactRecord(
-    review.page_script,
-    `${field}.page_script`,
-    PAGE_SCRIPT_REVIEW_KEYS,
-  );
-  if (pageScript.tier !== 'page-script') {
-    throw new PublicContractError(`${field}.page_script.tier`, 'must be page-script');
-  }
   return {
     contract: contract as unknown as Omit<PublicReadCapabilitySourceV1, 'strategies'>,
-    page_script: {
-      tier: 'page-script',
-      strategy_id: parseStableContractId(
-        pageScript.strategy_id,
-        `${field}.page_script.strategy_id`,
-      ),
-      wait: pageScript.wait,
-      interaction: pageScript.interaction,
-      expect: pageScript.expect,
-      request_body_limits: pageScript.request_body_limits,
-      replay: pageScript.replay,
-    },
+    ...parseStrategyBlocks(review, field, blockKey),
   };
 }
 

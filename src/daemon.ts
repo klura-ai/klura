@@ -9,9 +9,22 @@ import { markStandaloneDaemon } from './runtime-state/process-role';
 import { errorText } from './utils/error-text';
 import { canonicalJson, type JsonValueV1 } from './public/contracts/json';
 import { releaseOwnerFileLock, tryAcquireOwnerFileLock } from './utils/owner-file-lock';
+import { DAEMON_START_ERROR_FILE } from './consumer/daemon-client';
 const PID_FILE = path.join(KLURA_DIR, 'daemon.pid');
 const SOCKET_PATH = path.join(KLURA_DIR, 'klura.sock');
 const DAEMON_LOCK = path.join(KLURA_DIR, 'daemon.lock');
+
+// A unix socket address is a fixed-size `sockaddr_un.sun_path` — 104 bytes on
+// darwin/BSD, 108 on Linux — and `listen()` answers EINVAL for anything longer.
+// The limit is on the BYTE length of the path, so a home containing non-ASCII
+// characters runs out sooner than its character count suggests. One byte is
+// reserved for the NUL terminator.
+const SUN_PATH_MAX_BYTES = process.platform === 'linux' ? 108 : 104;
+
+/** True when binding this path would exceed the platform's sun_path limit. */
+function unixSocketPathTooLong(socketPath: string): boolean {
+  return Buffer.byteLength(socketPath, 'utf8') >= SUN_PATH_MAX_BYTES;
+}
 /** IPC message kind a freshly-forked daemon sends its parent once its server
  *  is listening. `ensureDaemon` resolves on this message. */
 const DAEMON_READY_MESSAGE_KIND = 'ready';
@@ -189,7 +202,22 @@ export function startDaemon(): void {
 
   recoverConsumerRunsBeforeIpc();
 
-  const useUnix = config.runtime.listen === 'unix';
+  // A deep KLURA_HOME pushes the socket past sun_path and every bind answers
+  // EINVAL, which takes down all consumer tooling for that home. Loopback TCP
+  // has no such limit and the client already discovers it through
+  // `daemon.addr`, so fall back rather than fail. Announced on stderr because
+  // the transport differs from what the config asked for.
+  const unixRequested = config.runtime.listen === 'unix';
+  const socketTooLong = unixRequested && unixSocketPathTooLong(SOCKET_PATH);
+  if (socketTooLong) {
+    console.error(
+      `[klura] unix socket path is ${Buffer.byteLength(SOCKET_PATH, 'utf8')} bytes, over this ` +
+        `platform's ${SUN_PATH_MAX_BYTES}-byte limit (${SOCKET_PATH}) — listening on loopback TCP ` +
+        `instead. Set runtime.listen to a host:port to choose the address yourself, or use a ` +
+        `shorter KLURA_HOME.`,
+    );
+  }
+  const useUnix = unixRequested && !socketTooLong;
   if (useUnix) {
     try {
       fs.unlinkSync(SOCKET_PATH);
@@ -315,6 +343,29 @@ export function startDaemon(): void {
     });
   });
 
+  // A daemon that cannot bind has nothing to serve. Exiting non-zero here lets
+  // the caller fail immediately with this reason on stderr; the
+  // `uncaughtException` handler below would otherwise log it and leave the
+  // process alive but never ready, turning a stateable error into a timeout.
+  server.once('error', (err: unknown) => {
+    const reason = `daemon could not listen: ${errorText(err)}`;
+    console.error(`[klura] ${reason}`);
+    // Leave the reason where whoever forked this daemon can read it. Their
+    // stdio is not connected to ours — a detached daemon has no terminal — so
+    // without this the caller sees only a generic timeout.
+    try {
+      fs.writeFileSync(path.join(KLURA_DIR, DAEMON_START_ERROR_FILE), reason);
+    } catch {
+      /* best effort — the console line above is the fallback */
+    }
+    try {
+      releaseOwnerFileLock(daemonLock);
+    } catch {
+      /* exiting anyway */
+    }
+    process.exit(1);
+  });
+
   if (useUnix) {
     server.listen(SOCKET_PATH, () => {
       fs.writeFileSync(PID_FILE, String(process.pid));
@@ -324,14 +375,21 @@ export function startDaemon(): void {
       console.log(`  idle timeout: ${config.runtime.idleTimeout}s`);
     });
   } else {
-    const { host, port } = parseListen(config.runtime.listen);
+    // Port 0 on the sun_path fallback: the config asked for a unix socket and
+    // named no port, so the kernel picks a free one and `daemon.addr` carries
+    // the resolved address the client dials.
+    const { host, port } = socketTooLong
+      ? { host: '127.0.0.1', port: 0 }
+      : parseListen(config.runtime.listen);
     server.listen(port, host, () => {
+      const address = server.address();
+      const boundPort = typeof address === 'object' && address !== null ? address.port : port;
       fs.writeFileSync(PID_FILE, String(process.pid));
       // Write the listen address so sendToDaemon can find it
-      fs.writeFileSync(path.join(KLURA_DIR, 'daemon.addr'), config.runtime.listen);
+      fs.writeFileSync(path.join(KLURA_DIR, 'daemon.addr'), `${host}:${boundPort}`);
       announceDaemonReady();
       console.log(`klura daemon started (pid ${process.pid})`);
-      console.log(`  listen: ${host}:${port}`);
+      console.log(`  listen: ${host}:${boundPort}`);
       console.log(`  idle timeout: ${config.runtime.idleTimeout}s`);
     });
   }

@@ -9,6 +9,10 @@ import { releaseOwnerFileLock, tryAcquireOwnerFileLock } from '../utils/owner-fi
 
 const DAEMON_READY_TIMEOUT_MS = 10_000;
 
+/** Where a daemon leaves the reason it refused to start, inside its own home.
+ *  Written by the daemon, read by whoever tried to start it. */
+export const DAEMON_START_ERROR_FILE = 'daemon-start-error.log';
+
 export class ConsumerDaemonClientError extends Error {
   constructor(
     public readonly code:
@@ -113,14 +117,47 @@ async function ensureConsumerDaemon(home: string, signal?: AbortSignal): Promise
   }
 }
 
+/** Bound on the start-failure detail quoted back to the caller. */
+const DAEMON_ERROR_DETAIL_CAP = 2000;
+
+/**
+ * Read the reason a daemon refused to start, which it leaves in its home
+ * before exiting (see `startDaemon`'s listen-error handler).
+ *
+ * A file rather than a piped stderr: the caller here is frequently a
+ * short-lived CLI process, and a pipe is a handle the parent must hold. The
+ * child's stderr stream is not covered by `child.unref()`, so keeping it open
+ * pins the parent's event loop and the CLI never exits. A file has no lifetime
+ * coupling to either process and survives the parent exiting first.
+ */
+function readDaemonStartError(home: string): string {
+  try {
+    const raw = fs.readFileSync(path.join(home, DAEMON_START_ERROR_FILE), 'utf8').trim();
+    return raw.slice(-DAEMON_ERROR_DETAIL_CAP);
+  } catch {
+    return '';
+  }
+}
+
 function startConsumerDaemon(home: string, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(cancelledError());
   const daemonScript = path.join(__dirname, '..', '..', 'bin', 'klura-daemon.js');
+  // A start attempt clears the previous reason so a stale one is never
+  // reported against a fresh failure.
+  try {
+    fs.unlinkSync(path.join(home, DAEMON_START_ERROR_FILE));
+  } catch {
+    /* nothing to clear */
+  }
   const child = cp.fork(daemonScript, [], {
     detached: true,
     stdio: 'ignore',
     env: { ...process.env, KLURA_HOME: home },
   });
+  const withDaemonStderr = (message: string): string => {
+    const detail = readDaemonStartError(home);
+    return detail.length > 0 ? `${message} — the daemon reported: ${detail}` : message;
+  };
   return new Promise<void>((resolve, reject) => {
     let settled = false;
     const finish = (error?: Error): void => {
@@ -140,23 +177,55 @@ function startConsumerDaemon(home: string, signal?: AbortSignal): Promise<void> 
       if (error) reject(error);
       else resolve();
     };
+    // `on`, not `once`: a message that arrives before the pid file and socket
+    // are both on disk is not the readiness signal, and dropping the listener
+    // on it would strand the start until the timeout.
     const onMessage = (message: unknown): void => {
       if (!isDaemonReadyMessage(message) || !isDaemonReady(home)) return;
       finish();
     };
     const onError = (): void => {
-      finish(new ConsumerDaemonClientError('daemon_unavailable', 'daemon process could not start'));
+      finish(
+        new ConsumerDaemonClientError(
+          'daemon_unavailable',
+          withDaemonStderr('daemon process could not start'),
+        ),
+      );
     };
+    // Losing a start race is ordinary, not a failure: another starter can bind
+    // the socket first and this child then exits without ever announcing. When
+    // the winner is already serving, report success rather than the exit.
+    //
+    // Deliberately does NOT wait for a winner that has not finished binding.
+    // `ensureConsumerDaemon` holds `daemon-start.lock` across this call, so any
+    // delay here is paid again by every concurrent caller — they see the lock
+    // held and block too. Failing fast keeps one lost race cheap and lets the
+    // caller retry; a slow failure here turns into a cascade of stalls.
     const onExit = (): void => {
-      finish(new ConsumerDaemonClientError('daemon_unavailable', 'daemon exited before readiness'));
+      if (settled) return;
+      if (isDaemonReady(home)) {
+        finish();
+        return;
+      }
+      finish(
+        new ConsumerDaemonClientError(
+          'daemon_unavailable',
+          withDaemonStderr('daemon exited before readiness'),
+        ),
+      );
     };
     const onAbort = (): void => {
       finish(cancelledError());
     };
     const timer = setTimeout(() => {
-      finish(new ConsumerDaemonClientError('daemon_unavailable', 'daemon did not become ready'));
+      finish(
+        new ConsumerDaemonClientError(
+          'daemon_unavailable',
+          withDaemonStderr('daemon did not become ready'),
+        ),
+      );
     }, DAEMON_READY_TIMEOUT_MS);
-    child.once('message', onMessage);
+    child.on('message', onMessage);
     child.once('error', onError);
     child.once('exit', onExit);
     signal?.addEventListener('abort', onAbort, { once: true });

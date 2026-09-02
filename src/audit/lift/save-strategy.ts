@@ -20,6 +20,7 @@ import {
   validateNoOpaqueUserParams,
   validateCapabilityPrereqs,
   validateNoSelectorSelfReference,
+  validateNoCircularPrereqBinding,
 } from '../../strategies/validate';
 import type { Session } from '../../drivers/types/session';
 import {
@@ -852,6 +853,12 @@ const noSelectorSelfReferenceCheck: ShapeCheck<Strategy, SaveStrategyCtx> = {
     validateNoSelectorSelfReference(data);
   },
 };
+const noCircularPrereqBindingCheck: ShapeCheck<Strategy, SaveStrategyCtx> = {
+  kind: AUDIT_KINDS.noCircularPrereqBinding,
+  check: (data) => {
+    validateNoCircularPrereqBinding(data);
+  },
+};
 
 // ---------- Audit instance ----------
 
@@ -881,6 +888,7 @@ export const saveStrategyAudit = new Audit<Strategy, SaveStrategyCtx>({
     noOpaqueUserParamsCheck,
     capabilityPrereqsCheck,
     noSelectorSelfReferenceCheck,
+    noCircularPrereqBindingCheck,
   ],
   detectors: [
     surfaceTriageMissingDetector,

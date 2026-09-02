@@ -28,6 +28,7 @@ export type AbortKind =
   | 'anti_bot'
   | 'captcha'
   | 'auth_required'
+  | 'consent_required'
   | 'age_gate'
   | 'existing_capability_covers'
   | 'user_stop'

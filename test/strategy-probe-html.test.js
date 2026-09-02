@@ -220,8 +220,13 @@ test('fetch without response field skips the HTML probe entirely', async () => {
   assert.strictEqual(driver.calls.length, 0);
 });
 
-test('fetch with response.format=json skips the HTML probe', async () => {
-  const driver = mockDriver();
+// A declared `response.format: "json"` used to skip probing entirely, which
+// left the runtime's most silent failure unguarded: a GET whose body does not
+// parse is handed back as raw text, so the strategy saves clean and every
+// caller receives a string where rows were promised. Declaring the format is a
+// claim about the endpoint, and the probe now verifies that claim.
+test('fetch with response.format=json is probed and accepts a JSON body', async () => {
+  const driver = mockDriver({ fetchBody: '{"orders":[{"id":"A"},{"id":"B"}]}' });
   const pool = mockPool(driver);
 
   await probeStrategySelectors({
@@ -231,6 +236,85 @@ test('fetch with response.format=json skips the HTML probe', async () => {
       baseUrl: 'https://example.com',
       endpoint: '/orders.json',
       response: { format: 'json' },
+    },
+    platform: 'testplat',
+    pool,
+  });
+
+  assert.strictEqual(pool.sessionsCreated, 1);
+  // It fires the real GET rather than running the HTML extract path.
+  assert.ok(driver.calls.some((c) => c.kind === 'fetchInBrowser'));
+});
+
+test('fetch with response.format=json rejects a body that is not JSON', async () => {
+  const driver = mockDriver({ fetchBody: '<html><h1>Orders</h1></html>' });
+  const pool = mockPool(driver);
+
+  await assert.rejects(
+    () =>
+      probeStrategySelectors({
+        data: {
+          strategy: 'fetch',
+          method: 'GET',
+          baseUrl: 'https://example.com',
+          endpoint: '/orders.json',
+          response: { format: 'json' },
+        },
+        platform: 'testplat',
+        pool,
+      }),
+    /does not parse as JSON/,
+  );
+});
+
+test('fetch with response.format=json accepts a body behind an anti-hijacking guard', async () => {
+  const driver = mockDriver({ fetchBody: ")]}'\n[{\"id\":\"A\"}]" });
+  const pool = mockPool(driver);
+
+  await probeStrategySelectors({
+    data: {
+      strategy: 'fetch',
+      method: 'GET',
+      baseUrl: 'https://example.com',
+      endpoint: '/orders.json',
+      response: { format: 'json' },
+    },
+    platform: 'testplat',
+    pool,
+  });
+
+  assert.strictEqual(pool.sessionsCreated, 1);
+});
+
+test('a non-GET json fetch is not probed — the probe never fires a mutating request', async () => {
+  const driver = mockDriver();
+  const pool = mockPool(driver);
+
+  await probeStrategySelectors({
+    data: {
+      strategy: 'fetch',
+      method: 'POST',
+      baseUrl: 'https://example.com',
+      endpoint: '/orders',
+      response: { format: 'json' },
+    },
+    platform: 'testplat',
+    pool,
+  });
+
+  assert.strictEqual(pool.sessionsCreated, 0);
+});
+
+test('a fetch that declares no response format stays unprobed', async () => {
+  const driver = mockDriver();
+  const pool = mockPool(driver);
+
+  await probeStrategySelectors({
+    data: {
+      strategy: 'fetch',
+      method: 'GET',
+      baseUrl: 'https://example.com',
+      endpoint: '/orders.json',
     },
     platform: 'testplat',
     pool,

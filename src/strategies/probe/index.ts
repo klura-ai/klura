@@ -27,6 +27,9 @@ import {
   extractFetchHtmlExtracts,
   probeOneFetchHtml,
   resolveFetchHtmlExtracts,
+  extractFetchJsonTargets,
+  resolveFetchJsonTargets,
+  probeOneFetchJson,
 } from './fetch-html';
 import {
   extractRecordedPathSteps,
@@ -70,6 +73,25 @@ interface ProbeArgs {
  * selector via waitForSelector, then stop (subsequent steps depend on state
  * changes we deliberately skip)
  */
+/** Warning kinds the author already acked inline on this save, so probe-stage
+ *  advisories they've answered don't re-reject. */
+function ackedWarningKinds(data: Record<string, unknown>): ReadonlySet<string> {
+  const notes = data.notes;
+  if (!notes || typeof notes !== 'object') return new Set();
+  const acks = (notes as Record<string, unknown>).save_warnings_acked;
+  if (!Array.isArray(acks)) return new Set();
+  const kinds = new Set<string>();
+  for (const entry of acks) {
+    if (!entry || typeof entry !== 'object') continue;
+    const record = entry as Record<string, unknown>;
+    // A kind with no reason is not an ack — the reason is the whole point.
+    if (typeof record.kind === 'string' && typeof record.reason === 'string' && record.reason) {
+      kinds.add(record.kind);
+    }
+  }
+  return kinds;
+}
+
 export async function probeStrategySelectors({
   data,
   platform,
@@ -82,6 +104,7 @@ export async function probeStrategySelectors({
   const jsEvalPrereqs = extractJsEvalPrereqs(data);
   const recordedSteps = extractRecordedPathSteps(data);
   const fetchHtmlExtracts = extractFetchHtmlExtracts(data);
+  const fetchJsonTargets = extractFetchJsonTargets(data);
   const wsOpenSteps = extractWsOpenSteps(data);
 
   if (
@@ -90,6 +113,7 @@ export async function probeStrategySelectors({
     jsEvalPrereqs.length === 0 &&
     recordedSteps.length === 0 &&
     fetchHtmlExtracts.length === 0 &&
+    fetchJsonTargets.length === 0 &&
     wsOpenSteps.length === 0
   ) {
     return;
@@ -125,6 +149,7 @@ export async function probeStrategySelectors({
     url: resolveTemplate(p.url, navigationInputs, `prerequisite "${p.name}".url`),
   }));
   const resolvedFetchHtml = resolveFetchHtmlExtracts(fetchHtmlExtracts, navigationInputs);
+  const resolvedFetchJson = resolveFetchJsonTargets(fetchJsonTargets, navigationInputs);
   const resolvedJsEval = jsEvalPrereqs.map((p) => ({
     ...p,
     url: resolveTemplate(p.url, navigationInputs, `prerequisite "${p.name}".url`),
@@ -193,9 +218,16 @@ export async function probeStrategySelectors({
         prereqFailures.push(extractInvalidStrategyMessage(err));
       }
     }
+    for (const fetchJson of resolvedFetchJson) {
+      try {
+        await probeOneFetchJson(driver, session, fetchJson, probeWarnings);
+      } catch (err) {
+        prereqFailures.push(extractInvalidStrategyMessage(err));
+      }
+    }
     for (const fetchHtml of resolvedFetchHtml) {
       try {
-        await probeOneFetchHtml(driver, session, fetchHtml, probeWarnings);
+        await probeOneFetchHtml(driver, session, fetchHtml, probeWarnings, ackedWarningKinds(data));
         // fetch HTML response extraction already uses extractFromHtml (cheerio)
         // in the execute path, so the browser probe validates the same code that
         // runs on warm execute. No parallel check needed.

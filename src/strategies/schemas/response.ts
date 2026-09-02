@@ -3,6 +3,9 @@ import { z } from 'zod';
 // Flat leaf entry — what `fields` entries inside a row-group are. No further
 // nesting, no `fields` key. The runtime extractor `extractFromHtml` resolves
 // these scoped to the row's matched element.
+const jsonPathDescription =
+  'Parse the matched element\'s text as JSON and return the raw value at this path (e.g. "props.pageProps.item.price", "items[0].id"); "" returns the whole parsed document. Wrap any key that itself contains a dot in brackets and quotes — `__DEFAULT_SCOPE__["webapp.user-detail"].userInfo` — otherwise the split shreds it and the path resolves to "". Use for data a site server-renders into a <script> tag instead of into markup — __NEXT_DATA__, __NUXT__, application/ld+json, rehydration blobs — which keeps the capability on the fetch tier instead of needing a browser to read a page global. Yields raw JSON (objects, arrays, numbers, booleans), not stringified values. Mutually exclusive with `attr` and `fields`.';
+
 const responseExtractLeafSchema = z
   .object({
     selector: z
@@ -12,8 +15,14 @@ const responseExtractLeafSchema = z
       ),
     attr: z.string().optional(),
     multiple: z.boolean().optional(),
+    json: z.string().optional().describe(jsonPathDescription),
   })
-  .strict();
+  .strict()
+  .refine((spec) => !(spec.attr !== undefined && spec.json !== undefined), {
+    message:
+      "`attr` and `json` are mutually exclusive — `attr` reads an attribute off the matched element; `json` parses that element's text content as JSON. Pick one.",
+    path: ['json'],
+  });
 
 // Top-level extract entry — either a leaf (selector + attr?/multiple?) or a
 // row-group (selector + fields + multiple). The schema is `.strict()` so
@@ -24,11 +33,12 @@ export const responseExtractEntrySchema = z
     selector: z.string().min(1, 'requires a "selector" string'),
     attr: z.string().optional(),
     multiple: z.boolean().optional(),
+    json: z.string().optional().describe(jsonPathDescription),
     fields: z
       .record(z.string(), responseExtractLeafSchema)
       .optional()
       .describe(
-        'Per-row sub-extract for listing-shaped data. Each field is a leaf spec ({selector, attr?, multiple?}) scoped to the matched row element. Use with `multiple:true` to produce Array<Record<string,string>> (search results, product cards, table rows); use without `multiple` to produce a single Record<string,string> for the first match. Mutually exclusive with `attr` — a row-group has no attribute of its own.',
+        'Per-row sub-extract for listing-shaped data. Each field is a leaf spec ({selector, attr?, multiple?, json?}) scoped to the matched row element. Use with `multiple:true` to produce Array<Record<string,string>> (search results, product cards, table rows); use without `multiple` to produce a single Record<string,string> for the first match. Mutually exclusive with `attr` — a row-group has no attribute of its own.',
       ),
   })
   .strict()
@@ -36,6 +46,16 @@ export const responseExtractEntrySchema = z
     message:
       "`attr` and `fields` are mutually exclusive — `attr` reads an attribute on the matched element; `fields` runs a sub-extract on the matched element's descendants. Pick one.",
     path: ['fields'],
+  })
+  .refine((spec) => !(spec.attr !== undefined && spec.json !== undefined), {
+    message:
+      "`attr` and `json` are mutually exclusive — `attr` reads an attribute off the matched element; `json` parses that element's text content as JSON. Pick one.",
+    path: ['json'],
+  })
+  .refine((spec) => !(spec.fields !== undefined && spec.json !== undefined), {
+    message:
+      "`fields` and `json` are mutually exclusive — `fields` runs a per-row sub-extract over descendant markup; `json` parses the matched element's own text as JSON. Pick one.",
+    path: ['json'],
   })
   .refine((spec) => !(spec.fields !== undefined && spec.multiple === undefined), {
     message:

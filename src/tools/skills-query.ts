@@ -264,9 +264,72 @@ export function liftRate(): LiftRateReport {
  * Agent-facing — this is the cross-run-awareness tool the triage step reads.
  * Pass a specific `capability` to narrow the payload.
  */
+
+/** Longest list this tool returns inline. Past it the response truncates and
+ *  the agent reads none of it, so a bounded list beats a complete one. */
+const LOGBOOK_LIST_LIMIT = 8;
+
+/** Endpoint field-tables returned for one capability. Each can be hundreds of
+ *  kilobytes on a busy site. */
+const FIELD_STABILITY_ENDPOINT_LIMIT = 3;
+
+/** Keep the head of a list and say what was left out. Never a silent cap: a
+ *  truncated list that looks complete is worse than one that admits it. */
+function boundList<T>(
+  list: readonly T[] | undefined,
+  limit = LOGBOOK_LIST_LIMIT,
+): readonly (T | string)[] | undefined {
+  return list !== undefined && list.length > limit
+    ? [
+        ...list.slice(0, limit),
+        `+${list.length - limit} more not listed (${TOOL_NAMES.getPlatformLogbook} caps inline lists at ${limit})`,
+      ]
+    : list;
+}
+
+/**
+ * Fit one platform logbook into the MCP output budget.
+ *
+ * Everything here grows with use: per-capability notes, the URL graph, forms
+ * seen, observed-but-unlifted capabilities. Past the budget the entire response
+ * is truncated to a file the agent never opens, so an unscoped call returned
+ * nothing usable — 61-65 KB observed across three platforms in one run, and one
+ * platform's field stability alone reached 1.78 MB.
+ *
+ * Scoped, the named capability keeps full detail. Unscoped, per-capability
+ * detail collapses to an index and the caller is pointed at the scoped call.
+ */
+function boundLogbook(
+  logbook: import('../working-dir/schema').PlatformLogbook,
+  capability: string | undefined,
+): Record<string, unknown> {
+  const urlGraph = logbook.url_graph as { nodes?: unknown[]; edges?: unknown[] } | undefined;
+  const shared = {
+    ...logbook,
+    forms_seen: boundList(logbook.forms_seen as unknown[]),
+    observed_capabilities: boundList(logbook.observed_capabilities as unknown[]),
+    url_graph: urlGraph
+      ? { ...urlGraph, nodes: boundList(urlGraph.nodes), edges: boundList(urlGraph.edges) }
+      : urlGraph,
+  };
+  if (capability) {
+    const entry = logbook.per_capability[capability];
+    return { ...shared, per_capability: entry ? { [capability]: entry } : {} };
+  }
+  const index: Record<string, string> = {};
+  for (const name of Object.keys(logbook.per_capability)) {
+    index[name] =
+      `detail omitted — ${TOOL_NAMES.getPlatformLogbook}({platform, capability: "${name}"})`;
+  }
+  return { ...shared, per_capability: index as never };
+}
+
 export function getPlatformLogbook(args: { platform: string; capability?: string }): {
-  logbook: import('../working-dir/schema').PlatformLogbook;
-  field_stability: import('../working-dir/derived/field-stability').FieldStabilityReport | null;
+  /** A bounded projection of the stored logbook, not the stored shape: long
+   *  lists carry an elision marker so a capped list cannot read as complete. */
+  logbook: Record<string, unknown>;
+  /** A bounded projection of the stability report, not the stored shape. */
+  field_stability: Record<string, unknown> | null;
   bundle_history: import('../working-dir/derived/bundle-history').BundleHistoryReport | null;
   signer_history: import('../working-dir/derived/signer-history').SignerHistoryReport | null;
   known_modules: import('../working-dir/derived/known-modules').KnownModulesReport | null;
@@ -281,8 +344,11 @@ export function getPlatformLogbook(args: { platform: string; capability?: string
   const signer_history = recomputeSignerHistory(args.platform);
   const known_modules = recomputeKnownModules(args.platform);
   if (args.capability) {
-    const capLogbook = logbook.per_capability[args.capability];
-    if (capLogbook) {
+    // Narrowing is driven by the caller's filter, not by whether the logbook
+    // happens to hold an entry. Gating on the logbook meant a capability with
+    // session archives but no logbook entry fell through to the unscoped
+    // path — returning every capability's data to a caller who named one.
+    {
       const capFieldStability = field_stability.per_capability[args.capability];
       // Narrow known_modules to entries that name the requested capability in
       // their used_by list. Cross-capability re-use is still valuable signal (a
@@ -294,25 +360,62 @@ export function getPlatformLogbook(args: { platform: string; capability?: string
         modules: known_modules.modules.filter((m) => m.used_by.includes(args.capability as string)),
       };
       return {
-        logbook: {
-          ...logbook,
-          per_capability: { [args.capability]: capLogbook },
+        logbook: boundLogbook(logbook, args.capability),
+        // A capability with no stability history yet gets an empty map, not
+        // every other capability's. Newly-authored capabilities all take this
+        // branch, so the fallback returned the entire unbounded report exactly
+        // when the caller had asked to narrow.
+        //
+        // Narrowing alone is not enough: one youtube capability's own endpoint
+        // tables came to 874,921 bytes across 21 endpoints, a single one of
+        // them 350,102. The list is bounded too.
+        field_stability: {
+          ...field_stability,
+          per_capability: capFieldStability
+            ? { [args.capability]: boundList(capFieldStability, FIELD_STABILITY_ENDPOINT_LIMIT) }
+            : {},
         },
-        field_stability: capFieldStability
-          ? {
-              ...field_stability,
-              per_capability: {
-                [args.capability]: capFieldStability,
-              },
-            }
-          : field_stability,
         bundle_history,
         signer_history,
         known_modules: capKnownModules,
       };
     }
   }
-  return { logbook, field_stability, bundle_history, signer_history, known_modules };
+  return {
+    logbook: boundLogbook(logbook, undefined),
+    field_stability: summarizeFieldStability(field_stability),
+    bundle_history,
+    signer_history,
+    known_modules,
+  };
+}
+
+/**
+ * Per-capability counts instead of every endpoint's field table.
+ *
+ * Field stability grows with every archived session and is by far the largest
+ * thing this tool returns — one platform reached 1,777,169 of 1,800,154 total
+ * bytes. Past the MCP output budget the whole response is truncated to a file
+ * the agent never reads, so an unscoped call returned nothing usable at all.
+ * The index says which capabilities have history and how much; the scoped call
+ * returns the detail for one of them.
+ */
+function summarizeFieldStability(
+  report: import('../working-dir/derived/field-stability').FieldStabilityReport,
+): Record<string, unknown> {
+  const per_capability: Record<string, never[]> = {};
+  const endpoint_counts: Record<string, number> = {};
+  for (const [capability, entries] of Object.entries(report.per_capability)) {
+    per_capability[capability] = [];
+    endpoint_counts[capability] = Array.isArray(entries) ? entries.length : 0;
+  }
+  return {
+    ...report,
+    per_capability,
+    endpoint_counts,
+    summarized: true,
+    detail_hint: `Field detail is omitted here because it exceeds the output budget. Call ${TOOL_NAMES.getPlatformLogbook}({platform, capability}) for one capability's field stability.`,
+  };
 }
 
 export function liftRateFormatted(): string {

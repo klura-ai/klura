@@ -15,6 +15,19 @@ Concretely, this means we do **not** build:
 
 The test for whether something belongs in the runtime: "does this require persistent state or browser/OS access that the LLM can't have?" If yes → runtime. If no → let the LLM handle it.
 
+## Verification runs fresh, except against a gate that wants a human
+
+Post-save verification executes the saved strategy with everything the authoring session established stripped away: a fresh browser context, and an empty cookie jar for a `fetch` fired from Node. That is the property worth having — a strategy that only worked because its author happened to hold a token never reaches another session.
+
+One case is not a verdict on the strategy. When the origin answers a navigation by sending the browser somewhere that _carries the requested URL as a parameter_, it is holding that URL to return to: a gate in front of the page. Verification retries once under the platform's primed session and records `session_context: "platform_session"` on the proof, so the weaker conditions are legible rather than passed off as fresh.
+
+The test is structural, never a guess about the destination. It has to be, because defences differ in kind:
+
+- A **machine-solvable** challenge is cleared by any real browser. Reddit's JS challenge is re-solved by a fresh context every time, and those capabilities verify fresh with no retry.
+- A **consent or login interstitial** wants a person. No amount of JavaScript clears it, and refusing the capability over it says nothing true about the strategy.
+
+Only a gate earns the retry. Every other failure — a stale endpoint, a broken selector, an empty collection — stays a verdict on the strategy, because re-running those with more state would launder the exact dependency the fresh context exists to expose.
+
 ## Validate everything the LLM emits
 
 LLMs WILL hallucinate. They will invent CSS selectors that look right but don't exist on the page. They will invent JSON keys that don't match any schema. They will invent enum values that aren't in the allowed set. **Treat every LLM-emitted string as untrusted input until it passes a runtime check against ground truth.**

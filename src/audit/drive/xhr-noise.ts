@@ -176,7 +176,15 @@ export function collectUnsavedHotXhrEndpoints(
     } catch {
       continue;
     }
-    const urlPath = parsed.pathname;
+    // Only a real network endpoint can be lifted into a capability. A `data:`
+    // or `blob:` URI is inline content the page carries with it — nobody can
+    // call it, so asking the agent to account for one is asking about
+    // something that does not exist. It also parses with the whole payload as
+    // `pathname`: YouTube's hover-prefetch produced 60-350 KB base64 paths, and
+    // since the ack must quote each flagged path verbatim, the close became
+    // impossible to satisfy and working capabilities could not be saved.
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue;
+    const urlPath = truncateEndpointPath(parsed.pathname);
     if (looksLikeTracking(urlPath)) continue;
     if (ackedNoise.has(urlPath)) continue;
     if (savedPatterns.some((re) => re.test(urlPath))) continue;
@@ -187,6 +195,18 @@ export function collectUnsavedHotXhrEndpoints(
     out.push({ method, urlPath, sampleUrl: req.url });
   }
   return out;
+}
+
+/** Longest endpoint path carried into an ack checklist.
+ *
+ *  The agent has to quote the path back verbatim, so a path it cannot fit in a
+ *  tool call is a gate nobody can pass. A path identifies an endpoint long
+ *  before its 200th character. */
+const MAX_ENDPOINT_PATH_CHARS = 200;
+
+function truncateEndpointPath(urlPath: string): string {
+  if (urlPath.length <= MAX_ENDPOINT_PATH_CHARS) return urlPath;
+  return `${urlPath.slice(0, MAX_ENDPOINT_PATH_CHARS)}…[${urlPath.length} chars]`;
 }
 
 /** Minimum same-endpoint read count in one session before the recurring-read
@@ -264,7 +284,15 @@ export function collectRecurringCoveredReads(
     } catch {
       continue;
     }
-    const urlPath = parsed.pathname;
+    // Only a real network endpoint can be lifted into a capability. A `data:`
+    // or `blob:` URI is inline content the page carries with it — nobody can
+    // call it, so asking the agent to account for one is asking about
+    // something that does not exist. It also parses with the whole payload as
+    // `pathname`: YouTube's hover-prefetch produced 60-350 KB base64 paths, and
+    // since the ack must quote each flagged path verbatim, the close became
+    // impossible to satisfy and working capabilities could not be saved.
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue;
+    const urlPath = truncateEndpointPath(parsed.pathname);
     if (looksLikeTracking(urlPath)) continue;
     const method = typeof req.method === 'string' ? req.method.toUpperCase() : 'GET';
     const key = `${method} ${parsed.origin}${urlPath}`;

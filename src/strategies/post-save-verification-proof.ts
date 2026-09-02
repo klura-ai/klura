@@ -19,6 +19,18 @@ export const PostSaveVerificationProofSchema = z
     strategy_digest: z.string().regex(SHA256_PATTERN),
     runtime_build_id: z.string().regex(SHA256_PATTERN),
     verifier_contract: z.string().min(1).max(100),
+    /**
+     * Which browser state produced the proof. Absent on proofs written before
+     * the field existed, and on those the default reading is `fresh` — that was
+     * the only path then.
+     *
+     * `fresh` is the strong form: nothing the authoring session established was
+     * available. `platform_session` means a gate holding the requested URL
+     * stopped the fresh attempt and the platform's primed session was used, so
+     * the strategy is proven under weaker conditions and must not read as
+     * though it were proven without them.
+     */
+    session_context: z.enum(['fresh', 'platform_session']).optional(),
   })
   .strict();
 

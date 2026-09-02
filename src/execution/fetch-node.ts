@@ -20,6 +20,7 @@ import {
 } from '../strategies/health';
 import { getDeviceProfile, resolveClientHints, DEFAULT_ACCEPT_LANGUAGE } from '../identity/devices';
 import { extractFromHtml } from '../response/html-extract';
+import { parseJsonAllowingHijackingPrefix } from '../response/json-hijacking-prefix';
 import {
   applyHtmlExtract,
   extractByPath,
@@ -430,9 +431,12 @@ async function fireRequestFromNode(
       if (bodyText.length === 0) {
         body = null;
       } else if (contentType.includes('application/json') || contentType.includes('+json')) {
-        try {
-          body = JSON.parse(bodyText);
-        } catch {
+        // Tolerates a leading anti-hijacking guard (`)]}'`, `for(;;);`). A
+        // plain parse is tried first, so a body without one is never touched.
+        const parsed = parseJsonAllowingHijackingPrefix(bodyText);
+        if (parsed) {
+          body = parsed.value;
+        } else {
           // Content-Type lied — return the raw text so the caller sees what
           // actually came back instead of an opaque parse error.
           body = bodyText;

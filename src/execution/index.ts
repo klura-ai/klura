@@ -1,4 +1,5 @@
 import * as skills from '../strategies/skills';
+import { navigationReachMissFrom, type NavigationReachMiss } from './navigation-reach';
 import type { BrowserDriver } from '../drivers/interface';
 import type { Session, SessionOptions } from '../drivers/types/session';
 import type {
@@ -622,6 +623,9 @@ export async function execute(
   }
 
   const errors: string[] = [];
+  /** Structured reach misses from this cascade, so a gate in front of the page
+   *  is legible without reading the prose in `errors`. */
+  const navigationReachMisses: NavigationReachMiss[] = [];
   let lastFailedResult: ExecuteResult | null = null;
   let lastFailedStrategy: skills.Strategy | null = null;
   // Track whether the revisit-fallback partial-replay has already fired
@@ -980,6 +984,12 @@ export async function execute(
         };
       }
       const msg = err instanceof Error ? err.message : String(err);
+      // A navigation that never arrived is carried out structurally as well as
+      // in prose. Callers that need to act on it — post-save verification has
+      // to tell a gate in front of the page from a strategy that is simply
+      // wrong — must not have to read the sentence to find out.
+      const reachMiss = navigationReachMissFrom(err);
+      if (reachMiss) navigationReachMisses.push(reachMiss);
       if (!opts._suppressStrategyState) {
         markFailed(platform, capability, type, msg);
         if (getHealth(platform, capability, type).status === 'broken') {
@@ -1012,7 +1022,14 @@ export async function execute(
     tokenCache,
   });
   if (retried) return retried;
-  return finalizeCascadeFailure(args, errors, lastFailedResult, lastFailedStrategy);
+  return finalizeCascadeFailure(
+    args,
+    errors,
+    lastFailedResult,
+    lastFailedStrategy,
+    undefined,
+    navigationReachMisses,
+  );
 }
 
 // One-retry-on-auth-wall path. When the cascade fails on auth (401 / 403 /
@@ -1508,6 +1525,7 @@ export function finalizeCascadeFailure(
   lastFailedResult: ExecuteResult | null,
   lastFailedStrategy: skills.Strategy | null,
   authProbe?: AutoExecDiagnosis['probe'],
+  navigationReachMisses: readonly NavigationReachMiss[] = [],
 ): ExecuteResult {
   const lastNotes = (lastFailedStrategy as { notes?: StrategyNotes } | null)?.notes;
   const paramsDoc = lastNotes?.params;
@@ -1543,6 +1561,9 @@ export function finalizeCascadeFailure(
     params_doc: paramsDoc,
     recovery_ref: recoveryRef,
     diagnosis,
+    // Structural, so a caller can tell a gate in front of the page from a
+    // strategy that is wrong without parsing the prose in `errors`.
+    ...(navigationReachMisses.length > 0 ? { navigation_reach_misses: navigationReachMisses } : {}),
   };
   if (diagnosis.kind === 'endpoint_stale') {
     body.tier = (lastFailedStrategy as { strategy?: string } | null)?.strategy;

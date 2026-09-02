@@ -23,6 +23,7 @@ export { validateNoOpaqueUserParams } from './validate/opaque-params';
 export { validateCapabilityPrereqs } from './validate/capability-prereqs';
 export {
   validateNoSelectorSelfReference,
+  validateNoCircularPrereqBinding,
   validateNoSynthesizedAuthHeaders,
   validatePlaceholderReferences,
 } from './validate/selectors';

@@ -104,6 +104,78 @@ export function validateNoSelectorSelfReference(data: Strategy): void {
   });
 }
 
+/** Names a prereq produces into the args namespace: `binds` for the
+ *  single-value kinds, the `vars` keys for the multi-value ones. */
+function prereqProducedNames(prereq: Record<string, unknown>): string[] {
+  const names: string[] = [];
+  const binds = prereq.binds;
+  if (typeof binds === 'string' && binds.length > 0) names.push(binds);
+  const vars = prereq.vars;
+  if (vars && typeof vars === 'object' && !Array.isArray(vars)) {
+    for (const key of Object.keys(vars as Record<string, unknown>)) names.push(key);
+  }
+  return names;
+}
+
+function referencesPlaceholderName(text: string, name: string): boolean {
+  return new RegExp(`\\{\\{\\s*${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\}\\}`).test(
+    text,
+  );
+}
+
+/**
+ * Circular-prereq detector: a prereq whose own `url` needs the very value that
+ * prereq produces.
+ *
+ * `{kind: "js-eval", url: "/@{{username}}/video/{{video_id}}", binds:
+ * "video_id"}` cannot run — reaching the page requires the id, and the id is
+ * what the page is supposed to yield. Nothing rejects it today: the placeholder
+ * validator sees `{{video_id}}` as declared *because this prereq declares it*,
+ * so the cycle validates cleanly, saves, and then returns nothing on replay.
+ *
+ * The second cost is quieter. A placeholder satisfied by a prereq bind is not a
+ * caller input, so the capability never has to document it — the saved contract
+ * omits an argument the caller must actually supply, and a later caller has no
+ * way to learn it exists.
+ *
+ * Structural check: compares a prereq's produced names against placeholder uses
+ * in its own url. No literal matching, no id-shape guessing. Referencing an
+ * EARLIER prereq's output is the normal chaining pattern and stays untouched;
+ * only self-reference is a cycle.
+ */
+export function validateNoCircularPrereqBinding(data: Strategy): void {
+  const prereqs = (data as Record<string, unknown>).prerequisites;
+  if (!Array.isArray(prereqs)) return;
+
+  prereqs.forEach((p, idx) => {
+    if (!p || typeof p !== 'object') return;
+    const prereq = p as Record<string, unknown>;
+    const url = prereq.url;
+    if (typeof url !== 'string' || url.length === 0) return;
+
+    for (const produced of prereqProducedNames(prereq)) {
+      if (!referencesPlaceholderName(url, produced)) continue;
+      const name = typeof prereq.name === 'string' ? prereq.name : `<unnamed[${idx}]>`;
+      throw new Error(
+        `invalid_strategy: prerequisites[${idx}] (name: "${name}") is circular — its url ` +
+          `${JSON.stringify(url)} references {{${produced}}}, which is the value this same prereq ` +
+          `produces. The url has to resolve before the prereq runs, so {{${produced}}} is still ` +
+          `unresolved at that point and the prereq can never mint it.\n` +
+          `Decide where the value actually comes from:\n` +
+          `  - The caller supplies it — drop \`${
+            typeof prereq.binds === 'string' ? 'binds' : 'vars'
+          }\` for ${produced} and declare it in notes.params.${produced} as a caller input. This is ` +
+          `the usual answer when the url embeds it, because a url built from it must already have ` +
+          `it. It also puts ${produced} in the saved contract, which is the only place a later ` +
+          `caller can learn the argument exists.\n` +
+          `  - An earlier step discovers it — move that discovery into its OWN prereq placed before ` +
+          `this one, and reference its bind here. Chaining across prereqs is fine; only a prereq ` +
+          `feeding itself is not.`,
+      );
+    }
+  });
+}
+
 export function validateNoSynthesizedAuthHeaders(data: Strategy): void {
   const sources: Array<{ label: string; headers: Record<string, unknown> }> = [];
   const headers = (data as { headers?: Record<string, unknown> }).headers;

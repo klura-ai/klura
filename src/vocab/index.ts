@@ -195,6 +195,7 @@ export const AUDIT_KINDS = {
   userConfirmation: 'user_confirmation',
   literalProvenance: 'literal_provenance',
   noSelectorSelfReference: 'no_selector_self_reference',
+  noCircularPrereqBinding: 'no_circular_prereq_binding',
   unobservedUrl: 'unobserved_url',
   surfaceTriageMissing: 'surface_triage_missing',
   tierBelowTriageVerdict: 'tier_below_triage_verdict',
@@ -233,6 +234,7 @@ export const WARNING_KINDS = {
   sideEffectPrereqUnproven: 'side_effect_prereq_unproven',
   callerArgBaked: 'caller_arg_baked',
   requiredParamWithoutExample: 'required_param_without_example',
+  htmlExtractReturnsJsonBlob: 'html_extract_returns_json_blob',
 } as const;
 
 export type WarningKind = (typeof WARNING_KINDS)[keyof typeof WARNING_KINDS];
