@@ -9,6 +9,7 @@ import {
   ValidationError,
 } from '../validators';
 import { KLURA_DIR } from '../paths';
+import { withOwnerFileLock, writeTextAtomically } from '../utils/owner-file-lock';
 
 const IDENTITIES_PATH = path.join(KLURA_DIR, 'identities.json');
 const OWNER_ONLY_FILE_MODE = 0o600;
@@ -104,13 +105,14 @@ function load(): IdentityStore {
 }
 
 function save(data: IdentityStore): void {
-  fs.mkdirSync(KLURA_DIR, { recursive: true });
-  const temporaryPath = `${IDENTITIES_PATH}.tmp`;
-  fs.writeFileSync(temporaryPath, JSON.stringify(data, null, 2), {
+  writeTextAtomically(IDENTITIES_PATH, JSON.stringify(data, null, 2), {
     mode: OWNER_ONLY_FILE_MODE,
   });
-  fs.chmodSync(temporaryPath, OWNER_ONLY_FILE_MODE);
-  fs.renameSync(temporaryPath, IDENTITIES_PATH);
+}
+
+/** Serialize a load→mutate→save cycle against concurrent identity writers. */
+function withIdentitiesLock<Value>(operation: () => Value): Value {
+  return withOwnerFileLock(`${IDENTITIES_PATH}.lock`, operation);
 }
 
 /**
@@ -154,10 +156,12 @@ export function setIdentity(platform: string, key: string, value: string): void 
     validateIdentityKey(key, 'key');
     asNonEmptyBoundedString(value, `value (${key})`, 1000);
   });
-  const data = load();
-  if (!data[platform]) data[platform] = {};
-  data[platform][key] = value;
-  save(data);
+  withIdentitiesLock(() => {
+    const data = load();
+    if (!data[platform]) data[platform] = {};
+    data[platform][key] = value;
+    save(data);
+  });
 }
 
 /** Set multiple identity fields for a platform (merges with existing). */
@@ -171,9 +175,11 @@ export function setIdentityFields(platform: string, fields: Record<string, strin
       asNonEmptyBoundedString(v, `fields.${k}`, 1000);
     }
   });
-  const data = load();
-  data[platform] = { ...(data[platform] ?? {}), ...fields };
-  save(data);
+  withIdentitiesLock(() => {
+    const data = load();
+    data[platform] = { ...(data[platform] ?? {}), ...fields };
+    save(data);
+  });
 }
 
 /** List all identities. */
@@ -186,10 +192,12 @@ export function clearIdentity(platform: string): void {
   rethrow('identity', () => {
     asPlatformSlug(platform, 'platform');
   });
-  const data = load();
-  const filtered: IdentityStore = {};
-  for (const [k, v] of Object.entries(data)) {
-    if (k !== platform) filtered[k] = v;
-  }
-  save(filtered);
+  withIdentitiesLock(() => {
+    const data = load();
+    const filtered: IdentityStore = {};
+    for (const [k, v] of Object.entries(data)) {
+      if (k !== platform) filtered[k] = v;
+    }
+    save(filtered);
+  });
 }

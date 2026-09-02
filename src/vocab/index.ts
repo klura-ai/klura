@@ -23,9 +23,10 @@
 //     description: `Call ${TOOL_NAMES.startSession} first. See ${refUrl(REF_LINKS.checkpoints)}.`
 //
 // Renaming a tool then becomes: edit ONE entry in TOOL_NAMES, tsc cascades
-// the rename through every TS reference. The `check-vocab-leakage` lint
-// script (runtime/scripts/) catches any bare string literal that didn't go
-// through the const map.
+// the rename through every TS reference. The lint scripts in
+// runtime/scripts/ (check-ref-links.js, check-tool-names.js,
+// check-no-static-synopses.js) catch stale slugs and hand-written synopses
+// that bypassed the const maps.
 
 // ---------- Tool names ----------
 
@@ -50,6 +51,7 @@ export const TOOL_NAMES = {
   evaluateInWorker: 'evaluate_in_worker',
   evaluateOnFrame: 'evaluate_on_frame',
   explainWsFrameStructure: 'explain_ws_frame_structure',
+  exportPlatformPackage: 'export_platform_package',
   findInPage: 'find_in_page',
   findInWsFrame: 'find_in_ws_frame',
   getA11yTree: 'get_a11y_tree',
@@ -96,6 +98,7 @@ export const TOOL_NAMES = {
   resume: 'resume',
   resumeScrapeRun: 'resume_scrape_run',
   resumeExecution: 'resume_execution',
+  reviewStrategyCandidate: 'review_strategy_candidate',
   saveStrategy: 'save_strategy',
   updateStrategy: 'update_strategy',
   saveVerifiedExpression: 'save_verified_expression',
@@ -121,6 +124,60 @@ export const TOOL_NAMES = {
 
 export type ToolName = (typeof TOOL_NAMES)[keyof typeof TOOL_NAMES];
 
+// ---------- Strategy tiers ----------
+
+/** The three strategy tiers, in optimality order (fastest first). Canonical
+ *  owner of the tier identifier set: TS unions derive from `StrategyTier`,
+ *  Zod enums via `z.enum(STRATEGY_TIERS)`, MCP JSON-schema enums via
+ *  `[...STRATEGY_TIERS]`, and per-tier metadata maps are typed
+ *  `Record<StrategyTier, ...>` so tsc enforces coverage. Sites that need a
+ *  different presentation order (e.g. policy caps listing recorded-path
+ *  first) derive it explicitly from this array rather than re-declaring. */
+export const STRATEGY_TIERS = ['fetch', 'page-script', 'recorded-path'] as const;
+
+export type StrategyTier = (typeof STRATEGY_TIERS)[number];
+
+// ---------- Prereq kinds ----------
+
+/** Every prerequisite `kind`. Canonical owner of the prereq-kind identifier
+ *  set — the per-kind Zod schemas live in
+ *  `runtime/src/strategies/schemas/prereqs.ts`, whose registry is typed
+ *  `satisfies Record<PrereqKind, ...>` so tsc enforces one schema per kind. */
+export const PREREQ_KIND_VALUES = [
+  'js-eval',
+  'page-extract',
+  'browser',
+  'fetch-extract',
+  'capability',
+  'tag',
+  'cached',
+] as const;
+
+export type PrereqKind = (typeof PREREQ_KIND_VALUES)[number];
+
+// ---------- Session outcomes ----------
+
+/** Wire-format values for `session_meta.outcome` in the working-dir capture
+ *  stream (`SessionMetaPayload`) and per-capability `lift_attempt` records. */
+export const SESSION_OUTCOMES = [
+  'fetch_saved',
+  'page_script_saved',
+  'recorded_path_saved',
+  'no_save',
+  'user_deferred',
+  'error',
+] as const;
+
+export type SessionOutcome = (typeof SESSION_OUTCOMES)[number];
+
+/** The saved-outcome value a landed strategy of each tier reports. Typed as a
+ *  full record so adding a tier forces the outcome mapping to be decided. */
+export const SAVED_OUTCOME_BY_TIER: Record<StrategyTier, SessionOutcome> = {
+  fetch: 'fetch_saved',
+  'page-script': 'page_script_saved',
+  'recorded-path': 'recorded_path_saved',
+};
+
 // ---------- Audit classifier + detector names ----------
 
 /** Wire-format kind strings for end-drive-audit + save-strategy-audit
@@ -141,6 +198,15 @@ export const AUDIT_KINDS = {
   surfaceTriageMissing: 'surface_triage_missing',
   tierBelowTriageVerdict: 'tier_below_triage_verdict',
   tierJustificationUnciteable: 'tier_justification_unciteable',
+  sensitiveActionMustBeRecordedNotSaved: 'sensitive_action_must_be_recorded_not_saved',
+  capturedQueryParamMissingFromStrategy: 'captured_query_param_missing_from_strategy',
+  authGatedWithoutAuthPrereq: 'auth_gated_without_auth_prereq',
+  saveStrategyStructuralDeadEnd: 'save_strategy_structural_dead_end',
+  // Triage-plan audit
+  requestPatternUrlExtractable: 'request_pattern_url_extractable',
+  requestPatternUrlObserved: 'request_pattern_url_observed',
+  capabilityNotDeclared: 'capability_not_declared',
+  recordedPathNavigateUrlUnbound: 'recorded_path_navigate_url_unbound',
 } as const;
 
 export type AuditKind = (typeof AUDIT_KINDS)[keyof typeof AUDIT_KINDS];
@@ -162,9 +228,27 @@ export const WARNING_KINDS = {
   parameterizationDisclosureRequired: 'parameterization_disclosure_required',
   unreferencedPrereqBinding: 'unreferenced_prereq_binding',
   hardcodedPaginationValue: 'hardcoded_pagination_value',
+  sideEffectPrereqUnproven: 'side_effect_prereq_unproven',
 } as const;
 
 export type WarningKind = (typeof WARNING_KINDS)[keyof typeof WARNING_KINDS];
+
+// ---------- Save origins ----------
+
+/** Wire-format origin tags for strategy producers. Every persisted strategy
+ *  routes through `evaluateSavePolicy({origin, ...})`
+ *  (runtime/src/audit/lift/save-policy.ts); the origin selects how the
+ *  saveStrategyAudit's detectors apply to that producer — differences between
+ *  producers are expressed via origin, never by skipping the audit. */
+export const SAVE_ORIGINS = {
+  agentExplicit: 'agent_explicit',
+  autoSynthFetch: 'auto_synth_fetch',
+  autoSynthRecorded: 'auto_synth_recorded',
+  graduation: 'graduation',
+  programmatic: 'programmatic',
+} as const;
+
+export type SaveOrigin = (typeof SAVE_ORIGINS)[keyof typeof SAVE_ORIGINS];
 
 // ---------- Audit decision values ----------
 
@@ -174,9 +258,29 @@ export const DECISION_VALUES = {
   approve: 'approve',
   reject: 'reject',
   acknowledged: 'acknowledged',
+  verifiedSuccess: 'verified_success',
+  verifiedFailure: 'verified_failure',
+  inconclusive: 'inconclusive',
 } as const;
 
 export type DecisionValue = (typeof DECISION_VALUES)[keyof typeof DECISION_VALUES];
+
+// ---------- Abort-ledger provenance ----------
+
+/** Wire-format values for `abort_events[].provenance`. Says where the abort's
+ *  classification came from, so replayed history is read as evidence of the
+ *  right strength:
+ *
+ *   - `agent_asserted`  — the `kind` an agent passed to `abort_session`. A
+ *     claim recorded by a prior session, never a runtime detection.
+ *   - `runtime_observed` — the same claim, corroborated by the runtime's own
+ *     origin-blocked detector firing on the aborted host during that session.
+ *
+ *  Historical ledger entries carry no field; readers default them to
+ *  `agent_asserted`. */
+export const ABORT_PROVENANCE_VALUES = ['agent_asserted', 'runtime_observed'] as const;
+
+export type AbortProvenance = (typeof ABORT_PROVENANCE_VALUES)[number];
 
 // ---------- REFERENCE.md slug links ----------
 
@@ -204,6 +308,7 @@ export const REF_LINKS = {
   networkLogDiscoveryWorkflow: 'network-log-discovery-workflow',
   pageScriptAnchors: 'page-script-anchors',
   pageScriptSchema: 'page-script-schema',
+  packageExport: 'package-export',
   platformSurfaceMap: 'platform-surface-map',
   popups: 'popups',
   rePatternChoice: 're-pattern-choice',

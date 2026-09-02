@@ -311,11 +311,11 @@ test('synth_fetch skips auto-save with sensitive_action_shape diagnostic when bo
   // address/card_number/exp/cvv args without typing the values; end_drive
   // name-affinity-matched the captured POST /api/checkout to place_order
   // and synthesized a runnable strategy templating those four sensitive
-  // fields. The saveStrategyAudit's sensitive_action_must_be_recorded_-
-  // not_saved Detector catches explicit saves, but auto-synth bypasses
-  // the audit. Same structural check fires here at the synth layer:
-  // sensitive-shape body → skip the auto-save, diagnostic notes the
-  // matched labels, no strategy file lands on disk.
+  // fields. The save policy runs the saveStrategyAudit's
+  // sensitive_action_must_be_recorded_not_saved Detector against the
+  // auto_synth_fetch origin: sensitive-shape body → SavePolicyBlockedError
+  // → skip the auto-save, diagnostic notes the matched labels, no
+  // strategy file lands on disk.
   const session = mkSession({
     declaredCapabilities: [
       {
@@ -485,4 +485,47 @@ test('synth_fetch prefers a 2xx capture over a more-recent 4xx one carrying the 
   const saved = JSON.parse(fs.readFileSync(fetched.path, 'utf-8'));
   assert.equal(saved.baseUrl, 'https://api.example.com');
   assert.equal(saved.endpoint, '/v1/search?q={{q}}');
+});
+
+test('synth_recorded refuses sensitive-shaped fallbacks via the save policy (no card_number on disk)', async () => {
+  // The recorded-path producer runs the same saveStrategyAudit bank as
+  // every other save origin. A declared `card_number` arg the agent typed
+  // during discovery templates into notes.params.card_number on the
+  // synthesized recorded-path — a sensitive shape that must never land as
+  // a runnable strategy, whatever the producer.
+  const now = Date.now() - 1000;
+  const session = mkSession({
+    declaredCapabilities: [
+      { capability: 'pay_order', args: { card_number: '4111111111111111' } },
+    ],
+    performActionHistory: [
+      { at: now, action: 'type', selector: 'input#card', value: '4111111111111111' },
+      { at: now + 100, action: 'click', selector: 'button#pay' },
+    ],
+    intercepted: [],
+  });
+  session.platform = 'test-synth-recorded-sensitive';
+
+  const diag = [];
+  const out = await synthesizeFallbacksOnClose(session, session.platform, null, diag);
+
+  const payOrderSaves = out.filter((r) => /pay_order\.json$/.test(r.path));
+  assert.equal(
+    payOrderSaves.length,
+    0,
+    `pay_order auto-save must NOT land; got: ${JSON.stringify(out)}`,
+  );
+  const skipped = diag.filter(
+    (d) => d.pass === 'synth_recorded' && d.outcome === 'sensitive_action_shape',
+  );
+  assert.equal(
+    skipped.length,
+    1,
+    `expected one synth_recorded sensitive_action_shape diagnostic, got: ${JSON.stringify(diag)}`,
+  );
+  assert.ok(
+    Array.isArray(skipped[0]?.detail?.matched_labels) &&
+      skipped[0].detail.matched_labels.length > 0,
+    `expected matched_labels in diagnostic; got: ${JSON.stringify(skipped[0])}`,
+  );
 });

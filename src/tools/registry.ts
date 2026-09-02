@@ -2,13 +2,18 @@
 //
 // Each tool exports a `TOOL_DEF: ToolDef` constant alongside its
 // implementation. This file imports every TOOL_DEF and assembles the
-// flat `TOOL_REGISTRY` array that the MCP wrapper (mcp/tools.js) consumes.
+// flat `TOOL_REGISTRY` array that the MCP server consumes. The phase
+// tool catalog (`runtime/src/phases/tool-catalog.ts`) is a derived
+// projection over this array: each TOOL_DEF's `phasePolicy` declares its
+// phase admissibility, and the per-phase allowed sets are computed from
+// those declarations.
 //
 // `runtime/test/registry-parity.test.js` asserts internal consistency:
 // every entry has a unique name in TOOL_NAMES, every name references a
-// callable handler, every TOOL_NAMES value appears in the registry, and
+// callable handler, every TOOL_NAMES value appears in the registry,
 // gate-owning tools (ack_checkpoint, resolve_interruption,
-// list_interruption_resolvers) set their bypass flags.
+// list_interruption_resolvers) set their bypass flags, and the derived
+// phase catalog matches every ToolDef's phasePolicy.
 //
 // **Adding a new tool** — define `TOOL_DEF` next to the implementation:
 //
@@ -22,6 +27,7 @@
 //         `... call ${TOOL_NAMES.endDrive} when done. ` +
 //         `See ${refUrl(REF_LINKS.checkpoints)}.`,
 //       inputSchema: { type: 'object', properties: { ... }, required: [...] },
+//       phasePolicy: { category: 'read_only_diagnostic' },
 //       handler: (args) => myToolImpl(args.foo, args.bar),
 //     };
 //
@@ -40,6 +46,7 @@ import { TOOL_DEF as triggerReferenceSend } from './trigger-reference-send';
 import { TOOL_DEFS as generatorTools } from './generators';
 import { TOOL_DEFS as sessionEnvelopeTools } from './session-envelopes';
 import { TOOL_DEFS as saveStrategyTools } from './save-strategy';
+import { TOOL_DEF as reviewStrategyCandidate } from './review-strategy-candidate';
 import { TOOL_DEF as submitTriagePlan } from './submit-triage-plan';
 import { TOOL_DEFS as skillsQueryTools } from './skills-query';
 import { TOOL_DEF as getStrategyHealth } from './health';
@@ -54,6 +61,7 @@ import { TOOL_DEFS as listenerTools } from './listeners';
 import { TOOL_DEF as resumeExecution } from './execute';
 import { TOOL_DEFS as configTools } from './config-tools';
 import { TOOL_DEFS as interruptionTools } from './interruption-tools';
+import { TOOL_DEF as exportPlatformPackage } from './export-platform-package';
 import { TOOL_DEFS as consumerTools } from '../consumer/mcp-tools';
 
 export const TOOL_REGISTRY: ToolDef[] = [
@@ -67,6 +75,7 @@ export const TOOL_REGISTRY: ToolDef[] = [
   ...generatorTools,
   ...sessionEnvelopeTools,
   ...saveStrategyTools,
+  reviewStrategyCandidate,
   submitTriagePlan,
   ...skillsQueryTools,
   getStrategyHealth,
@@ -81,4 +90,5 @@ export const TOOL_REGISTRY: ToolDef[] = [
   resumeExecution,
   ...configTools,
   ...interruptionTools,
+  exportPlatformPackage,
 ];

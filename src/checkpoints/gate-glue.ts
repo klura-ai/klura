@@ -9,6 +9,7 @@ import { invokeCheckpoint } from './registry';
 import type { CheckpointEvent, CheckpointKind, CheckpointResolution } from './types';
 import { buildTokenGate } from '../gate';
 import { resolveAutoExecuteAlias } from '../execution/auto-execute-alias';
+import { onSessionDispose, removeSessionDisposeHook } from '../pool/session-scope';
 
 /**
  * Unified checkpoint envelope attached to tool responses when the
@@ -33,13 +34,7 @@ export interface CheckpointEnvelope {
 
 interface PendingCheckpoint {
   token: string;
-  payload: CheckpointGatePayload;
-}
-
-interface CheckpointGatePayload {
-  session_id: string;
-  kind: CheckpointKind;
-  context: Record<string, unknown>;
+  payload: CheckpointEvent;
 }
 
 interface CheckpointAckAnswers {
@@ -49,7 +44,9 @@ interface CheckpointAckAnswers {
   reason?: string;
 }
 
-const checkpointGate = buildTokenGate<CheckpointGatePayload, CheckpointAckAnswers>({
+// The gate payload IS the checkpoint event — one shape from emit site to
+// pending-state map to ack validation, hashed whole for token binding.
+const checkpointGate = buildTokenGate<CheckpointEvent, CheckpointAckAnswers>({
   kind: 'checkpoint_ack',
   buildChecklist: () => ({
     prompt:
@@ -79,16 +76,26 @@ const checkpointGate = buildTokenGate<CheckpointGatePayload, CheckpointAckAnswer
 
 const pendingCheckpoints = new Map<string, PendingCheckpoint>();
 
+// Session-scope hook name — see runtime/src/pool/session-scope.ts. A session
+// that dies with an unacked checkpoint (abort, pool shutdown, an auto-execute
+// inner session never resumed) drops its pending entry via scope disposal
+// instead of leaking it for the daemon's lifetime.
+const PENDING_CHECKPOINT_HOOK = 'pending-checkpoint';
+
 function rememberPendingCheckpoint(
   sessionId: string,
-  payload: CheckpointGatePayload,
+  payload: CheckpointEvent,
   token: string,
 ): void {
   pendingCheckpoints.set(sessionId, { token, payload });
+  onSessionDispose(sessionId, PENDING_CHECKPOINT_HOOK, () => {
+    pendingCheckpoints.delete(sessionId);
+  });
 }
 
 function clearPendingCheckpoint(sessionId: string): void {
   pendingCheckpoints.delete(sessionId);
+  removeSessionDisposeHook(sessionId, PENDING_CHECKPOINT_HOOK);
 }
 
 /**
@@ -109,20 +116,15 @@ export function peekPendingCheckpointKind(sessionId: string): CheckpointKind | u
 }
 
 /** Mint a pending-checkpoint token for a handover resolution. */
-export function mintCheckpointToken(
-  sessionId: string,
-  kind: CheckpointKind,
-  context: Record<string, unknown>,
-): string {
-  const payload: CheckpointGatePayload = { session_id: sessionId, kind, context };
-  const result = checkpointGate.process(payload, {});
+export function mintCheckpointToken(event: CheckpointEvent): string {
+  const result = checkpointGate.process(event, {});
   if (result.status !== 'pending' && result.status !== 'rejected') {
     throw new Error(
       `internal: mintCheckpointToken expected pending/rejected, got ${result.status}`,
     );
   }
   const token = result.rejection.token;
-  rememberPendingCheckpoint(sessionId, payload, token);
+  rememberPendingCheckpoint(event.session_id, event, token);
   return token;
 }
 
@@ -192,10 +194,7 @@ export function assertNoPendingCheckpoint(sessionId: string, args: CheckpointAck
  * if the resolution is a `handover`, mint the pending-checkpoint token
  * and build the envelope the caller attaches to its tool response.
  */
-export async function invokeCheckpointAndGate(
-  kind: CheckpointKind,
-  event: CheckpointEvent,
-): Promise<{
+export async function invokeCheckpointAndGate(event: CheckpointEvent): Promise<{
   resolution: CheckpointResolution;
   envelope?: CheckpointEnvelope;
 }> {
@@ -206,11 +205,11 @@ export async function invokeCheckpointAndGate(
     // Session gone / not yet registered — no envelope; caller continues.
     return { resolution: { status: 'continue' } };
   }
-  const resolution = await invokeCheckpoint(kind, event, session);
+  const resolution = await invokeCheckpoint(event, session);
   if (resolution.status === 'handover') {
-    const token = mintCheckpointToken(event.session_id, kind, event.context);
+    const token = mintCheckpointToken(event);
     const envelope: CheckpointEnvelope = {
-      kind,
+      kind: event.kind,
       context: event.context,
       prompt: resolution.prompt,
       ...(resolution.viewer_url ? { viewer_url: resolution.viewer_url } : {}),

@@ -11,8 +11,14 @@
 
 import type { Session } from '../drivers/types/session';
 import type { DaemonConfig } from '../config/handler';
+import type { SessionPhase } from '../public/tool-phase-policy';
 
-export type SessionPhase = 'drive' | 'triage' | 'lift' | 'execute';
+// The phase/policy vocabulary (SESSION_PHASES, ToolPhaseCategory,
+// ToolPhasePolicy) lives in public/tool-phase-policy.ts because ToolDef —
+// a public contract — declares it; this module re-exports the names for
+// host-side consumers.
+export { SESSION_PHASES, TOOL_PHASE_CATEGORIES } from '../public/tool-phase-policy';
+export type { SessionPhase, ToolPhaseCategory, ToolPhasePolicy } from '../public/tool-phase-policy';
 
 export type GraphName = 'discover' | 'map' | 'execute';
 

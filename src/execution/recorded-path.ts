@@ -16,7 +16,7 @@ import { extractFromHtml } from '../response/html-extract';
 import { recordRecordedPathSuccess } from '../strategies/strategy-graduation';
 import { trimA11yTree, HEALABLE_A11Y_BUDGET } from '../response/response-size';
 import { fireInterrupts, type InterruptEntry } from '../strategies/interrupt-firing';
-import { invokeCheckpointAndGate } from '../checkpoints';
+import { checkpointEvent, invokeCheckpointAndGate } from '../checkpoints';
 import { resolveVariables } from './vars';
 import { probeOptionalLocator, runResolvedRecordedStep } from './step-runner';
 import { tryStructuralHeal, isHealableAction } from './heal';
@@ -28,6 +28,11 @@ import {
   resolveAutoExecuteAlias,
 } from './auto-execute-alias';
 import {
+  adoptChildSession,
+  onSessionDispose,
+  removeSessionDisposeHook,
+} from '../pool/session-scope';
+import {
   capturePageFingerprint,
   diffFingerprints,
   describeDrift,
@@ -35,6 +40,7 @@ import {
   type PageFingerprint,
 } from '../strategies/page-fingerprint';
 import { currentDeviceSessionOpts } from '../execution';
+import { captureBrowserDiagnosticEvidence } from './diagnostic-evidence';
 import type {
   AnyPool,
   ExecuteResult,
@@ -64,9 +70,22 @@ interface PausedExecution {
   /** Preserved across a pause so between_steps / pre_execution
    *  interrupts fire correctly when the resumed tail runs. */
   interrupts?: readonly InterruptEntry[];
+  /** Outer (start_session-owned) session id when auto-execute fired this
+   *  replay. Preserved across a pause so the resumed tail re-registers the
+   *  outer→inner alias if it pauses again — without it, outer-id
+   *  resume_execution / ack_checkpoint would stop resolving after the first
+   *  resume. */
+  ownerSessionId?: string;
 }
 
 const pausedExecutions = new Map<string, PausedExecution>();
+
+// Session-scope hook names — see runtime/src/pool/session-scope.ts. The
+// paused-execution hook lives on the INNER session (whose id keys
+// `pausedExecutions`); the alias hook lives on the OUTER session (whose id
+// keys the alias map).
+const PAUSED_EXECUTION_HOOK = 'paused-execution';
+const AUTO_EXECUTE_ALIAS_HOOK = 'auto-execute-alias';
 
 export async function executeRecordedPath(
   strategy: RecordedPathStrategy,
@@ -223,10 +242,16 @@ export async function resumeRecordedPath(sessionId: string, pool: AnyPool): Prom
     throw new Error(`No paused execution for session ${sessionId}`);
   }
   pausedExecutions.delete(effectiveId);
-  // Clear alias under whichever outer id mapped to this inner — the
-  // paused-execution lifetime is over.
-  if (effectiveId !== sessionId) {
-    clearAutoExecuteAlias(sessionId);
+  removeSessionDisposeHook(effectiveId, PAUSED_EXECUTION_HOOK);
+  // Clear the alias under the outer id that mapped to this inner — the
+  // pause window is over. The stored `ownerSessionId` covers both call
+  // shapes (agent resumed with the outer id OR with the inner id from the
+  // failure envelope). The child adoption stays in place: the inner session
+  // is still alive, and the outer session closing must still close it. If
+  // the resumed tail pauses again, the alias re-registers at the pause site.
+  const outerId = effectiveId !== sessionId ? sessionId : (paused.ownerSessionId ?? undefined);
+  if (outerId) {
+    clearAutoExecuteAlias(outerId);
   }
 
   const session = pool.getSession(effectiveId);
@@ -258,6 +283,7 @@ export async function resumeRecordedPath(sessionId: string, pool: AnyPool): Prom
     session,
     paused.response,
     paused.interrupts,
+    outerId,
   );
 }
 
@@ -497,14 +523,29 @@ async function executeSteps(
           platform,
           capability,
           response,
+          interrupts,
+          ...(ownerSessionId && ownerSessionId !== session.id ? { ownerSessionId } : {}),
+        });
+        // Session-scope disposer: if this inner session dies before the
+        // pause is consumed (abort, end_drive, pool shutdown), the paused
+        // entry goes with it instead of leaking for the daemon's lifetime.
+        onSessionDispose(session.id, PAUSED_EXECUTION_HOOK, () => {
+          pausedExecutions.delete(session.id);
         });
         // When auto-execute fired this from start_session, register the
         // outer→inner alias so resume_execution / ack_checkpoint with the
         // outer (agent-known) session id resolve to this inner session's
-        // entries. See `runtime/src/execution/auto-execute-alias.ts` and
+        // entries, and adopt the inner session as a child of the outer so
+        // closing the outer session (abort_session / end_drive) closes this
+        // paused browser context first. See
+        // `runtime/src/execution/auto-execute-alias.ts` and
         // `runtime/docs/run-lifecycle.md#auto-execute-session-topology`.
         if (ownerSessionId && ownerSessionId !== session.id) {
           registerAutoExecuteAlias(ownerSessionId, session.id);
+          onSessionDispose(ownerSessionId, AUTO_EXECUTE_ALIAS_HOOK, () => {
+            clearAutoExecuteAlias(ownerSessionId);
+          });
+          adoptChildSession(ownerSessionId, session.id, () => pool.endDrive(session.id));
         }
 
         const rawA11y = await pool
@@ -548,12 +589,10 @@ async function executeSteps(
               }
             : null;
         const { envelope: checkpointEnvelope } = await invokeCheckpointAndGate(
-          'recorded_step_failed',
-          {
+          checkpointEvent.recorded_step_failed({
             session_id: session.id,
             capability,
             context: {
-              kind: 'recorded_step_failed',
               failed_step_index: i,
               ...(failedStepId ? { failed_step_id: failedStepId } : {}),
               failed_step: failedStep,
@@ -566,7 +605,7 @@ async function executeSteps(
               healable: true,
               ...(driftCtx ?? {}),
             },
-          },
+          }),
         );
 
         return {
@@ -725,6 +764,11 @@ async function executeSteps(
       },
     };
   } finally {
+    try {
+      await captureBrowserDiagnosticEvidence(pool.driverFor(session.id), session);
+    } catch {
+      /* diagnostic capture is best-effort */
+    }
     if (!keepSession) {
       await pool.endDrive(session.id);
     }

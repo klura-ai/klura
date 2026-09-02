@@ -10,7 +10,7 @@ The "how." A saved recipe for executing one capability. Three tiers, ordered by 
 - **`page-script`** — JS executed inside a live page to build and fire the request per call.
 - **`recorded-path`** — replay of UI actions. Last resort.
 
-May declare prerequisites (`page-extract`, `fetch-extract`, `js-eval`, `cached`, `capability`, `browser`) that run before the body. See [strategies.md](strategies.md).
+May declare prerequisites (`page-extract`, `fetch-extract`, `js-eval`, `cached`, `capability`, `tag`, `browser`; the canonical kind list is `PREREQ_KIND_VALUES` in `runtime/src/vocab/index.ts`) that run before the body. See [strategies.md](strategies.md).
 
 ## Capability
 

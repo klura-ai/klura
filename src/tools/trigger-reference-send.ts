@@ -275,6 +275,7 @@ import type { ToolDef } from '../tools/types';
 
 export const TOOL_DEF: ToolDef = {
   name: TOOL_NAMES.triggerReferenceSend,
+  phasePolicy: { category: 'lift_re_active' },
   description:
     'Fire a short action sequence (perform_action-shaped steps) and surface every new sent WebSocket frame that arrives during / within `settle_ms` of the final step. Returns each candidate with `ws_hash` + `ws_i` + byte length so the agent can pick one and pin it via pin_ws_frame (or opt into `auto_pin: true` which pins the first sent frame over 100 bytes — a rough "probably the real send, not a keepalive" heuristic). Use this when you need a fresh reference frame AFTER the end_drive auto-pin window has passed, or on execute-only sessions that never hit end_drive. **Consent gate (Level-3 token-gated):** this tool re-fires a submit, producing a real side-effect on every call. The first call always returns a `consent_token` + checklist; the second call must echo the token and include `consent_answers` ({tier, action_description, recipient_description, user_acknowledgement_quote}). Tier 2 (destructive, irreversible, monetary, OR any third-party recipient human/bot) requires a non-empty user_acknowledgement_quote with the user\'s own words. The token binds to a hash of the consented payload — changing actions between calls forces re-classification. See klura://reference#checkpoints.',
   inputSchema: {

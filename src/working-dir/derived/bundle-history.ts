@@ -4,9 +4,9 @@
 // pointers may no longer resolve).
 
 import fs from 'fs';
-import path from 'path';
 import { isSessionArchive, type SessionArchive } from '../schema';
 import { derivedPath, listSessions, sessionArchivePath } from '../layout';
+import { writeTextAtomically } from '../../utils/owner-file-lock';
 export interface BundleHistoryReport {
   schema_version: 1;
   platform: string;
@@ -91,11 +91,7 @@ export function recomputeBundleHistory(platform: string): BundleHistoryReport {
     per_url,
     drift_events,
   };
-  const p = derivedPath(platform, 'bundle-history');
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  const tmp = `${p}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(report, null, 2));
-  fs.renameSync(tmp, p);
+  writeTextAtomically(derivedPath(platform, 'bundle-history'), JSON.stringify(report, null, 2));
   return report;
 }
 

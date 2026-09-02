@@ -8,9 +8,11 @@
 // identically.
 
 import { isPlainObject } from './helpers';
-import { refUrl, REF_LINKS } from '../../vocab';
+import { refUrl, REF_LINKS, type PrereqKind } from '../../vocab';
 
-const BROWSER_BOUND_KINDS = new Set(['js-eval', 'browser']);
+// Widened to ReadonlySet<string> so `.has()` accepts raw agent-submitted kind
+// strings; the initializer stays PrereqKind-typed so membership is vocab-checked.
+const BROWSER_BOUND_KINDS: ReadonlySet<string> = new Set<PrereqKind>(['js-eval', 'browser']);
 
 export function validateFetchPrereqKinds(data: Record<string, unknown>, tier: string): void {
   if (tier !== 'fetch') return;

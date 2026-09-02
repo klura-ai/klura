@@ -92,6 +92,24 @@ test('cite-validation: justification citing an observed cookie name passes', asy
   }
 });
 
+test('mechanism_hypothesis is optional because structural evidence drives the plan', async () => {
+  const session = triageSession({ cookieNames: ['__sd_pix'] });
+  const restore = patchPool(session);
+  const value = plan();
+  delete value.defense_surface.mechanism_hypothesis;
+  try {
+    const result = await submitTriagePlan({
+      session_id: session.id,
+      capability: 'complete_checkout',
+      ...value,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.phase, 'lift');
+  } finally {
+    restore();
+  }
+});
+
 test('cite-validation: empty justification rejects with the candidate list', async () => {
   const session = triageSession({ cookieNames: ['__sd_pix'] });
   const restore = patchPool(session);

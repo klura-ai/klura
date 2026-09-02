@@ -1,5 +1,5 @@
 // Built-in default checkpoint handlers. Registered at module-load time
-// via `registerCheckpointDefaults()`. Three broad defaults span every
+// via `registerCheckpointDefaults()`. Four broad defaults span every
 // shipped CheckpointKind; scenario / enterprise plugins register after
 // to claim a subset and pre-empt these.
 //
@@ -9,6 +9,8 @@
 //     `session_expired`. Opens the remote viewer for a human at the page.
 //  3. DefaultPreActionConsentCheckpoint — `post_save_validation_consent`.
 //     Formats a pre-action-advice envelope for tier classification.
+//  4. DefaultAbortSessionConsentCheckpoint — `abort_session_consent`.
+//     Asks the user to approve / veto the staged abort.
 
 import type { CheckpointEvent, CheckpointHandler, CheckpointResolution } from './types';
 import type { Session } from '../drivers/types/session';
@@ -45,10 +47,12 @@ export function setViewerOpener(fn: ViewerOpener): void {
   viewerOpener = fn;
 }
 
-const DefaultHandoverViewerCheckpoint: CheckpointHandler = {
+const DefaultHandoverViewerCheckpoint: CheckpointHandler<
+  'recorded_step_failed' | 'session_expired'
+> = {
   name: 'default-handover-viewer-checkpoint',
   kinds: ['recorded_step_failed', 'session_expired'],
-  async handle(event: CheckpointEvent, session: Session): Promise<CheckpointResolution> {
+  async handle(event, session: Session): Promise<CheckpointResolution> {
     const prompt = promptForKind(event);
     if (!viewerOpener) {
       // DI wire-up skipped (test harness without runtime-state). Surface
@@ -61,10 +65,10 @@ const DefaultHandoverViewerCheckpoint: CheckpointHandler = {
   },
 };
 
-const DefaultAskUserCheckpoint: CheckpointHandler = {
+const DefaultAskUserCheckpoint: CheckpointHandler<'triage_plan' | 'surface_changed'> = {
   name: 'default-ask-user-checkpoint',
   kinds: ['triage_plan', 'surface_changed'],
-  handle(event: CheckpointEvent): Promise<CheckpointResolution> {
+  handle(event): Promise<CheckpointResolution> {
     return Promise.resolve({
       status: 'handover',
       target: 'user',
@@ -73,15 +77,11 @@ const DefaultAskUserCheckpoint: CheckpointHandler = {
   },
 };
 
-const DefaultPreActionConsentCheckpoint: CheckpointHandler = {
+const DefaultPreActionConsentCheckpoint: CheckpointHandler<'post_save_validation_consent'> = {
   name: 'default-pre-action-consent-checkpoint',
   kinds: ['post_save_validation_consent'],
-  handle(event: CheckpointEvent): Promise<CheckpointResolution> {
-    const ctx = event.context as {
-      pendingAction?: string;
-      contextSummary?: string;
-      declineHandler?: string;
-    };
+  handle(event): Promise<CheckpointResolution> {
+    const ctx = event.context;
     const advice = buildPreActionAdvice({
       pendingAction: ctx.pendingAction ?? 'an agent-initiated side-effect',
       contextSummary: ctx.contextSummary ?? '',
@@ -96,28 +96,17 @@ const DefaultPreActionConsentCheckpoint: CheckpointHandler = {
   },
 };
 
-const DefaultAbortSessionConsentCheckpoint: CheckpointHandler = {
+const DefaultAbortSessionConsentCheckpoint: CheckpointHandler<'abort_session_consent'> = {
   name: 'default-abort-session-consent-checkpoint',
   kinds: ['abort_session_consent'],
-  handle(event: CheckpointEvent): Promise<CheckpointResolution> {
-    const ctx = event.context as {
-      reason?: string;
-      kind?: string;
-      vendor?: string;
-      capturedActionsCount?: number;
-    };
-    const reason = ctx.reason ?? '<no reason given>';
-    const kind = ctx.kind ?? 'other';
-    const vendorLine = ctx.vendor ? ` Attributed vendor: ${ctx.vendor}.` : '';
-    const captures =
-      typeof ctx.capturedActionsCount === 'number'
-        ? ` Session captured ${ctx.capturedActionsCount} perform_action call(s) so far.`
-        : '';
+  handle(event): Promise<CheckpointResolution> {
+    const { reason, abort_kind, capturedActionsCount } = event.context;
+    const captures = ` Session captured ${capturedActionsCount} perform_action call(s) so far.`;
     return Promise.resolve({
       status: 'handover',
       target: 'user',
       prompt:
-        `The agent wants to abort_session (kind: \`${kind}\`).${vendorLine}${captures} Reason given: ` +
+        `The agent wants to abort_session (kind: \`${abort_kind}\`).${captures} Reason given: ` +
         `"${reason}".\n\nklura's mission is to REVERSE-ENGINEER sites — not bail on first ` +
         `friction. Before approving abort, consider whether the agent tried the cheap things: ` +
         `wait + re-snap on iframe challenges (~10s), alternate entry paths under the same host ` +
@@ -129,9 +118,21 @@ const DefaultAbortSessionConsentCheckpoint: CheckpointHandler = {
   },
 };
 
-function promptForKind(event: CheckpointEvent): string {
-  const kind = (event.context.kind ?? event.context.reason) as string | undefined;
-  switch (kind) {
+/** Compile-time exhaustiveness backstop for `promptForKind`. */
+function unreachableCheckpointKind(event: never): never {
+  throw new Error(
+    `internal: promptForKind received unhandled checkpoint kind ${JSON.stringify(
+      (event as { kind?: unknown }).kind,
+    )}`,
+  );
+}
+
+function promptForKind(
+  event: CheckpointEvent<
+    'recorded_step_failed' | 'session_expired' | 'triage_plan' | 'surface_changed'
+  >,
+): string {
+  switch (event.kind) {
     case 'recorded_step_failed':
       return (
         'A recorded-path step failed mid-execute. The remote viewer is open; ' +
@@ -140,40 +141,26 @@ function promptForKind(event: CheckpointEvent): string {
       );
     case 'session_expired':
       return 'The site rejected the request with a session-expired response. Re-authenticate in the viewer.';
-    case 'triage_plan': {
-      const ctx = event.context as { capability?: string; summary_for_user?: string };
-      const cap = ctx.capability ?? 'this capability';
-      const summary = ctx.summary_for_user ?? 'no summary provided';
+    case 'triage_plan':
       return (
-        `Triage plan submitted for \`${cap}\`. Relay this summary to the user ` +
-        `before proceeding to LIFT:\n\n${summary}`
+        `Triage plan submitted for \`${event.context.capability}\`. Relay this summary to the user ` +
+        `before proceeding to LIFT:\n\n${event.context.summary_for_user}`
       );
-    }
     case 'surface_changed': {
-      const ctx = event.context as {
-        new_url?: string;
-        prior_surface?: string;
-        triage_budget?: number;
-      };
-      const newUrl = ctx.new_url ?? '<unknown>';
+      const ctx = event.context;
       const prior = ctx.prior_surface ? ` (prior surface: \`${ctx.prior_surface}\`)` : '';
-      const budget = ctx.triage_budget;
-      let budgetLine = '';
-      if (budget === 0) {
-        budgetLine = ' Triage budget reset (no round limit).';
-      } else if (budget !== undefined) {
-        budgetLine = ` Triage budget reset to ${budget} rounds.`;
-      }
+      const budgetLine =
+        ctx.triage_budget === 0
+          ? ' Triage budget reset (no round limit).'
+          : ` Triage budget reset to ${ctx.triage_budget} rounds.`;
       return (
-        `Navigated to \`${newUrl}\`${prior} — no triage plan exists for this surface yet. ` +
+        `Navigated to \`${ctx.new_url}\`${prior} — no triage plan exists for this surface yet. ` +
         `Read the defense surface (third-party origins, scripts, cookies, request patterns), ` +
         `pick a \`surface_label\`, and submit_triage_plan before continuing.${budgetLine}`
       );
     }
-    case 'post_save_validation_consent':
-      return 'An agent-initiated side-effect needs consent classification. Classify Tier 1 / Tier 2; Tier 2 waits for explicit user OK.';
     default:
-      return 'A runtime checkpoint needs human input.';
+      return unreachableCheckpointKind(event);
   }
 }
 

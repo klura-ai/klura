@@ -67,7 +67,7 @@ type CloseHandoff = {
   platform: string;
   unresolved_capabilities: Array<{
     capability: string;
-    declared_args: Record<string, string>;
+    declared_args: Record<string, unknown>;
     saved_strategies: string[];
     policy_max_tier: string | null;
     /** True when a saved strategy auto-executed this session and failed
@@ -313,9 +313,12 @@ export function computeReverseEngineerHandoff(
       );
     }
     // Per-capability save-authoring contract. Composed from session
-    // state at handoff time; every constraint maps 1:1 to a
-    // save_strategy detector. Reading this upfront replaces the
-    // cascading audit cycle. See `runtime/src/phases/lift/save-authoring-contract.ts`.
+    // state at handoff time; every constraint projects a save-strategy
+    // audit concern (Detector or Classifier) via its detector_kind —
+    // parity with the audit is enforced by
+    // runtime/test/authoring-contract-parity.test.js. Reading this
+    // upfront replaces the cascading audit cycle. See
+    // `runtime/src/phases/lift/save-authoring-contract.ts`.
     let contract: SaveAuthoringContract | undefined;
     try {
       contract = composeSaveAuthoringContract(session, u.capability, u.declared_args, platform);
@@ -565,7 +568,7 @@ export function computeReverseEngineerHandoff(
     `\`list_loaded_scripts\`, \`get_js_source\`, \`search_js_source\`). Identify the bot-detection posture ` +
     `using your own knowledge — klura runtime never names vendors; you do. ` +
     `Then call \`submit_triage_plan\` with: \`surface_label\` (semantic name like "checkout" or "search"), ` +
-    `\`defense_surface\` (observed_origins, observed_scripts, cookies_set, request_patterns, mechanism_hypothesis), ` +
+    `\`defense_surface\` (observed_origins, observed_scripts, cookies_set, request_patterns; add mechanism_hypothesis only when supported), ` +
     `\`expected_tier\` (T0=fetch / T1=page-script / T2=recorded-path), ` +
     `\`tier_justification\` citing at least one verbatim observed origin / script / cookie / URL, ` +
     `and \`summary_for_user\`. ` +
@@ -637,16 +640,19 @@ export function computeReverseEngineerHandoff(
  * Makes the loop visible to the agent rather than quietly re-presenting the
  * same candidate list they ignored once already.
  *
- * Signal: session has `lift` set (first close already hit the handoff) AND
- * `roundsSinceHandoff === 0` AND `endDriveAttempts >= 2`. Since every tool call
- * increments `roundsSinceHandoff` in `pool.getSession`, a zero counter at
- * attempt ≥ 2 means the agent did nothing between closes.
+ * Signal: `endDriveAttempts >= 2` AND the pool's user-round count has moved
+ * by at most one round (the repeat end_drive call itself) since the last
+ * close attempt's snapshot (`session.roundCountAtLastCloseAttempt`, stamped
+ * by the end-drive orchestrator when the handoff fires). Rounds register
+ * once per admitted non-universal tool call at the phase-middleware dispatch
+ * boundary, so a delta ≤ 1 at attempt ≥ 2 means the agent did nothing
+ * between closes.
  */
 function detectRepeatedNoOpClose(
   session: ReturnType<typeof pool.getSession>,
   _unresolved: CloseHandoff['unresolved_capabilities'],
 ): boolean {
-  if (!session.lift) return false;
   if ((session.endDriveAttempts ?? 1) < 2) return false;
-  return session.lift.roundsSinceHandoff <= 1;
+  const current = pool.getSessionRoundCount?.(session.id) ?? 0;
+  return current - (session.roundCountAtLastCloseAttempt ?? 0) <= 1;
 }

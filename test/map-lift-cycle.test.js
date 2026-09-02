@@ -87,6 +87,34 @@ test('lift_observed_capability: drive → triage transition on map session', asy
   }
 });
 
+test('lift_observed_capability preserves structured caller inputs', async () => {
+  const session = fakeMapSession('sess-map-structured-args');
+  const restore = await patchPool(session);
+  try {
+    recordObservedCapability({
+      platform: PLATFORM,
+      name: 'search_many',
+      evidence: { source: 'network', endpoint: '/api/search' },
+      why_not_lifted: 'separate_capability',
+    });
+    const args = {
+      queries: ['thai', 'pizza'],
+      limit: 3,
+      include_closed: false,
+      bounds: { north: 60, south: 59 },
+    };
+    const result = liftObservedCapability({
+      session_id: session.id,
+      name: 'search_many',
+      args,
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(session.declaredCapabilities[0].args, args);
+  } finally {
+    restore();
+  }
+});
+
 test('lift_observed_capability: lift → triage transition (next slug after save)', async () => {
   const session = fakeMapSession('sess-map-lift-2');
   const restore = await patchPool(session);

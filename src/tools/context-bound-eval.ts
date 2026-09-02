@@ -165,6 +165,7 @@ export async function evaluateInWorker(args: EvaluateInWorkerArgs): Promise<Eval
 export const TOOL_DEFS: ToolDef[] = [
   {
     name: TOOL_NAMES.evaluateInIframe,
+    phasePolicy: { category: 'read_only_diagnostic' },
     description:
       'Spawn an iframe at `iframe_src` on the active page, run `expression` inside `iframe.contentWindow`, return the result, optionally remove the iframe. Same response shape as `js_eval`. Use when a captured request 200:ed live but the same request from main-frame context (`js_eval` / Node fetch) returns 401/403 — the server may be validating tokens bound to the JS-execution context that generated them (vendor SDK init in an iframe, KPSDK-class proof-of-work bound to its iframe origin, iframe-init-bound CSRF cookies). The iframe gives the request the matching execution context. Third RE-toolkit axis parallel to `inspect_ws_frame` + `try_generator` (binary WS) and `search_js_source` + `read_js_function` (HTTP signer). Cross-origin iframes are opaque from the parent — `iframe_src` must be same-origin to the page (or `"/"` for the page\'s own origin). Cross-origin loads return `iframe_eval_failed`. Expression cap 4096 chars; timeout default 10000ms (max 60000).',
     inputSchema: {
@@ -206,6 +207,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: TOOL_NAMES.evaluateInIframeChain,
+    phasePolicy: { category: 'read_only_diagnostic' },
     description:
       'Spawn ONE iframe at `iframe_src` and run a sequence of expressions inside its context, persisting state across steps. Returns the last step\'s result (or all steps when `return_all: true`). Use when a single tool call needs "wait for vendor SDK ready" → "fetch protected route" → "return result" as one chain — saves the spawn cost of multiple `evaluate_in_iframe` calls, and keeps the context alive between steps (initialized globals, in-flight promises, cookies set by the first step). Steps cap at 10. Per-step `wait_for_ms` lets the agent settle between operations (e.g. "wait 200ms after fetch for the response handler to run"). Same response shape as `js_eval`.',
     inputSchema: {
@@ -261,6 +263,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: TOOL_NAMES.evaluateInWorker,
+    phasePolicy: { category: 'read_only_diagnostic' },
     description:
       "Spawn a Web Worker from `worker_source` on the active page, optionally `postMessage(message)`, wait for the first response message, terminate. The worker source MUST call `self.postMessage(result)` when its computation is done — otherwise the call times out. Use when the server binds tokens to a WebWorker context (vendor SDKs that run proof-of-work in a dedicated worker so the main thread never sees the computation; the resulting token only validates on requests fired from that worker). Pair with `search_js_source` / `read_js_function` to extract the relevant worker-bootstrap code from the vendor's bundle, then run it here. Same response shape as `js_eval`. Source cap 16384 chars; timeout default 10000ms (max 60000).",
     inputSchema: {

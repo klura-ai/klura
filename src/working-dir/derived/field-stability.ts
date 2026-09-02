@@ -6,9 +6,9 @@
 // the derived-signal file at derivedPath('field-stability').
 
 import fs from 'fs';
-import { dirname } from 'path';
 import { isSessionArchive, type SessionArchive } from '../schema';
 import { derivedPath, listSessions, sessionArchivePath } from '../layout';
+import { writeTextAtomically } from '../../utils/owner-file-lock';
 import {
   type CaptureSample,
   classifyFieldStability,
@@ -63,11 +63,7 @@ export function recomputeFieldStability(platform: string): FieldStabilityReport 
     computed_at: new Date().toISOString(),
     per_capability,
   };
-  const p = derivedPath(platform, 'field-stability');
-  fs.mkdirSync(dirname(p), { recursive: true });
-  const tmp = `${p}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(report, null, 2));
-  fs.renameSync(tmp, p);
+  writeTextAtomically(derivedPath(platform, 'field-stability'), JSON.stringify(report, null, 2));
   return report;
 }
 

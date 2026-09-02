@@ -38,7 +38,7 @@ type NodeWebSocketFailureCode =
 
 type SendNodeWebSocketFrameResult =
   | { ok: true; ackPayload?: string }
-  | { ok: false; code: NodeWebSocketFailureCode; error: string };
+  | { ok: false; code: NodeWebSocketFailureCode; error: string; sent: boolean };
 
 /**
  * Open a WebSocket to `url`, send `payload`, optionally wait for an ack
@@ -64,6 +64,7 @@ export async function sendNodeWebSocketFrame(
   return await new Promise<SendNodeWebSocketFrameResult>((resolve) => {
     let ws: WebSocketType | null = null;
     let settled = false;
+    let sent = false;
     let openTimer: ReturnType<typeof setTimeout> | null = null;
     let ackTimer: ReturnType<typeof setTimeout> | null = null;
     let requestTimer: ReturnType<typeof setTimeout> | null = null;
@@ -91,12 +92,41 @@ export async function sendNodeWebSocketFrame(
       resolve(result);
     };
 
+    const onAckTimeout = (): void => {
+      settle({
+        ok: false,
+        code: 'ack_timeout',
+        error: `ack_timeout: ${ackTimeoutMs}ms`,
+        sent: true,
+      });
+    };
+
+    const onSendComplete = (err?: Error): void => {
+      if (err) {
+        settle({
+          ok: false,
+          code: 'send_failed',
+          error: `ws_send_failed: ${err.message}`,
+          sent: true,
+        });
+        return;
+      }
+      if (settled) return;
+      if (!opts.ackMatch) {
+        settle({ ok: true });
+        return;
+      }
+      ackTimer = setTimeout(onAckTimeout, ackTimeoutMs);
+      (ackTimer as unknown as { unref?: () => void }).unref?.();
+    };
+
     if (timeoutMs !== undefined) {
       requestTimer = setTimeout(() => {
         settle({
           ok: false,
           code: 'request_timeout',
           error: `ws_request_timeout: ${timeoutMs}ms`,
+          sent,
         });
       }, timeoutMs);
       (requestTimer as unknown as { unref?: () => void }).unref?.();
@@ -109,12 +139,18 @@ export async function sendNodeWebSocketFrame(
         ok: false,
         code: 'construct_failed',
         error: `ws_construct_failed: ${e instanceof Error ? e.message : String(e)}`,
+        sent: false,
       });
       return;
     }
 
     openTimer = setTimeout(() => {
-      settle({ ok: false, code: 'open_timeout', error: `ws_open_timeout: ${openTimeoutMs}ms` });
+      settle({
+        ok: false,
+        code: 'open_timeout',
+        error: `ws_open_timeout: ${openTimeoutMs}ms`,
+        sent: false,
+      });
     }, openTimeoutMs);
     (openTimer as unknown as { unref?: () => void }).unref?.();
 
@@ -127,28 +163,20 @@ export async function sendNodeWebSocketFrame(
       // for incoming frames still attached below, so a racing inbound frame
       // before we close doesn't crash.
       try {
-        ws.send(payload, (err) => {
-          if (err) {
-            settle({ ok: false, code: 'send_failed', error: `ws_send_failed: ${err.message}` });
-            return;
-          }
-          if (!opts.ackMatch) {
-            settle({ ok: true });
-          }
-        });
+        // Once ws.send is invoked, remote delivery is conservatively unknown
+        // until an acknowledgement proves success. Callback errors, closes,
+        // and total timeouts must not make the caller replay a possible write.
+        sent = true;
+        ws.send(payload, onSendComplete);
       } catch (e) {
+        sent = false;
         settle({
           ok: false,
           code: 'send_threw',
           error: `ws_send_threw: ${e instanceof Error ? e.message : String(e)}`,
+          sent: false,
         });
         return;
-      }
-      if (opts.ackMatch) {
-        ackTimer = setTimeout(() => {
-          settle({ ok: false, code: 'ack_timeout', error: `ack_timeout: ${ackTimeoutMs}ms` });
-        }, ackTimeoutMs);
-        (ackTimer as unknown as { unref?: () => void }).unref?.();
       }
     });
 
@@ -166,7 +194,12 @@ export async function sendNodeWebSocketFrame(
     });
 
     ws.on('error', (err) => {
-      settle({ ok: false, code: 'connection_error', error: `ws_error: ${err.message}` });
+      settle({
+        ok: false,
+        code: 'connection_error',
+        error: `ws_error: ${err.message}`,
+        sent,
+      });
     });
 
     ws.on('close', (code, reason) => {
@@ -179,6 +212,7 @@ export async function sendNodeWebSocketFrame(
         ok: false,
         code: 'closed_before_ack',
         error: `ws_closed_before_ack: code=${code}${reasonPart}`,
+        sent,
       });
     });
   });

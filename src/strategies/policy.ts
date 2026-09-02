@@ -12,14 +12,18 @@ import {
   asBoundedString,
   ValidationError,
 } from '../validators';
+import type { StrategyTier } from '../vocab';
+
+export type { StrategyTier };
 
 // Tier order: least lifty → most lifty (matches the cascade in
 // skills.ts:loadStrategies and the T0/T1/T2 labels in lift/report.ts).
 // `default_max_strategy_tier` caps how far up this ladder the platform can go
 // by default; `per_capability[<cap>].max_strategy_tier` overrides the default
-// for a specific capability (the more restrictive of the two wins).
-const TIER_ORDER = ['recorded-path', 'page-script', 'fetch'] as const;
-export type StrategyTier = (typeof TIER_ORDER)[number];
+// for a specific capability (the more restrictive of the two wins). The order
+// is semantic (a ranking, not the vocabulary's presentation order), so it
+// stays explicit here — the element type keeps membership vocab-checked.
+const TIER_ORDER: readonly StrategyTier[] = ['recorded-path', 'page-script', 'fetch'];
 
 const MAX_PER_CAPABILITY_ENTRIES = 50;
 const MAX_REASON_LEN = 200;

@@ -242,6 +242,7 @@ import type { ToolDef } from '../tools/types';
 export const TOOL_DEFS: ToolDef[] = [
   {
     name: TOOL_NAMES.setBreakpoint,
+    phasePolicy: { category: 'lift_re_active' },
     description:
       'Set a CDP source-location breakpoint. `file` is a script URL as reported by `inspect_ws_frame.js_callstack.frames[].file` or `list_loaded_scripts`; `line` and optional `column` are the CDP coordinates. Optional `condition` is a JS expression evaluated at the candidate pause — execution only pauses when it is truthy. Returns `breakpoint_id` (pass to remove_breakpoint) and `resolved_location` reporting where CDP actually placed the bp (line numbers can shift to the nearest executable statement). Escalation tool for the RE path — use when the "paused closure" approach is shorter than hand-reading a minified bundle: set the bp at the WebSocket.send site, re-trigger the flow with perform_action, call wait_for_pause, then read the encoder out of the paused scope chain. Max 10 active bps per session; conditions capped at 512 chars. Blocked in execute_only mode. Requires the playwright driver.',
     inputSchema: {
@@ -274,6 +275,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.removeBreakpoint,
+    phasePolicy: { category: 'lift_re_active' },
     description:
       'Remove an active breakpoint by id. Idempotent — removing an unknown/already-removed id is a no-op. Use when you are done with a bp, or call end_drive and the runtime will clean up automatically.',
     inputSchema: {
@@ -293,6 +295,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.listBreakpoints,
+    phasePolicy: { category: 'lift_re_active' },
     description:
       'List every active breakpoint on this session, with id, resolved location (file/line/column), and condition if any. Use to introspect after a flaky pause or to verify a bp landed where you expected.',
     inputSchema: {
@@ -305,6 +308,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.waitForPause,
+    phasePolicy: { category: 'lift_re_active' },
     description:
       'Block until the page hits a breakpoint or `timeout_ms` elapses. Does NOT resume — the page stays paused so you can inspect the frame. Response shape on a hit: `{hit: true, reason, breakpoint_ids, call_frames: [{frame_index, location, function_name, function_source_preview, scope_chain}]}`. `scope_chain[]` is a shallow list of scope types (`local`, `closure`, `global`) with preview strings — drill deeper with `get_frame_scope`. On timeout: `{hit: false, reason: "timeout", call_frames: []}`. Queues up to 5 unread pauses; the 6th drops the oldest. Only one outstanding wait per session — calling a second time while the first is in flight throws `already_waiting`. Default timeout 10000, max 60000.',
     inputSchema: {
@@ -324,6 +328,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.getFrameScope,
+    phasePolicy: { category: 'lift_re_active' },
     description:
       'Dump one scope of one paused call frame as a shallow property list. Pick the scope by `scope_type` (first match wins: `local`, `closure`, `global`, `block`, `catch`, `with`, `module`) OR by `scope_index` into the frame\'s scope_chain. Returns `{properties: [{name, type, preview, has_children}]}` capped at 200 entries (sets `truncated: true` over the cap). For the closure scope at the WebSocket.send site, `properties[]` typically contains the encoder function, the original args, and any buffered channel state — exactly what you need to save as a verified expression. Drill into nested objects with `evaluate_on_frame(frame_index, "name.of.thing")`. Session must be paused.',
     inputSchema: {
@@ -354,6 +359,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.evaluateOnFrame,
+    phasePolicy: { category: 'lift_re_active' },
     description:
       "Run arbitrary JS in the paused frame's context — DevTools-console-on-a-paused-frame. Backed by CDP `Debugger.evaluateOnCallFrame`, so the expression sees the frame's locals and closure-captured variables directly (unlike js_eval which runs at global scope). Typical uses: `JSON.stringify(arguments)` to snapshot the exact call args, `encodeSend.toString()` to read the encoder source, `this.__channel` to reach instance state. **Call `get_frame_scope(frame_index)` first** — the names and shapes of what's in scope depend on where the breakpoint landed (locals may be minified, `arguments[0]` may not be the payload you expect, `this` may be undefined in arrow bodies). Reading scope first avoids the \"undefined.byteLength\" class of error. Result is string-serialized (`result` on ok, `error` on throw). Execution is sync against the frozen page — no async IIFE wrap. Session must be paused. Expression cap 4096 chars; timeout default 5000, max 30000.",
     inputSchema: {
@@ -379,6 +385,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.step,
+    phasePolicy: { category: 'lift_re_active' },
     description:
       'Advance a paused execution by one step. `mode` is `over` (execute current line, pause at next), `into` (descend into a function call), or `out` (run to the end of the current function). Returns `{paused_at: {file, line, column, function_name}}` on the next pause, or `{done: true}` when execution resumes without pausing again within 5s. Session must be paused.',
     inputSchema: {
@@ -394,6 +401,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.resume,
+    phasePolicy: { category: 'lift_re_active' },
     description:
       "Release the current pause and let the page continue. No-op when the session isn't paused. Use after you have extracted everything you need from the paused frame. end_drive also auto-resumes, so in practice this tool is optional if you are about to close.",
     inputSchema: {

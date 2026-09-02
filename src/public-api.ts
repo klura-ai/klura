@@ -5,13 +5,10 @@ import { readStrategyEvents } from './working-dir/logbook';
 import { resolveSecret } from './identity/secrets';
 import { enforceFinalBudget, MAX_TOOL_OUTPUT_CHARS } from './response/response-size';
 
-/** Last-resort ceiling on a tool result's serialized size. 2× the per-tool
- *  best-effort budget — tight enough that MCP's 1 MB transport cap is
- *  unreachable, generous enough that the prefix obligation + checkpoint
- *  envelopes still fit without false-positive backstop fires. Per-tool
- *  compactors aim well below this; if `enforceFinalBudget` ever fires in
- *  production, a per-tool layer missed a case. */
-const FORMAT_TOOL_RESULT_CEILING = MAX_TOOL_OUTPUT_CHARS * 2;
+/** Last-resort ceiling on a tool result's serialized size. Per-tool
+ *  compactors aim well below this; the formatter enforces the public
+ *  single-result budget as a transport backstop. */
+const FORMAT_TOOL_RESULT_CEILING = MAX_TOOL_OUTPUT_CHARS;
 
 export { getHealth } from './strategies/health';
 export type { HealthStatus } from './strategies/health';

@@ -66,19 +66,19 @@ Semantics:
 - **Unacked warning → save rejected.** The unacked warning's `message` + `hint` are bundled into the rejection; the agent either fixes the strategy OR re-submits with a valid ack.
 - **Anti-canned-ack via `validateAck`** (optional per detector). The reason must reference a flagged value / key — a bare `"intentional"` doesn't pass.
 
-Detectors in `runtime/src/gate/save-warnings.ts` (consumed by the save-strategy audit):
+Detectors in the `runtime/src/gate/save-warnings*.ts` family (re-exported through `save-warnings.ts`, consumed by the save-strategy audit):
 
-- `unparametrized_session_id` — expression bodies reading session-scoped state (`location.href`, `document.URL`) + id-extraction shapes (`.match(`, `.split(`, `.slice(`, …). Catches "id read from whatever page the session happens to be on."
+- `unparametrized_session_id` — expression bodies reading session-scoped state (`location.href`, `document.URL`) + id-extraction shapes (`.match(`, `.split(`, `.slice(`, …). Catches "id read from whatever page the session happens to be on." Suppressed when the expression body reads caller `args.` or the strategy declares a `{kind: "capability"}` / `{kind: "tag"}` prereq — a caller-derived source or lookup sibling is already in play.
 - `unresolved_name_to_id_gap` — `notes.params.X.example` is id-shaped but the caller's declared args contain no matching `X` and no capability-prereq binds to it. Catches missing lookup siblings.
-- `entity_pinned_infra_prereq` — a `prerequisites[i].url` contains a verbatim substring from `session.declaredCapabilities[0].args`. Catches strategies that bake a single-entity id into an infra URL.
-- `inline_multi_fetch_prereq` — a single prereq packs multiple sequential fetches that should be split into siblings.
+- `entity_pinned_infra_prereq` — a `prerequisites[i].url` has a path segment or query value equal to a value from `session.declaredCapabilities[0].args`. Hostname matches are excluded because the hostname identifies the platform, not a caller entity.
+- `multi_fetch_inline_prereq` — a single executable-JS field inlines 2+ `fetch()` calls that should be split into sibling capabilities.
 - `prereq_bind_key_mismatch` — `prereq.binds` doesn't match the placeholder names the strategy actually references.
 - `lookup_embedded_in_prereq` — a downstream capability inlines a lookup-shaped prereq; the lookup should be a capability sibling. First-class `search_<entity>`, `lookup_<entity>`, `list_<entity>`, and equivalent `<entity>_search` capabilities own their retrieval surface and are excluded.
 - `auth_gated_without_auth_prereq` — strategy targets an origin where the session captured cookie-setting requests, but declares no `{kind: "capability"}` or `{kind: "tag", tag: "auth"}` prereq, and the strategy itself doesn't advertise `provides: ["auth"]`.
 
 ## The Audit class — one machinery, all save-time concerns
 
-Every save-time concern lives inside ONE `Audit` instance: `runtime/src/audit/lift/save-strategy.ts`. As of this writing, that instance composes 13 Detectors (literal provenance prerequisites, observed-property-keys, observed-literal-values, surface-triage-bound, URL observation, popup addressing, plus the seven structural save-warnings) and 4 Classifiers (literal_provenance, capability_name_justification, observed_siblings, user_confirmation). The class (`runtime/src/audit/index.ts`) absorbs the token mint + hash binding + rejection envelope; each concern is a small spec entry the class consumes.
+Every save-time concern lives inside ONE `Audit` instance: `runtime/src/audit/lift/save-strategy.ts`. That instance composes a few dozen Detectors (surface-triage binding, tier-verdict enforcement, URL observation, sensitive-shape refusal, popup addressing, the structural save-warnings, …) and a handful of Classifiers (literal_provenance, capability_name_justification, observed_siblings, user_confirmation, plus the token-bound warning classifiers) — `Audit.detectorKinds()` / `classifierKinds()` enumerate the live set. The class (`runtime/src/audit/index.ts`) absorbs the token mint + hash binding + rejection envelope; each concern is a small spec entry the class consumes.
 
 Two spec shapes:
 
@@ -88,6 +88,30 @@ Two spec shapes:
 Adding a new save-time concern is one row: write the detector or classifier, register it in the audit's `detectors` / `classifiers` arrays. Runtime threads the token, formats the rejection, scopes the hash, and persists ack reasons onto `notes.save_warnings_acked` automatically.
 
 The audit emits ONE rejection envelope regardless of how many spec entries fired — the agent sees a unified shape, not a stack of per-gate response shapes.
+
+### The save policy — one entry for every producer
+
+Strategies land on disk from five producers: the attended agent pipeline (`save_strategy` tool), the two auto-synth passes at `end_drive` (fetch/page-script capture-join and recorded-path replay), graduation (recorded-path → fetch/page-script after N consistent observations), and the programmatic API (daemon HTTP / embedder code). **All five route through `evaluateSavePolicy({origin, platform, capability, strategy, evidence})`** (`runtime/src/audit/lift/save-policy.ts`), which drives the same `saveStrategyAudit` instance; differences between producers are expressed via the `origin` (a `SAVE_ORIGINS` value from `runtime/src/vocab/index.ts`), never by skipping the audit:
+
+- `agent_explicit` — delegates to `Audit.process` unchanged: Stage 0 shape, Stage 1 detectors with ack semantics, Stage 2 token-gated classifiers.
+- `auto_synth_fetch` / `auto_synth_recorded` / `graduation` — the unattended pipeline: Stage 0 shape checks, then `Audit.runUnattended`, which runs every Detector and splits issues by the detector's `unattendedPolicy` (default derives from `ackReason`: `'none'` → blocking, `'required'` → warning; `'skip'` opts agent-workflow checks out). Blocking issues throw `SavePolicyBlockedError`; the auto-synth origins persist warn-tier issues onto `runtime_meta.save_warnings` for the next attended session. Classifiers don't run a token flow unattended (nothing would consume the token); a classifier whose structural signal still matters on the artifact supplies an `unattendedWarnings` projection (e.g. `parameterization_disclosure_required`).
+- `programmatic` — embedder code persisting a hand-constructed strategy, not LLM-emitted content: blocking issues demote to warnings in the returned `AuditResult` instead of refusing the caller's deliberate write.
+
+The payoff: a new save-time invariant lands ONCE as a Detector row and protects every producer by construction. `sensitive_action_must_be_recorded_not_saved` is the canonical example — one detector blocks the sensitive shape on the agent path, both synth passes, and graduation, with no per-producer copies.
+
+### The save-rejection bounce — structural dead ends
+
+The audit's rejection envelope is an iteration loop, and most agents clear it in 1–3 retries. The failure mode it doesn't self-correct is the agent iterating **the same rejection** with cosmetic edits — chasing a detector false-positive, a schema contradiction, or a shape the runtime genuinely can't save. `runtime/src/audit/lift/save-rejection-bounce.ts` guards that loop: every surfaced `save_strategy` rejection increments a per-session `(capability, family)` counter, and on the 3rd same-family rejection the thrown message escalates to `save_strategy_structural_dead_end` instead of echoing the audit prose again.
+
+The **family key** is a signature of what actively failed: the saved tier (`strategy.strategy` — a fetch → recorded-path pivot is a fresh family) plus the components carrying an active issue in _this_ rejection — unacked warning kinds on `unacked_warnings`; on `answers_inconsistent`, the classifier kinds (or `notes.params.<param>` paths for enum-grounding bullets) attributed from the issue bullets, never the full `items` checklist, so an auto-classified-and-resolved classifier doesn't inflate the family. `pending` and `payload_changed` rejections are audit-flow bookkeeping, not substantive failures — they never count.
+
+The **exit menu leads with the rejection's own remedy**: active warning hints and liftable classifier remedies (`capability_alternative`, `observed_alternatives`, `cross_session_evidence`, `classification_options`) render as the first options, a return-to-drive option is added when the rejection is enum-grounding-shaped, and the generic defer (`add_discovery_note`) / tier-switch / abandon (`abort_session`) triad closes the list. The bounce fires on the _rejection_, never preemptively on the attempt — the 3rd retry is evaluated in full, so a genuine structural fix commits normally.
+
+Two integration points: `applySaveRejectionBounce` (`runtime/src/audit/lift/save-policy.ts`) is the origin-gated policy entry — only `agent_explicit` saves with a live session count (unattended origins have no agent looping); the `rejectAudit` funnel in `runtime/src/tools/save-strategy.ts` routes every rejection it throws to the agent through it, so internal policy evaluations (acker discovery, pre-probe checks) never spend the budget. An accepted `submit_triage_plan` for the capability calls `resetSaveRejectionFamilies` — a re-plan is a deliberate pivot and restarts the budget.
+
+### Concern modules — one fact source per lockstep concern
+
+Concerns whose facts feed both an audit issue and an authoring hint (the triage / save authoring contracts in `runtime/src/phases/`) own one shared extractor under `runtime/src/audit/concerns/`: `slug-collision.ts` (tokenizer + query-value matcher), `citeable-artifacts.ts` (the tier-justification citation universe), `tier-rank.ts` (the tier speed ordering), `triage-verdict.ts` (logbook verdict lookup). The contracts project the same facts the detectors enforce; `runtime/test/authoring-contract-parity.test.js` asserts two-way detector↔constraint coverage on the triage side and a reviewed projection subset on the save side (via `Audit.detectorKinds()` / `classifierKinds()`). A new concern that surfaces in both places starts as a concern module, not as parallel copies.
 
 ## Known limitation — `user_confirmation` can't verify the quote
 
@@ -99,7 +123,7 @@ This is intentional and we're fine with it. The gate's job here isn't cryptograp
 
 | Gate | Level | Where | Why |
 | --- | --- | --- | --- |
-| `save_strategy` audit | 2 + 3 | `runtime/src/audit/lift/save-strategy.ts` | Single Audit instance composing 13 detectors + 4 classifiers. Wrong commit = silently-broken strategy every future caller runs. |
+| `save_strategy` audit | 2 + 3 | `runtime/src/audit/lift/save-strategy.ts` | Single Audit instance composing every save-time detector + classifier, applied to every producer via the save policy. Wrong commit = silently-broken strategy every future caller runs. |
 | `end_drive` audit | 2 + 3 | `runtime/src/audit/drive/end-drive.ts` | Second Audit instance — `capability_declaration_required` Detector (`ackReason: 'none'`) + `re_persistence` Classifier (token-gated). Same machinery as save-strategy audit, different lifecycle decision point. |
 | `trigger_reference_send` consent | 3 | `runtime/src/tools/trigger-reference-send.ts` | Re-fires a real submit on every call. Wrong commit = side-effect fired against a real service without user knowing. |
 

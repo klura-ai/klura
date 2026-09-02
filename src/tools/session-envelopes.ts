@@ -136,6 +136,16 @@ const ackCheckpointDescription = `Acknowledge a runtime-emitted checkpoint. When
 export const TOOL_DEFS: ToolDef[] = [
   {
     name: TOOL_NAMES.endDrive,
+    // extraPhases: lift admits end_drive as the abandon path when an audit
+    // loop fails to converge (auto-synth still runs at the orchestrator, so
+    // a salvageable recorded-path can land from drive history); execute
+    // admits it as the strategy-invocation abort. It survives every
+    // exhausted budget — a soft-blocked session must always have an exit.
+    phasePolicy: {
+      category: 'drive_active',
+      extraPhases: ['lift', 'execute'],
+      allowedWhenExhaustedIn: ['drive', 'lift', 'execute'],
+    },
     description:
       'End the DRIVE phase. The agent has finished driving the UI; runtime ALWAYS hands over to TRIAGE — agent does not get to decide "this was a one-off task, no triage needed." When any declared capability is unresolved, the triage handoff returns with captures inventory + diagnostic tools menu + plan-structure preview. When every declared capability is already saved (no unresolved work), the end_drive_audit `triage_acknowledgment` classifier fires instead: agent must echo `audit_token` + `{triage_acknowledgment: {acknowledged: true, reason: "<own words ≥20 chars>"}}` to confirm triage was considered. Phase-locked to drive — calling from triage or lift returns a structured rejection. Auto-close on terminal save_strategy means most sessions never need to call this explicitly.\n\nCloses the browser session. Runs auto-synthesis: builds `page-script`/`fetch` strategies by joining typed literals to captured HTTP request bodies, and a `recorded-path` from perform_action history. Also persists the discovery artifact (resume pointers + tool-call trace). Response carries `auto_synthesized: [{capability, tier, path}]`, `artifacts_updated: [{capability, sessions_contributed, has_blob}]`, and `_diagnostics.synth: [{pass, capability, phase, outcome, detail}]` explaining exactly what each synth pass found — whether it matched, where (http_request_body / ws_frame_sent / etc.), and why it saved or skipped. Read `_diagnostics` when you need to understand why auto-save produced nothing — the most common case is `outcome: "literal_in_ws_frame_only"` which means the send rode a binary WS frame and needs manual lift via `inspect_ws_frame` + `try_generator`. A related shape is `outcome: "context_bound_token_in_request"` — auto-save produced a fetch strategy whose captured request carries opaque headers that may bind to the JS context that generated them; if warm execute returns 401/403, lift manually via `evaluate_in_iframe` / `evaluate_in_iframe_chain` / `evaluate_in_worker` (third RE-toolkit axis).',
     inputSchema: {
@@ -176,6 +186,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.ackCheckpoint,
+    phasePolicy: { category: 'universal' },
     description: ackCheckpointDescription,
     inputSchema: {
       type: 'object',

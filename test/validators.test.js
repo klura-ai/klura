@@ -308,6 +308,33 @@ test('asReturnShape rejects required_keys on non-object kind', () => {
   );
 });
 
+// ---- asReturnShape: array kind ----
+
+test('asReturnShape accepts a bare array kind', () => {
+  assert.deepStrictEqual(asReturnShape({ kind: 'array' }, 'rs'), { kind: 'array' });
+});
+
+test('asReturnShape accepts array with min_items', () => {
+  assert.deepStrictEqual(asReturnShape({ kind: 'array', min_items: 1 }, 'rs'), {
+    kind: 'array',
+    min_items: 1,
+  });
+});
+
+test('asReturnShape rejects min_items on non-array kind', () => {
+  assert.throws(
+    () => asReturnShape({ kind: 'object', min_items: 1 }, 'rs'),
+    /only valid when kind === "array"/,
+  );
+});
+
+test('asReturnShape rejects required_keys on array kind', () => {
+  assert.throws(
+    () => asReturnShape({ kind: 'array', required_keys: ['x'] }, 'rs'),
+    /only valid when kind === "object"/,
+  );
+});
+
 // ---- assertReturnShape ----
 
 test('assertReturnShape validates string bounds', () => {
@@ -350,6 +377,29 @@ test('assertReturnShape rejects null in required_keys', () => {
     () => assertReturnShape({ token: null }, shape, 'v'),
     /missing required key "token"/,
   );
+});
+
+test('assertReturnShape serializes arrays and accepts an empty one without min_items', () => {
+  const shape = { kind: 'array' };
+  assert.strictEqual(assertReturnShape([], shape, 'v'), '[]');
+  assert.deepStrictEqual(JSON.parse(assertReturnShape([{ id: 1 }], shape, 'v')), [{ id: 1 }]);
+});
+
+test('assertReturnShape enforces min_items only when it is declared', () => {
+  assert.throws(
+    () => assertReturnShape([], { kind: 'array', min_items: 1 }, 'v'),
+    /shorter than declared min_items 1/,
+  );
+  assert.strictEqual(assertReturnShape([1], { kind: 'array', min_items: 1 }, 'v'), '[1]');
+});
+
+test('assertReturnShape rejects a non-array for array kind', () => {
+  assert.throws(() => assertReturnShape({ a: 1 }, { kind: 'array' }, 'v'), /must be an array/);
+  assert.throws(() => assertReturnShape('[]', { kind: 'array' }, 'v'), /must be an array/);
+});
+
+test('assertReturnShape does not accept an array for object kind', () => {
+  assert.throws(() => assertReturnShape([], { kind: 'object' }, 'v'), /.+/);
 });
 
 test('assertNoReservedKeys rejects __proto__ / constructor / prototype', () => {

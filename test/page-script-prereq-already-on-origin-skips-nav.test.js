@@ -86,6 +86,56 @@ test('page-script: session already on target origin → zero navigates before fe
   assert.equal(fetches.length, 1);
 });
 
+test('page-script transport omits absent optional body and header fields', async () => {
+  let fetchOptions;
+  const driver = {
+    async getUrl() {
+      return 'https://api.example.com/ready';
+    },
+    async fetchInBrowser(_session, _url, options) {
+      fetchOptions = options;
+      return { ok: true, status: 200, body: { ok: true } };
+    },
+    async saveStorageState() {},
+  };
+  const pool = {
+    async createSession() {
+      return { id: 'sess-optional' };
+    },
+    driverFor() {
+      return driver;
+    },
+    async endDrive() {},
+  };
+  const strategy = {
+    strategy: 'page-script',
+    baseUrl: 'https://api.example.com',
+    endpoint: '/search',
+    method: 'POST',
+    headers: { 'X-Cursor': '{{cursor}}' },
+    body: { query: '{{query}}', cursor: '{{cursor}}' },
+    notes: {
+      params: {
+        query: { kind: 'text' },
+        cursor: { kind: 'id', optional: true },
+      },
+    },
+  };
+
+  await executeFetchInBrowser(
+    strategy,
+    { query: 'books' },
+    'example',
+    'search_page',
+    pool,
+    null,
+    0,
+  );
+
+  assert.equal(fetchOptions.body, JSON.stringify({ query: 'books' }));
+  assert.equal(Object.hasOwn(fetchOptions.headers, 'X-Cursor'), false);
+});
+
 test('browser fetches share the configured local origin admission queue', async () => {
   fs.writeFileSync(
     path.join(TMP, 'config.json'),
@@ -103,7 +153,8 @@ test('browser fetches share the configured local origin admission queue', async 
     async fetchInBrowser(_session, url) {
       started();
       return await new Promise((resolve) => {
-        releaseFirst = () => resolve({ ok: true, status: 200, body: { first: true }, finalUrl: url });
+        releaseFirst = () =>
+          resolve({ ok: true, status: 200, body: { first: true }, finalUrl: url });
       });
     },
     async saveStorageState() {},
@@ -202,6 +253,103 @@ test('browser fetch surfaces a configured in-page request deadline', async () =>
     /timed out after 1000ms/,
   );
   assert.equal(receivedTimeout, 1_000);
+});
+
+test('browser POST deadline is typed as sent_unconfirmed after dispatch', async () => {
+  fs.writeFileSync(
+    path.join(TMP, 'config.json'),
+    JSON.stringify({ traffic: { request_timeout_ms: 1_000 } }),
+  );
+  let dispatched = 0;
+  const driver = {
+    async getUrl() {
+      return 'https://api.example.com/ready';
+    },
+    async fetchInBrowser() {
+      dispatched += 1;
+      return {
+        ok: false,
+        error: 'driver deadline',
+        timed_out: true,
+        delivery_state: 'sent_unconfirmed',
+      };
+    },
+    async saveStorageState() {},
+  };
+  const pool = {
+    async createSession() {
+      return { id: 'post-timeout-session' };
+    },
+    driverFor() {
+      return driver;
+    },
+    async endDrive() {},
+  };
+  const strategy = {
+    strategy: 'page-script',
+    baseUrl: 'https://api.example.com',
+    endpoint: '/v1/submit',
+    method: 'POST',
+    body: { value: 'one' },
+    headers: {},
+  };
+
+  await assert.rejects(
+    () => executeFetchInBrowser(strategy, {}, 'browser-timeout', 'submit', pool, null, 0),
+    (error) => {
+      assert.equal(error.name, 'FactoryExecutionStateError');
+      assert.equal(error.executionState, 'sent_unconfirmed');
+      assert.equal(error.code, 'http_delivery_unknown');
+      return true;
+    },
+  );
+  assert.equal(dispatched, 1);
+});
+
+test('browser POST proven not_sent remains an ordinary transport failure', async () => {
+  const driver = {
+    async getUrl() {
+      return 'https://api.example.com/ready';
+    },
+    async fetchInBrowser() {
+      return {
+        ok: false,
+        error: 'request construction rejected',
+        delivery_state: 'not_sent',
+      };
+    },
+    async saveStorageState() {},
+  };
+  const pool = {
+    async createSession() {
+      return { id: 'post-not-sent-session' };
+    },
+    driverFor() {
+      return driver;
+    },
+    async endDrive() {},
+  };
+  const strategy = {
+    strategy: 'page-script',
+    baseUrl: 'https://api.example.com',
+    endpoint: '/v1/submit',
+    method: 'POST',
+    body: { value: 'one' },
+    headers: {},
+  };
+
+  const result = await executeFetchInBrowser(
+    strategy,
+    {},
+    'browser-not-sent',
+    'submit',
+    pool,
+    null,
+    0,
+  );
+  assert.equal(result.status, 0);
+  assert.equal(result.executionState, undefined);
+  assert.equal(result.body.error, 'fetch_failed');
 });
 
 test('browser navigation receives the configured driver deadline', async () => {

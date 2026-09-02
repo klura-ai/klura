@@ -35,6 +35,8 @@ import { loadConfig } from '../config/handler';
 import { ValidationError, asArray, asObject, asEnum } from '../validators';
 import { substringMatchWithDecoding, extractContentType } from '../response/network-log-shape';
 import { KLURA_DIR } from '../paths';
+import { withOwnerFileLock, writeTextAtomically } from '../utils/owner-file-lock';
+import { SAVE_ORIGINS, type StrategyTier } from '../vocab';
 
 const GRADUATION_DIR = path.join(KLURA_DIR, 'graduation');
 
@@ -174,10 +176,8 @@ function readState(platform: string, capability: string): GraduationState {
 }
 
 function writeState(platform: string, capability: string, state: GraduationState): void {
-  const file = fileFor(platform, capability);
   try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(state, null, 2));
+    writeTextAtomically(fileFor(platform, capability), JSON.stringify(state, null, 2));
   } catch {
     // Best-effort — graduation must never crash execute().
   }
@@ -378,7 +378,10 @@ export function synthesizeHighestViable(
 function preValidate(strategy: Record<string, unknown>): void {
   try {
     const obj = asObject(strategy, 'strategy');
-    asEnum(obj.strategy, 'strategy.strategy', ['fetch', 'page-script'] as const);
+    // Graduation only synthesizes the two Node-liftable tiers — a deliberate
+    // subset of the tier vocabulary, membership vocab-checked via the type.
+    const GRADUATION_TIERS: readonly StrategyTier[] = ['fetch', 'page-script'];
+    asEnum(obj.strategy, 'strategy.strategy', GRADUATION_TIERS);
     if (typeof obj.baseUrl !== 'string' || obj.baseUrl.length === 0) {
       throw new ValidationError('strategy.baseUrl', 'must be a non-empty string');
     }
@@ -463,6 +466,27 @@ export function recordRecordedPathSuccess(
   wsContext?: GraduationWsContext,
 ): boolean {
   try {
+    // Serialize the whole observe→synthesize→persist flow per capability so a
+    // concurrent process can't lose an observation between read and write.
+    // Contention drops this observation — graduation is best-effort. Lock
+    // order: graduation lock → capability mutation lock (saveStrategy below);
+    // never the reverse.
+    return withOwnerFileLock(`${fileFor(platform, capability)}.lock`, () =>
+      recordRecordedPathSuccessLocked(platform, capability, log, wsContext),
+    );
+  } catch {
+    // Best-effort — never surface graduation errors to the caller.
+    return false;
+  }
+}
+
+function recordRecordedPathSuccessLocked(
+  platform: string,
+  capability: string,
+  log: InterceptedRequest[],
+  wsContext?: GraduationWsContext,
+): boolean {
+  try {
     const state = readState(platform, capability);
     if (state.graduatedTier) return false;
 
@@ -505,6 +529,12 @@ export function recordRecordedPathSuccess(
             capability,
             synthesized as skills.Strategy,
             `graduated from recorded-path to ${synthesizedTier} (${observationThreshold} consistent observations)`,
+            undefined,
+            undefined,
+            {
+              origin: SAVE_ORIGINS.graduation,
+              evidence: { observedUrls: collectObservedUrlsFromLog(log) },
+            },
           );
           state.graduatedTier = synthesizedTier;
           writeState(platform, capability, state);
@@ -547,6 +577,12 @@ export function recordRecordedPathSuccess(
           capability,
           wsSynthesized as skills.Strategy,
           `graduated from recorded-path to page-script/websocket (${observationThreshold} consistent ws-echo observations)`,
+          undefined,
+          undefined,
+          {
+            origin: SAVE_ORIGINS.graduation,
+            evidence: { observedUrls: collectObservedUrlsFromLog(log) },
+          },
         );
         state.graduatedTier = 'page-script';
         writeState(platform, capability, state);
@@ -562,6 +598,16 @@ export function recordRecordedPathSuccess(
     // Best-effort — never surface graduation errors to the caller.
     return false;
   }
+}
+
+/** Observed-URL ground truth for the save policy: every captured URL from
+ *  the successful recorded-path run graduation synthesized from. */
+function collectObservedUrlsFromLog(log: InterceptedRequest[]): string[] {
+  const out: string[] = [];
+  for (const entry of log) {
+    if (typeof entry.url === 'string' && entry.url.length > 0) out.push(entry.url);
+  }
+  return out;
 }
 
 function logSynthesisFailure(platform: string, capability: string, err: unknown): void {

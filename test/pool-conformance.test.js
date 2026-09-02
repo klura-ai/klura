@@ -1,7 +1,7 @@
 // Pool-level conformance test.
 //
 // Pool must satisfy the BrowserPool interface declared in
-// src/drivers/interface.ts. TypeScript enforces this at build time via
+// src/drivers/types/session.ts. TypeScript enforces this at build time via
 // `implements BrowserPool`; this file is the runtime safety net that catches
 // someone deleting a method without updating callers.
 
@@ -9,15 +9,20 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { Pool } from '../dist/pool/pool.js';
 
-// Method surface every BrowserPool implementation must expose. Sourced from
-// the interface in src/drivers/interface.ts — keep in lockstep when adding
-// new members.
+// Method surface the real Pool must expose. Sourced from the BrowserPool
+// interface in src/drivers/types/session.ts — keep in lockstep when adding
+// new members. `busy` is interface-optional (facades that own no browser
+// state may omit it) but required of Pool: it is the single idle/teardown
+// authority the daemon's idle shutdown consults.
 const REQUIRED_METHODS = [
   'createSession',
+  'createNodeOnlySession',
   'endDrive',
   'getSession',
+  'registerUserRound',
   'driverFor',
   'shutdown',
+  'busy',
 ];
 
 const REQUIRED_GETTERS = ['activeSessions', 'idleSince'];

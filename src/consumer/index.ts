@@ -418,3 +418,95 @@ export type {
   PackageStorePathsV1,
   PutVerifiedPackageInputV1,
 } from './store/package-store';
+export {
+  CALLER_BOUND_KEYS,
+  CONSUMER_BOUNDS,
+  CONSUMER_BYTE_LIMITS,
+  CONSUMER_LIMITS_MAX_ENTRIES_V1,
+} from '../public/contracts/consumer-bounds';
+export type { CallerBoundKeyV1, ConsumerIntegerBoundV1 } from '../public/contracts/consumer-bounds';
+export {
+  parseScrapeCallerBounds,
+  parseScrapeCallerLimitMap,
+} from '../public/contracts/scrape-policy';
+export {
+  capabilitySelectorContract,
+  CONSUMER_FIELDS,
+  CONSUMER_TOOL_CONTRACTS,
+  CONSUMER_WIRE_CONTRACTS,
+  parseConsumerArgs,
+  parseConsumerWireBody,
+  RUN_CANCELLATION_SOURCES,
+  RUN_OUTPUT_FORMATS,
+  startScrapeRunOptionsContract,
+  toolInputJsonSchema,
+} from './contracts/tool-contracts';
+export type {
+  ConsumerArgsContractV1,
+  ConsumerFieldContractV1,
+  ConsumerRunOutputInputV1,
+  ConsumerStartRunOptionsParsedV1,
+  ConsumerWireContractV1,
+} from './contracts/tool-contracts';
+export {
+  assessPackageFixtureCoverage,
+  PACKAGE_FIXTURE_COVERAGE_ISSUE_CODES,
+  PACKAGE_FIXTURE_KINDS,
+  PACKAGE_FIXTURE_LIMITS,
+  PACKAGE_FIXTURE_SCHEMA_VERSION,
+  packageFixtureFileName,
+  parsePackageFixtureFileName,
+  parsePublicPackageFixture,
+  parsePublicPackageFixtureBytes,
+  planPackageFixtureCoverage,
+} from '../public/contracts/fixture';
+export type {
+  PackageFixtureCoverageEntryV1,
+  PackageFixtureCoverageIssueCodeV1,
+  PackageFixtureCoverageIssueV1,
+  PackageFixtureKindV1,
+  ParsedPackageFixtureFileNameV1,
+  PublicPackageCallFixtureV1,
+  PublicPackageFixtureResponseV1,
+  PublicPackageFixtureV1,
+  PublicPackageRunFixtureV1,
+} from '../public/contracts/fixture';
+export {
+  PACKAGE_SOURCE_FILE_NAME,
+  parseRegistryCatalogManifest,
+  parseRegistryCatalogManifestBytes,
+  parseRegistryReleaseSourcePath,
+  parseRegistryReleaseState,
+  projectRegistryReleaseCatalog,
+  REGISTRY_CATALOG_LIMITS,
+  REGISTRY_CATALOG_MANIFEST_KEYS,
+  REGISTRY_CATALOG_RELEASE_KEYS,
+  REGISTRY_CATALOG_SCHEMA_VERSION,
+  REGISTRY_RELEASE_CATALOG_KEYS,
+  RELEASES_DIRECTORY_NAME,
+} from '../public/contracts/registry-catalog';
+export type {
+  RegistryCatalogManifestV1,
+  RegistryCatalogReleaseV1,
+  RegistryReleaseCatalogV1,
+  RegistryReleaseSourcePathV1,
+  RegistryReleaseStateV1,
+} from '../public/contracts/registry-catalog';
+export {
+  buildPackageReviewSnapshot,
+  projectCapabilityForReview,
+  projectPackageForReview,
+  projectStrategyForReview,
+  REVIEW_PROJECTION_OMITTED_KEYS,
+  REVIEW_PROJECTION_SCHEMA_VERSION,
+} from './registry/review-projection';
+export type {
+  PackageReviewSnapshotV1,
+  ReviewBrowserNavigationStrategyProjectionV1,
+  ReviewBrowserPageScriptStrategyProjectionV1,
+  ReviewCapabilityProjectionV1,
+  ReviewHttpStrategyProjectionV1,
+  ReviewPackageProjectionV1,
+  ReviewStrategyProjectionV1,
+} from './registry/review-projection';
+export { readConsumerRuntimeVersion } from './runtime-version';

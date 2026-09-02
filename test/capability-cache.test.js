@@ -24,9 +24,8 @@ test.after(() => {
   }
 });
 
-const { CapabilityCache, parseTtl, getCachedOrExecute } = await import(
-  '../dist/cache/capability-cache.js'
-);
+const { CapabilityCache, parseTtl, getCachedOrExecute } =
+  await import('../dist/cache/capability-cache.js');
 const { validateCacheShape } = await import('../dist/strategies/validate/cache.js');
 
 // ---------- TTL parser ----------
@@ -40,7 +39,21 @@ test('parseTtl: accepts seconds / minutes / hours', () => {
 });
 
 test('parseTtl: rejects malformed', () => {
-  for (const bad of ['', '30', '5min', '1d', '1w', 'm', '0s', '-5m', null, undefined, 30, '5.5m', '5 m']) {
+  for (const bad of [
+    '',
+    '30',
+    '5min',
+    '1d',
+    '1w',
+    'm',
+    '0s',
+    '-5m',
+    null,
+    undefined,
+    30,
+    '5.5m',
+    '5 m',
+  ]) {
     assert.throws(() => parseTtl(bad), /cache\.ttl/);
   }
 });
@@ -61,7 +74,15 @@ test('CapabilityCache: get/set roundtrip within TTL hits, beyond TTL misses', as
 
 test('CapabilityCache: stable arg hash — different key order, same hit', () => {
   const cache = new CapabilityCache();
-  cache.set('acme', undefined, 'search_contact', { name: 'bob', limit: 1 }, 200, { id: 'A' }, 60_000);
+  cache.set(
+    'acme',
+    undefined,
+    'search_contact',
+    { name: 'bob', limit: 1 },
+    200,
+    { id: 'A' },
+    60_000,
+  );
   // Reverse-order keys should still hit — JSON.stringify with sorted keys
   // canonicalizes the inputs.
   const hit = cache.get('acme', undefined, 'search_contact', { limit: 1, name: 'bob' });
@@ -88,6 +109,11 @@ test('CapabilityCache: errors are not stored', () => {
   assert.equal(cache.set('a', undefined, 'c', {}, 401, { error: 'auth' }, 60_000), false);
   // 2xx with error body
   assert.equal(cache.set('a', undefined, 'c', {}, 200, { error: 'something' }, 60_000), false);
+  // 2xx with an explicit factory failure
+  assert.equal(
+    cache.set('a', undefined, 'c', {}, 200, { ok: false, outcome: 'not_found' }, 60_000),
+    false,
+  );
   // 2xx with needs_generation
   assert.equal(cache.set('a', undefined, 'c', {}, 200, { needs_generation: true }, 60_000), false);
   // 2xx with healable blocker
@@ -170,8 +196,8 @@ test('validateCacheShape: absent block is fine', () => {
 
 test('validateCacheShape: accepts well-formed ttl', () => {
   for (const ttl of ['30s', '5m', '1h', '120s']) {
-    assert.doesNotThrow(() =>
-      validateCacheShape({ strategy: 'fetch', cache: { ttl } }),
+    assert.doesNotThrow(
+      () => validateCacheShape({ strategy: 'fetch', cache: { ttl } }),
       `expected ttl ${JSON.stringify(ttl)} to validate`,
     );
   }

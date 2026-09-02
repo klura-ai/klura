@@ -1,5 +1,8 @@
 import type { Strategy } from './skills';
-import { collectInlinePlaceholderRefs } from '../execution/placeholders';
+import {
+  collectInlinePlaceholderRefs,
+  normalizeUrlColonPlaceholders,
+} from '../execution/placeholders';
 
 export interface DeclaredPlaceholders {
   genNames: Set<string>;
@@ -23,6 +26,13 @@ export interface PlaceholderUse {
   path: string;
   ref: string;
   context: PlaceholderResolutionContext;
+  /**
+   * True only when the executor can omit this exact template occurrence for
+   * a missing `notes.params.<ref>.optional: true` value. Embedded templates
+   * and array elements remain required because omitting them would change the
+   * wire shape or positional meaning.
+   */
+  optionalOmittable: boolean;
 }
 
 interface PlaceholderDeclarationSource {
@@ -74,6 +84,10 @@ const PREREQ_PRODUCED_NAME_COLLECTORS: Record<string, ProducedNameCollector> = {
     raw.vars && typeof raw.vars === 'object'
       ? Object.keys(raw.vars as Record<string, unknown>)
       : [],
+  tag: (raw) =>
+    raw.vars && typeof raw.vars === 'object'
+      ? Object.keys(raw.vars as Record<string, unknown>)
+      : [],
 };
 
 function collectInterruptProducedNames(raw: unknown): Iterable<string> {
@@ -89,7 +103,7 @@ function collectInterruptProducedNames(raw: unknown): Iterable<string> {
 // — only explicit `step.as` outputs count. The runtime may hydrate
 // `tokens[prereq.name]` from cache on a warm hit, but that's an optimization,
 // not a portable declaration shape a newly-saved strategy should rely on.
-function getPrereqProducedNames(raw: unknown): Set<string> {
+export function collectPrerequisiteProducedNames(raw: unknown): Set<string> {
   const out = new Set<string>();
   if (!raw || typeof raw !== 'object') return out;
   const kind = (raw as Record<string, unknown>).kind;
@@ -147,7 +161,9 @@ export function collectDeclaredPlaceholders(
   const prereqs = (data as { prerequisites?: unknown[] }).prerequisites;
   if (Array.isArray(prereqs)) {
     for (const raw of prereqs) {
-      for (const name of getPrereqProducedNames(raw)) out.prereqProducedNames.add(name);
+      for (const name of collectPrerequisiteProducedNames(raw)) {
+        out.prereqProducedNames.add(name);
+      }
     }
   }
 
@@ -228,13 +244,19 @@ export function isPlaceholderDeclared(
   context: PlaceholderResolutionContext,
 ): boolean {
   if (ref.includes('.')) {
-    if (!context.allowGeneratedNames) return false;
     const [head, ...rest] = ref.split('.');
-    if (head !== '__gen') return false;
-    const genName = rest.join('.');
-    return declared.genNames.has(genName);
+    if (!head || rest.some((part) => !part || isUnsafePathSegment(part))) return false;
+    if (head === '__gen') {
+      if (!context.allowGeneratedNames) return false;
+      return declared.genNames.has(rest.join('.'));
+    }
+    return bareNamesForContext(declared, context).has(head);
   }
   return bareNamesForContext(declared, context).has(ref);
+}
+
+function isUnsafePathSegment(segment: string): boolean {
+  return segment === '__proto__' || segment === 'prototype' || segment === 'constructor';
 }
 
 function collectTemplateUses(
@@ -242,22 +264,52 @@ function collectTemplateUses(
   path: string,
   context: PlaceholderResolutionContext,
   out: PlaceholderUse[],
+  omissionMode: 'none' | 'object-value' | 'url' = 'none',
+  objectValueSlot = false,
+  insideArray = false,
 ): void {
   if (typeof value === 'string') {
-    for (const ref of collectInlinePlaceholderRefs(value)) {
-      out.push({ path, ref, context });
+    const template = omissionMode === 'url' ? normalizeUrlColonPlaceholders(value) : value;
+    for (const ref of collectInlinePlaceholderRefs(template)) {
+      const exactWholeValue = template === `{{${ref}}}`;
+      out.push({
+        path,
+        ref,
+        context,
+        optionalOmittable:
+          (omissionMode === 'object-value' && objectValueSlot && !insideArray && exactWholeValue) ||
+          (omissionMode === 'url' && isExactOptionalQueryValue(template, ref)),
+      });
     }
     return;
   }
   if (Array.isArray(value)) {
-    for (const entry of value) collectTemplateUses(entry, path, context, out);
+    for (const entry of value) {
+      collectTemplateUses(entry, path, context, out, omissionMode, false, true);
+    }
     return;
   }
   if (value && typeof value === 'object') {
     for (const entry of Object.values(value as Record<string, unknown>)) {
-      collectTemplateUses(entry, path, context, out);
+      collectTemplateUses(entry, path, context, out, omissionMode, true, false);
     }
   }
+}
+
+function isExactOptionalQueryValue(template: string, ref: string): boolean {
+  const token = `{{${ref}}}`;
+  const queryStart = template.indexOf('?');
+  if (queryStart < 0 || template.slice(0, queryStart).includes(token)) return false;
+  let found = false;
+  for (const segment of template.slice(queryStart + 1).split('&')) {
+    if (!segment.includes(token)) continue;
+    const eq = segment.indexOf('=');
+    if (eq < 0 || segment.slice(0, eq).includes(token) || segment.slice(eq + 1) !== token) {
+      return false;
+    }
+    found = true;
+  }
+  return found;
 }
 
 const GEN_CODE_ARGS_REF_RE = /\bargs\.([A-Z_a-z]\w*)/g;
@@ -276,6 +328,7 @@ function collectGeneratorArgUses(generated: unknown, out: PlaceholderUse[]): voi
         path: `generated.${name}.code`,
         ref: match[1],
         context: RUNTIME_ONLY_PLACEHOLDER_CONTEXT,
+        optionalOmittable: false,
       });
     }
   }
@@ -290,21 +343,44 @@ function collectPrereqUses(prereqs: unknown, out: PlaceholderUse[]): void {
     switch (prereq.kind) {
       case 'page-extract':
       case 'js-eval':
-        collectTemplateUses(prereq.url, `${pathBase}.url`, RUNTIME_ONLY_PLACEHOLDER_CONTEXT, out);
+        collectTemplateUses(
+          prereq.url,
+          `${pathBase}.url`,
+          RUNTIME_ONLY_PLACEHOLDER_CONTEXT,
+          out,
+          'url',
+        );
+        if (prereq.kind === 'js-eval') {
+          collectTemplateUses(
+            prereq.args_template,
+            `${pathBase}.args_template`,
+            RUNTIME_ONLY_PLACEHOLDER_CONTEXT,
+            out,
+            'object-value',
+          );
+        }
         break;
       case 'fetch-extract':
-        collectTemplateUses(prereq.url, `${pathBase}.url`, RUNTIME_ONLY_PLACEHOLDER_CONTEXT, out);
+        collectTemplateUses(
+          prereq.url,
+          `${pathBase}.url`,
+          RUNTIME_ONLY_PLACEHOLDER_CONTEXT,
+          out,
+          'url',
+        );
         collectTemplateUses(
           prereq.headers_map,
           `${pathBase}.headers_map`,
           RUNTIME_ONLY_PLACEHOLDER_CONTEXT,
           out,
+          'object-value',
         );
         collectTemplateUses(
           prereq.fetch_body,
           `${pathBase}.fetch_body`,
           RUNTIME_ONLY_PLACEHOLDER_CONTEXT,
           out,
+          'object-value',
         );
         break;
       case 'browser':
@@ -318,12 +394,21 @@ function collectPrereqUses(prereqs: unknown, out: PlaceholderUse[]): void {
               `${pathBase}.steps[${stepIdx}].${field}`,
               RUNTIME_ONLY_PLACEHOLDER_CONTEXT,
               out,
+              field === 'url' ? 'url' : 'object-value',
+              field !== 'url',
             );
           }
         });
         break;
       case 'capability':
-        collectTemplateUses(prereq.args, `${pathBase}.args`, RUNTIME_ONLY_PLACEHOLDER_CONTEXT, out);
+      case 'tag':
+        collectTemplateUses(
+          prereq.args,
+          `${pathBase}.args`,
+          RUNTIME_ONLY_PLACEHOLDER_CONTEXT,
+          out,
+          'object-value',
+        );
         break;
     }
   });
@@ -341,6 +426,7 @@ function collectInterruptUses(interrupts: unknown, out: PlaceholderUse[]): void 
       `interrupts[${idx}].handler.url`,
       RUNTIME_ONLY_PLACEHOLDER_CONTEXT,
       out,
+      'url',
     );
   });
 }
@@ -351,8 +437,14 @@ export function collectPlaceholderUses(data: Strategy): PlaceholderUse[] {
   const protocol = obj.protocol === 'websocket' ? 'websocket' : 'http';
 
   if (protocol === 'websocket') {
-    collectTemplateUses(obj.wsUrl, 'wsUrl', RUNTIME_ONLY_PLACEHOLDER_CONTEXT, out);
-    collectTemplateUses(obj.wsHeaders, 'wsHeaders', RUNTIME_ONLY_PLACEHOLDER_CONTEXT, out);
+    collectTemplateUses(obj.wsUrl, 'wsUrl', RUNTIME_ONLY_PLACEHOLDER_CONTEXT, out, 'url');
+    collectTemplateUses(
+      obj.wsHeaders,
+      'wsHeaders',
+      RUNTIME_ONLY_PLACEHOLDER_CONTEXT,
+      out,
+      'object-value',
+    );
     collectTemplateUses(obj.frame, 'frame', RUNTIME_ONLY_PLACEHOLDER_CONTEXT, out);
 
     const frameFromPage = obj.frameFromPage;
@@ -375,13 +467,25 @@ export function collectPlaceholderUses(data: Strategy): PlaceholderUse[] {
       );
     }
   } else {
-    collectTemplateUses(obj.endpoint, 'endpoint', HTTP_REQUEST_PLACEHOLDER_CONTEXT, out);
-    collectTemplateUses(obj.baseUrl, 'baseUrl', HTTP_REQUEST_PLACEHOLDER_CONTEXT, out);
-    collectTemplateUses(obj.headers, 'headers', HTTP_REQUEST_PLACEHOLDER_CONTEXT, out);
-    collectTemplateUses(obj.body, 'body', HTTP_REQUEST_PLACEHOLDER_CONTEXT, out);
-    collectTemplateUses(obj.params, 'params', HTTP_REQUEST_PLACEHOLDER_CONTEXT, out);
+    collectTemplateUses(obj.endpoint, 'endpoint', HTTP_REQUEST_PLACEHOLDER_CONTEXT, out, 'url');
+    collectTemplateUses(obj.baseUrl, 'baseUrl', HTTP_REQUEST_PLACEHOLDER_CONTEXT, out, 'url');
+    collectTemplateUses(
+      obj.headers,
+      'headers',
+      HTTP_REQUEST_PLACEHOLDER_CONTEXT,
+      out,
+      'object-value',
+    );
+    collectTemplateUses(obj.body, 'body', HTTP_REQUEST_PLACEHOLDER_CONTEXT, out, 'object-value');
+    collectTemplateUses(
+      obj.params,
+      'params',
+      HTTP_REQUEST_PLACEHOLDER_CONTEXT,
+      out,
+      'object-value',
+    );
     if (obj.strategy === 'page-script') {
-      collectTemplateUses(obj.origin, 'origin', HTTP_REQUEST_PLACEHOLDER_CONTEXT, out);
+      collectTemplateUses(obj.origin, 'origin', HTTP_REQUEST_PLACEHOLDER_CONTEXT, out, 'url');
     }
   }
 

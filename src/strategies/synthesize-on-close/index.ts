@@ -219,7 +219,12 @@ function buildSaveMarkers(session: Session): SaveMarker[] {
     capability: d.capability,
     at: nowTs,
     tier: 'declared',
-    args: d.args,
+    args: Object.fromEntries(
+      Object.entries(d.args).filter((entry): entry is [string, string] => {
+        const value = entry[1];
+        return typeof value === 'string';
+      }),
+    ),
   }));
   // Union: if both lists have the same capability name, the explicit save wins
   // (it has a real tier); its `at` is the later of the two, which is what the

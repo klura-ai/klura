@@ -90,6 +90,41 @@ test('js-eval per-call mode interpolates args_template and forwards as `args`', 
   assert.deepStrictEqual(result.tokens, { request_signature: 'signed-payload-token-12345678' });
 });
 
+test('js-eval per-call mode structurally omits an absent optional whole-value arg', async () => {
+  const { driver, calls } = makeDriver({ ok: true });
+  const pool = makePool(driver);
+
+  await runPrerequisites({
+    strategy: {
+      baseUrl: 'https://example.com',
+      notes: {
+        params: {
+          cursor: { kind: 'id', optional: true },
+        },
+      },
+      prerequisites: [
+        {
+          name: 'page',
+          kind: 'js-eval',
+          url: 'https://example.com/items',
+          expression: 'args.cursor ? loadNext(args.cursor) : loadFirst()',
+          binds: 'page',
+          return_shape: { kind: 'object', required_keys: ['ok'] },
+          args_template: { cursor: '{{cursor}}' },
+        },
+      ],
+    },
+    args: {},
+    platform: 'example',
+    pool,
+    tokenCache: null,
+  });
+
+  const eval_ = calls.find((c) => c.kind === 'evaluateExpression');
+  assert.ok(eval_, 'driver.evaluateExpression should have been called');
+  assert.deepStrictEqual(eval_.options.args, {});
+});
+
 test('js-eval per-call mode skips cache reads and writes', async () => {
   // The cache is keyed on (platform, bindsTo) with no awareness of
   // args_template, so a hit would bind a signature minted for a different

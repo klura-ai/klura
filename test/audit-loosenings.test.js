@@ -209,6 +209,49 @@ test('C2: templated secret ({{password}}) is accepted (caller_input)', () => {
   assert.deepEqual(issues, [], 'a templated {{password}} bound to a declared param is fine');
 });
 
+test('C2: nested caller-input path is grounded by its declared root param', () => {
+  const data = {
+    strategy: 'page-script',
+    origin: 'https://example.com',
+    response: { from: 'result', format: 'json' },
+    prerequisites: [
+      {
+        name: 'lookup',
+        kind: 'capability',
+        capability: 'search_items',
+        args: { query: '{{queries.0}}' },
+        vars: { result: 'body' },
+      },
+    ],
+    notes: { params: { queries: { kind: 'json', example: '["pizza"]' } } },
+  };
+  const issues = validateLiteralAnswer(
+    data,
+    { path: 'prerequisites[0].args.query', value: '{{queries.0}}' },
+    { caller_input: 'queries.0' },
+  );
+  assert.deepEqual(
+    issues,
+    [],
+    'a nested path inherits provenance from the declared top-level caller argument',
+  );
+});
+
+test('C2: positional caller-input alias is grounded by declaration order', () => {
+  const data = {
+    strategy: 'fetch',
+    baseUrl: 'https://example.com',
+    endpoint: '/search?q={{0}}',
+    notes: { params: { query: { kind: 'text', example: 'pizza' } } },
+  };
+  const issues = validateLiteralAnswer(
+    data,
+    { path: 'endpoint', value: '/search?q={{0}}' },
+    { caller_input: '0' },
+  );
+  assert.deepEqual(issues, [], 'a positional alias resolves to its declared caller argument');
+});
+
 test('C2: non-secret identifier (username) is NOT force-rejected on static', () => {
   // Only the secret half of a credential pair is forced; usernames/emails can
   // be legitimately frozen for a single-account strategy.

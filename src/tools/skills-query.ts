@@ -1,4 +1,5 @@
 import * as skills from '../strategies/skills';
+import { STRATEGY_TIERS, type StrategyTier } from '../vocab';
 import type { Strategy, SkillInfo } from '../strategies/skills';
 import { loadLogbook as loadLogbookForPlatform } from '../working-dir/logbook';
 import { recomputeFieldStability } from '../working-dir/derived/field-stability';
@@ -140,13 +141,10 @@ export function getSavedSkillsSummaryMd(): string {
   ].join('\n');
 }
 
-const STRATEGY_TIER_VALUES = ['fetch', 'page-script', 'recorded-path'] as const;
-type GetStrategyTier = (typeof STRATEGY_TIER_VALUES)[number];
-
 export interface GetStrategyArgs {
   platform: string;
   capability: string;
-  tier?: GetStrategyTier;
+  tier?: StrategyTier;
 }
 
 /**
@@ -162,7 +160,7 @@ export interface GetStrategyArgs {
 export function getStrategy(args: GetStrategyArgs): Strategy | null {
   let platform: string;
   let capability: string;
-  let tier: GetStrategyTier | undefined;
+  let tier: StrategyTier | undefined;
   try {
     const obj = args as unknown as Record<string, unknown>;
     if (typeof obj !== 'object') {
@@ -178,8 +176,7 @@ export function getStrategy(args: GetStrategyArgs): Strategy | null {
     }
     if (obj.tier !== undefined && obj.tier !== null) {
       const t = obj.tier;
-      asEnum(t, 'tier', STRATEGY_TIER_VALUES);
-      tier = t as GetStrategyTier;
+      tier = asEnum(t, 'tier', STRATEGY_TIERS);
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -281,6 +278,7 @@ import { getStrategyEvents } from '../public-api';
 export const TOOL_DEFS: ToolDef[] = [
   {
     name: TOOL_NAMES.listPlatformSkills,
+    phasePolicy: { category: 'universal' },
     description:
       'List platform skills — one entry per platform with its saved capabilities and any observed-but-not-lifted ones. Pass `platform` to scope the result to a single site (recommended when the caller already knows which platform they need — the full-corpus response routinely exceeds the output budget on machines with many primed platforms).',
     inputSchema: {
@@ -298,6 +296,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.getStrategy,
+    phasePolicy: { category: 'universal' },
     description:
       "Return the full body of a previously-saved strategy — including `generated.<name>.code` and the complete `notes` block — so you can inspect a saved skill in detail. `list_platform_skills` only returns a summary; this is the detail-on-demand tool. Prior-discovery continuation context (verified expressions, envelope notes, resume pointers) lives in the capability's discovery_artifact, not in the strategy body — fetch it via `get_discovery_artifact_field` or read the inline block on end_drive's LIFT handoff (`triage[<cap>].discovery_artifact`). Ordering: if `tier` is omitted, returns the highest-tier saved strategy. Returns the raw strategy object, or `null` if none exists.",
     inputSchema: {
@@ -307,7 +306,7 @@ export const TOOL_DEFS: ToolDef[] = [
         capability: { type: 'string', description: 'Capability name (e.g. "send_message")' },
         tier: {
           type: 'string',
-          enum: ['fetch', 'page-script', 'recorded-path'],
+          enum: [...STRATEGY_TIERS],
           description:
             'Optional: fetch a specific tier. Omit to use the default ordering (highest-tier saved strategy).',
         },
@@ -324,6 +323,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.getStrategyEvents,
+    phasePolicy: { category: 'universal' },
     description:
       'Return strategy life-cycle events for a platform, most recent first. Events are appended whenever a saved strategy is mutated: `discovered` / `rediscovered` on save, `tier_demote` on persistent transport failure, `archived` / `unarchived` on manual reset, `patched` on step patch, `healed` when a broken strategy recovers. Pass `capability` to narrow; pass `limit` to cap the slice (default 50). Use to answer "what changed about this skill lately?" without loading the full logbook.',
     inputSchema: {
@@ -340,6 +340,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.getPlatformLogbook,
+    phasePolicy: { category: 'universal' },
     description:
       'Return the platform working-dir summary: per-capability lift history, cross-session data sufficiency, field-stability classifier output, bundle-drift events, signer-anchor history, AND `known_modules` (in-page module / global names referenced by the platform\'s saved strategies — extract source is lexical, so if `AppTransport` appears in a saved `require(...)` call, it\'s listed here as `{name:"AppTransport", source:"require", used_by:["send_message", ...]}`). Use at end_drive / LIFT entry to see "how much do we already know about this platform?" — BEFORE enumerating training-prior module name guesses at `js_eval`, probe the names in `known_modules` first; those are the identifiers the page actually exposed in prior successful lifts. Pass `capability` to narrow the payload to one capability.',
     inputSchema: {

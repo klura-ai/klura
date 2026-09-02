@@ -131,6 +131,11 @@ export function collectExecutableJsStrings(data: Strategy): ExecutableJsString[]
  * uses it as a value that should have come from a caller arg or a
  * lookup-companion prereq.
  *
+ * Expressions that also read `args.*` are skipped: the caller-supplied
+ * binding is threaded into the same body, so the session-state read is a
+ * fallback, not the value's sole provenance — free-form JavaScript
+ * provenance beyond that is left to the authoring agent.
+ *
  * This is NOT a reject: some legitimate uses (reading a rotating page- scoped
  * CSRF token out of document state, deriving a per-tab client id) share the
  * same mechanical shape. The agent is the intelligence; the runtime surfaces
@@ -174,6 +179,9 @@ export function detectSessionScopedIdExtraction(data: Strategy): SaveWarning[] {
   if (hasCapabilityPrereq) return warnings;
 
   for (const { path, body } of expressions) {
+    // `args` is the runtime's caller-input binding inside expression bodies;
+    // a body that reads it has a caller-supplied source in play.
+    if (/\bargs\s*\./.test(body)) continue;
     const stateRead = SESSION_STATE_READS.find((s) => body.includes(s));
     if (!stateRead) continue;
     const extractShape = ID_EXTRACTION_SHAPES.find((shape) => body.includes(shape));
@@ -252,9 +260,9 @@ export function detectNameIdMismatch(data: Strategy, sessionId?: string): SaveWa
 }
 
 /**
- * Entity-pinned infra-prereq detector. When a `prerequisites[i].url` contains a
- * substring that appears verbatim in the caller's declared args, the prereq is
- * bound to the discovery-session's entity instead of a site-wide root. For
+ * Entity-pinned infra-prereq detector. When a `prerequisites[i].url` has a
+ * path segment or query value equal to one of the caller's declared args, the
+ * prereq is bound to the discovery-session's entity instead of a site-wide root. For
  * infra prereqs (guest-token cookie scrape, main-bundle JS parsing, CSRF token
  * extraction) the URL should be the site root — loading any page would work,
  * and pinning to the discoverer's profile makes the strategy read like it's
@@ -291,7 +299,7 @@ export function detectEntityPinnedPrereqUrls(data: Strategy, sessionId?: string)
     const url = pr.url;
     if (typeof url !== 'string' || url.length === 0) return;
     for (const { name, value } of scannable) {
-      if (!url.includes(value)) continue;
+      if (!urlContainsEntityComponent(url, value)) continue;
       warnings.push({
         kind: 'entity_pinned_infra_prereq',
         message:
@@ -310,6 +318,38 @@ export function detectEntityPinnedPrereqUrls(data: Strategy, sessionId?: string)
     }
   });
   return warnings;
+}
+
+/**
+ * Compares caller values only with entity-bearing URL components. Hostnames
+ * identify the platform and cannot prove that a prerequisite is pinned to the
+ * caller's entity. Exact component equality avoids treating unrelated words
+ * that happen to occur in a URL as evidence.
+ */
+function urlContainsEntityComponent(url: string, value: string): boolean {
+  if (url === value) return true;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+
+  const components = [
+    ...parsed.pathname.split('/').filter(Boolean),
+    ...parsed.searchParams.values(),
+  ];
+  if (parsed.hash.length > 1) components.push(parsed.hash.slice(1));
+
+  return components.some((component) => {
+    if (component === value) return true;
+    try {
+      return decodeURIComponent(component) === value;
+    } catch {
+      return false;
+    }
+  });
 }
 
 /**
@@ -614,7 +654,7 @@ interface SessionLite {
    *  agent typed it; it's not an enumerable option). */
   declaredCapabilities?: ReadonlyArray<{
     capability: string;
-    args: Record<string, string>;
+    args: Record<string, unknown>;
     declared_at: number;
   }>;
 }

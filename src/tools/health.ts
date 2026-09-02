@@ -6,7 +6,12 @@
 import fs from 'fs';
 import path from 'path';
 import { getKluraHome } from '../paths';
-import { listPlatformHealth, successRate, isSilenced } from '../strategies/health';
+import {
+  listPlatformHealth,
+  successRate,
+  isSilenced,
+  evaluateBrokenTierProbation,
+} from '../strategies/health';
 import { loadConfig } from '../config/handler';
 import { asPlatformSlug, ValidationError } from '../validators';
 
@@ -29,6 +34,16 @@ export interface StrategyHealthEntry {
    *  threshold AND the capability is not silenced — i.e. the next `execute`
    *  call would raise the rediscover gate. */
   rediscover_gate_armed: boolean;
+  /** True when the tier is `broken` and still inside its probation window —
+   *  `execute` skips it without running, so no new outcome can land. Always
+   *  false for healthy/degraded tiers. */
+  quarantined: boolean;
+  /** Unix-ms at which a `broken` tier becomes probe-eligible: the next
+   *  `execute` reaching it runs it once and lets the outcome re-decide its
+   *  health. `null` when the tier isn't broken, when it is already
+   *  probe-eligible, or when probation is disabled
+   *  (`pool.brokenProbationHours = 0`). */
+  probe_eligible_at: number | null;
 }
 
 export interface GetStrategyHealthArgs {
@@ -74,6 +89,8 @@ export function getStrategyHealth(args: GetStrategyHealthArgs = {}): GetStrategy
 
   const cfg = loadConfig();
   const threshold = cfg.pool.rediscoverThreshold;
+  const probationHours = cfg.pool.brokenProbationHours;
+  const now = Date.now();
   const entries: StrategyHealthEntry[] = [];
 
   for (const platform of platforms) {
@@ -82,6 +99,9 @@ export function getStrategyHealth(args: GetStrategyHealthArgs = {}): GetStrategy
       const rate = successRate(r.status);
       const silenced = isSilenced(platform, r.capability);
       const rediscover_gate_armed = threshold > 0 && rate !== null && rate < threshold && !silenced;
+      // Same policy function the executor consults, so this surface can never
+      // disagree with what the next execute() actually does.
+      const probation = evaluateBrokenTierProbation(r.status, probationHours, now);
       entries.push({
         platform,
         capability: r.capability,
@@ -95,6 +115,8 @@ export function getStrategyHealth(args: GetStrategyHealthArgs = {}): GetStrategy
         last_error: r.status.lastError,
         silenced,
         rediscover_gate_armed,
+        quarantined: probation.action === 'skip',
+        probe_eligible_at: probation.action === 'skip' ? probation.nextProbeAt : null,
       });
     }
   }
@@ -117,8 +139,9 @@ import type { ToolDef } from '../tools/types';
 
 export const TOOL_DEF: ToolDef = {
   name: TOOL_NAMES.getStrategyHealth,
+  phasePolicy: { category: 'none' },
   description:
-    'Per-strategy rolling success rate + status for saved skills. Returns one row per (platform, capability, strategy_type) with `success_rate` (over the last ≤20 calls; null when fewer than 5 samples), `samples`, `status` (healthy/degraded/broken), `last_error`, `silenced`, and `rediscover_gate_armed` (true when the next `execute` call would raise the rediscover ack-gate). Pass `platform` to scope to one platform; omit to list all known platforms. Use this proactively to spot strategies that have rotted before they fire mid-flow. Threshold lives in `pool.rediscoverThreshold` (configure via the `configure` tool).',
+    'Per-strategy rolling success rate + status for saved skills. Returns one row per (platform, capability, strategy_type) with `success_rate` (over the last ≤20 calls; null when fewer than 5 samples), `samples`, `status` (healthy/degraded/broken), `last_error`, `silenced`, `rediscover_gate_armed` (true when the next `execute` call would raise the rediscover ack-gate), plus `quarantined` + `probe_eligible_at` (a broken tier `execute` skips until its probation window elapses). Pass `platform` to scope to one platform; omit to list all known platforms. Use this proactively to spot strategies that have rotted before they fire mid-flow. Thresholds live in `pool.rediscoverThreshold` and `pool.brokenProbationHours` (configure via the `configure` tool).',
   inputSchema: {
     type: 'object',
     properties: {

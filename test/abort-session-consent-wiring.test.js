@@ -114,6 +114,43 @@ test('consent ack → performAbortTeardown runs; ledger entry written; pendingAb
   }
 });
 
+test('regression: consent prompt renders the real abort classification, not the checkpoint kind', async () => {
+  // The consent prompt's "(kind: `...`)" slot must show the AbortKind the
+  // agent passed to abort_session (typed `abort_kind` on the checkpoint
+  // context), not the checkpoint's own kind label.
+  const platform = 'abort-consent-prompt';
+  const session = makeFakeSession('sess_abort_consent_prompt', platform);
+  const endDriveSpy = { calls: 0 };
+  const restore = patchPool(session, endDriveSpy);
+  try {
+    const result = await abortSession({
+      session_id: session.id,
+      reason: 'origin serves an interstitial block page on every entry path tried',
+      kind: 'origin_blocked',
+    });
+    assert.ok(result._checkpoint, 'envelope present');
+    const prompt = String(result._checkpoint.prompt ?? '');
+    assert.match(
+      prompt,
+      /kind: `origin_blocked`/,
+      'prompt must render the abort classification the agent passed',
+    );
+    assert.ok(
+      !prompt.includes('kind: `abort_session_consent`'),
+      'prompt must not mislabel the abort classification with the checkpoint kind',
+    );
+    // Clean up the staged abort so this session leaks no pending state.
+    await ackCheckpoint({
+      session_id: session.id,
+      checkpoint_token: result._checkpoint.checkpoint_token,
+      cancelled: true,
+      reason: 'prompt-content regression check only',
+    });
+  } finally {
+    restore();
+  }
+});
+
 test('decline ack → no teardown; pendingAbort cleared; agent told to keep trying', async () => {
   const platform = 'abort-consent-no';
   const session = makeFakeSession('sess_abort_consent_no', platform);

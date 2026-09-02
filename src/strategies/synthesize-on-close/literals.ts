@@ -2,10 +2,12 @@
 // the session captured for verbatim occurrences of a typed value and reports
 // raw findings. Generic by design — the runtime reports what it found, the
 // agent reasons from there. Also hosts the typed-text drift detector and the
-// save-warnings attachment helper, which both ride on the same primitive.
+// save-evidence collector, which both ride on the same session state.
 
 import type { Session } from '../../drivers/types/session';
 import { WRITE_SHAPED_ACTIONS } from '../../audit/drive/end-drive';
+import { getAllParamObservations } from '../../response/session-observations';
+import type { SaveEvidence } from '../../audit/lift/save-policy';
 import { stringifyOrEmpty } from './helpers';
 
 /** One source of ground-truth matches for a typed literal across every
@@ -259,13 +261,42 @@ export function detectSilentlyBakedArgs(
   return baked;
 }
 
-export function attachSaveWarningsToStrategy(
-  strategy: Record<string, unknown>,
-  warnings: SaveWarning[],
-): void {
-  if (warnings.length === 0) return;
-  const meta = (strategy.runtime_meta ?? {}) as Record<string, unknown>;
-  const existing = Array.isArray(meta.save_warnings) ? (meta.save_warnings as SaveWarning[]) : [];
-  meta.save_warnings = [...existing, ...warnings];
-  strategy.runtime_meta = meta;
+/**
+ * Session-derived evidence for the save policy's unattended pipeline.
+ * Mirrors what the explicit save path feeds the audit: every captured
+ * XHR/fetch URL plus top-level visited URLs (observed-URL ground truth),
+ * captured origin+pathname pairs (lookup-prereq check), and the per-param
+ * observation index (enum grounding + snapshot at commit time).
+ */
+export function collectSaveEvidence(session: Session): SaveEvidence {
+  const observedUrls: string[] = [];
+  const capturedEndpointPaths = new Set<string>();
+  for (const req of session.intercepted) {
+    if (typeof req.url !== 'string' || req.url.length === 0) continue;
+    observedUrls.push(req.url);
+    try {
+      const u = new URL(req.url);
+      capturedEndpointPaths.add(`${u.origin}${u.pathname}`);
+    } catch {
+      // skip non-URL entries
+    }
+  }
+  for (const visited of session.visitedUrls ?? []) {
+    if (typeof visited === 'string' && visited.length > 0 && visited !== 'about:blank') {
+      observedUrls.push(visited);
+    }
+  }
+  let observedParamValues: SaveEvidence['observedParamValues'];
+  try {
+    observedParamValues = getAllParamObservations(session.id);
+  } catch {
+    observedParamValues = {};
+  }
+  return {
+    sessionId: session.id,
+    session,
+    observedUrls,
+    capturedEndpointPaths,
+    observedParamValues,
+  };
 }

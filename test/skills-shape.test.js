@@ -133,21 +133,56 @@ test('notes.params.kind must be from the allowed enum', () => {
   );
 });
 
-test('notes.params.example must be a string', () => {
+test('notes.params.example accepts JSON scalar, array, and object values', () => {
+  for (const example of [123, true, null, ['coffee', 'tea'], { country: 'se' }]) {
+    validateStrategyShape({
+      ...base(),
+      notes: { params: { input: { example } } },
+    });
+  }
+});
+
+test('notes.params kind array/object accepts a matching structured example', () => {
+  validateStrategyShape({
+    ...base(),
+    notes: {
+      params: {
+        searches: { kind: 'array', example: ['coffee'] },
+        geolocation: { kind: 'object', example: { lat: 59.3, lng: 18.1 } },
+      },
+    },
+  });
+});
+
+test('notes.params kind array/object rejects a mismatched example', () => {
   expectReject(
     {
       ...base(),
-      notes: { params: { user_id: { example: 123 } } },
+      notes: { params: { searches: { kind: 'array', example: 'coffee' } } },
     },
-    /notes\.params\.user_id\.example.*(must be a string|expected string)/,
+    /example.*must be an array when kind is "array"/,
+  );
+  expectReject(
+    {
+      ...base(),
+      notes: { params: { geolocation: { kind: 'object', example: ['se'] } } },
+    },
+    /example.*must be an object when kind is "object"/,
   );
 });
 
-test('notes.params.example over 2000 chars is rejected', () => {
+test('notes.params.example over 2000 serialized chars is rejected', () => {
   expectReject(
     {
       ...base(),
       notes: { params: { user_id: { example: 'x'.repeat(2001) } } },
+    },
+    /example is too long/,
+  );
+  expectReject(
+    {
+      ...base(),
+      notes: { params: { filters: { kind: 'object', example: { q: 'x'.repeat(2001) } } } },
     },
     /example is too long/,
   );

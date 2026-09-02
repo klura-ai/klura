@@ -371,6 +371,7 @@ import type { ToolDef } from '../tools/types';
 export const TOOL_DEFS: ToolDef[] = [
   {
     name: TOOL_NAMES.inspectWsFrame,
+    phasePolicy: { category: 'read_only_diagnostic' },
     description:
       'Return a byte-level view of a captured WebSocket frame. Use when composing `generated.frame.code` for a binary envelope (length-prefixed headers, nested-escaped JSON, varint encoding) — eyeballing a 1-KB raw-octet string in a `get_network_log({ws_i, full: true})` response is slow and error-prone. Three formats: "mixed" (default — classic hex dump with offset column + 16 hex bytes per line + ASCII gutter, easiest for spotting length prefixes and topic/command strings); "hex" (space-separated lowercase bytes, no formatting); "utf8" (decoded text with non-printable control bytes escaped as \\xNN, useful for seeing JSON payloads inside the envelope). Paginate with {offset, length} — default 512 bytes per call, max 4096. **One-call iteration-1 starter**: pass `text_contains` with the literal you typed and, when the frame matches the binary-WS write shape, the response carries a `starter` field — a runnable generator pre-wired to splice `args.text` into the captured envelope. Pair with `try_generator({code: starter.code, args: starter.args_for_iteration_1, verify_against: {ws_hash}})` for a one-call ok:true that confirms envelope shape; the rest is refactor-not-discover (template the dynamic fields named in `starter.next_iteration_targets`). **Stable handle**: response carries `ws_hash` — a content-addressed handle that survives ring-buffer rotation and can be passed to every RE tool in place of `ws_i`. Prefer `ws_hash` for any reference you reuse across multiple tool calls.',
     inputSchema: {
@@ -424,6 +425,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.findInWsFrame,
+    phasePolicy: { category: 'read_only_diagnostic' },
     description:
       'Locate every byte offset where `needle` appears inside a captured WebSocket frame (treated as raw octets — UTF-8 substrings match against the utf-8-encoded bytes). Use this to find the byte offset of the user-variable substring (the message text you typed) inside a length-prefixed binary envelope, which is the anchor your `generated.frame.code` needs when it composes the outgoing frame from a slice-and-inject shape. Returns `{offsets: number[], total_length: number, truncated?: boolean}`. Up to 32 offsets per call. Accepts ws_i OR ws_hash — prefer ws_hash (survives ring rotation).',
     inputSchema: {
@@ -454,6 +456,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.pinWsFrame,
+    phasePolicy: { category: 'read_only_diagnostic' },
     description:
       "Explicitly pin a captured WebSocket frame so it survives the ring buffer's FIFO rotation. Returns the stable `ws_hash` to pass to every RE tool (inspect_ws_frame, find_in_ws_frame, try_generator_in_page.verify_against, explain_ws_frame_structure). Use when you want a reference frame to remain addressable across many iteration rounds — the ring cap means long RE sessions lose early frames as new ones push them out. The end_drive RE nag already auto-pins the target frame identified in `signal.ws_hash`; use this tool for additional frames (companion ack frame, prior-send diff target) the auto-pin couldn't know about. Pins are capped per session (LRU eviction on overflow) — response carries `pinned_count`, `pinned_cap`, and any `evicted_hash`.",
     inputSchema: {
@@ -478,6 +481,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.explainWsFrameStructure,
+    phasePolicy: { category: 'read_only_diagnostic' },
     description:
       'Structural explainer for a captured WebSocket frame. One call returns: (1) detected wire protocol — `mqtt_publish`, `protobuf_unary`, `grpc_web`, `thrift_compact`, `json`, or `raw`; (2) for JSON-like envelopes, a parse tree with depth-1 keys, a pretty-printed preview (≤ 2KB), and json-path locations of any `text_anchor` you supply (the typed literal you want to parameterize); (3) nested-JSON-string detection: an outer envelope whose `payload` field is itself stringified JSON); (4) a `hints` array explaining what the bytes are and how to reconstruct a frame. Use this at the START of a binary-WS reverse-engineering attempt — it replaces ~20 rounds of hand-walking `inspect_ws_frame(format:"utf8", offset:N, length:M)` with one structured view.',
     inputSchema: {

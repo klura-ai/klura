@@ -1,7 +1,8 @@
+import crypto from 'crypto';
 import { BrowserDriver } from '../drivers/interface';
-import type { BrowserPool, Session, SessionOptions } from '../drivers/types/session';
+import type { BrowserLease, BrowserPool, Session, SessionOptions } from '../drivers/types/session';
+import { disposeSessionScope } from './session-scope';
 import { JsEvalCacheImpl } from '../strategies/js-eval-cache';
-import { loadConfig, type ConnectConfig } from '../config/handler';
 import { isDrivenByExternalMcpHost } from '../runtime-state/mcp-host';
 import {
   emptyStats,
@@ -9,6 +10,13 @@ import {
   type RecentDiffEntry,
   type TryGeneratorStats,
 } from '../strategies/try-generator-stats';
+import { resolveDriverClass, type DriverCtor, type PoolOptions } from './create-pool';
+import { DEFAULT_IDENTITY, deviceFingerprintOf, warmKey, type WarmEntry } from './warm-slots';
+
+// Construction surface (driver registry + config-reading factory) lives in
+// ./create-pool — re-exported so callers keep the canonical pool import path.
+export { createPool, resolveDriverClass } from './create-pool';
+export type { PoolOptions, DriverConstructorOptions, DriverCtor } from './create-pool';
 
 // Gate `[pool]` trace lines behind KLURA_VERBOSE so daemon stderr stays quiet
 // in normal use. Matches the convention used by the bench harness (`bench/*`).
@@ -16,135 +24,6 @@ import {
 const trace = (...args: unknown[]): void => {
   if (process.env.KLURA_VERBOSE === '1') console.log(...args);
 };
-
-interface PoolOptions {
-  idleTimeout?: number; // seconds, default 300
-  /** Driver name or path. Overrides `config.pool.driver`. */
-  driver?: string;
-  /** Launch a visible browser window. Overrides `config.pool.headful`. */
-  headful?: boolean;
-  /** Chromium channel preference. Overrides `config.pool.channel`. */
-  channel?: 'auto' | 'chrome' | 'chromium';
-  /** Opaque per-driver config — passed verbatim as `opts.config` to the
-   *  driver constructor. Shape is the driver's contract. */
-  driverConfig?: Record<string, unknown>;
-  /** Connect-mode settings. Overrides `config.pool.connect`. */
-  connect?: ConnectConfig;
-  /**
-   * Warm-pool settings. When `enabled`, `endDrive` returns the underlying
-   * BrowserContext to a per-platform idle slot instead of tearing it down, and
-   * the next `createSession` for the same platform reuses it via
-   * `driver.resetSession` — cutting warm execute from ~10-20s to ~1-2s.
-   */
-  warm?: {
-    enabled?: boolean;
-    maxContexts?: number;
-    idleTtlSeconds?: number;
-  };
-}
-
-interface DriverConstructorOptions {
-  headful?: boolean;
-  channel?: 'auto' | 'chrome' | 'chromium';
-  config?: Record<string, unknown>;
-  connect?: ConnectConfig;
-}
-
-type DriverCtor = new (opts?: DriverConstructorOptions) => BrowserDriver;
-
-// Built-in driver names. `pool.driver` picks one of these short names, or
-// alternatively passes an absolute path / bare npm package name to require()
-// for BYO (e.g. `@klura/driver-playwright-stealth`). Each entry is lazy so only
-// the driver we actually use gets loaded.
-const BUILTIN_DRIVERS: Record<string, () => DriverCtor> = {
-  playwright: () => {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const mod = require('../drivers/playwright') as { PlaywrightDriver: DriverCtor };
-    return mod.PlaywrightDriver;
-  },
-};
-
-/**
- * Resolve a driver name or path to a constructor:
- * - The `'playwright'` short name loads the bundled class via lazy require.
- * - Anything else goes through `require()` as a BYO driver — absolute path,
- *   relative path from cwd, or a bare npm module name. Accepts either a default
- *   or named export.
- *
- * Returns null for undefined input so callers can chain `??` fallbacks.
- */
-export function resolveDriverClass(nameOrPath: string | undefined): DriverCtor | null {
-  if (!nameOrPath) return null;
-  const builtin = BUILTIN_DRIVERS[nameOrPath];
-  if (builtin) return builtin();
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const mod = require(nameOrPath) as { default?: DriverCtor } | DriverCtor;
-  const resolved = (mod as { default?: DriverCtor }).default ?? (mod as DriverCtor);
-  if (typeof resolved !== 'function') {
-    throw new Error(
-      `pool.driver "${nameOrPath}" did not export a BrowserDriver constructor ` +
-        `(expected default export or named class extending BrowserDriver)`,
-    );
-  }
-  return resolved;
-}
-
-/**
- * Create a Pool by reading `~/.klura/config.json` directly. Returns a
- * `BrowserPool` implementation; callers should depend on the interface, not
- * the concrete class.
- *
- * `opts` override the corresponding config fields for programmatic callers
- * (tests, benchmarks, embedded use) that want to bypass config.json without
- * having to write it first.
- */
-export function createPool(opts: PoolOptions = {}): BrowserPool {
-  const config = loadConfig();
-  return new Pool(undefined, {
-    idleTimeout: opts.idleTimeout ?? config.pool.idleTimeout,
-    driver: opts.driver ?? config.pool.driver,
-    headful: opts.headful ?? config.pool.headful,
-    channel: opts.channel ?? config.pool.channel,
-    driverConfig: opts.driverConfig ?? config.pool.driver_config,
-    connect: opts.connect ?? config.pool.connect,
-    warm: {
-      enabled: config.pool.warm.enabled,
-      maxContexts: config.pool.warm.max_contexts,
-      idleTtlSeconds: config.pool.warm.idle_ttl_seconds,
-    },
-  });
-}
-
-import crypto from 'crypto';
-
-/**
- * A warm Session that has been released by endDrive and is idle in the
- * per-platform slot. The underlying BrowserContext + Page are still live inside
- * the shared driver — the Session object itself is reused (identity-keyed
- * driver weakmaps still resolve it) with a fresh id minted when the next
- * `createSession` checks it out.
- */
-interface WarmEntry {
-  platform: string;
-  /** Account name on the platform — see `Session.identity`. Default-when-omitted
-   *  is `"default"`. The warm-slot key composes `platform + identity` so two
-   *  accounts on the same platform never share a slot. */
-  identity: string;
-  session: Session;
-  lastUsedAt: number;
-  inUse: boolean;
-}
-
-/** Compose the warm-slot map key from a `(platform, identity)` tuple. The
- *  `::` separator is unambiguous: platform slug and identity slug are both
- *  defined to exclude colons, so the joined key parses cleanly even if the
- *  platform contains dashes. Default identity = `"default"` so the slot for a
- *  no-identity-supplied session is `"<platform>::default"` — distinct from
- *  any named identity. See klura://reference#identities. */
-const DEFAULT_IDENTITY = 'default';
-function warmKey(platform: string, identity?: string): string {
-  return `${platform}::${identity || DEFAULT_IDENTITY}`;
-}
 
 export class Pool implements BrowserPool {
   // Driver construction is deferred to first use (via `_driver`, below) so that
@@ -157,7 +36,10 @@ export class Pool implements BrowserPool {
   private _sessions = new Map<string, Session>();
   private _lastActivity = Date.now();
   private _idleTimeout: number;
-  private _idleTimer: ReturnType<typeof setInterval>;
+  // Idle-hibernation timer. Armed at lifecycle edges (`_touch` on every
+  // public entry point, warm-sweeper eviction when the pool may have just
+  // gone quiet) — never a condition-polling interval.
+  private _idleTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Warm-pool state. Keyed by platform — each platform gets at most one warm
   // BrowserContext at a time.
@@ -215,12 +97,19 @@ export class Pool implements BrowserPool {
   // lifecycle as _tryGeneratorStats.
   private _recentDiffs = new Map<string, RecentDiffEntry[]>();
 
-  // Per-session tool-call count. Used by the envelope-advisory escalation
-  // ("URGENT: 12+ rounds without verified iteration"). Incremented on every
-  // getSession() lookup — that's the choke point for any tool that touches a
-  // session. Slight overcount when a tool calls getSession twice is fine; the
-  // ≥12 threshold is a soft signal, not a guarantee.
+  // Per-session user-round count. Incremented exactly once per admitted
+  // non-universal tool call by the phase middleware (`registerUserRound` from
+  // `assertToolAdmissibleBySessionId`) — session lookups are pure and never
+  // touch it. Read back via `getSessionRoundCount` for envelope-advisory
+  // evidence narration and the end_drive repeat-close snapshot.
   private _sessionRoundCounts = new Map<string, number>();
+
+  // Subscribers for the pool's busy→idle transition at edges that arrive
+  // with no accompanying RPC (warm-sweeper eviction of the last slot). The
+  // daemon's idle-shutdown timer re-arms from this callback: its one-shot
+  // timer does not re-arm when it fires while `busy()` is true, and a warm
+  // slot can keep `busy()` true with no future request to touch it.
+  private _idleSubscribers = new Set<() => void>();
 
   constructor(DriverClass?: DriverCtor, opts: PoolOptions = {}) {
     // Capture the resolution recipe; don't run it. The require()/construct only
@@ -257,7 +146,7 @@ export class Pool implements BrowserPool {
     this._warmEnabled = opts.warm?.enabled ?? false;
     this._warmMax = opts.warm?.maxContexts ?? 3;
     this._warmTtlMs = (opts.warm?.idleTtlSeconds ?? 600) * 1000;
-    this._idleTimer = this._startIdleTimer();
+    this._armIdleTimer();
     if (this._warmEnabled) {
       this._startWarmSweeper();
     }
@@ -281,40 +170,93 @@ export class Pool implements BrowserPool {
 
   private _touch(): void {
     this._lastActivity = Date.now();
+    this._armIdleTimer();
   }
 
-  private _startIdleTimer(): ReturnType<typeof setInterval> {
-    const timer = setInterval(() => {
-      if (this._sessions.size > 0) return;
-      // Warm entries count as "in use" from the browser's perspective —
-      // hibernating the shared browser would kill them. Skip the hibernation
-      // check entirely when any warm slot is live.
-      if (this._warm.size > 0) return;
+  /**
+   * The single busy-predicate for the idle/teardown decision. Live sessions
+   * are obviously busy; warm entries count as "in use" from the browser's
+   * perspective too — hibernating the shared browser would kill them, and
+   * killing them silently defeats the warm-pool feature. Any layer deciding
+   * whether klura is idle enough to tear browser state down (the pool's own
+   * hibernation, the daemon's idle shutdown) must consult this predicate
+   * rather than re-deriving its own.
+   */
+  busy(): boolean {
+    return this._sessions.size > 0 || this._warm.size > 0;
+  }
 
-      const idle = Date.now() - this._lastActivity;
-      if (idle > this._idleTimeout) {
-        trace('[pool] Idle timeout, hibernating browser');
-        void this._driver.closeBrowser();
+  /**
+   * Subscribe to the pool's busy→idle transition on lifecycle edges that no
+   * RPC accompanies (currently: the warm sweeper evicting the last slot).
+   * Layers whose own idle timers gate on `busy()` (the daemon's idle
+   * shutdown) re-arm from this callback instead of polling. Returns an
+   * unsubscribe function. Subscriber failures are isolated — one throwing
+   * callback never blocks the others or the sweeper.
+   */
+  onBecameIdle(cb: () => void): () => void {
+    this._idleSubscribers.add(cb);
+    return () => {
+      this._idleSubscribers.delete(cb);
+    };
+  }
+
+  private _notifyBecameIdle(): void {
+    for (const cb of [...this._idleSubscribers]) {
+      try {
+        cb();
+      } catch (err) {
+        console.warn(
+          '[pool] became-idle subscriber failed:',
+          err instanceof Error ? err.message : String(err),
+        );
       }
-    }, 60000);
+    }
+  }
 
-    timer.unref();
-    return timer;
+  /**
+   * (Re-)arm the idle-hibernation timer to fire `idleTimeout` after the last
+   * activity stamp. Called from `_touch` (every public entry point) and from
+   * the warm sweeper when an eviction may have just made the pool non-busy.
+   * When the timer fires while the pool is still busy it simply does not
+   * re-arm — the next lifecycle edge (a tool call's `_touch`, an `endDrive`,
+   * a warm eviction) arms it again, so the check never runs on a polling
+   * tick.
+   */
+  private _armIdleTimer(): void {
+    if (this._idleTimer) clearTimeout(this._idleTimer);
+    this._idleTimer = null;
+    if (this._idleTimeout <= 0) return;
+    const delay = Math.max(0, this._idleTimeout - (Date.now() - this._lastActivity));
+    this._idleTimer = setTimeout(() => {
+      this._idleTimer = null;
+      if (this.busy()) return;
+      trace('[pool] Idle timeout, hibernating browser');
+      // Only close a driver that was actually constructed — hibernating a
+      // never-used pool must not force-load the driver just to close nothing.
+      if (this._driverInstance) void this._driverInstance.closeBrowser();
+    }, delay);
+    this._idleTimer.unref();
   }
 
   async createSession(opts: SessionOptions = {}): Promise<Session> {
     this._touch();
 
-    // Warm-pool fast path: if there's an idle warm BrowserContext for this
-    // (platform, identity) tuple, reuse it via driver.resetSession instead of
-    // spawning a new context. Same-platform-different-identity calls correctly
-    // miss and cold-spawn — cookie-jar bleed across accounts is not allowed.
-    // Falls through to cold spawn on any failure (stale context, reset error,
-    // busy slot, no platform).
+    const freshContext = opts.freshContext === true;
+
+    // Warm-pool fast path: if there's an idle warm lease for this
+    // (platform, identity) tuple, mint a fresh Session, bind the lease onto
+    // it, and reset via driver.resetSession instead of spawning a new
+    // context. Same-platform-different-identity calls correctly miss and
+    // cold-spawn — cookie-jar bleed across accounts is not allowed.
+    // A fresh-context session bypasses both checkout and registration so its
+    // BrowserContext cannot inherit or later export page-local state.
+    // Otherwise, falls through to cold spawn on any failure (stale context,
+    // reset error, busy slot, device-profile mismatch, no platform).
     const key = opts.platform ? warmKey(opts.platform, opts.identity) : null;
-    if (this._warmEnabled && key) {
+    if (!freshContext && this._warmEnabled && key) {
       const warm = this._warm.get(key);
-      if (warm && !warm.inUse) {
+      if (warm && !warm.inUse && warm.lease) {
         const reused = await this._reuseWarm(warm, opts);
         if (reused) return reused;
       }
@@ -327,17 +269,48 @@ export class Pool implements BrowserPool {
     session.startedAt = Date.now();
     this._sessions.set(session.id, session);
 
-    if (this._warmEnabled && opts.platform && key && !this._warm.has(key)) {
+    if (!freshContext && this._warmEnabled && opts.platform && key && !this._warm.has(key)) {
       this._evictIfNeeded();
       this._warm.set(key, {
         platform: opts.platform,
         identity: opts.identity || DEFAULT_IDENTITY,
-        session,
+        lease: null,
+        sessionId: session.id,
+        deviceFingerprint: deviceFingerprintOf(opts),
         lastUsedAt: Date.now(),
         inUse: true,
       });
     }
 
+    return session;
+  }
+
+  /**
+   * The single constructor for pool-minted logical sessions — the warm
+   * checkout path and `createNodeOnlySession` both build their Session here
+   * so field treatment can't drift between them. Every field starts fresh:
+   * a session minted against a warm lease begins with the same blank
+   * logical state a cold spawn gets.
+   */
+  private _mintSession(opts: {
+    platform?: string;
+    identity?: string;
+    hasTouch?: boolean;
+    isMobile?: boolean;
+  }): Session {
+    const session: Session = {
+      id: 'sess_' + crypto.randomBytes(6).toString('hex'),
+      intercepted: [],
+      intercepting: false,
+      hasTouch: opts.hasTouch === true,
+      isMobile: opts.isMobile === true,
+      wsFrames: [],
+      subPages: [],
+      origin: isDrivenByExternalMcpHost() ? 'mcp' : 'cli',
+      startedAt: Date.now(),
+    };
+    if (opts.platform) session.platform = opts.platform;
+    if (opts.identity) session.identity = opts.identity;
     return session;
   }
 
@@ -357,64 +330,79 @@ export class Pool implements BrowserPool {
    */
   createNodeOnlySession(opts: { platform?: string; identity?: string } = {}): Session {
     this._touch();
-    const session: Session = {
-      id: 'sess_' + crypto.randomBytes(6).toString('hex'),
-      intercepted: [],
-      intercepting: false,
-      hasTouch: false,
-      wsFrames: [],
-      subPages: [],
-      origin: isDrivenByExternalMcpHost() ? 'mcp' : 'cli',
-    };
-    if (opts.platform) session.platform = opts.platform;
-    if (opts.identity) session.identity = opts.identity;
+    const session = this._mintSession(opts);
     this._sessions.set(session.id, session);
     return session;
   }
 
   /**
-   * Check out a warm slot for a new klura session. Rotates the underlying
-   * Session object's id (driver-private weakmaps stay keyed by object identity,
-   * so the Page/Context bindings survive), asks the driver to reset ephemeral
-   * state, and registers the session under the new id. Returns `null` on any
-   * failure — the caller falls through to a cold spawn and the stale warm entry
-   * is evicted.
+   * Check out a warm slot for a new klura session. Mints a FRESH Session
+   * (blank logical state), binds the slot's lease onto it via
+   * `driver.attachLease`, asks the driver to reset ephemeral browser state,
+   * and registers the new session. Returns `null` on any failure — the
+   * caller falls through to a cold spawn and the stale warm entry is
+   * evicted. A device-profile mismatch also evicts: the lease's
+   * BrowserContext was created with context-creation-time settings
+   * (UA, viewport, touch, mobile emulation) that a reset cannot change.
    */
   private async _reuseWarm(warm: WarmEntry, opts: SessionOptions): Promise<Session | null> {
-    const session = warm.session;
-    const newId = 'sess_' + crypto.randomBytes(6).toString('hex');
-    const oldId = session.id;
-    session.id = newId;
-    if (opts.platform) session.platform = opts.platform;
-    if (opts.identity) session.identity = opts.identity;
+    const key = warmKey(warm.platform, warm.identity);
+    const lease = warm.lease;
+    if (!lease) return null;
 
+    if (deviceFingerprintOf(opts) !== warm.deviceFingerprint) {
+      trace(
+        `[pool] warm slot for platform=${warm.platform} identity=${warm.identity} has a different device profile — evicting for cold spawn`,
+      );
+      this._warm.delete(key);
+      try {
+        await this._driver.destroyLease(lease);
+      } catch {
+        /* already dead */
+      }
+      return null;
+    }
+
+    // Claim the slot synchronously — before any await — so a concurrent
+    // createSession for the same (platform, identity) sees `inUse` and
+    // cold-spawns instead of racing attachLease for the same lease record
+    // (the loser's attach throw would evict the slot mid-checkout and then
+    // register a duplicate entry, breaking the one-slot-per-key invariant).
+    warm.lease = null;
+    warm.sessionId = null;
+    warm.inUse = true;
+    warm.lastUsedAt = Date.now();
+
+    const session = this._mintSession(opts);
+    let attached = false;
     try {
+      this._driver.attachLease(session, lease);
+      attached = true;
       await this._driver.resetSession(session, opts);
     } catch (err) {
       console.warn(
         `[pool] warm reuse for platform=${warm.platform} identity=${warm.identity} failed, falling back to cold spawn:`,
         err instanceof Error ? err.message : String(err),
       );
-      // Stale context — force-destroy so nothing is left hanging, then drop the
-      // warm entry.
+      // Drop the claimed slot before the async teardown so a concurrent
+      // checkout can register a fresh entry immediately.
+      this._warm.delete(key);
+      // Stale context — force-destroy so nothing is left hanging. The minted
+      // Session was never registered, so it just falls out of scope.
       try {
-        await this._driver.destroySession(session);
+        if (attached) await this._driver.destroySession(session);
+        else await this._driver.destroyLease(lease);
       } catch {
         /* already dead */
       }
-      this._warm.delete(warmKey(warm.platform, warm.identity));
-      // Restore the old id so callers of getSession with the prior id don't see
-      // a mutated phantom — though in practice the old id was already removed
-      // from _sessions when endDrive stashed this entry.
-      session.id = oldId;
       return null;
     }
 
-    warm.inUse = true;
+    warm.sessionId = session.id;
     warm.lastUsedAt = Date.now();
 
-    this._sessions.set(newId, session);
-    trace(`[pool] warm-reused context for platform=${warm.platform} (session ${newId})`);
+    this._sessions.set(session.id, session);
+    trace(`[pool] warm-reused context for platform=${warm.platform} (session ${session.id})`);
     return session;
   }
 
@@ -439,28 +427,74 @@ export class Pool implements BrowserPool {
   ): Promise<Session | null> {
     this._touch();
 
-    // Warm slot first — if reuse succeeds without resetSession, the page is
-    // still on whatever URL the previous borrow left it at. The
-    // (platform, identity) tuple keys the slot — same-platform-different-
-    // identity calls correctly miss so cookie jars don't leak across
-    // accounts.
+    // Warm slot first — the borrow deliberately skips resetSession, so the
+    // page is still on whatever URL the previous borrow left it at. A fresh
+    // Session is minted and the slot's lease bound onto it before the probe
+    // runs (the probe needs a live page binding); a failed probe detaches the
+    // lease straight back into the slot. The (platform, identity) tuple keys
+    // the slot — same-platform-different-identity calls correctly miss so
+    // cookie jars don't leak across accounts.
     const warm = this._warm.get(warmKey(platform, identity));
-    if (this._warmEnabled && warm && !warm.inUse) {
-      let ok: boolean;
+    if (this._warmEnabled && warm && !warm.inUse && warm.lease) {
+      // The minted session self-describes as the device the lease's context
+      // was actually created with — the borrow has no SessionOptions to
+      // consult, but the slot remembers.
+      const fp = JSON.parse(warm.deviceFingerprint) as {
+        hasTouch?: boolean;
+        isMobile?: boolean;
+      };
+      const session = this._mintSession({
+        platform,
+        identity,
+        hasTouch: fp.hasTouch,
+        isMobile: fp.isMobile,
+      });
+      let attached: boolean;
       try {
-        ok = await probe(warm.session, this._driver);
+        this._driver.attachLease(session, warm.lease);
+        attached = true;
       } catch {
-        ok = false;
+        attached = false;
       }
-      if (ok) {
-        const newId = 'sess_' + crypto.randomBytes(6).toString('hex');
-        warm.session.id = newId;
-        warm.session.borrowed = true;
+      if (attached) {
+        // Claim the slot synchronously before the probe awaits (mirrors
+        // _reuseWarm): concurrent checkouts and the TTL sweeper must see
+        // the slot as busy while the probe is in flight.
+        warm.lease = null;
+        warm.sessionId = session.id;
         warm.inUse = true;
         warm.lastUsedAt = Date.now();
-        this._sessions.set(newId, warm.session);
-        trace(`[pool] ready-checkout warm session for platform=${platform} (session ${newId})`);
-        return warm.session;
+        let ok: boolean;
+        try {
+          ok = await probe(session, this._driver);
+        } catch {
+          ok = false;
+        }
+        if (ok) {
+          session.borrowed = true;
+          this._sessions.set(session.id, session);
+          trace(
+            `[pool] ready-checkout warm session for platform=${platform} (session ${session.id})`,
+          );
+          return session;
+        }
+        // Probe said not-ready — return the resources to the slot and let
+        // the caller cold-spawn. The minted Session was never registered.
+        warm.sessionId = null;
+        warm.inUse = false;
+        warm.lastUsedAt = Date.now();
+        warm.lease = this._detachLeaseSafe(session);
+        if (!warm.lease) {
+          // Undetachable after a successful attach — the context is still
+          // bound to the minted session. Destroy it so nothing leaks, then
+          // drop the slot (mirrors the endDrive undetachable branch).
+          this._warm.delete(warmKey(platform, identity));
+          try {
+            await this._driver.destroySession(session);
+          } catch {
+            /* already destroyed */
+          }
+        }
       }
     }
 
@@ -512,19 +546,32 @@ export class Pool implements BrowserPool {
     };
   }
 
+  /** Pure lookup — mutates nothing beyond the pool's idle-liveness stamp.
+   *  Round accounting happens exclusively via `registerUserRound`, called
+   *  by the phase middleware once per admitted non-universal tool call. */
   getSession(id: string): Session {
     const session = this._sessions.get(id);
     if (!session) throw new Error(`Session not found: ${id}`);
     this._touch();
-    this._sessionRoundCounts.set(id, (this._sessionRoundCounts.get(id) ?? 0) + 1);
-    // LIFT round counter: once end_drive has handed off, every tool-call
-    // lookup increments. Drives the LIFT phase budget enforcement in
-    // `runtime/src/phases/middleware.ts` and the freshly-handed-off
-    // guard in `runtime/src/phases/drive/drive-to-triage-handoff.ts`.
-    if (session.lift) {
-      session.lift.roundsSinceHandoff += 1;
-    }
     return session;
+  }
+
+  /** Read a live session without stamping pool idle-liveness. Returns null
+   *  instead of throwing on an unknown id. For out-of-band observers —
+   *  harness evidence collectors and tests asserting whether an id is
+   *  still valid — that must not perturb idle tracking or blow up on an
+   *  already-closed session. Tool handlers on the request path use
+   *  `getSession`; observers are the only intended callers here. */
+  peekSession(id: string): Session | null {
+    return this._sessions.get(id) ?? null;
+  }
+
+  /** Register one admitted user-facing tool round against a session. The
+   *  phase middleware (`assertToolAdmissibleBySessionId`) is the single
+   *  caller — handlers looking sessions up via `getSession` add nothing. */
+  registerUserRound(id: string): void {
+    if (!this._sessions.has(id)) return;
+    this._sessionRoundCounts.set(id, (this._sessionRoundCounts.get(id) ?? 0) + 1);
   }
 
   getTryGeneratorStats(sessionId: string): TryGeneratorStats | null {
@@ -571,67 +618,126 @@ export class Pool implements BrowserPool {
     return buf.slice();
   }
 
-  /** Approximate count of tool calls against this session — incremented
-   *  on every getSession() lookup. Used by envelope-advisory escalation
-   *  at high round counts. Slight overcount when a tool calls getSession
-   *  twice is acceptable; this is a soft heuristic. */
+  /** Count of admitted non-universal tool calls against this session —
+   *  see `registerUserRound`. Session lookups never affect it. */
   getSessionRoundCount(sessionId: string): number {
     return this._sessionRoundCounts.get(sessionId) ?? 0;
   }
 
-  async endDrive(id: string): Promise<void> {
-    this._touch();
-    // Drop any per-session feedback state for this id. Even if the underlying
-    // browser context is returned to the warm pool below, the klura session id
-    // rotates on next checkout (see _reuseWarm) so counters are
-    // session-id-keyed, not context-keyed.
+  /**
+   * Run every registered session-scope cleanup hook for a dying id — see
+   * `runtime/src/pool/session-scope.ts`. Called on exactly the `endDrive`
+   * branches where the session id stops being valid; the borrowed-shared
+   * keep-alive branch (id survives, owner still registered) and the
+   * unknown-id early return deliberately skip it. `disposeSessionScope`
+   * isolates per-hook failures and never throws; the extra guard here keeps
+   * teardown alive even against a scope-internal defect, since endDrive runs
+   * inside many `finally` blocks.
+   */
+  private async _disposeScope(id: string): Promise<void> {
+    try {
+      await disposeSessionScope(id);
+    } catch (err) {
+      console.warn(
+        `[pool] session-scope disposal failed for ${id}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
+  /** Drop per-session feedback state (try_generator stats/diffs, user-round
+   *  counter) for a dying id. Called on exactly the `endDrive` branches where
+   *  the session id stops being valid — the borrowed-shared keep-alive branch
+   *  keeps the id (and therefore its counters) live for the registrar. Even
+   *  when the underlying browser context returns to the warm pool, the klura
+   *  session id rotates on next checkout (see `_reuseWarm`), so counters are
+   *  session-id-keyed, not context-keyed. */
+  private _dropSessionFeedback(id: string): void {
     this._tryGeneratorStats.delete(id);
     this._recentDiffs.delete(id);
     this._sessionRoundCounts.delete(id);
+  }
+
+  /** `driver.detachLease` with stub-driver tolerance: plain-object test
+   *  drivers may not implement the lease surface, and a detach that throws
+   *  means the resources are unstashable — both map to null so the caller
+   *  destroys instead. */
+  private _detachLeaseSafe(session: Session): BrowserLease | null {
+    if (typeof this._driver.detachLease !== 'function') return null;
+    try {
+      return this._driver.detachLease(session);
+    } catch {
+      return null;
+    }
+  }
+
+  async endDrive(id: string): Promise<void> {
+    this._touch();
     const session = this._sessions.get(id);
     if (!session) {
       // Still might be a shared session tracked only in _sharedSessions
       // (listener-owned, never put into _sessions). Let the listener's own
-      // endDrive call catch it when it tears down.
+      // endDrive call catch it when it tears down. The id is not valid in
+      // this pool, so any feedback state recorded under it is dead — drop it.
+      this._dropSessionFeedback(id);
       return;
     }
 
-    // Borrowed session via `tryCheckoutReadySession`: either the pool owns the
-    // warm slot (release to warm without resetSession — the page is still
-    // useful for the next borrower) or a listener owns it (no-op; the listener
-    // manages teardown). Either way, do NOT destroy.
+    // Borrowed session via `tryCheckoutReadySession`: either someone else
+    // owns it (shared registration — no-op, the owner manages teardown) or
+    // the pool minted it against a warm slot (detach the lease back into the
+    // slot without resetSession — the page is still useful for the next
+    // borrower). Either way, do NOT destroy.
     if (session.borrowed) {
       session.borrowed = false;
-      if (this._warmEnabled && session.platform) {
-        const warm = this._warm.get(warmKey(session.platform, session.identity));
-        if (warm && warm.session === session) {
-          warm.inUse = false;
-          warm.lastUsedAt = Date.now();
-          this._sessions.delete(id);
-          trace(
-            `[pool] borrowed session ${id} released back to warm slot for platform=${session.platform} identity=${warm.identity}`,
-          );
-          return;
-        }
-      }
-      // Shared session release. If the session is still registered as a
-      // shared session for its platform, the original owner (listener,
-      // start_session-attached agent session) still holds the id and will
-      // make tool calls against it — keep the id valid. The owner's own
-      // teardown path drops `_sharedSessions` and routes back through
-      // endDrive, where the warm/cold branches below run for real
-      // teardown. Dropping the id here would invalidate the agent's
-      // sessionId mid-run (observed on auto-exec failure: agent calls
-      // start_session, auto-exec runs a borrowed-shared browser-prereq,
-      // its finally calls endDrive on the borrowed handle, the agent's
-      // own sessionId then errors with "Session not found" on any
-      // follow-up tool).
+      // Shared keep-alive comes FIRST. A session still registered in
+      // `_sharedSessions` is owned by someone else (a listener, or the
+      // agent session that start_session registers around auto-execute) —
+      // the owner still holds the id and will make tool calls against it,
+      // so keep the id valid and touch nothing. The order matters when the
+      // same session also owns its platform's warm slot (a cold spawn
+      // registers the slot with `sessionId = id` while `inUse` is true):
+      // consulting the warm slot first would detach-strip a LIVE session's
+      // driver bindings and stash them, bricking the owner's id. Warm-slot
+      // borrows are freshly minted by `tryCheckoutReadySession` and never
+      // shared-registered, so they fall through to the warm branch below.
+      // The owner's own teardown routes back through endDrive with
+      // `borrowed` unset, where the warm/cold branches run for real.
       if (session.platform) {
         const sharedForPlatform = this._sharedSessions.get(session.platform);
         if (sharedForPlatform?.has(session)) {
           trace(
-            `[pool] borrowed shared session ${id} released (still owned by listener; keeping id valid)`,
+            `[pool] borrowed shared session ${id} released (still owned by its registrar; keeping id valid)`,
           );
+          return;
+        }
+      }
+      if (this._warmEnabled && session.platform) {
+        const warm = this._warm.get(warmKey(session.platform, session.identity));
+        if (warm && warm.sessionId === id) {
+          const lease = this._detachLeaseSafe(session);
+          this._sessions.delete(id);
+          this._dropSessionFeedback(id);
+          // The borrowed Session dies here whether the lease restashes or
+          // not — run its scope disposal before the browser resources move.
+          await this._disposeScope(id);
+          if (lease) {
+            warm.lease = lease;
+            warm.sessionId = null;
+            warm.inUse = false;
+            warm.lastUsedAt = Date.now();
+            trace(
+              `[pool] borrowed session ${id} released back to warm slot for platform=${session.platform} identity=${warm.identity}`,
+            );
+            return;
+          }
+          // Undetachable — drop the slot and destroy for real.
+          this._warm.delete(warmKey(session.platform, session.identity));
+          try {
+            await this._driver.destroySession(session);
+          } catch {
+            /* already destroyed */
+          }
           return;
         }
       }
@@ -639,29 +745,22 @@ export class Pool implements BrowserPool {
       // Drop the id; the underlying BrowserContext lifecycle is the
       // owner's responsibility.
       this._sessions.delete(id);
+      this._dropSessionFeedback(id);
+      await this._disposeScope(id);
       trace(`[pool] borrowed shared session ${id} released (owner gone, dropping id)`);
       return;
     }
 
-    // Warm path: if the session is bound to a platform and that platform owns
-    // this session's warm slot, mark the slot idle and leave the BrowserContext
-    // alive. The next createSession for the same platform reuses it via
-    // _reuseWarm.
-    if (this._warmEnabled && session.platform) {
-      const warm = this._warm.get(warmKey(session.platform, session.identity));
-      if (warm && warm.session === session) {
-        warm.inUse = false;
-        warm.lastUsedAt = Date.now();
-        this._sessions.delete(id);
-        trace(
-          `[pool] session ${id} released warm context for platform=${session.platform} identity=${warm.identity} (idle)`,
-        );
-        return;
-      }
-    }
+    // Every non-borrowed path below kills the id — warm stash, undetachable
+    // fall-through, or cold destroy — so its feedback state dies with it.
+    this._dropSessionFeedback(id);
 
-    // Cold path: remove from _sharedSessions too (listener may have registered
-    // it and is now tearing it down via endDrive).
+    // Every non-borrowed release kills the id (a warm stash mints a fresh
+    // Session on the next checkout), so a shared registration — a listener
+    // tearing its session down via endDrive — must be cleared on every path
+    // below. A stashed session left in `_sharedSessions` would be iterated
+    // forever by `tryCheckoutReadySession` as a dead candidate: detachLease
+    // strips its driver bindings, so its probe can only throw.
     if (session.platform) {
       const shared = this._sharedSessions.get(session.platform);
       if (shared?.has(session)) {
@@ -670,12 +769,46 @@ export class Pool implements BrowserPool {
       }
     }
 
+    // Warm path: if the session is bound to a platform and owns that
+    // platform's warm slot, detach the browser resources as a lease and
+    // stash them in the slot. The Session object dies HERE — the next
+    // createSession for the same platform mints a fresh one and binds the
+    // lease onto it (_reuseWarm), which is what makes logical-state leakage
+    // across klura sessions structurally impossible. Drivers without a
+    // lease surface return null and the session falls through to destroy.
+    if (this._warmEnabled && session.platform) {
+      const warm = this._warm.get(warmKey(session.platform, session.identity));
+      if (warm && warm.sessionId === id) {
+        const lease = this._detachLeaseSafe(session);
+        if (lease) {
+          warm.lease = lease;
+          warm.sessionId = null;
+          warm.inUse = false;
+          warm.lastUsedAt = Date.now();
+          this._sessions.delete(id);
+          await this._disposeScope(id);
+          trace(
+            `[pool] session ${id} released warm context for platform=${session.platform} identity=${warm.identity} (idle)`,
+          );
+          return;
+        }
+        // No detachable resources — drop the slot and fall through to the
+        // cold teardown below.
+        this._warm.delete(warmKey(session.platform, session.identity));
+      }
+    }
+
+    // Cold path.
+    // Drop the id before the scope runs so a hook that (indirectly) re-enters
+    // endDrive for the same id hits the unknown-id early return instead of a
+    // second driver teardown.
+    this._sessions.delete(id);
+    await this._disposeScope(id);
     try {
       await this._driver.destroySession(session);
     } catch {
       /* already destroyed */
     }
-    this._sessions.delete(id);
   }
 
   get activeSessions(): number {
@@ -698,7 +831,10 @@ export class Pool implements BrowserPool {
   }
 
   async shutdown(): Promise<void> {
-    clearInterval(this._idleTimer);
+    if (this._idleTimer) {
+      clearTimeout(this._idleTimer);
+      this._idleTimer = null;
+    }
     if (this._warmSweeper) {
       clearInterval(this._warmSweeper);
       this._warmSweeper = null;
@@ -706,14 +842,16 @@ export class Pool implements BrowserPool {
     for (const id of [...this._sessions.keys()]) {
       await this.endDrive(id);
     }
-    // Evict every remaining warm context. endDrive above would have
+    // Evict every remaining warm lease. endDrive above would have
     // released in-use warm slots to the idle pool; this final sweep destroys
     // them before closing the browser.
     for (const [key, warm] of this._warm) {
-      try {
-        await this._driver.destroySession(warm.session);
-      } catch {
-        /* already destroyed */
+      if (warm.lease) {
+        try {
+          await this._driver.destroyLease(warm.lease);
+        } catch {
+          /* already destroyed */
+        }
       }
       // jsEvalCache is platform-scoped — different identities on the same
       // platform share the cache, which is the correct policy (the JS body
@@ -750,7 +888,7 @@ export class Pool implements BrowserPool {
       if (!oldestKey) return; // every entry busy; can't evict
       const victim = this._warm.get(oldestKey);
       if (!victim) return;
-      this._driver.destroySession(victim.session).catch(() => undefined);
+      if (victim.lease) this._driver.destroyLease(victim.lease).catch(() => undefined);
       this._warm.delete(oldestKey);
       this.jsEvalCache.cancel(victim.platform);
       trace(`[pool] LRU evicted warm context (key=${oldestKey})`);
@@ -767,16 +905,29 @@ export class Pool implements BrowserPool {
     this._warmSweeper = setInterval(() => {
       if (!this._warmEnabled) return;
       const now = Date.now();
+      let evicted = false;
       for (const [key, entry] of [...this._warm]) {
         if (entry.inUse) continue;
         if (now - entry.lastUsedAt > this._warmTtlMs) {
-          this._driver.destroySession(entry.session).catch(() => undefined);
+          if (entry.lease) this._driver.destroyLease(entry.lease).catch(() => undefined);
           this._warm.delete(key);
           this.jsEvalCache.cancel(entry.platform);
+          evicted = true;
           trace(
             `[pool] TTL evicted warm context (key=${key}, idle=${Math.floor((now - entry.lastUsedAt) / 1000)}s)`,
           );
         }
+      }
+      // An eviction is a lifecycle edge for the idle-hibernation decision:
+      // dropping the last warm slot may have just made the pool non-busy, and
+      // no `_touch` fires here to re-arm the timer. Deliberately not a stamp
+      // of `_lastActivity` — eviction is not user activity, so the timer
+      // fires against the true last-activity time (possibly immediately).
+      // The same edge notifies became-idle subscribers (the daemon's idle
+      // shutdown), since no RPC arrives to re-arm their timers either.
+      if (evicted && !this.busy()) {
+        this._armIdleTimer();
+        this._notifyBecameIdle();
       }
     }, 60_000);
     this._warmSweeper.unref();

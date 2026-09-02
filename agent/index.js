@@ -246,7 +246,7 @@ async function runAgentTask(opts = {}) {
   const model = resolveModel(provider, agentConfig);
   const systemPrompt = opts.systemPrompt || buildSystemPrompt('chat');
 
-  const server = await createKluraServer();
+  const server = await createKluraServer(opts.mcpServerOptions);
   // The CI harnesses register their own checkpoint stubs (auto-continue +
   // save-confirmation + per-scenario handlers) before the run; they pass
   // skipCheckpointSetup so @klura/agent's handler does not register last and

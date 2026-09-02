@@ -108,6 +108,134 @@ function runAudit(partialCtx, strategy, answers) {
   return saveStrategyAudit.process(strategy, ctx, { token, answers: mergedAnswers, acks });
 }
 
+test('save audit does not gate mixed caller-arg and page-state id extraction', () => {
+  const strategy = {
+    strategy: 'page-script',
+    origin: 'https://example.com',
+    prerequisites: [
+      {
+        name: 'result',
+        kind: 'js-eval',
+        url: 'https://example.com',
+        expression:
+          "(()=>{const u=String(args.place_url||location.href);return u.match(/place\\/([^/?]+)/)?.[1]||null})()",
+      },
+    ],
+  };
+  const result = saveStrategyAudit.process(
+    strategy,
+    {
+      sessionId: 'sess_mixed_source',
+      platform: 'test_platform',
+      capability: 'get_place',
+      observedSiblings: [],
+      observedParamValues: {},
+      capturedEndpointPaths: new Set(),
+    },
+    {},
+  );
+
+  const warningKinds =
+    result.status === 'rejected'
+      ? (result.rejection.warnings ?? []).map((warning) => warning.kind)
+      : [];
+  assert.equal(
+    warningKinds.includes('unparametrized_session_id'),
+    false,
+    'free-form JavaScript provenance is left to the authoring agent',
+  );
+});
+
+test('save audit gates pure page-state id extraction as unparametrized_session_id', () => {
+  // Regression pin for the detector bank: unparametrized_session_id is a
+  // composed Detector (ackReason: 'required'), so a prereq that derives an
+  // id from session state alone — no args.* read, no capability prereq —
+  // must surface the warning through saveStrategyAudit, not only through
+  // the raw gate function.
+  assert.ok(
+    saveStrategyAudit.detectorKinds().includes('unparametrized_session_id'),
+    'unparametrized_session_id must be composed into the saveStrategyAudit detector bank',
+  );
+  const strategy = {
+    strategy: 'page-script',
+    origin: 'https://example.com',
+    prerequisites: [
+      {
+        name: 'uid',
+        kind: 'js-eval',
+        url: 'https://example.com',
+        expression: "document.cookie.match(/uid=([^;]+)/)[1]",
+      },
+    ],
+  };
+  const result = saveStrategyAudit.process(
+    strategy,
+    {
+      sessionId: 'sess_cookie_uid',
+      platform: 'test_platform',
+      capability: 'read_inbox',
+      observedSiblings: [],
+      observedParamValues: {},
+      capturedEndpointPaths: new Set(),
+    },
+    {},
+  );
+  assert.equal(result.status, 'rejected');
+  const warningKinds = (result.rejection.warnings ?? []).map((warning) => warning.kind);
+  assert.ok(
+    warningKinds.includes('unparametrized_session_id'),
+    `expected unparametrized_session_id, got: ${warningKinds.join(', ')}`,
+  );
+});
+
+test('unobserved URL audit keeps unchanged update URLs grounded and rejects changed URLs', () => {
+  const previousStrategy = {
+    strategy: 'page-script',
+    origin: 'https://example.com',
+    response: { format: 'json', from: 'result' },
+    prerequisites: [
+      {
+        name: 'result',
+        kind: 'js-eval',
+        url: 'https://example.com/search/{{query}}',
+        expression: '({ok:true,items:[]})',
+      },
+    ],
+    notes: {
+      params: {
+        query: { kind: 'text', example: 'books' },
+      },
+    },
+  };
+  const ctx = {
+    sessionId: 'sess_unchanged_url',
+    platform: 'test_platform',
+    capability: 'search_items',
+    observedSiblings: [],
+    observedParamValues: {},
+    capturedEndpointPaths: new Set(),
+    observedUrls: [],
+    previousStrategy,
+  };
+  const amended = structuredClone(previousStrategy);
+  amended.prerequisites[0].expression = '({ok:true,items:[{id:"one"}]})';
+  const unchangedResult = saveStrategyAudit.process(amended, ctx, {});
+  const unchangedWarningKinds =
+    unchangedResult.status === 'rejected'
+      ? (unchangedResult.rejection.warnings ?? []).map((warning) => warning.kind)
+      : [];
+  assert.equal(unchangedWarningKinds.includes('unobserved_url'), false);
+
+  const changed = structuredClone(amended);
+  changed.prerequisites[0].url = 'https://api.example.com/search/{{query}}';
+  const changedResult = saveStrategyAudit.process(changed, ctx, {});
+  const changedWarningKinds =
+    changedResult.status === 'rejected'
+      ? (changedResult.rejection.warnings ?? []).map((warning) => warning.kind)
+      : [];
+  assert.ok(changedWarningKinds.includes('unobserved_url'));
+});
+
 test('inline lookup in js-eval prereq → unacked_warnings rejection (ackReason: none)', () => {
   // Inline /search lookups must be factored into sibling capabilities. The
   // capability_name_justification harden was a softer Layer-2 ack-validator
@@ -937,9 +1065,60 @@ test('static-on-click-observed: accepts "static" prereq url that equals a click-
   );
 });
 
+test('static-on-click-observed: accepts fixed prereq url with incidental token substring', () => {
+  const strategy = {
+    strategy: 'page-script',
+    baseUrl: 'https://site.example.com',
+    endpoint: '/api/search',
+    method: 'GET',
+    prerequisites: [
+      {
+        name: 'read_page',
+        kind: 'js-eval',
+        url: 'https://site.example.com/maps',
+        expression: '({ok:true})',
+        binds: 'result',
+        return_shape: { kind: 'object' },
+      },
+    ],
+  };
+  const result = runAudit(
+    {
+      capability: 'search_places',
+      observedSiblings: [],
+      observedParamValues: {
+        mode: [
+          {
+            param_name: 'mode',
+            value: 'map',
+            source: { kind: 'ui_click', label: 'Places' },
+            observed_at: 1,
+          },
+        ],
+      },
+      capturedEndpointPaths: new Set(),
+    },
+    strategy,
+    {
+      literal_provenance: {
+        endpoint: 'static',
+        'prerequisites[0].url': 'static',
+      },
+      observed_siblings: {},
+    },
+  );
+  const issues = result.rejection?.classifier_issues || [];
+  const staticOnClick = issues.find((issue) => /static.*UI click/.test(issue));
+  assert.equal(
+    staticOnClick,
+    undefined,
+    `incidental URL-token substring must not become enum provenance: ${JSON.stringify(issues)}`,
+  );
+});
+
 // Negative companion: a prereq url where the click-observed value is a PROPER
-// substring (a real enum slot in the url) must still reject — the exemption is
-// full-value-equality only, so the templatable-enum escape hatch stays closed.
+// query-value slot must still reject, so the templatable-enum escape hatch
+// stays closed without relying on arbitrary substring overlap.
 test('static-on-click-observed: rejects "static" prereq url with a proper-substring click match', () => {
   const strategy = {
     strategy: 'page-script',

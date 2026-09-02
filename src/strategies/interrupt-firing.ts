@@ -21,7 +21,7 @@ export interface InterruptEntry {
 interface InterruptFireCtx {
   readonly session: Session;
   readonly driver: BrowserDriver;
-  readonly tokens: Record<string, string>;
+  readonly tokens: Record<string, unknown>;
   readonly args: Record<string, unknown>;
 }
 

@@ -1,6 +1,8 @@
-// start_session.must_escalate: when ≥3 aborts within 24h share root cause
-// (same kind + host), the response surfaces an advisory so the agent can't
-// burn another session on the same wall.
+// start_session.must_escalate: when aborts within 24h sharing one root cause
+// (same kind + host) reach the weighted escalation threshold, the response
+// surfaces an advisory so the agent reads the pattern before repeating it.
+// Weighting (provenance × recency) is covered in depth by
+// abort-escalation-provenance.test.js; these cases pin the threshold itself.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -35,6 +37,7 @@ function makeAborts(platform, entries) {
       reason: e.reason ?? 'test abort',
       kind: e.kind,
       host: e.host,
+      provenance: e.provenance,
       captured_actions_count: 0,
       phase_at_abort: 'drive',
     });
@@ -53,64 +56,58 @@ test('readRecentAborts returns enriched entries with hours_since', () => {
   assert.equal(typeof aborts[0].hours_since, 'number');
 });
 
-test('escalation threshold: <3 same-cause aborts → no advisory (sanity)', () => {
+// Direct tests of the real helper. Ledger entries go in through the real
+// appender so the shape the helper scores is the shape that is persisted.
+const { computeAbortEscalation } = await import('../dist/tools/start-session.js');
+
+test('ledger → helper: 2 same-cause aborts stay below the threshold', () => {
   const platform = 'test-escalation-below';
   makeAborts(platform, [
-    { kind: 'origin_blocked', host: 'example.com' },
-    { kind: 'origin_blocked', host: 'example.com' },
+    { kind: 'origin_blocked', host: 'example.com', session_id: 's1', provenance: 'runtime_observed' },
+    { kind: 'origin_blocked', host: 'example.com', session_id: 's2', provenance: 'runtime_observed' },
   ]);
-  const aborts = logbook.readRecentAborts(platform, 50);
-  // Mirror the helper's logic inline for the assertion — the helper itself
-  // is module-internal to start-session.ts. Counting same kind+host within
-  // 24h must be < 3 here.
-  const recent = aborts.filter((a) => a.hours_since <= 24);
-  const sameCause = recent.filter(
-    (a) => a.kind === 'origin_blocked' && a.host === 'example.com',
-  );
-  assert.ok(sameCause.length < 3);
+  assert.equal(computeAbortEscalation(logbook.readRecentAborts(platform, 50)), undefined);
 });
 
-test('escalation threshold: ≥3 same-cause aborts within 24h → triggers', () => {
+test('ledger → helper: 3 runtime-observed same-cause aborts within 24h escalate', () => {
   const platform = 'test-escalation-trigger';
   makeAborts(platform, [
-    { kind: 'origin_blocked', host: 'example.com' },
-    { kind: 'origin_blocked', host: 'example.com' },
-    { kind: 'origin_blocked', host: 'example.com' },
+    { kind: 'origin_blocked', host: 'example.com', session_id: 's1', provenance: 'runtime_observed' },
+    { kind: 'origin_blocked', host: 'example.com', session_id: 's2', provenance: 'runtime_observed' },
+    { kind: 'origin_blocked', host: 'example.com', session_id: 's3', provenance: 'runtime_observed' },
   ]);
-  const aborts = logbook.readRecentAborts(platform, 50);
-  const recent = aborts.filter((a) => a.hours_since <= 24);
-  const sameCause = recent.filter(
-    (a) => a.kind === 'origin_blocked' && a.host === 'example.com',
-  );
-  assert.ok(sameCause.length >= 3, `expected ≥3 same-cause aborts, got ${sameCause.length}`);
+  const result = computeAbortEscalation(logbook.readRecentAborts(platform, 50));
+  assert.ok(result, 'three fresh runtime-observed aborts must escalate');
+  assert.equal(result.same_root_cause_count, 3);
 });
 
 test('escalation: distinct kinds do not coalesce', () => {
   const platform = 'test-escalation-distinct';
   makeAborts(platform, [
-    { kind: 'origin_blocked', host: 'example.com' },
-    { kind: 'origin_blocked', host: 'example.com' },
-    { kind: 'site_dead', host: 'example.com' },
+    { kind: 'origin_blocked', host: 'example.com', session_id: 's1', provenance: 'runtime_observed' },
+    { kind: 'origin_blocked', host: 'example.com', session_id: 's2', provenance: 'runtime_observed' },
+    { kind: 'site_dead', host: 'example.com', session_id: 's3', provenance: 'runtime_observed' },
   ]);
-  const aborts = logbook.readRecentAborts(platform, 50);
-  const groups = new Map();
-  for (const a of aborts.filter((a) => a.hours_since <= 24)) {
-    const key = `${a.kind ?? 'other'}|${a.host ?? ''}`;
-    groups.set(key, (groups.get(key) ?? 0) + 1);
-  }
-  // Two origin_blocked + one site_dead — no group hits 3.
-  assert.ok([...groups.values()].every((c) => c < 3));
+  // Two origin_blocked + one site_dead — neither group reaches the threshold.
+  assert.equal(computeAbortEscalation(logbook.readRecentAborts(platform, 50)), undefined);
 });
 
-// Direct tests of the real helper (block-class filter). These exercise
-// computeAbortEscalation itself, not a mirror of its logic.
-const { computeAbortEscalation } = await import('../dist/tools/start-session.js');
+/** Runtime-corroborated abort event — full weight, so three of them sit
+ *  exactly on the threshold. */
+function observed(overrides) {
+  return {
+    kind: 'origin_blocked',
+    host: 'example.com',
+    provenance: 'runtime_observed',
+    ...overrides,
+  };
+}
 
 test('escalation: 3x existing_capability_covers (benign reads) → no advisory', () => {
   const aborts = [
-    { kind: 'existing_capability_covers', host: 'example.com', hours_since: 1 },
-    { kind: 'existing_capability_covers', host: 'example.com', hours_since: 2 },
-    { kind: 'existing_capability_covers', host: 'example.com', hours_since: 3 },
+    observed({ kind: 'existing_capability_covers', hours_since: 1, session_id: 's1' }),
+    observed({ kind: 'existing_capability_covers', hours_since: 2, session_id: 's2' }),
+    observed({ kind: 'existing_capability_covers', hours_since: 3, session_id: 's3' }),
   ];
   assert.equal(
     computeAbortEscalation(aborts),
@@ -119,30 +116,61 @@ test('escalation: 3x existing_capability_covers (benign reads) → no advisory',
   );
 });
 
-test('escalation: 3x origin_blocked → advisory fires (block class)', () => {
+test('escalation: 3x runtime-observed origin_blocked → advisory fires (block class)', () => {
   const aborts = [
-    { kind: 'origin_blocked', host: 'example.com', hours_since: 1 },
-    { kind: 'origin_blocked', host: 'example.com', hours_since: 2 },
-    { kind: 'origin_blocked', host: 'example.com', hours_since: 3 },
+    observed({ hours_since: 1, session_id: 's1' }),
+    observed({ hours_since: 2, session_id: 's2' }),
+    observed({ hours_since: 3, session_id: 's3' }),
   ];
   const result = computeAbortEscalation(aborts);
   assert.ok(result, 'origin_blocked repeats must escalate');
   assert.equal(result.kind, 'origin_blocked');
   assert.equal(result.same_root_cause_count, 3);
+  assert.equal(result.runtime_observed_count, 3);
+  assert.equal(result.agent_asserted_count, 0);
+  assert.equal(result.score, 3);
+});
+
+test('escalation: 3x agent-asserted origin_blocked → below threshold, no advisory', () => {
+  // Same count, same kind, same host — but nothing corroborated them. Three
+  // claims are 1.2, not 3.
+  const aborts = [
+    { kind: 'origin_blocked', host: 'example.com', hours_since: 1, session_id: 's1' },
+    { kind: 'origin_blocked', host: 'example.com', hours_since: 2, session_id: 's2' },
+    { kind: 'origin_blocked', host: 'example.com', hours_since: 3, session_id: 's3' },
+  ];
+  assert.equal(computeAbortEscalation(aborts), undefined);
 });
 
 test('escalation: benign kinds do not dilute / mask a real block', () => {
   // 3 benign + 3 blocks interleaved → still escalates on the blocks only.
   const aborts = [
-    { kind: 'existing_capability_covers', host: 'example.com', hours_since: 1 },
-    { kind: 'origin_blocked', host: 'example.com', hours_since: 2 },
-    { kind: 'user_stop', host: 'example.com', hours_since: 3 },
-    { kind: 'origin_blocked', host: 'example.com', hours_since: 4 },
-    { kind: 'site_dead', host: 'example.com', hours_since: 5 },
-    { kind: 'origin_blocked', host: 'example.com', hours_since: 6 },
+    observed({ kind: 'existing_capability_covers', hours_since: 1, session_id: 's1' }),
+    observed({ hours_since: 2, session_id: 's2' }),
+    observed({ kind: 'user_stop', hours_since: 3, session_id: 's3' }),
+    observed({ hours_since: 4, session_id: 's4' }),
+    observed({ kind: 'site_dead', hours_since: 5, session_id: 's5' }),
+    observed({ hours_since: 6, session_id: 's6' }),
   ];
   const result = computeAbortEscalation(aborts);
   assert.ok(result, 'three origin_blocked among benign kinds must still escalate');
   assert.equal(result.kind, 'origin_blocked');
   assert.equal(result.same_root_cause_count, 3);
+});
+
+test('escalation advisory: states the provenance mix, never asserts the site is still blocking', () => {
+  const result = computeAbortEscalation([
+    observed({ hours_since: 1, session_id: 's1' }),
+    observed({ hours_since: 2, session_id: 's2' }),
+    { kind: 'origin_blocked', host: 'example.com', hours_since: 3, session_id: 's3' },
+    observed({ hours_since: 4, session_id: 's4' }),
+  ]);
+  assert.ok(result);
+  assert.equal(result.runtime_observed_count, 3);
+  assert.equal(result.agent_asserted_count, 1);
+  assert.match(result.advisory, /3 corroborated by the runtime's own origin-blocked detector/);
+  assert.match(result.advisory, /1 agent-asserted/);
+  assert.match(result.advisory, /CLAIM a prior session recorded, not an observation/);
+  assert.doesNotMatch(result.advisory, /will not work/);
+  assert.doesNotMatch(result.advisory, /underlying gate has not changed/);
 });

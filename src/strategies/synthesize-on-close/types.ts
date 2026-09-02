@@ -1,8 +1,10 @@
 // Shared types for the synthesize-on-close passes.
 
+import type { StrategyTier } from '../../vocab';
+
 export interface AutoSynthResult {
   capability: string;
-  tier: 'page-script' | 'fetch' | 'recorded-path';
+  tier: StrategyTier;
   path: string;
   reason: string;
 }

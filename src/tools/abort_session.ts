@@ -22,11 +22,8 @@ import {
   flushAccumulatorArtifacts,
 } from '../strategies/discovery-artifact';
 import { appendAbortEvent } from '../working-dir/logbook';
-import { clearStartersForSession } from '../response/starter-cache';
-import { clearForSession as clearSessionObservations } from '../response/session-observations';
-import { clearObservedSessionTracking } from '../working-dir/logbook';
-import { deleteJournal } from '../working-dir/capture-journal';
-import { invokeCheckpointAndGate, type CheckpointEnvelope } from '../checkpoints';
+import { findOriginBlockedObservation } from '../phases/origin-blocked-observations';
+import { checkpointEvent, invokeCheckpointAndGate, type CheckpointEnvelope } from '../checkpoints';
 import { TOOL_NAMES } from '../vocab';
 import { didYouMeanSuffix } from '../utils/string-distance';
 import type { ToolDef } from '../tools/types';
@@ -144,17 +141,18 @@ export async function abortSession(args: AbortSessionArgs): Promise<AbortSession
   // a `continue`-returning handler (test harnesses, autonomous loops
   // where the oracle has decided) get pre-consent + abort proceeds. The
   // user-facing prompt explicitly invites "no, keep trying" replies.
-  const { envelope } = await invokeCheckpointAndGate('abort_session_consent', {
-    session_id: args.session_id,
-    capability: session.declaredCapabilities?.[0]?.capability,
-    context: {
-      kind: 'abort_session_consent',
-      reason,
-      abort_kind: kind,
-      capturedActionsCount,
-      phase_at_abort: phaseAtAbort,
-    },
-  });
+  const { envelope } = await invokeCheckpointAndGate(
+    checkpointEvent.abort_session_consent({
+      session_id: args.session_id,
+      capability: session.declaredCapabilities?.[0]?.capability,
+      context: {
+        reason,
+        abort_kind: kind,
+        capturedActionsCount,
+        phase_at_abort: phaseAtAbort,
+      },
+    }),
+  );
   if (envelope) {
     // Handed over to user — stage the args on the session and return early
     // WITHOUT tearing down. `ack_checkpoint` reads `session.pendingAbort`
@@ -214,10 +212,9 @@ export interface PerformAbortTeardownArgs {
 /** Run the actual abort teardown: persist storage state, log to the
  *  platform's abort_events ledger, tear down the browser, clear per-
  *  session maps. Called inline when consent is pre-granted, and from
- *  `ack_checkpoint` when consent is granted by ack. Idempotent enough —
- *  ledger appends are unconditional and not deduped (the same call shape
- *  twice in a row would write two ledger entries), so callers must not
- *  invoke this more than once per intended abort. */
+ *  `ack_checkpoint` when consent is granted by ack. The ledger append drops a
+ *  write that repeats the newest entry's session_id + kind + host, so a
+ *  double-invocation for one intended abort cannot inflate the ledger. */
 export async function performAbortTeardown(
   sessionId: string,
   payload: PerformAbortTeardownArgs,
@@ -245,11 +242,21 @@ export async function performAbortTeardown(
   if (platform) {
     try {
       const hostFromCaptures = readFirstNavHost(session);
+      // `kind` is the agent's classification. It is a claim until the
+      // runtime's own origin-blocked detector fired on the same host during
+      // this session — then, and only then, the ledger entry carries the
+      // structural signals that back it. Future sessions weigh the two
+      // differently (see computeAbortEscalation), so a wrong guess costs a
+      // fraction of a real observation instead of the same as one.
+      const observation = findOriginBlockedObservation(session, hostFromCaptures);
       appendAbortEvent(platform, {
         session_id: sessionId,
         reason: payload.reason,
         kind: payload.kind,
         ...(hostFromCaptures !== null ? { host: hostFromCaptures } : {}),
+        ...(observation
+          ? { provenance: 'runtime_observed' as const, signals: observation.signals }
+          : { provenance: 'agent_asserted' as const }),
         captured_actions_count: payload.captured_actions_count,
         phase_at_abort: payload.phase_at_abort,
       });
@@ -279,19 +286,21 @@ export async function performAbortTeardown(
     }
   }
 
+  // The single teardown call — session-scope disposal inside `pool.endDrive`
+  // runs every disposer registered against this id (starter cache, session
+  // observations, logbook dedupe, pending checkpoints/interruptions, paused
+  // executions, remote viewers, adopted child sessions). The capture journal
+  // is dropped by its own disposer too: a deliberate abort means those
+  // captures are unwanted — left behind, the next start_session's
+  // orphan-recovery would fold the snapshot with inferCaps:true and stamp
+  // the very capabilities the abort discarded (e.g. 404-probe `view_*`
+  // entries) onto the platform logbook.
   await pool.endDrive(sessionId);
-  clearStartersForSession(sessionId);
-  clearSessionObservations(sessionId);
-  clearObservedSessionTracking(sessionId);
-  // Drop the capture journal: a deliberate abort means these captures are
-  // unwanted. Left behind, the next start_session's orphan-recovery would fold
-  // the snapshot with inferCaps:true and stamp the very capabilities the abort
-  // discarded (e.g. 404-probe `view_*` entries) onto the platform logbook.
-  deleteJournal(sessionId);
 }
 
 export const TOOL_DEF: ToolDef = {
   name: TOOL_NAMES.abortSession,
+  phasePolicy: { category: 'escape_valve', allowedWhenExhaustedIn: ['drive', 'triage', 'lift'] },
   description:
     `Honest exit when this session shouldn't have started OR the user has explicitly said stop. ` +
     `Skips the close-time audit (no capability_declaration_required, no re_persistence, no ` +

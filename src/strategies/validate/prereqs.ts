@@ -54,14 +54,10 @@ export function validatePrereqShape(
   const kind = item.kind;
   const where = `${tier}.prerequisites[${i}]`;
 
-  // kind === 'cached' has no structural validation — value is optional,
-  // runtime checks the cache at execute time. Skip.
-  if (kind === 'cached') return;
-
   if (typeof kind !== 'string') {
     throw new Error(
       `invalid_strategy: ${where}.kind is required (must be one of: ` +
-        `${PREREQ_KINDS.map((k) => JSON.stringify(k)).join(', ')}, "cached")\n\n` +
+        `${PREREQ_KINDS.map((k) => JSON.stringify(k)).join(', ')})\n\n` +
         `Expected shape:\n  { kind: ${PREREQ_KINDS.map((k) => JSON.stringify(k)).join(' | ')}, ... }\n\n` +
         `See klura://reference#capability-prereq.`,
     );
@@ -69,11 +65,10 @@ export function validatePrereqShape(
 
   const schema = getPrereqSchema(kind);
   if (!schema) {
-    const allKinds = [...PREREQ_KINDS, 'cached'];
-    const suggestion = didYouMeanSuffix(kind, allKinds);
+    const suggestion = didYouMeanSuffix(kind, PREREQ_KINDS as readonly string[]);
     throw new Error(
       `invalid_strategy: ${where}.kind = ${JSON.stringify(kind)} is not a recognized prereq kind${suggestion}. ` +
-        `Allowed: ${PREREQ_KINDS.map((k) => JSON.stringify(k)).join(', ')}, "cached".\n\n` +
+        `Allowed: ${PREREQ_KINDS.map((k) => JSON.stringify(k)).join(', ')}.\n\n` +
         `Expected shape:\n  { kind: ${PREREQ_KINDS.map((k) => JSON.stringify(k)).join(' | ')}, ... }\n\n` +
         `See klura://reference#capability-prereq.`,
     );

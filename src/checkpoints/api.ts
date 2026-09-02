@@ -8,11 +8,13 @@ import { pool } from '../runtime-state';
 import { assertNoPendingCheckpoint } from '../checkpoints';
 import { peekPendingCheckpointKind } from '../checkpoints/gate-glue';
 import { composeAckHint } from '../checkpoints/ack-hints';
-import { stampRuntimeMeta } from '../strategies/skills';
+import { stampPostSaveValidationProof } from '../strategies/skills';
 import {
   verifySavedStrategy,
+  verifyStrategyCandidate,
   type VerifySavedStrategyResult,
 } from '../strategies/verify-saved-strategy';
+import { resolveStrategyCandidateRef } from '../strategies/strategy-candidates';
 import { describeFactoryExecutionFailure } from '../execution/result-classification';
 import { performAbortTeardown } from '../tools/abort_session';
 import type { Session } from '../drivers/types/session';
@@ -36,11 +38,11 @@ export interface AckCheckpointResult {
 }
 
 /**
- * Run the deferred post-save factory verification staged on the session by
- * `save_strategy`. Called when a `post_save_validation_consent` checkpoint is
- * acked. Consent (`!cancelled`) → run `verifySavedStrategy`; decline
- * (`cancelled`) → stamp the strategy unverified. Clears the staged payload
- * either way.
+ * Run deferred factory verification staged on the session by `save_strategy`.
+ * Active saves use `verifySavedStrategy`; inactive replacements use
+ * `verifyStrategyCandidate` and promote only on explicit success. Declining an
+ * active save stamps it unverified, while declining a candidate leaves both
+ * candidate and prior active strategy untouched.
  */
 async function resolvePostSaveValidation(
   session: Session | null,
@@ -58,7 +60,17 @@ async function resolvePostSaveValidation(
   session.pendingPostSaveValidation = undefined;
 
   if (args.cancelled === true) {
-    stampRuntimeMeta(pending.platform, pending.capability, { post_save_validation: 'declined' });
+    if (pending.candidate_id) {
+      recordAbandonedSaveAttempt(session, pending.capability, 'declined');
+      return {
+        ok: true,
+        _hint:
+          `Candidate validation declined — \`${pending.capability}\` remains inactive and the ` +
+          `prior active strategy is unchanged. end_drive will refuse close until you verify a ` +
+          `replacement or explicitly acknowledge the abandoned save attempt.`,
+      };
+    }
+    stampPostSaveValidationProof(pending.proof, 'declined', false);
     recordAbandonedSaveAttempt(session, pending.capability, 'declined');
     return {
       ok: true,
@@ -69,16 +81,41 @@ async function resolvePostSaveValidation(
     };
   }
 
-  const result = await verifySavedStrategy(
-    pending.platform,
-    pending.capability,
-    pending.args,
-    pool,
-  );
-  if (result.classification === 'explicit_success') {
+  const candidateRef = pending.candidate_id
+    ? resolveStrategyCandidateRef(pending.platform, pending.capability, pending.candidate_id)
+    : null;
+  const result = candidateRef
+    ? await verifyStrategyCandidate(candidateRef, pending.args, pool, pending.changelog)
+    : await verifySavedStrategy(
+        pending.platform,
+        pending.capability,
+        pending.args,
+        pool,
+        pending.proof,
+      );
+  if (result.ok && result.classification === 'explicit_success') {
+    if (candidateRef) {
+      if (!session.savedCapabilities) session.savedCapabilities = [];
+      session.savedCapabilities.push({
+        capability: pending.capability,
+        tier: candidateRef.tier,
+        at: Date.now(),
+      });
+      session.staleStrategyCapabilities?.delete(pending.capability);
+    }
     return {
       ok: true,
       _hint: `Post-save validation passed — \`${pending.capability}\` returned HTTP ${result.status} with explicit body.ok === true. Strategy verified locally.`,
+      post_save_validation: result,
+    };
+  }
+  if (result.proof_current === false) {
+    return {
+      ok: true,
+      _hint:
+        `Post-save validation result was discarded — the exact \`${pending.capability}\` strategy ` +
+        `changed before its proof could be committed. No newer bytes were marked verified. ` +
+        `Run verification against the current strategy when ready.`,
       post_save_validation: result,
     };
   }
@@ -89,6 +126,20 @@ async function resolvePostSaveValidation(
         `Post-save validation is inconclusive — \`${pending.capability}\` returned HTTP ${result.status}, ` +
         `but the body had no explicit boolean ok field. Inspect post_save_validation.body_preview now; ` +
         `factory runtime did not classify its semantic outcome, and published outcome contracts are verified separately.`,
+      post_save_validation: result,
+    };
+  }
+  if (result.classification === 'not_run' || result.classification === 'delivery_unknown') {
+    const statusLabel = describeFactoryExecutionFailure(result.classification, result.status);
+    return {
+      ok: true,
+      _hint:
+        `Post-save validation is inconclusive — \`${pending.capability}\` ${statusLabel}. ` +
+        `The strategy was not archived. ${
+          result.classification === 'delivery_unknown'
+            ? 'Do not retry until remote state has been reconciled with a read.'
+            : 'Supply the missing input before retrying.'
+        }`,
       post_save_validation: result,
     };
   }

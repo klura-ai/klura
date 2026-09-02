@@ -93,6 +93,22 @@ export {
 } from './phases/drive/drive-to-triage-handoff';
 export { endDrive } from './phases/drive/end-drive-orchestrator';
 
+// Session-scope — the single owner of per-session teardown. Subsystems (and
+// plugin / scenario authors) holding session-keyed state register a named
+// disposer at the write site; `pool.endDrive` disposes the scope on every
+// path where the session id dies. See runtime/src/pool/session-scope.ts.
+export {
+  onSessionDispose,
+  removeSessionDisposeHook,
+  adoptChildSession,
+  releaseChildSession,
+  parentSessionOf,
+  childSessionsOf,
+  hasSessionScope,
+  disposeSessionScope,
+} from './pool/session-scope';
+export type { SessionDisposeHook, SessionDisposeFailure } from './pool/session-scope';
+
 // ---- Vocabulary (drift-prevention const maps) ----
 
 export {
@@ -144,8 +160,26 @@ export {
   assertToolAdmissibleBySessionId,
   tickPhaseCounter,
 } from './phases/middleware';
-export type { SessionPhase, PhaseSpec, PhaseEvent, PhaseEventKind } from './phases/types';
-export { ToolNotAdmissibleError, SessionPhaseTransitionError } from './phases/types';
+export type {
+  SessionPhase,
+  PhaseSpec,
+  PhaseEvent,
+  PhaseEventKind,
+  ToolPhaseCategory,
+  ToolPhasePolicy,
+} from './phases/types';
+export {
+  ToolNotAdmissibleError,
+  SessionPhaseTransitionError,
+  SESSION_PHASES,
+  TOOL_PHASE_CATEGORIES,
+} from './phases/types';
+export {
+  CATEGORY_PHASES,
+  phaseAllowedTools,
+  phaseExhaustedTools,
+  toolPhasePolicies,
+} from './phases/tool-catalog';
 
 // Public, runtime-state-bound entry point for the saved-strategy executor.
 // The lower-level `execute` in `runtime/src/execution/index.ts` takes pool +
@@ -154,17 +188,27 @@ export { ToolNotAdmissibleError, SessionPhaseTransitionError } from './phases/ty
 // the four-arg shape they expect.
 import { execute as executeCore } from './execution';
 import type { ExecuteResult } from './execution/types';
+import { collectExecutionDiagnosticEvidence } from './execution/diagnostic-evidence';
 import { pool as runtimePool, tokenCache as runtimeTokenCache } from './runtime-state';
 
 export async function execute(
   platform: string,
   capability: string,
   args: Record<string, unknown> = {},
-  opts: { identity?: string } = {},
+  opts: {
+    identity?: string;
+    _suppressStrategyState?: boolean;
+    _collectDiagnosticEvidence?: boolean;
+  } = {},
 ): Promise<ExecuteResult> {
-  return executeCore(platform, capability, args, runtimePool, runtimeTokenCache, {
-    identity: opts.identity,
-  });
+  const invoke = (): Promise<ExecuteResult> =>
+    executeCore(platform, capability, args, runtimePool, runtimeTokenCache, {
+      identity: opts.identity,
+      _suppressStrategyState: opts._suppressStrategyState,
+    });
+  if (!opts._collectDiagnosticEvidence) return invoke();
+  const { result, evidence } = await collectExecutionDiagnosticEvidence(invoke);
+  return { ...result, diagnosticEvidence: evidence };
 }
 
 export { resumeExecution } from './tools/execute';

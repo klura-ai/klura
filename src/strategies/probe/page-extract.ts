@@ -8,6 +8,7 @@ import {
   DEFAULT_ACCEPT_LANGUAGE,
 } from '../../identity/devices';
 import { isLoginWallUrl, tryGetUrl } from '../../response/auth-wall';
+import { recordDiagnosticUrl } from '../../execution/diagnostic-evidence';
 
 export interface PageExtractPrereq {
   name: string;
@@ -148,6 +149,7 @@ export async function probeOnePrereqFromNode(
 
   let response: Response;
   try {
+    recordDiagnosticUrl('request', prereq.url);
     response = await fetch(prereq.url, { method: 'GET', headers, redirect: 'follow' });
   } catch (err) {
     return {

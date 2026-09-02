@@ -9,8 +9,9 @@
 //   - `save_strategy` `invalid_shape` rejection — inlined in the rejection message.
 
 import { z } from 'zod';
+import { STRATEGY_TIERS, type StrategyTier } from '../vocab';
 import { prereqSchemas, PREREQ_KINDS, prereqReferenceSlug } from './schemas/prereqs';
-import { strategySchemas } from './schemas/strategy';
+import { strategySchemas, TIER_REFERENCE_SLUGS } from './schemas/strategy';
 import { renderZodSkeleton } from './schemas/zod-helpers';
 import { describeNotesAllowlist } from './validate/notes';
 import {
@@ -20,7 +21,7 @@ import {
   WS_UNSAFE_HEADERS,
 } from './validate/constants';
 
-export type StrategyTier = 'fetch' | 'page-script' | 'recorded-path';
+export type { StrategyTier };
 
 interface RenderOpts {
   /** Restrict prereq listing to those typically used with the given tier.
@@ -59,7 +60,7 @@ export function renderSaveStrategySchemaMarkdown(opts: RenderOpts = {}): string 
   } else {
     lines.push('### Strategy tiers');
     lines.push('');
-    for (const tier of ['fetch', 'page-script', 'recorded-path'] as const) {
+    for (const tier of STRATEGY_TIERS) {
       lines.push(`**\`${tier}\`**`);
       lines.push('');
       lines.push('```');
@@ -144,26 +145,17 @@ export function getSaveStrategySchema(): {
       schema,
     };
   }
-  const tiers: Record<
+  const tiers = {} as Record<
     StrategyTier,
     { shape_skeleton: string; reference_slug: string; schema: z.ZodType }
-  > = {
-    fetch: {
-      shape_skeleton: renderZodSkeleton(strategySchemas.fetch),
-      reference_slug: 'fetch-schema',
-      schema: strategySchemas.fetch,
-    },
-    'page-script': {
-      shape_skeleton: renderZodSkeleton(strategySchemas['page-script']),
-      reference_slug: 'page-script-schema',
-      schema: strategySchemas['page-script'],
-    },
-    'recorded-path': {
-      shape_skeleton: renderZodSkeleton(strategySchemas['recorded-path']),
-      reference_slug: 'recorded-path-schema',
-      schema: strategySchemas['recorded-path'],
-    },
-  };
+  >;
+  for (const tier of STRATEGY_TIERS) {
+    tiers[tier] = {
+      shape_skeleton: renderZodSkeleton(strategySchemas[tier]),
+      reference_slug: TIER_REFERENCE_SLUGS[tier],
+      schema: strategySchemas[tier],
+    };
+  }
   return {
     prereqs,
     tiers,

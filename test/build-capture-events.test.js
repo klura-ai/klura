@@ -90,3 +90,23 @@ test('outcome reflects the best saved tier', () => {
   const noSave = buildCaptureEvents(fakeSession(), [], [], [])[0];
   assert.equal(noSave.payload.outcome, 'no_save');
 });
+
+test('mixed-tier saves fold to the canonical best tier (fetch over page-script)', () => {
+  // The session_meta outcome and lift-attempt dedup both rank by the
+  // canonical tier speed ordering (audit/concerns/tier-rank.ts), so a
+  // session that saved both tiers reports the fetch win everywhere.
+  const mixed = fakeSession({
+    savedCapabilities: [
+      { capability: 'list_x', tier: 'page-script' },
+      { capability: 'list_x', tier: 'fetch' },
+    ],
+  });
+  const meta = buildCaptureEvents(mixed, [], [], [])[0];
+  assert.equal(meta.payload.outcome, 'fetch_saved');
+
+  const pageScriptOnly = fakeSession({
+    savedCapabilities: [{ capability: 'list_x', tier: 'page-script' }],
+  });
+  const psMeta = buildCaptureEvents(pageScriptOnly, [], [], [])[0];
+  assert.equal(psMeta.payload.outcome, 'page_script_saved');
+});

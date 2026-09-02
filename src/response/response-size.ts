@@ -213,7 +213,7 @@ export interface BudgetEnforced<T> {
 
 /** Cap below which strings inside the budget walker are never touched. Below
  *  this, the leaf contributes too little to be worth shaving. */
-const ENFORCE_STRING_LEAF_MIN = 1_000;
+const ENFORCE_STRING_LEAF_MIN = 256;
 
 /** Threshold below which arrays inside the budget walker are never touched. */
 const ENFORCE_ARRAY_LEAF_MIN = 50;
@@ -281,7 +281,7 @@ function collectBudgetLeaves(
  *  1. Serialize once. If under ceiling, return the original value untouched
  *     with `truncations: []`.
  *  2. Deep-clone via JSON round-trip (the stringify is paid; parse is cheap).
- *  3. Collect string leaves ≥ 1 KB and array leaves ≥ 50 entries, sorted
+ *  3. Collect string leaves ≥ 256 chars and array leaves ≥ 50 entries, sorted
  *     descending by size.
  *  4. Repeatedly clip the largest: strings via `truncateString` with a marker
  *     naming the dot-path; arrays head-sliced to a count proportional to the

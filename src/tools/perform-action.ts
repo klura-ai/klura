@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { pool } from '../runtime-state';
 import { capturePageFingerprint } from '../strategies/page-fingerprint';
+import { storageStatePath } from '../strategies/storage-state';
 import { ensureAccumulator, ringPush, digestArgs } from '../strategies/discovery-artifact';
 import { trimA11yTree, paginateA11yTree, DEFAULT_A11Y_BUDGET } from '../response/response-size';
 import type { PaginatedA11yTree } from '../response/response-size';
@@ -24,6 +25,7 @@ import { detectSensitiveFieldNames } from '../gate/save-warnings-sensitive-shape
 import { maybeFireSurfaceChanged } from '../phases/surface-changed';
 import { readInitialNavStatus } from './start-session';
 import { detectOriginBlocked } from '../phases/origin-blocked-detector';
+import { recordOriginBlockedObservation } from '../phases/origin-blocked-observations';
 import { snapVisibilityAnomalies } from '../phases/visibility';
 import type { OriginBlockedAdvisory } from '../phases/origin-blocked-detector';
 import type { BrowserDriver, PageOpts } from '../drivers/interface';
@@ -34,7 +36,10 @@ import type { CheckpointEnvelope } from '../checkpoints';
 /** Run the origin-blocked detector on a freshly-navigated page. Extracted
  *  from `performAction` to keep that function under the cognitive-complexity
  *  cap; returns `{}` (no field) when the detector cleared, or
- *  `{origin_blocked}` to spread into the response. */
+ *  `{origin_blocked}` to spread into the response. A firing advisory is also
+ *  recorded on the session — it is the runtime's own structural evidence that
+ *  this host refused us, and `abort_session` reads it to stamp the ledger
+ *  entry's provenance. */
 async function snapNavigateOriginBlocked(
   driver: BrowserDriver,
   session: Session,
@@ -56,7 +61,9 @@ async function snapNavigateOriginBlocked(
     iframes,
     connectEnabled: pool.connectEnabled,
   });
-  return advisory ? { origin_blocked: advisory } : {};
+  if (!advisory) return {};
+  recordOriginBlockedObservation(session, advisory);
+  return { origin_blocked: advisory };
 }
 
 export interface ActionResult {
@@ -84,6 +91,10 @@ export interface ActionResult {
     openedAt: number;
     closedAt?: number;
   }>;
+  _storage_state?: {
+    persisted: false;
+    code: 'storage_state_save_failed';
+  };
   /**
    * Pending-checkpoint envelope when the action's resulting navigation
    * crossed to a path-distinct surface that no triage plan covers.
@@ -837,6 +848,25 @@ export async function performAction(
   // this session's archive. No-op on graphs that don't journal (warm/execute).
   await checkpointCaptureJournal(session);
 
+  // Browser actions can update cookies or local storage before the authoring
+  // session closes. Persist at this natural lifecycle edge so a subsequent
+  // session for the same platform/identity inherits the just-observed browser
+  // state even if the agent opens it before end_drive. A persistence failure
+  // must not turn a successfully-dispatched action into a thrown error, which
+  // could make the caller repeat a mutation; surface a typed advisory instead.
+  let storageStateField: ActionResult['_storage_state'];
+  if (session.platform) {
+    try {
+      await driver.saveStorageState(session, storageStatePath(session.platform, session.identity));
+    } catch {
+      storageStateField = {
+        persisted: false,
+        code: 'storage_state_save_failed',
+      };
+    }
+  }
+  const storageStateResponseField = storageStateField ? { _storage_state: storageStateField } : {};
+
   // Surface-changed checkpoint: when the page is now on a path-distinct
   // URL that no triage plan covers and the session is past triage entry,
   // fire the checkpoint so the agent re-enters triage and produces a
@@ -868,6 +898,7 @@ export async function performAction(
       ...navStatusField,
       ...subPagesField,
       ...checkpointField,
+      ...storageStateResponseField,
     };
   }
   const rawTree = await driver.getAccessibilityTree(session, pageOpts);
@@ -922,6 +953,7 @@ export async function performAction(
     visibility_anomalies: visibilityAnomalies,
     ...subPagesField,
     ...checkpointField,
+    ...storageStateResponseField,
   };
 }
 
@@ -1127,6 +1159,9 @@ import type { ToolDef } from '../tools/types';
 export const TOOL_DEFS: ToolDef[] = [
   {
     name: TOOL_NAMES.performAction,
+    // extraPhases: lifting a read surface often requires another UI
+    // interaction to generate the request or rendered state being inspected.
+    phasePolicy: { category: 'drive_active', extraPhases: ['lift'] },
     description:
       'Interact with the page. Per-action args:\n  - click: selector (CSS / a11y / role-name)\n  - type: selector + text (the string to type — APPENDS by default; pass replace:true to clear first)\n  - fill_editor: selector + text (contenteditable rich-text editors — Lexical/Slate/Draft/ProseMirror — where type fails on zero-height bounding boxes)\n  - select: selector + text (the <option>\'s value attribute)\n  - key_press: selector + text (the key, e.g. "Enter", "Escape", "ArrowDown")\n  - mouse_click: selector="x,y" (coordinates as a string)\n  - mouse_drag: selector="x,y" (start) + text="x,y" (end)\n  - scroll: selector="x,y" (anchor, optional) + text="deltaX,deltaY"\n  - navigate: selector=<url> (top-level page navigation)\n\n`text` is the canonical name for the string-to-send, matching the Claude-in-Chrome convention. `value` is accepted as a deprecated alias for `text` and produces an identical effect. Returns the updated accessibility tree (~2-4s on heavy DOMs); pass `return_tree: false` when the next tool call (get_network_log, get_screenshot, another perform_action) will supersede the tree anyway. Pass `page` to target a popup or `target=_blank` tab — `subPages[]` lists open handles.',
     inputSchema: {
@@ -1186,6 +1221,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.getNetworkLog,
+    phasePolicy: { category: 'read_only_diagnostic' },
     description:
       'Captured network activity — **HTTP requests AND WebSocket frames** in one call. **For write-capability discovery, ALWAYS narrow with a filter on the first call** — do not scan the raw summary and then fetch {i, full: true} per entry, that is the slow anti-pattern. A narrowing filter auto-promotes HTTP entries to detail-lite mode (full request headers + full postData + 512-char responseBody preview per entry) AND surfaces matching WebSocket frames in the response\'s `wsFrames` field (url + direction + 512-char payload preview per frame). Three filter patterns, in order of specificity: (1) {text_contains: "<literal>"} — the best primitive when you know a string you just typed. Substring-searches URL + headers + postData + responseBody for HTTP AND payload for every captured WS frame; the request OR ws frame that carried or echoed your input is almost always the only match. **On realtime / chat sites the write is usually a sent WS frame, not an HTTP POST** — it appears in `wsFrames`, not `requests`. (2) {url_contains: "<path>"} — when the endpoint path is distinctive (e.g. /graphql, /api/orders). (3) {last: 20} — when neither of the above applies, tails the final entries of the session. Detail-lite auto-paginates when the narrowed set is larger than one response; walk pages with {page: N}. The other modes: unfiltered call → summary (one tiny object per HTTP request + the last 30 WS frame previews); {i: N, full: true} → a single verbatim HTTP entry; {ws_i: N, full: true} → a single untrimmed WS frame (use this to capture the exact payload bytes for a `protocol:"websocket"` strategy); {full: true} → paginated raw detail-list for HTTP, rarely needed.',
     inputSchema: {
@@ -1252,6 +1288,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.getA11yTree,
+    phasePolicy: { category: 'read_only_diagnostic' },
     description:
       'Fetch the full, untrimmed accessibility tree for a live session, paginated. Use when the default trimmed tree from `start_session` / `perform_action` (or the healable-error body from `execute`) came back with `a11y_truncated: true` and you need to see the rest of the page to pick a selector. Response shape: `{tree, total_chars, page, page_size, total_pages, has_more}`. Most discovery turns do NOT need this — the trimmed defaults cover the top ~15 KB of the tree, which is enough for nearly every real-world page. Reach for this tool only when you have evidence the element you want is outside the trimmed window (e.g. deeply nested content, very long lists).',
     inputSchema: {
@@ -1275,6 +1312,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.getActionHistory,
+    phasePolicy: { category: 'read_only_diagnostic' },
     description:
       'Return the session\'s timestamped perform_action history. Each entry carries `at` (Unix ms), `action`, and whichever of `selector` / `value` / `key` / `url` apply. Filter with `since` / `until` to time-correlate against XHR timestamps from `get_network_log` — e.g. "I clicked X at time T; which XHR fired between T and T+2s was the data load for that click?" Compact response; no pagination needed (histories are typically 10-30 entries). Primary use case: at end_drive review time, when you need to figure out which captured request carried the data you reported to the user, scan action history for the last click/navigate + use that timestamp as a floor on `get_network_log` to narrow the candidate window.',
     inputSchema: {

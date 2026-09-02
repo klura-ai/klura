@@ -4,6 +4,7 @@
 
 import type { Strategy } from '../strategies/skills';
 import { getCapturedRequestsProvider } from '../strategies/validate/providers';
+import { tokenizeSlug } from '../audit/concerns/slug-collision';
 import type { SaveWarning } from './save-warnings';
 
 /**
@@ -30,11 +31,7 @@ export function detectEnumValueInCapabilitySlug(data: Strategy, capability: stri
   if (typeof capability !== 'string' || capability.length === 0) return [];
   const params = (data as { notes?: { params?: Record<string, unknown> } }).notes?.params;
   if (!params || typeof params !== 'object') return [];
-  const slugTokens = capability
-    .toLowerCase()
-    .split(/[_\-/]/)
-    .filter(Boolean);
-  const slugTokenSet = new Set(slugTokens);
+  const slugTokenSet = new Set(tokenizeSlug(capability));
   for (const [paramName, info] of Object.entries(params)) {
     if (!info || typeof info !== 'object') continue;
     const i = info as { kind?: unknown; observed_values?: unknown };
@@ -373,6 +370,17 @@ function collectObservedEnumPairs(strategy: Strategy): Array<{ value: string; la
  * (preferences, A/B test). Without ack, the warning surfaces the structural
  * fact and points at the typed-edge auth pattern.
  */
+/** Methods the auth-gated detector scopes to. Exported so the save
+ *  authoring contract's auth constraint cites the same scope the detector
+ *  enforces — see the scoping rationale inside
+ *  `detectAuthGatedWithoutAuthPrereq`. */
+export const AUTH_GATE_MUTATING_METHODS: ReadonlySet<string> = new Set([
+  'POST',
+  'PUT',
+  'DELETE',
+  'PATCH',
+]);
+
 export function detectAuthGatedWithoutAuthPrereq(
   data: Strategy,
   sessionId?: string,
@@ -390,8 +398,7 @@ export function detectAuthGatedWithoutAuthPrereq(
   // Truly auth-gated GETs that fail cold-execute fall through to the auth-
   // wall recovery layer at execute time.
   const method = ((data as { method?: string }).method ?? '').toUpperCase();
-  const MUTATING = new Set(['POST', 'PUT', 'DELETE', 'PATCH']);
-  if (!MUTATING.has(method)) return [];
+  if (!AUTH_GATE_MUTATING_METHODS.has(method)) return [];
   const provider = getCapturedRequestsProvider();
   if (!provider) return [];
   const captured = provider(sessionId);

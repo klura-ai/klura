@@ -19,9 +19,11 @@
 // outer id "owns" which inner id during the pause window. Both lookup
 // sites consult the alias on miss before falling through.
 //
-// Lifetime mirrors `pausedExecutions` exactly: registered when the inner
-// session pauses, cleared when the paused entry is consumed (resume
-// success/failure).
+// Lifetime mirrors `pausedExecutions`: registered when the inner session
+// pauses, cleared when the paused entry is consumed by a resume, and — for
+// pauses never resumed — cleared by the outer session's scope disposal
+// (`runtime/src/pool/session-scope.ts`), which also closes the adopted
+// inner session.
 
 const aliases = new Map<string, string>();
 

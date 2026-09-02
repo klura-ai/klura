@@ -33,8 +33,15 @@ import {
   parseScrapeRunPolicy,
   type EffectiveRunBoundsV1,
 } from '../../public/contracts/scrape-policy';
-import { parseRunId, parseRunOperationId, type RunIdV1, type RunOperationIdV1 } from './journal';
+import {
+  parseRunId,
+  parseRunOperationId,
+  readJournal,
+  type RunIdV1,
+  type RunOperationIdV1,
+} from './journal';
 import { parseRunOutput, type RunOutputV1 } from './output';
+import { withOwnerFileLockAsync } from '../../utils/owner-file-lock';
 
 const META_MAX_BYTES_V1 = 1024 * 1024;
 
@@ -84,6 +91,59 @@ export interface RunStorePathsV1 {
   runs: string;
 }
 
+// The `runs/<run_id>/{meta.json,journal.log,data.spool}` layout is owned here
+// and nowhere else. Collaborators that need a run's on-disk location (the
+// session store's stale-lease recovery, startup recovery) go through these
+// accessors so a layout change cascades from one place.
+
+export function runDirectoryPath(home: string, runId: RunIdV1): string {
+  return path.join(home, 'runs', runId);
+}
+
+export function runMetaPath(home: string, runId: RunIdV1): string {
+  return path.join(runDirectoryPath(home, runId), 'meta.json');
+}
+
+export function runJournalPath(home: string, runId: RunIdV1): string {
+  return path.join(runDirectoryPath(home, runId), 'journal.log');
+}
+
+export function runDataSpoolPath(home: string, runId: RunIdV1): string {
+  return path.join(runDirectoryPath(home, runId), 'data.spool');
+}
+
+/**
+ * True when durable run state proves the run can no longer dispatch traffic:
+ * its meta or journal never came into existence (run never started), or the
+ * journal's last frame is terminal. Corrupt or nonterminal journals return
+ * false. The session store's stale-lease recovery consumes this — the run
+ * layout and terminal-frame read stay owned by the run store.
+ */
+export function isRunTerminalOrUnstarted(home: string, runId: RunIdV1): boolean {
+  const metaPath = runMetaPath(home, runId);
+  const journalPath = runJournalPath(home, runId);
+  try {
+    const meta = fs.lstatSync(metaPath);
+    if (!meta.isFile() || meta.isSymbolicLink()) return false;
+  } catch (error) {
+    return isMissing(error);
+  }
+  let journal: fs.Stats;
+  try {
+    journal = fs.lstatSync(journalPath);
+  } catch (error) {
+    return isMissing(error);
+  }
+  if (!journal.isFile() || journal.isSymbolicLink()) return false;
+  try {
+    const frames = readJournal(fs.readFileSync(journalPath), runId).frames;
+    if (frames.length === 0) return true;
+    return frames.at(-1)?.body.event.kind === 'terminal';
+  } catch {
+    return false;
+  }
+}
+
 export class RunStoreV1 {
   readonly paths: RunStorePathsV1;
 
@@ -129,11 +189,11 @@ export class RunStoreV1 {
   }
 
   journalPath(runId: string): string {
-    return path.join(this.runDirectory(parseRunId(runId, 'run_id')), 'journal.log');
+    return runJournalPath(this.paths.home, parseRunId(runId, 'run_id'));
   }
 
   dataSpoolPath(runId: string): string {
-    return path.join(this.runDirectory(parseRunId(runId, 'run_id')), 'data.spool');
+    return runDataSpoolPath(this.paths.home, parseRunId(runId, 'run_id'));
   }
 
   discard(runId: string): void {
@@ -174,12 +234,9 @@ export class RunStoreV1 {
 
   async withResumeLease<T>(runId: RunIdV1, operation: () => Promise<T>): Promise<T> {
     const lockPath = path.join(this.runDirectory(runId), 'resume.lock');
-    acquireResumeLease(lockPath);
-    try {
-      return await operation();
-    } finally {
-      releaseResumeLease(lockPath);
-    }
+    return withOwnerFileLockAsync(lockPath, operation, {
+      onLocked: () => new RunLeaseError('another local process is resuming this run'),
+    });
   }
 
   private ensureRunsDirectory(): void {
@@ -190,7 +247,7 @@ export class RunStoreV1 {
   }
 
   private runDirectory(runId: RunIdV1): string {
-    return path.join(this.paths.runs, runId);
+    return runDirectoryPath(this.paths.home, runId);
   }
 }
 
@@ -350,80 +407,6 @@ function writeExclusive(target: string, bytes: Buffer): void {
     fs.fsyncSync(fd);
   } finally {
     fs.closeSync(fd);
-  }
-}
-
-function acquireResumeLease(lockPath: string): void {
-  for (let attempts = 0; attempts < 2; attempts += 1) {
-    try {
-      const fd = fs.openSync(lockPath, 'wx', 0o600);
-      try {
-        fs.writeFileSync(fd, Buffer.from(canonicalJson({ pid: process.pid }), 'utf8'));
-        fs.fsyncSync(fd);
-      } finally {
-        fs.closeSync(fd);
-      }
-      return;
-    } catch (error) {
-      if (!isExists(error)) throw error;
-      const ownerPid = readResumeLeasePid(lockPath);
-      if (isProcessLive(ownerPid)) {
-        throw new RunLeaseError('another local process is resuming this run');
-      }
-      fs.unlinkSync(lockPath);
-    }
-  }
-  throw new RunLeaseError('could not acquire the local resume lease');
-}
-
-function releaseResumeLease(lockPath: string): void {
-  try {
-    fs.unlinkSync(lockPath);
-  } catch (error) {
-    if (isMissing(error)) return;
-    throw error;
-  }
-}
-
-function readResumeLeasePid(lockPath: string): number {
-  let bytes: Buffer;
-  try {
-    bytes = fs.readFileSync(lockPath);
-  } catch (error) {
-    if (isMissing(error)) throw new RunLeaseError('local resume lease changed while acquiring it');
-    throw error;
-  }
-  try {
-    const record = parseExactRecord(
-      parseStrictJson(bytes, 'run.resume.lock', 1_024, 3),
-      'run.resume.lock',
-      ['pid'],
-    );
-    const pid = record.pid;
-    if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid < 1) {
-      throw new RunLeaseError('local resume lease has an invalid owner');
-    }
-    return pid;
-  } catch (error) {
-    if (error instanceof RunLeaseError) throw error;
-    if (error instanceof PublicContractError) {
-      throw new RunLeaseError('local resume lease is malformed');
-    }
-    throw error;
-  }
-}
-
-function isProcessLive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return !(
-      typeof error === 'object' &&
-      error !== null &&
-      'code' in error &&
-      error.code === 'ESRCH'
-    );
   }
 }
 

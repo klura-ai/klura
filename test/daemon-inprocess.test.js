@@ -78,10 +78,38 @@ test('daemon boots and responds to /status', async () => {
   assert.strictEqual(require.cache[FACTORY_INDEX], undefined);
 });
 
-test('consumer daemon route rejects malformed input without loading factory state', async () => {
-  const result = await sendToDaemon('POST', '/consumer/call', { unexpected: true });
-  assert.strictEqual(typeof result, 'object');
-  assert.ok(result.error);
+test('consumer daemon route rejects malformed input without sending success headers', async () => {
+  const result = await new Promise((resolve, reject) => {
+    const request = http.request(
+      {
+        socketPath: path.join(TMP, 'klura.sock'),
+        path: '/consumer/call',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      },
+      (response) => {
+        let body = '';
+        response.on('data', (chunk) => {
+          body += String(chunk);
+        });
+        response.on('end', () => {
+          try {
+            resolve({ status: response.statusCode, body: JSON.parse(body) });
+          } catch (error) {
+            reject(error);
+          }
+        });
+      },
+    );
+    request.setTimeout(1_000, () => {
+      request.destroy(new Error('malformed consumer request did not complete'));
+    });
+    request.on('error', reject);
+    request.end(JSON.stringify({ unexpected: true }));
+  });
+  assert.strictEqual(result.status, 500);
+  assert.strictEqual(typeof result.body, 'object');
+  assert.ok(result.body.error);
   assert.strictEqual(require.cache[FACTORY_INDEX], undefined);
 });
 

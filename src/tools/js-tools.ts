@@ -573,6 +573,7 @@ import type { ToolDef } from '../tools/types';
 export const TOOL_DEFS: ToolDef[] = [
   {
     name: TOOL_NAMES.getJsSource,
+    phasePolicy: { category: 'read_only_diagnostic' },
     description:
       'Read the source body of a JS script the page has already loaded, windowed around `line` with surrounding context. The fast path for binary-WS / signed-request reverse engineering: `inspect_ws_frame.js_callstack.frames[0]` names the file:line of the encoder; `get_js_source(file, {line: that_line, context_lines: 80})` reads the surrounding source, so you SEE the actual derivations (`epoch_id = Date.now() * 1e6n`, `otid = nextOtid()`, etc.) instead of guessing them from output bytes. Pretty-prints minified single-line bundles before windowing so the slice has structure. Per-session cache means paginated reads share one fetch. Response: `{url, format, total_lines, start_line, end_line, source, truncated?}`.',
     inputSchema: {
@@ -611,6 +612,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.getSendEncoder,
+    phasePolicy: { category: 'lift_re_active' },
     description:
       'Read the per-ws_i side-channel that the page-side WebSocket.send wrapper stashed at send time. On a matching captured send: `{sent_args_preview, sent_args_type, sent_args_byte_length, ws_url, head_hex, ts, handle_alive, encoder_handle, advice}` — `encoder_handle` is a JS expression like `window.__kluraSendEncoders[471]` addressable via `js_eval` to read `<handle>.ws` (captured WebSocket instance) and `<handle>.sentArgs` (original data passed to send). When no stash entry matches, returns `{encoder: null, reason, advice}` — `reason` is one of `frame_out_of_range` (ws_i past buffer), `frame_received` (not a sent frame — pick a sent one), `wrapper_not_installed` (no WS-using JS on the page yet), `no_matching_fingerprint` (page may have re-wrapped WebSocket.send; fall back to reading encoder source via `get_js_source` with `inspect_ws_frame.js_callstack`). The `advice` field names the best next action for each reason. Pair with `inspect_ws_frame.js_callstack` + `get_js_source` for the reverse-engineer toolkit.',
     inputSchema: {
@@ -634,6 +636,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.searchJsSource,
+    phasePolicy: { category: 'read_only_diagnostic' },
     description:
       'Substring-search a JS script the page already loaded. Returns `{line, column, preview}` for each hit (max 100). Line numbers are raw-source coordinates matching `Error.stack` and `get_js_source({line})`. Use to find encoder call sites: search for protocol literals observed in captured bytes (e.g. `"/ls_req"`, `"encodeSend"`, a field name from the envelope JSON). Literal-substring only — no regex; run multiple searches when needed.',
     inputSchema: {
@@ -659,6 +662,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.readJsFunction,
+    phasePolicy: { category: 'read_only_diagnostic' },
     description:
       'Given a line inside a JS source, extract the enclosing function: name, params, start/end line, body preview (default 2000 chars cap). Handles `function(...)`, `function name(...)`, and arrow functions. Use after `search_js_source` finds a candidate call site — read ONE function instead of windowing source with guessed line ranges.',
     inputSchema: {
@@ -682,6 +686,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.listLoadedScripts,
+    phasePolicy: { category: 'read_only_diagnostic' },
     description:
       'List every external JS script URL observed during the browser session. Uses the driver resource-event ledger (separate from the API-focused network log), deduped in load order with encoded byte counts when available. Use when the `inspect_ws_frame.js_callstack` bundle turns out not to contain the encoder — widen the search to other bundles.',
     inputSchema: {
@@ -694,6 +699,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.jsEval,
+    phasePolicy: { category: 'read_only_diagnostic' },
     description:
       'Evaluate a JS expression inside the live page and return the result. Binary values (ArrayBuffer, Uint8Array) come back as hex strings automatically — no JSON-serialization holes. Strings, numbers, and plain objects pass through. Use this to probe the page during discovery: verify globals exist, inspect module registries, call encoder functions with sample args, compare output byte lengths against captured frames. This is the primary reverse-engineer probe — pair it with `search_js_source` + `read_js_function` + `get_js_source` to locate and verify the encoder path before committing to a `frameFromPage` strategy. Blocked in `execute_only` sessions (warm-measurement mode). Timeout default 5000ms, max 30000. Expression cap 4096 chars.',
     inputSchema: {
@@ -717,6 +723,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.installPageInitScript,
+    phasePolicy: { category: 'lift_re_active' },
     description:
       "Install a JS expression that runs on every fresh document — before the page's own bundle, on every navigation. Wraps Playwright `addInitScript` (CDP `Page.addScriptToEvaluateOnNewDocument`). Canonical use: monkey-patch `window.fetch` / `XMLHttpRequest` for capture-on-real-send during RE on SPA sites where a one-shot `js_eval` patch would be stomped when the bundle re-runs after navigation. The agent's wrapper runs first; the page's own wrappers wrap the agent's, so the agent gets visibility into every send across navigations. Returns `{handle}` for `remove_page_init_script`. See klura://reference#reverse-engineer-playbook for the canonical fetch-wrapper template. Blocked in execute_only mode. Expression cap 4096 chars.",
     inputSchema: {
@@ -740,6 +747,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.removePageInitScript,
+    phasePolicy: { category: 'lift_re_active' },
     description:
       "Disable a previously-installed page init script by handle. Best-effort: Playwright does not expose a removal API on `addInitScript`, so the runtime adds the handle to a session-scoped removed-set; the wrapper checks this set on every navigation and short-circuits. Already-running wrappers in the current page also notice via an in-page `__klura_init_removed` set. The init script itself remains installed for the browser context's lifetime, but its body is a no-op once removed.",
     inputSchema: {

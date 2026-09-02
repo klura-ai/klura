@@ -23,7 +23,7 @@ export interface CaptureSample {
   /** URL of the captured fire. */
   url: string;
   /** Args the capability was called with for this fire (if known). */
-  caller_args?: Record<string, string>;
+  caller_args?: Record<string, unknown>;
 }
 
 export interface EndpointFieldStability {
@@ -48,7 +48,7 @@ export function classifyFieldStability(samples: CaptureSample[]): EndpointFieldS
   const endpointKey = `${first.origin}${first.pathname}`;
 
   // Collect per-param value lists AND their caller_args at that fire.
-  const valuesByParam = new Map<string, Array<{ value: string; args?: Record<string, string> }>>();
+  const valuesByParam = new Map<string, Array<{ value: string; args?: Record<string, unknown> }>>();
   for (const s of samples) {
     const parsed = parseUrl(s.url);
     if (!parsed) continue;
@@ -73,7 +73,7 @@ export function classifyFieldStability(samples: CaptureSample[]): EndpointFieldS
 }
 
 function classifyOne(
-  list: Array<{ value: string; args?: Record<string, string> }>,
+  list: Array<{ value: string; args?: Record<string, unknown> }>,
   n: number,
 ): FieldStability {
   const distinct = new Set(list.map((e) => e.value));

@@ -1668,6 +1668,17 @@ test('scrape policies accept only explicit lower caller bounds and declared call
     () => resolveEffectiveRunBounds(policy, limits, { limits: { invented: 1 } }, 'run'),
     /declared/,
   );
+  assert.throws(
+    () => resolveEffectiveRunBounds(policy, limits, { max_items: 3_600_001 }, 'run'),
+    /from 1 to 3600000/,
+  );
+  const oversizedLimits = Object.fromEntries(
+    Array.from({ length: 65 }, (_, index) => [`limit_${index}`, 1]),
+  );
+  assert.throws(
+    () => resolveEffectiveRunBounds(policy, limits, { limits: oversizedLimits }, 'run'),
+    /at most 64 entries/,
+  );
 });
 
 test('scrape input modes constrain roots to signed templates and declared data sources', () => {
@@ -6215,6 +6226,36 @@ test('consumer SDK keeps selectors structural and routes execution through the l
       result_schema_version: 1,
       kind: 'consumer_failure',
       operation: 'call',
+      code: 'invalid_options',
+      retryable: false,
+      package_id: 'ikea',
+    },
+  );
+  assert.deepEqual(
+    await client.startRun(
+      { package_id: 'ikea', capability: 'get_product' },
+      { id: '42' },
+      { max_items: 5_000_000 },
+    ),
+    {
+      result_schema_version: 1,
+      kind: 'consumer_failure',
+      operation: 'start_run',
+      code: 'invalid_options',
+      retryable: false,
+      package_id: 'ikea',
+    },
+  );
+  assert.deepEqual(
+    await client.startRun(
+      { package_id: 'ikea', capability: 'get_product' },
+      { id: '42' },
+      { limits: { product_limit: 1_000_001 } },
+    ),
+    {
+      result_schema_version: 1,
+      kind: 'consumer_failure',
+      operation: 'start_run',
       code: 'invalid_options',
       retryable: false,
       package_id: 'ikea',

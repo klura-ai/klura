@@ -8,39 +8,17 @@
 import type { PhaseSpec, AdmissibilityResult, PhaseEvent, GraphConfig } from './types';
 import type { Session } from '../drivers/types/session';
 import type { DaemonConfig } from '../config/handler';
-import {
-  CAPABILITY_DECLARATION,
-  DISCOVERY_ARTIFACT,
-  DRIVE_ACTIVE,
-  ESCAPE_VALVE,
-  LOGBOOK_WRITE,
-  MAP_LIFT_INITIATOR,
-  READ_ONLY_DIAGNOSTIC,
-  STRATEGY_AMEND,
-  unionSets,
-} from './tool-catalog';
-
-const ALLOWED = unionSets(
-  DRIVE_ACTIVE,
-  CAPABILITY_DECLARATION,
-  READ_ONLY_DIAGNOSTIC,
-  DISCOVERY_ARTIFACT,
-  LOGBOOK_WRITE,
-  MAP_LIFT_INITIATOR,
-  STRATEGY_AMEND,
-  ESCAPE_VALVE,
-);
-
-/** When the budget is hit, the only accepted next calls are the phase exits.
- *  abort_session is a co-equal exit — when the session shouldn't have started
- *  in the first place, the honest move is to abort, not to push through to
- *  end_drive's audit. */
-const ALLOWED_WHEN_EXHAUSTED: ReadonlySet<string> = new Set(['end_drive', 'abort_session']);
+import { phaseAllowedTools, phaseExhaustedTools } from './tool-catalog';
+import { TOOL_NAMES } from '../vocab';
 
 export const DRIVE_SPEC: PhaseSpec = {
   name: 'drive',
-  allowedTools: ALLOWED,
-  allowedToolsWhenExhausted: ALLOWED_WHEN_EXHAUSTED,
+  // Derived from each ToolDef's phasePolicy — see tool-catalog.ts. The
+  // exhausted set is the phase exits only: end_drive hands to triage;
+  // abort_session is the co-equal honest exit when the session shouldn't
+  // have started in the first place.
+  allowedTools: phaseAllowedTools('drive'),
+  allowedToolsWhenExhausted: phaseExhaustedTools('drive'),
 
   onEnter(
     session: Session,
@@ -68,7 +46,7 @@ export const DRIVE_SPEC: PhaseSpec = {
       // close-time auto-synth).
       const isMapShaped = graphConfig?.skipAutoSynth === true;
       let reason: string;
-      if (isMapShaped && toolName === 'save_strategy') {
+      if (isMapShaped && toolName === TOOL_NAMES.saveStrategy) {
         reason =
           `tool 'save_strategy' is not available in phase 'drive'. In map mode, save_strategy ` +
           `runs in lift — which you enter by calling lift_observed_capability({session_id, name, ` +
@@ -76,7 +54,7 @@ export const DRIVE_SPEC: PhaseSpec = {
           `is: record_observed_capability(name, evidence, why_not_lifted) → lift_observed_capability(` +
           `name, args) → submit_triage_plan → save_strategy. If you haven't observed the capability ` +
           `yet, drive the UI to reach the surface, record_observed_capability, then lift.`;
-      } else if (isMapShaped && toolName === 'submit_triage_plan') {
+      } else if (isMapShaped && toolName === TOOL_NAMES.submitTriagePlan) {
         reason =
           `tool 'submit_triage_plan' is not available in phase 'drive'. In map mode, triage opens ` +
           `when you call lift_observed_capability({session_id, name, args}) for an already-observed ` +

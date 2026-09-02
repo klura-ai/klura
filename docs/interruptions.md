@@ -49,6 +49,8 @@ The handler's return:
 - `{status: 'continue', hint}` — runtime proceeds silently.
 - `{status: 'handover', target, prompt, viewer_url?}` — runtime mints `interruption_token`; the agent's **next tool call must echo the token + an ack** (`user_response` / `viewer_result`) OR an explicit cancel (`{cancelled: true, reason}`). Without an echo, every subsequent tool call rejects with `invalid_strategy: pending_interruption …`.
 
+The pending entry lives until a committed ack — or until the session dies: minting registers a session-scope disposer (`runtime/src/pool/session-scope.ts`), so a session closed with an unacked handover (abort, pool shutdown) drops its entry instead of leaking it.
+
 Viewer spin-up lives in the plugin. When a handler returns `{status: 'handover', target: 'viewer'}` it is expected to have already opened the viewer and populated `viewer_url` (the injected `ViewerOpener` from `runtime-state.ts` is the shared path). The agent never calls `start_remote_session` separately — it reads `viewer_url` from the resolution.
 
 ## Registering a custom handler

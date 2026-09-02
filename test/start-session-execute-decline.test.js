@@ -151,9 +151,10 @@ test('admissibility: drive primitives stay admissible after args_required declin
   const opts = { platform: 'p', capability: 'c' };
   const result = { executed: false, auto_execute_reason: 'args_required_to_auto_execute' };
   dispatchExecuteGraphOutcome(session, opts, result);
-  // Spot-check: js_eval is in UNIVERSAL_TOOLS so it always admits, but the
-  // load-bearing claim is that NON-universal drive tools also admit, since
-  // status isn't 'failed'.
+  // js_eval, get_a11y_tree, and get_screenshot are read_only_diagnostic
+  // (phase-scoped, not universal) — they admit here because the decline
+  // swapped the graph to discover, whose entry phase is drive, and status
+  // isn't 'failed'.
   for (const tool of ['js_eval', 'get_a11y_tree', 'get_screenshot']) {
     const r = checkAdmissibility(session, tool);
     assert.ok(r.ok, `${tool} must be admissible; got ${JSON.stringify(r)}`);

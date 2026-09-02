@@ -6,40 +6,27 @@
 // drift point we eliminated — see also `renderZodSkeletonInline` in
 // `../schemas/zod-helpers.ts` for the underlying mechanism.
 
+import { STRATEGY_TIERS, type StrategyTier } from '../../vocab';
+
 export const ANCHOR_TYPES = ['module', 'protocol', 'dom', 'unknown'] as const;
 
-const STRATEGY_TIER_DESCRIPTIONS: ReadonlyArray<{ key: string; hint: string }> = [
-  {
-    key: 'fetch',
-    hint: '(OPTIMAL WHEN ACHIEVABLE) — templated HTTP or WebSocket request. Fires from Node, no browser — fastest, stateless, parallelizable. Works cleanly on simple / legacy sites with unsigned APIs. Body or frame can be a string template with {{placeholders}}, a Node-VM generator (generated.frame — for binary envelopes you byte-spliced against a captured reference), or derived via a prereq chain (cached / fetch-extract / page-extract / capability / tag). For js-eval or browser prereqs, save as page-script — those require a live page and are rejected on fetch.',
-  },
-  {
-    key: 'page-script',
-    hint: '(REALISTIC DEFAULT for modern signed sites) — a JS expression that runs inside the live page and builds the request there. The page\'s own signer / builder / transport runs on every call, so you don\'t need to lift per-call signing, rotating tokens, or anti-bot headers. Declare notes.anchor_type: "module" (calls a module the page also calls) or "protocol" (builds a wire-level payload + hands it to the page\'s durable sender). "dom" (walks rendered components / React fiber) is fragile, discouraged.',
-  },
-  {
-    key: 'recorded-path',
-    hint: '(LAST RESORT) — replays captured perform_action steps. UI automation, no API lift.',
-  },
-];
+// Full record over the tier vocabulary — adding a tier without a hint is a
+// compile error.
+const STRATEGY_TIER_DESCRIPTIONS: Record<StrategyTier, string> = {
+  fetch:
+    '(OPTIMAL WHEN ACHIEVABLE) — templated HTTP or WebSocket request. Fires from Node, no browser — fastest, stateless, parallelizable. Works cleanly on simple / legacy sites with unsigned APIs. Body or frame can be a string template with {{placeholders}}, a Node-VM generator (generated.frame — for binary envelopes you byte-spliced against a captured reference), or derived via a prereq chain (cached / fetch-extract / page-extract / capability / tag). For js-eval or browser prereqs, save as page-script — those require a live page and are rejected on fetch.',
+  'page-script':
+    '(REALISTIC DEFAULT for modern signed sites) — a JS expression that runs inside the live page and builds the request there. The page\'s own signer / builder / transport runs on every call, so you don\'t need to lift per-call signing, rotating tokens, or anti-bot headers. Declare notes.anchor_type: "module" (calls a module the page also calls) or "protocol" (builds a wire-level payload + hands it to the page\'s durable sender). "dom" (walks rendered components / React fiber) is fragile, discouraged.',
+  'recorded-path':
+    '(LAST RESORT) — replays captured perform_action steps. UI automation, no API lift.',
+};
 
 export function describeStrategyTiers(): string {
-  return STRATEGY_TIER_DESCRIPTIONS.map((t) => `  • ${t.key} ${t.hint}`).join('\n');
+  return STRATEGY_TIERS.map((t) => `  • ${t} ${STRATEGY_TIER_DESCRIPTIONS[t]}`).join('\n');
 }
 
 export const JS_EVAL_TIMEOUT_HARD_CAP_MS = 30_000;
 export const JS_EVAL_TIMEOUT_DEFAULT_MS = 5_000;
-
-export const ARRAY_ITEM_REQUIRES: Record<string, string[]> = {
-  prerequisites: ['name', 'kind'],
-  steps: ['action'],
-};
-
-export const ARRAY_ITEM_ENUMS: Record<string, Record<string, readonly string[]>> = {
-  prerequisites: {
-    kind: ['browser', 'cached', 'page-extract', 'fetch-extract', 'js-eval', 'capability', 'tag'],
-  },
-};
 
 export const RECORDED_PATH_ACTIONS = [
   'navigate',
@@ -94,7 +81,17 @@ export const HTTP_EXCLUSIVE_FIELDS = [
   'response',
 ] as const;
 
-export const PARAM_KIND_VALUES = ['id', 'slug', 'email', 'url', 'uuid', 'enum', 'text'] as const;
+export const PARAM_KIND_VALUES = [
+  'id',
+  'slug',
+  'email',
+  'url',
+  'uuid',
+  'enum',
+  'text',
+  'array',
+  'object',
+] as const;
 export const PARAM_EXAMPLE_MAX = 2000;
 export const PARAM_FIELD_MAX = 2000;
 export const GENERATOR_CODE_MAX = 10_000;

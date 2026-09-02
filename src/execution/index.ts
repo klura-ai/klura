@@ -14,7 +14,9 @@ import { TokenCache } from '../strategies/tokens';
 import {
   markHealthy,
   markFailed,
-  isBroken,
+  shouldSkipBrokenTier,
+  describeBrokenTierSkip,
+  markProbeAttempted,
   getHealth,
   recordNodeTransportSuccess,
 } from '../strategies/health';
@@ -24,7 +26,7 @@ import { isLoginWallUrl } from '../response/auth-wall';
 import type { StrategyNotes } from '../strategies/skills';
 import { evaluatePredicate as registryEvaluatePredicate } from '../strategies/predicate-registry';
 import { dispatchWebSocket } from './websocket';
-import { interpolateVars, mergeWithIdentity } from './vars';
+import { mergeWithIdentity, resolveBody } from './vars';
 export { joinBaseAndPath } from './vars';
 import {
   TransportFailureError,
@@ -36,6 +38,14 @@ export { runPrerequisites, executeFetchInBrowser } from './fetch-browser';
 import { executeRecordedPath, replayRecordedPathToAnchor } from './recorded-path';
 export { resumeRecordedPath } from './recorded-path';
 import { defaultCapabilityCache, getCachedOrExecute, parseTtl } from '../cache/capability-cache';
+import {
+  classifyFactoryExecutionResult,
+  describeFactoryExecutionFailure,
+  FactoryExecutionStateError,
+  factoryExecutionWasAccepted,
+} from './result-classification';
+import { assessDeclaredCollectionEmptiness } from './collection-emptiness';
+import { createPostSaveVerificationProof } from '../strategies/post-save-verification-proof';
 
 // False positives are harmless — the DOMParser walker handles non-HTML input by
 // emitting an empty tree.
@@ -223,6 +233,8 @@ export async function resolveCapabilityPrereq(
   tokenCache: TokenCache | null,
   depth: number,
   parentIdentity?: string,
+  omittedOptionalParams: ReadonlySet<string> = new Set(),
+  suppressStrategyState = false,
 ): Promise<Record<string, unknown> | null> {
   const targetPlatform =
     typeof prereq.platform === 'string' && prereq.platform.length > 0
@@ -282,13 +294,19 @@ export async function resolveCapabilityPrereq(
       ? (rawVars as Record<string, string>)
       : {};
   const sideEffectOnly = Object.keys(varsMap).length === 0;
+  const nullBindings = (): Record<string, null> =>
+    Object.fromEntries(Object.keys(varsMap).map((name) => [name, null]));
 
   // Caller args take priority over tokens on name collision.
   const substitutionScope: Record<string, unknown> = {
     ...callerTokens,
     ...callerArgs,
   };
-  const subArgs = interpolateCapabilityArgs(prereq.args ?? {}, substitutionScope);
+  const subArgs = interpolateCapabilityArgs(
+    prereq.args ?? {},
+    substitutionScope,
+    omittedOptionalParams,
+  );
 
   // Capability cache for prereq calls — the `search_contact → thread_id`
   // pattern. When the target capability's saved strategy declares
@@ -299,7 +317,9 @@ export async function resolveCapabilityPrereq(
   // context. Same singleton as tools/execute.ts so a direct
   // `execute("acme", "search_contact", ...)` shares the cache with the
   // prereq call.
-  const ttlMs = resolveCapabilityCacheTtlMs(targetPlatform, targetCap);
+  // Runtime-owned verification must observe the prerequisite itself and must
+  // not replace a caller-visible cached value with grading traffic.
+  const ttlMs = suppressStrategyState ? 0 : resolveCapabilityCacheTtlMs(targetPlatform, targetCap);
   const subResult = await getCachedOrExecute(
     defaultCapabilityCache,
     targetPlatform,
@@ -311,15 +331,49 @@ export async function resolveCapabilityPrereq(
       execute(targetPlatform, targetCap, subArgs, pool, tokenCache, {
         _depth: depth + 1,
         identity: parentIdentity,
+        _suppressStrategyState: suppressStrategyState,
       }),
   );
 
-  if (typeof subResult.status !== 'number' || subResult.status < 200 || subResult.status >= 300) {
+  const subResultClassification = classifyFactoryExecutionResult(subResult);
+  if (subResultClassification === 'not_run') {
+    if (prereq.optional) {
+      return sideEffectOnly ? null : nullBindings();
+    }
+    throw new FactoryExecutionStateError(
+      'not_run',
+      'capability_prerequisite_not_run',
+      `prerequisite ${JSON.stringify(prereq.name)} returned not_run; parent request not sent`,
+      {
+        prerequisite: prereq.name,
+        target_platform: targetPlatform,
+        target_capability: targetCap,
+        prerequisite_result: subResult.body,
+      },
+    );
+  }
+  if (subResultClassification === 'delivery_unknown') {
+    throw new FactoryExecutionStateError(
+      'sent_unconfirmed',
+      'capability_prerequisite_delivery_unknown',
+      `prerequisite ${JSON.stringify(prereq.name)} returned delivery_unknown; parent request not sent`,
+      {
+        prerequisite: prereq.name,
+        target_platform: targetPlatform,
+        target_capability: targetCap,
+        prerequisite_result: subResult.body,
+      },
+    );
+  }
+  if (
+    typeof subResult.status !== 'number' ||
+    subResult.status < 200 ||
+    subResult.status >= 300 ||
+    subResultClassification === 'explicit_failure'
+  ) {
     if (prereq.optional) {
       if (sideEffectOnly) return null;
-      const nulled: Record<string, unknown> = {};
-      for (const name of Object.keys(varsMap)) nulled[name] = null;
-      return nulled;
+      return nullBindings();
     }
     const bodyPreview =
       typeof subResult.body === 'string'
@@ -363,6 +417,10 @@ export async function resolveCapabilityPrereq(
           `Fix the dot-path (array indices accept results.0.id or results[0].id).`,
       );
     }
+    if (extracted === undefined) {
+      bound[name] = null;
+      continue;
+    }
     bound[name] = extracted;
   }
   return bound;
@@ -383,12 +441,9 @@ export function stringifyScope(v: unknown): string {
 function interpolateCapabilityArgs(
   rawArgs: Record<string, unknown>,
   scope: Record<string, unknown>,
+  omittedOptionalParams: ReadonlySet<string>,
 ): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(rawArgs)) {
-    out[k] = typeof v === 'string' ? interpolateVars(v, scope) : v;
-  }
-  return out;
+  return resolveBody(rawArgs, scope, omittedOptionalParams);
 }
 
 export function walkJsonPath(root: unknown, path: string): unknown {
@@ -449,6 +504,21 @@ interface ExecuteOpts {
    * LLM as before. Not set by external callers.
    */
   _authRetryAttempted?: boolean;
+  /**
+   * Exact strategy set for runtime-owned verification. Ordinary callers load
+   * the active tier cascade from disk. Candidate verification supplies one
+   * validated inactive strategy so a working sibling cannot mask it.
+   */
+  _strategyOverride?: skills.Strategy[];
+  /**
+   * Candidate verification exercises transport without changing active
+   * health, archive, node-transport, or partial-replay state.
+   */
+  _suppressStrategyState?: boolean;
+}
+
+function notRunResult(body: Record<string, unknown>): ExecuteResult {
+  return { status: 0, executionState: 'not_run', body };
 }
 
 function policyTierCapResult(platform: string, capability: string): ExecuteResult {
@@ -456,21 +526,21 @@ function policyTierCapResult(platform: string, capability: string): ExecuteResul
   // just the mechanical rejection.
   const prior = loadCapabilityPolicy(platform, capability);
   const policyReason = prior?.reason ? ` (reason: "${prior.reason}")` : '';
-  return {
-    status: 0,
-    body: {
-      error: 'policy_violation',
-      message: `all strategies for ${platform}/${capability} are above the allowed tier (${prior?.max_strategy_tier ?? 'unknown'})`,
-      policy_max_tier: prior?.max_strategy_tier ?? null,
-      policy_reason: prior?.reason ?? null,
-      retry_hint:
-        `The capability is capped at "${prior?.max_strategy_tier ?? '(unknown)'}" by USER POLICY${policyReason}. ` +
-        `Policy is user-owned (ToS / compliance / operator rule) and the agent has no write path to modify it. ` +
-        `To change this cap, the user must edit ~/.klura/skills/${platform}/policy.json directly or run \`klura policy clear ${platform} ${capability}\`.`,
-    },
-  };
+  return notRunResult({
+    error: 'policy_violation',
+    message: `all strategies for ${platform}/${capability} are above the allowed tier (${prior?.max_strategy_tier ?? 'unknown'})`,
+    policy_max_tier: prior?.max_strategy_tier ?? null,
+    policy_reason: prior?.reason ?? null,
+    retry_hint:
+      `The capability is capped at "${prior?.max_strategy_tier ?? '(unknown)'}" by USER POLICY${policyReason}. ` +
+      `Policy is user-owned (ToS / compliance / operator rule) and the agent has no write path to modify it. ` +
+      `To change this cap, the user must edit ~/.klura/skills/${platform}/policy.json directly or run \`klura policy clear ${platform} ${capability}\`.`,
+  });
 }
 
+// Tier cascade, auth recovery, health, and isolated candidate execution share
+// one ordered state machine so each transport result is classified once.
+// eslint-disable-next-line sonarjs/cognitive-complexity
 export async function execute(
   platform: string,
   capability: string,
@@ -481,10 +551,8 @@ export async function execute(
 ): Promise<ExecuteResult> {
   const depth = opts._depth ?? 0;
   // Bind the caller's identity so capability prereqs (sub-executes) inherit
-  // it without us threading the parameter through every per-tier
-  // sub-executor's resolveCapabilityPrereq pass-through. The bound version
-  // closes over `opts.identity` lexically — sub-executors call it with the
-  // historical 7-arg shape, the wrapper supplies the identity.
+  // it without threading identity through every per-tier executor. The
+  // wrapper also forwards each strategy's optional-parameter omission policy.
   const boundResolveCapabilityPrereq = (
     prereq: Prerequisite,
     callerPlatform: string,
@@ -493,6 +561,7 @@ export async function execute(
     p: AnyPool | null,
     tc: TokenCache | null,
     d: number,
+    omittedOptionalParams?: ReadonlySet<string>,
   ): Promise<Record<string, unknown> | null> =>
     resolveCapabilityPrereq(
       prereq,
@@ -503,38 +572,34 @@ export async function execute(
       tc,
       d,
       opts.identity,
+      omittedOptionalParams,
+      opts._suppressStrategyState,
     );
   if (depth > MAX_PREREQ_DEPTH) {
-    return {
-      status: 0,
-      body: {
-        error: 'capability_prereq_depth_exceeded',
-        message:
-          `capability prereq chain exceeds max depth ${MAX_PREREQ_DEPTH} at ${platform}/${capability}. ` +
-          `Likely a cycle in your saved strategies' {kind: "capability"} prereqs. ` +
-          `Trace each capability prereq back to its target and check whether any target transitively references the root.`,
-        depth,
-      },
-    };
+    return notRunResult({
+      error: 'capability_prereq_depth_exceeded',
+      message:
+        `capability prereq chain exceeds max depth ${MAX_PREREQ_DEPTH} at ${platform}/${capability}. ` +
+        `Likely a cycle in your saved strategies' {kind: "capability"} prereqs. ` +
+        `Trace each capability prereq back to its target and check whether any target transitively references the root.`,
+      depth,
+    });
   }
   const startedAt = Date.now();
 
   const mergedArgs = mergeWithIdentity(args, platform, opts.identity);
 
   if (isCapabilityForbidden(platform, capability)) {
-    return {
-      status: 0,
-      body: {
-        error: 'policy_violation',
-        message: `capability "${capability}" is forbidden for platform "${platform}"`,
-      },
-    };
+    return notRunResult({
+      error: 'policy_violation',
+      message: `capability "${capability}" is forbidden for platform "${platform}"`,
+    });
   }
 
   // Priority order: fetch → page-script → recorded-path. Cheapest first — fetch
   // fires from Node (self-retries in-browser if TLS blocks it), page-script
   // always pays for a page load, recorded-path replays the DOM.
-  const allStrategies = skills.loadStrategies(platform, capability);
+  const allStrategies = opts._strategyOverride ?? skills.loadStrategies(platform, capability);
   const strategies = allStrategies.filter((s) => isTierAllowed(platform, capability, s.strategy));
   if (strategies.length === 0) {
     if (allStrategies.length > 0) {
@@ -555,9 +620,18 @@ export async function execute(
   for (const strategy of strategies) {
     const type = strategy.strategy;
 
-    if (isBroken(platform, capability, type)) {
-      errors.push(`${type}: broken (skipped)`);
-      continue;
+    if (!opts._suppressStrategyState) {
+      const probation = shouldSkipBrokenTier(platform, capability, type);
+      if (probation.action === 'skip') {
+        errors.push(`${type}: broken (skipped — ${describeBrokenTierSkip(probation)})`);
+        continue;
+      }
+      if (probation.action === 'probe') {
+        // Stamp the clock BEFORE the probe fires. `not_run` / `delivery_unknown`
+        // outcomes return early without touching health by design, so the
+        // stamp is the only thing that stops the probe re-firing on every call.
+        markProbeAttempted(platform, capability, type);
+      }
     }
 
     // Preflight against notes.params. Without it, a caller passing {repo:
@@ -572,8 +646,9 @@ export async function execute(
       // tells the caller exactly what the next retry needs.
       const paramsDoc = (strategy.notes as { params?: unknown } | undefined)?.params;
       if (paramsDoc) {
-        lastFailedResult = {
+        lastFailedResult ??= {
           status: 0,
+          executionState: 'not_run',
           body: {
             error: 'missing_args',
             missing,
@@ -603,8 +678,9 @@ export async function execute(
     if (unobserved.length > 0) {
       const argList = unobserved.map((u) => `${u.param}="${u.value}"`).join(', ');
       errors.push(`${type}: unobserved enum arg(s) ${argList}`);
-      lastFailedResult = {
+      lastFailedResult ??= {
         status: 0,
+        executionState: 'not_run',
         body: {
           error: 'unobserved_enum_arg',
           issues: unobserved,
@@ -616,39 +692,40 @@ export async function execute(
       continue;
     }
 
-    // Dynamic-enum grounding: enum params with `source: "capability:<slug>"`
-    // refresh their valid value set from the listing capability at execute
-    // time — what the doc string promises but historically wasn't wired. The
-    // listing fires as a sub-execute (counts against the prereq depth), its
-    // response is parsed for the first array of `{value, ...}` objects, and
-    // the caller's value must be in that fresh list. Static observed_values
-    // (handled above) take precedence when the caller's value is already
-    // grounded — the listing only fires on cache miss.
-    const dynamicUnobserved = await validateEnumArgsAgainstSourceCapability(
-      strategy,
-      mergedArgs,
-      platform,
-      pool,
-      tokenCache,
-      opts.identity,
-      depth,
-    );
-    if (dynamicUnobserved.length > 0) {
-      const argList = dynamicUnobserved.map((u) => `${u.param}="${u.value}"`).join(', ');
-      errors.push(`${type}: unobserved dynamic-enum arg(s) ${argList}`);
-      lastFailedResult = {
-        status: 0,
-        body: {
-          error: 'unobserved_enum_arg',
-          issues: dynamicUnobserved,
-          retry_with:
-            'Each issue lists the fresh value set fetched from the source capability. Pick a `value` whose `label` best matches user intent and re-call execute.',
-        },
-      };
-      continue;
-    }
-
     try {
+      // Dynamic-enum grounding refreshes enum params with
+      // `source: "capability:<slug>"` from the listing capability at execute
+      // time. The listing fires as a sub-execute (counts against the prereq
+      // depth), its response is parsed for the first array of `{value, ...}`
+      // objects, and the caller's value must be in that fresh list. Static
+      // observed_values take precedence when the caller's value is already
+      // grounded, so the listing only fires on cache miss.
+      const dynamicUnobserved = await validateEnumArgsAgainstSourceCapability(
+        strategy,
+        mergedArgs,
+        platform,
+        pool,
+        tokenCache,
+        opts.identity,
+        depth,
+        opts._suppressStrategyState,
+      );
+      if (dynamicUnobserved.length > 0) {
+        const argList = dynamicUnobserved.map((u) => `${u.param}="${u.value}"`).join(', ');
+        errors.push(`${type}: unobserved dynamic-enum arg(s) ${argList}`);
+        lastFailedResult ??= {
+          status: 0,
+          executionState: 'not_run',
+          body: {
+            error: 'unobserved_enum_arg',
+            issues: dynamicUnobserved,
+            retry_with:
+              'Each issue lists the fresh value set fetched from the source capability. Pick a `value` whose `label` best matches user intent and re-call execute.',
+          },
+        };
+        continue;
+      }
+
       let result: ExecuteResult;
 
       switch (type) {
@@ -665,6 +742,7 @@ export async function execute(
               depth,
               errors,
               opts.identity,
+              opts._suppressStrategyState,
             );
             if (!ws) continue;
             result = ws.result;
@@ -697,7 +775,9 @@ export async function execute(
                 errors.push(`fetch/node: ${err.signal} and no pool for browser fallback`);
                 continue;
               }
-              recordNodeTransportFailure(platform, capability, 'fetch', 'http', err.signal);
+              if (!opts._suppressStrategyState) {
+                recordNodeTransportFailure(platform, capability, 'fetch', 'http', err.signal);
+              }
               result = await executeFetchInBrowser(
                 apiStrategy,
                 mergedArgs,
@@ -728,6 +808,7 @@ export async function execute(
               depth,
               errors,
               opts.identity,
+              opts._suppressStrategyState,
             );
             if (!ws) continue;
             result = ws.result;
@@ -780,14 +861,33 @@ export async function execute(
         return result;
       }
 
-      // Cascade on HTTP errors. Auth check runs AFTER all tiers are exhausted,
-      // so a 403 from fetch falls through to page-script before we signal
-      // needs_reauth.
-      if (result.status >= 400) {
-        const errorDetail = `HTTP ${result.status}`;
-        markFailed(platform, capability, type, errorDetail);
-        if (getHealth(platform, capability, type).status === 'broken') {
-          skills.archiveStrategy(platform, capability, type, errorDetail);
+      const classification = classifyFactoryExecutionResult(result);
+      if (classification === 'explicit_failure') {
+        result.elapsedMs = Date.now() - startedAt;
+        result.tier = type;
+        return result;
+      }
+      if (classification === 'not_run' || classification === 'delivery_unknown') {
+        // Neither state is evidence about strategy health. A not-run request
+        // needs caller input; an unconfirmed delivery may already have changed
+        // remote state. Returning directly prevents health mutation, sibling
+        // cascade, partial replay, and duplicate writes.
+        result.elapsedMs = Date.now() - startedAt;
+        result.tier = type;
+        return result;
+      }
+
+      // Cascade on every transport failure. Auth check runs AFTER all tiers
+      // are exhausted, so a 403 from fetch falls through to page-script before
+      // we signal needs_reauth. Status 0 and non-2xx redirects are failures too;
+      // only the classifier's accepted states may reach markHealthy below.
+      if (classification === 'transport_failure') {
+        const errorDetail = describeFactoryExecutionFailure(classification, result.status);
+        if (!opts._suppressStrategyState) {
+          markFailed(platform, capability, type, errorDetail);
+          if (getHealth(platform, capability, type).status === 'broken') {
+            skills.archiveStrategy(platform, capability, type, errorDetail);
+          }
         }
         errors.push(`${type}: ${errorDetail}`);
         lastFailedResult = result;
@@ -798,7 +898,11 @@ export async function execute(
         // re-firing the primary. If it sticks, return the retry's result.
         // If the partial replay or the retry fails, the loop continues to
         // the next tier (which may be the full recorded-path) as usual.
-        if (!partialReplayAttempted && (type === 'fetch' || type === 'page-script')) {
+        if (
+          !opts._suppressStrategyState &&
+          !partialReplayAttempted &&
+          (type === 'fetch' || type === 'page-script')
+        ) {
           partialReplayAttempted = true;
           const retry = await tryRevisitPartialReplay(
             strategy,
@@ -822,24 +926,61 @@ export async function execute(
         continue;
       }
 
-      markHealthy(platform, capability, type);
+      if (!opts._suppressStrategyState) {
+        // markHealthy is unconditional: an empty read is a transport success,
+        // and the tier stays usable. Only the "verified working" proof stamp is
+        // withheld — a declared collection that returned zero rows has not
+        // shown the strategy reads anything.
+        markHealthy(platform, capability, type);
+        if (
+          classification === 'explicit_success' &&
+          (type === 'fetch' || type === 'page-script') &&
+          !assessDeclaredCollectionEmptiness(strategy, result.body)
+        ) {
+          const proof = createPostSaveVerificationProof(platform, capability, strategy);
+          skills.stampPostSaveValidationProof(proof, 'passed', true);
+        }
+      }
       // Reset the Node-fire failure counter on a clean success so a slow spell
       // doesn't accumulate toward demotion. Keyed by protocol so a successful
       // ws run doesn't reset the http counter.
-      if (type === 'fetch') {
+      if (!opts._suppressStrategyState && type === 'fetch') {
         recordNodeTransportSuccess(platform, capability, type, result.protocol ?? 'http');
       }
       result.elapsedMs = Date.now() - startedAt;
       result.tier = type;
       return result;
     } catch (err) {
+      if (err instanceof FactoryExecutionStateError) {
+        return {
+          status: 0,
+          executionState: err.executionState,
+          body: {
+            error: err.code,
+            message: err.message,
+            ...err.details,
+          },
+          elapsedMs: Date.now() - startedAt,
+          tier: type,
+        };
+      }
       const msg = err instanceof Error ? err.message : String(err);
-      markFailed(platform, capability, type, msg);
-      if (getHealth(platform, capability, type).status === 'broken') {
-        skills.archiveStrategy(platform, capability, type, msg);
+      if (!opts._suppressStrategyState) {
+        markFailed(platform, capability, type, msg);
+        if (getHealth(platform, capability, type).status === 'broken') {
+          skills.archiveStrategy(platform, capability, type, msg);
+        }
       }
       errors.push(`${type}: ${msg}`);
       continue;
+    }
+  }
+
+  if (lastFailedResult) {
+    const finalClassification = classifyFactoryExecutionResult(lastFailedResult);
+    if (finalClassification === 'not_run' || finalClassification === 'delivery_unknown') {
+      lastFailedResult.elapsedMs = Date.now() - startedAt;
+      return lastFailedResult;
     }
   }
 
@@ -887,8 +1028,10 @@ async function maybeRetryAfterAuthWall(input: {
   if (!looksLikeAuthFailure(lastFailedResult, lastFailedResult.finalUrl ?? '')) return null;
   const authCapabilities = collectAuthProvidingPrereqCapabilities(strategies, platform);
   if (authCapabilities.length === 0) return null;
-  for (const c of authCapabilities) {
-    defaultCapabilityCache.evictForCapability(c.platform, opts.identity, c.capability);
+  if (!opts._suppressStrategyState) {
+    for (const c of authCapabilities) {
+      defaultCapabilityCache.evictForCapability(c.platform, opts.identity, c.capability);
+    }
   }
   const retried = await execute(platform, capability, args, pool, tokenCache, {
     ...opts,
@@ -993,8 +1136,19 @@ async function tryRevisitPartialReplay(
     p: AnyPool | null,
     tc: TokenCache | null,
     d: number,
+    omittedOptionalParams?: ReadonlySet<string>,
   ): Promise<Record<string, unknown> | null> =>
-    resolveCapabilityPrereq(prereq, callerPlatform, callerArgs, callerTokens, p, tc, d, identity);
+    resolveCapabilityPrereq(
+      prereq,
+      callerPlatform,
+      callerArgs,
+      callerTokens,
+      p,
+      tc,
+      d,
+      identity,
+      omittedOptionalParams,
+    );
   const runtimeMeta = (failingStrategy as { runtime_meta?: Record<string, unknown> }).runtime_meta;
   const anchorId = runtimeMeta?.discovered_at_step_id;
   if (typeof anchorId !== 'string' || anchorId.length === 0) {
@@ -1088,8 +1242,13 @@ async function tryRevisitPartialReplay(
     if (type === 'fetch') {
       await pool.endDrive(replay.session.id).catch(() => {});
     }
-    if (retryResult.status >= 200 && retryResult.status < 300) {
+    const retryClassification = classifyFactoryExecutionResult(retryResult);
+    if (factoryExecutionWasAccepted(retryClassification)) {
       errors.push(`revisit-fallback: primary retry succeeded after partial replay`);
+      return retryResult;
+    }
+    if (retryClassification !== 'transport_failure') {
+      errors.push(`revisit-fallback: primary retry stopped with ${retryClassification}`);
       return retryResult;
     }
     errors.push(`revisit-fallback: primary retry still returned ${retryResult.status}`);
@@ -1347,6 +1506,14 @@ export function finalizeCascadeFailure(
     lastFailedStrategy,
     authProbe,
   );
+  const lastBody =
+    lastFailedResult?.status === 0 &&
+    lastFailedResult.body &&
+    typeof lastFailedResult.body === 'object' &&
+    !Array.isArray(lastFailedResult.body) &&
+    typeof (lastFailedResult.body as Record<string, unknown>).error === 'string'
+      ? (lastFailedResult.body as Record<string, unknown>)
+      : undefined;
 
   // The body's error/flags are derived from diagnosis.kind (single source of
   // truth) so they never contradict it. A 401 whose body says {error:stale_nonce}
@@ -1372,6 +1539,11 @@ export function finalizeCascadeFailure(
     body.details = errors;
   }
   applyDiagnosisToBody(body, diagnosis);
+  if (lastBody) {
+    // Status-zero results are runtime-owned typed transport failures. Surface
+    // their exact code without interpreting its text or replacing diagnosis.
+    body.transport_error = lastBody.error;
+  }
 
   let status = 0;
   if (diagnosis.kind === 'auth_failed' || diagnosis.kind === 'stale_nonce') {
@@ -1510,6 +1682,7 @@ async function validateEnumArgsAgainstSourceCapability(
   tokenCache: TokenCache | null,
   identity: string | undefined,
   depth: number,
+  suppressStrategyState = false,
 ): Promise<UnobservedEnumIssue[]> {
   const notes = (strategy as { notes?: Record<string, unknown> }).notes;
   if (!notes || typeof notes !== 'object') return [];
@@ -1545,6 +1718,7 @@ async function validateEnumArgsAgainstSourceCapability(
       listing = await execute(platform, sourceCapability, {}, pool, tokenCache, {
         _depth: depth + 1,
         identity,
+        _suppressStrategyState: suppressStrategyState,
       });
     } catch (err) {
       issues.push({
@@ -1557,6 +1731,18 @@ async function validateEnumArgsAgainstSourceCapability(
         },
       } as UnobservedEnumIssue);
       continue;
+    }
+    const listingClassification = classifyFactoryExecutionResult(listing);
+    if (listingClassification === 'not_run' || listingClassification === 'delivery_unknown') {
+      throw new FactoryExecutionStateError(
+        listingClassification === 'not_run' ? 'not_run' : 'sent_unconfirmed',
+        `dynamic_enum_source_${listingClassification}`,
+        `dynamic enum source ${JSON.stringify(sourceCapability)} returned ${listingClassification}; parent request not sent`,
+        {
+          source_capability: sourceCapability,
+          source_result: listing.body,
+        },
+      );
     }
     if (typeof listing.status !== 'number' || listing.status < 200 || listing.status >= 300) {
       issues.push({
@@ -1621,7 +1807,7 @@ export function normalizeEnumArgCasing(
   }
 }
 
-function findUnobservedEnumArgs(
+export function findUnobservedEnumArgs(
   strategy: skills.Strategy,
   args: Record<string, unknown>,
 ): UnobservedEnumIssue[] {
@@ -1642,7 +1828,7 @@ function findUnobservedEnumArgs(
       if (!o || typeof o !== 'object') return [];
       const ov = (o as Record<string, unknown>).value;
       const ol = (o as Record<string, unknown>).label;
-      return typeof ov === 'string' && typeof ol === 'string' ? [{ value: ov, label: ol }] : [];
+      return typeof ov === 'string' ? [{ value: ov, label: typeof ol === 'string' ? ol : ov }] : [];
     });
     if (observedTuples.some((t) => t.value === v)) continue;
     issues.push({ param: key, value: v, observed_values: observedTuples });

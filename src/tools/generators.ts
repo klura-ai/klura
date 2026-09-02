@@ -752,6 +752,7 @@ import type { ToolDef } from '../tools/types';
 export const TOOL_DEFS: ToolDef[] = [
   {
     name: TOOL_NAMES.tryGenerator,
+    phasePolicy: { category: 'lift_re_active' },
     description:
       'Dry-run a candidate `generated.<name>.code` snippet in the warm-execute vm sandbox, optionally diffing output byte-for-byte against a captured WebSocket frame. On `ok:false` the response names `first_diff_offset` + `expected_byte` + `got_byte` + a 16-byte hex context window on each side. Sandbox globals: `Date`, `Math`, `Buffer`, `JSON`, string/number helpers, `encodeURIComponent`/`decodeURIComponent`, `crypto` (`randomUUID`, `randomBytes`, `createHash`, `createHmac`), `args` (frozen). 100ms timeout. Must return a string; for binary, return base64. Full loop + convergence signals + structural-match mode: klura://reference#try-generator.',
     inputSchema: {
@@ -814,6 +815,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.tryGeneratorInPage,
+    phasePolicy: { category: 'lift_re_active' },
     description:
       'Page-side sibling of `try_generator`: runs a `frameFromPage`-shaped expression in the LIVE page (via `driver.evaluateExpression`), decodes its hex/base64 output to bytes, and diffs against a captured ws frame. Gives you the same convergence feedback `try_generator` gives for Node-VM generators, but for expressions that can read `document` / `window.*` / live session state. A successful run (`ok:true`) means the expression can be saved verbatim as `frameFromPage.expression` on a `page-script` strategy. Use this when you hit the "HARD PIVOT — write the encoder yourself" path on a binary-WS nag: iterate your expression against the captured frame until bytes match, then save.',
     inputSchema: {

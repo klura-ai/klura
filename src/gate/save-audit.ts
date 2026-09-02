@@ -21,10 +21,17 @@ import { escapeRegExp } from '../utils/regex';
 import { isLookupSurfaceOwnerCapability } from './save-audit-lookup';
 import { findLookupSegments, validateLookupPrereqsAreCapabilities } from './save-audit-lookup';
 import { secretLiteralProvenanceIssue } from './credential-secrets';
+import {
+  declaredCallerParamName,
+  listDeclaredParamNames,
+  listDeclaredPrereqBinds,
+  prereqWithBindsExists,
+  wireParamNamesForPlaceholder,
+} from './save-audit-bindings';
 
-// Re-exported so existing importers (save-warnings-lookup-sibling, tests) keep
-// resolving these from save-audit; the implementations live in save-audit-lookup.
+// `save-audit` is the stable public surface for the split structural helpers.
 export { findLookupSegments, validateLookupPrereqsAreCapabilities };
+export { listDeclaredPrereqBinds, wireParamNamesForPlaceholder };
 
 // `generated.<name>.code` paths: agent-authored JS that reads caller args via
 // `args.X` (not `{{X}}`), so the templated-vs-observed provenance rules for
@@ -109,110 +116,8 @@ function fieldContainsPlaceholder(fieldValue: string, placeholderName: string): 
   return fieldValue.includes(`{{${placeholderName}}}`);
 }
 
-/**
- * Return the wire-level param names a `{{placeholder}}` is templated as in the
- * strategy. The runtime records `ParamObservation`s under the WIRE name
- * (`category` in `/api/restaurants?category=italian`) but `notes.params` is
- * keyed by the agent's chosen PLACEHOLDER name (`{{cuisine}}`). Without this
- * resolution, audits that look up "observations for the placeholder" miss
- * everything when the agent renames the placeholder away from the wire name —
- * which is the common case for self-documenting strategy authoring.
- *
- * Covers query params (`?wire={{ph}}`) and JSON-body fields
- * (`{wire: "{{ph}}"}`). Path-segment placeholders have no wire-param name
- * (the URL path doesn't carry key→value structure), so they return [].
- */
-export function wireParamNamesForPlaceholder(data: Strategy, placeholderName: string): string[] {
-  const found = new Set<string>();
-  const ph = `{{${placeholderName}}}`;
-
-  const endpoint = (data as { endpoint?: unknown }).endpoint;
-  if (typeof endpoint === 'string' && endpoint.includes(ph)) {
-    // Query-string scan: ?wire={{ph}} or &wire={{ph}}.
-    const re = new RegExp(`[?&]([^=&]+)=${ph.replace(/[{}]/g, '\\$&')}`, 'g');
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(endpoint)) !== null) {
-      const wire = m[1];
-      if (wire) found.add(decodeURIComponent(wire));
-    }
-  }
-
-  const body = (data as { body?: unknown }).body;
-  if (body && typeof body === 'object' && !Array.isArray(body)) {
-    walkJsonForKeyWithPlaceholder(body as Record<string, unknown>, ph, (k) => found.add(k));
-  }
-  return [...found];
-}
-
-function walkJsonForKeyWithPlaceholder(
-  obj: Record<string, unknown>,
-  ph: string,
-  emit: (key: string) => void,
-): void {
-  for (const [k, v] of Object.entries(obj)) {
-    if (typeof v === 'string' && v.includes(ph)) emit(k);
-    else if (v && typeof v === 'object' && !Array.isArray(v)) {
-      walkJsonForKeyWithPlaceholder(v as Record<string, unknown>, ph, emit);
-    }
-  }
-}
-
 function notesParamExists(data: Strategy, name: string): boolean {
-  const params = (data as { notes?: { params?: Record<string, unknown> } }).notes?.params;
-  if (!params || typeof params !== 'object') return false;
-  return name in params;
-}
-
-function listDeclaredParamNames(data: Strategy): string[] {
-  const params = (data as { notes?: { params?: Record<string, unknown> } }).notes?.params;
-  if (!params || typeof params !== 'object') return [];
-  return Object.keys(params);
-}
-
-export function listDeclaredPrereqBinds(data: Strategy): string[] {
-  const prereqs = (data as Record<string, unknown>).prerequisites;
-  if (!Array.isArray(prereqs)) return [];
-  const out = new Set<string>();
-  for (const p of prereqs) {
-    if (!p || typeof p !== 'object') continue;
-    const rec = p as Record<string, unknown>;
-    if (typeof rec.binds === 'string' && rec.binds.length > 0) out.add(rec.binds);
-    if (
-      (rec.kind === 'page-extract' ||
-        rec.kind === 'fetch-extract' ||
-        rec.kind === 'capability' ||
-        rec.kind === 'tag') &&
-      rec.vars &&
-      typeof rec.vars === 'object' &&
-      !Array.isArray(rec.vars)
-    ) {
-      for (const k of Object.keys(rec.vars as Record<string, unknown>)) out.add(k);
-    }
-  }
-  return Array.from(out);
-}
-
-function prereqWithBindsExists(data: Strategy, binds: string): boolean {
-  const prereqs = (data as Record<string, unknown>).prerequisites;
-  if (!Array.isArray(prereqs)) return false;
-  return prereqs.some((p) => {
-    if (!p || typeof p !== 'object') return false;
-    const rec = p as Record<string, unknown>;
-    if (rec.binds === binds) return true;
-    // page-extract / fetch-extract / capability bind under vars:{name: path}.
-    if (
-      (rec.kind === 'page-extract' ||
-        rec.kind === 'fetch-extract' ||
-        rec.kind === 'capability' ||
-        rec.kind === 'tag') &&
-      rec.vars &&
-      typeof rec.vars === 'object' &&
-      !Array.isArray(rec.vars)
-    ) {
-      return binds in (rec.vars as Record<string, unknown>);
-    }
-    return false;
-  });
+  return declaredCallerParamName(data, name) !== null;
 }
 
 // Walk the per-session ParamObservation index and return every ui_click
@@ -265,12 +170,11 @@ function literalInAnyExample(data: Strategy, literal: string): boolean {
   return false;
 }
 
-// Click-observed exemption for fixed entry/origin URLs. The static-on-click-
-// observed rejection treats "value appears in any captured ui_click value" as
-// "value is a selectable enum option." That logic is right for URL params,
-// body fields, headers, and the capability endpoint — places where the click-
-// observed value is one of several pickable options the user steers between.
-// It's wrong for a fixed entry point of the flow, which is not a choice:
+// Click-observed handling for URL fields. A URL carries a selectable value
+// only when the observed value occupies a complete query-value or pathname
+// segment. Arbitrary substring overlap with a hostname/path token is not
+// provenance (for example, observed "map" inside a fixed "/maps" entry URL).
+// Fixed entry points also need a full-value exemption:
 //   - a `navigate` step's destination URL, and
 //   - a prerequisite's `url` (the setup/entry fetch).
 // Common false positives: auth flows redirect through `?next=<entry-url>`, so
@@ -285,6 +189,39 @@ function literalInAnyExample(data: Strategy, literal: string): boolean {
 const NAVIGATE_URL_PATH_RE = /^steps\[(\d+)\]\.url$/;
 const WSOPEN_NAVIGATE_URL_PATH_RE = /^wsOpen\.steps\[(\d+)\]\.url$/;
 const PREREQ_URL_PATH_RE = /^prerequisites\[(\d+)\]\.url$/;
+function isUrlFieldPath(path: string): boolean {
+  return (
+    path === 'endpoint' ||
+    path === 'baseUrl' ||
+    path === 'origin' ||
+    path === 'wsUrl' ||
+    path.endsWith('.url')
+  );
+}
+
+function urlContainsObservedSlot(literal: string, observedValue: string): boolean {
+  const withoutMethod = literal.replace(/^[A-Z]+\s+/, '');
+  try {
+    const parsed = new URL(withoutMethod, 'https://placeholder.invalid');
+    for (const value of parsed.searchParams.values()) {
+      if (value === observedValue) return true;
+    }
+    for (const rawSegment of parsed.pathname.split('/')) {
+      if (rawSegment.length === 0) continue;
+      let segment = rawSegment;
+      try {
+        segment = decodeURIComponent(rawSegment);
+      } catch {
+        // Keep the literal segment when percent-decoding is malformed.
+      }
+      if (segment === observedValue) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function isEntryOrOriginUrl(data: Strategy, path: string): boolean {
   // A prerequisite url is an entry/setup fetch, not a pickable capability
   // target — the path role alone establishes it.
@@ -344,7 +281,10 @@ export function validateLiteralAnswer(
     // literal (e.g. a canonical slug copied from traffic) inside an alias map —
     // the code blob is provenance-opaque, so don't force grounding on it.
     if (isGeneratedCodePath(item.path)) return [];
-    const matches = findClickObservedValuesIn(item.value, observedParamValues);
+    const rawMatches = findClickObservedValuesIn(item.value, observedParamValues);
+    const matches = isUrlFieldPath(item.path)
+      ? rawMatches.filter((match) => urlContainsObservedSlot(item.value, match.value))
+      : rawMatches;
     if (matches.length > 0) {
       // Entry/origin-URL exemption: when the literal is a navigate step's url
       // or a prerequisite url AND every match is a full-value equality (not a
@@ -616,7 +556,7 @@ export interface SaveAuditContext {
 
 interface NotesParam {
   kind?: string;
-  example?: string;
+  example?: unknown;
   observed_values?: Array<{ value: string; label: string }>;
   source?: string;
   /** Required when kind is "text" but the runtime has UI-click
@@ -631,7 +571,9 @@ interface NotesParam {
 function getDeclaredParam(data: Strategy, name: string): NotesParam | null {
   const params = (data as { notes?: { params?: Record<string, unknown> } }).notes?.params;
   if (!params || typeof params !== 'object') return null;
-  const p = params[name];
+  const declaredName = declaredCallerParamName(data, name);
+  if (!declaredName) return null;
+  const p = params[declaredName];
   if (!p || typeof p !== 'object') return null;
   return p as NotesParam;
 }
@@ -963,9 +905,11 @@ export function validateCallerInputKindsAndEnums(
     }
   }
   const issues: string[] = [];
-  for (const paramName of callerInputParams) {
-    const declared = getDeclaredParam(data, paramName);
+  for (const callerInputRef of callerInputParams) {
+    const declaredName = declaredCallerParamName(data, callerInputRef);
+    const declared = getDeclaredParam(data, callerInputRef);
     if (!declared) continue; // notes.params-missing is handled by the existing literal check.
+    const paramName = declaredName ?? callerInputRef;
     // Observations are recorded under the WIRE-level param name (`category`
     // for `?category=italian`), but the agent's notes.params is keyed by the
     // PLACEHOLDER name (`{{cuisine}}`). Look up under both so a renamed
@@ -973,7 +917,7 @@ export function validateCallerInputKindsAndEnums(
     // drives the must-be-enum / observed_values audit gates.
     const observations = [
       ...(observedParamValues[paramName] ?? []),
-      ...wireParamNamesForPlaceholder(data, paramName).flatMap(
+      ...wireParamNamesForPlaceholder(data, callerInputRef).flatMap(
         (wire) => observedParamValues[wire] ?? [],
       ),
     ];

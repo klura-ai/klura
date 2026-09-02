@@ -16,7 +16,7 @@ import type { Session } from '../drivers/types/session';
 import { isPathDistinct, lookupSurface } from './surface-binding';
 import { currentPhase, currentGraph } from './registry';
 import { dispatch } from './state-machine';
-import { invokeCheckpointAndGate, type CheckpointEnvelope } from '../checkpoints';
+import { checkpointEvent, invokeCheckpointAndGate, type CheckpointEnvelope } from '../checkpoints';
 import { composeTriageAuthoringContract } from './triage/triage-authoring-contract';
 import { loadConfig } from '../config/handler';
 
@@ -74,15 +74,16 @@ export async function maybeFireSurfaceChanged(
   // per-phase budgets outperform inferred ones.
   const triageBudget = session.triage?.budget ?? loadConfig().triage.max_rounds;
   const triageContract = composeTriageAuthoringContract(session);
-  const { envelope } = await invokeCheckpointAndGate('surface_changed', {
-    session_id: session.id,
-    context: {
-      kind: 'surface_changed',
-      new_url: currentUrl,
-      triage_budget: triageBudget,
-      triage_authoring_contract: triageContract,
-      ...(priorSurface ? { prior_surface: priorSurface } : {}),
-    },
-  });
+  const { envelope } = await invokeCheckpointAndGate(
+    checkpointEvent.surface_changed({
+      session_id: session.id,
+      context: {
+        new_url: currentUrl,
+        triage_budget: triageBudget,
+        triage_authoring_contract: triageContract,
+        ...(priorSurface ? { prior_surface: priorSurface } : {}),
+      },
+    }),
+  );
   return envelope;
 }

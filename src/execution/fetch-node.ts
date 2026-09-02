@@ -23,10 +23,11 @@ import { extractFromHtml } from '../response/html-extract';
 import {
   applyHtmlExtract,
   extractByPath,
-  interpolateVars,
+  omittedOptionalParamNames,
   prepareRequest,
   resolveBody,
   resolveHeaders,
+  resolveUrlTemplate,
 } from './vars';
 import type { ExecuteResult, FetchStrategy, Prerequisite, RequestStrategy, AnyPool } from './types';
 import type { TokenCache } from '../strategies/tokens';
@@ -34,11 +35,15 @@ import { resolveGenerated } from '../strategies/generators';
 import { applyResponseFrom, hasResponseFrom } from './response-from';
 import {
   acquireLocalOriginPermit,
+  dispatchedHttpDeliveryUnknown,
+  httpMethodMayMutate,
   LocalRequestTimeoutError,
+  mapDispatchedHttpTimeout,
   localTrafficPolicyForUrl,
   localRequestTimeoutMs,
 } from './local-traffic';
 import { OriginSchedulerError, type SchedulerCompletionV1 } from './origin-scheduler';
+import { recordDiagnosticUrl } from './diagnostic-evidence';
 
 // Wraps the graduation-layer counter bump with the side-effect of rewriting the
 // saved strategy from `fetch` to `page-script` when the threshold crosses. This
@@ -84,7 +89,7 @@ function classifyFetchThrow(err: unknown): string | null {
   if (!(err instanceof Error)) return null;
   // Node's undici wraps low-level errors under `.cause`.
   const errObj = err as Error & { cause?: unknown };
-  const cause = errObj.cause as { code?: string; message?: string } | undefined;
+  const cause = errObj.cause as { code?: string } | undefined;
   const code = typeof cause?.code === 'string' ? cause.code : undefined;
   if (code) {
     if (code === 'EAI_AGAIN' || code === 'ENOTFOUND') return 'dns_failure';
@@ -95,12 +100,6 @@ function classifyFetchThrow(err: unknown): string | null {
       return 'http2_protocol';
     }
   }
-  // Fallback: messages that carry diagnostic strings without a code.
-  const message = typeof cause?.message === 'string' ? cause.message : err.message;
-  if (/socket hang up|ECONNRESET|client network socket disconnected/i.test(message)) {
-    return 'connection_reset';
-  }
-  if (/unable to verify|self.?signed|CERT_/i.test(message)) return 'tls_handshake';
   return null;
 }
 
@@ -175,16 +174,26 @@ interface AdmittedNodeResponse {
   timed_out(): boolean;
 }
 
+interface NodeRequestDispatchState {
+  request_dispatches: number;
+}
+
 async function fetchWithOriginAdmission(
   url: string,
   workloadId: string,
   init: RequestInit,
+  dispatchState: NodeRequestDispatchState = { request_dispatches: 0 },
 ): Promise<AdmittedNodeResponse> {
   let currentUrl = url;
   let currentInit: RequestInit = { ...init, redirect: 'manual' };
   let redirectHops = 0;
   for (;;) {
-    const admitted = await fetchOneWithOriginAdmission(currentUrl, workloadId, currentInit);
+    const admitted = await fetchOneWithOriginAdmission(
+      currentUrl,
+      workloadId,
+      currentInit,
+      dispatchState,
+    );
     const response = admitted.response;
     if (!isRedirectResponse(response.status)) return admitted;
 
@@ -214,6 +223,7 @@ async function fetchOneWithOriginAdmission(
   url: string,
   workloadId: string,
   init: RequestInit,
+  dispatchState: NodeRequestDispatchState,
 ): Promise<AdmittedNodeResponse> {
   const permit = await acquireLocalOriginPermit(url, workloadId);
   const timeoutMs = localRequestTimeoutMs();
@@ -223,6 +233,8 @@ async function fetchOneWithOriginAdmission(
   }, timeoutMs);
   const signal = init.signal ? AbortSignal.any([init.signal, deadline.signal]) : deadline.signal;
   try {
+    dispatchState.request_dispatches += 1;
+    recordDiagnosticUrl('request', url);
     const response = await fetch(url, { ...init, signal });
     let released = false;
     return {
@@ -318,7 +330,11 @@ async function fireRequestFromNode(
 
   // Cookie jar: read once before the request, persist Set-Cookie after.
   const jarBeforeRequest = skills.readStorageStateCookies(platform, url, options.identity);
-  const strategyHeaders = resolveHeaders(strategy.headers, args);
+  const strategyHeaders = resolveHeaders(
+    strategy.headers,
+    args,
+    omittedOptionalParamNames(strategy, args),
+  );
   const headers = buildNodeHeaders(
     strategyHeaders,
     serializedBody !== undefined,
@@ -329,15 +345,36 @@ async function fireRequestFromNode(
   );
 
   let admitted: AdmittedNodeResponse;
+  const dispatchState: NodeRequestDispatchState = { request_dispatches: 0 };
   try {
-    admitted = await fetchWithOriginAdmission(url, `${platform}/${capability}`, {
-      method,
-      headers,
-      body: serializedBody,
-    });
+    admitted = await fetchWithOriginAdmission(
+      url,
+      `${platform}/${capability}`,
+      {
+        method,
+        headers,
+        body: serializedBody,
+      },
+      dispatchState,
+    );
   } catch (err) {
-    if (err instanceof OriginSchedulerError || err instanceof LocalRequestTimeoutError) throw err;
+    const mappedTimeout = mapDispatchedHttpTimeout(err, method, url);
+    if (mappedTimeout !== err) throw mappedTimeout;
+    if (
+      err instanceof LocalRequestTimeoutError ||
+      (err instanceof OriginSchedulerError &&
+        (!httpMethodMayMutate(method) || dispatchState.request_dispatches === 0))
+    ) {
+      throw err;
+    }
     const signal = classifyFetchThrow(err);
+    if (httpMethodMayMutate(method)) {
+      throw dispatchedHttpDeliveryUnknown(method, url, {
+        transport_signal: signal ?? 'unknown',
+        request_dispatches: dispatchState.request_dispatches,
+        ...(err instanceof OriginSchedulerError ? { scheduler_code: err.code } : {}),
+      });
+    }
     if (signal) {
       throw new TransportFailureError(
         signal,
@@ -410,6 +447,8 @@ async function fireRequestFromNode(
       body: extracted.body,
       finalUrl: response.url,
     };
+  } catch (error) {
+    throw mapDispatchedHttpTimeout(error, method, url);
   } finally {
     admitted.release(response.status >= 500 ? 'transient_failure' : 'success');
   }
@@ -424,6 +463,7 @@ async function fireRequestFromNode(
 async function fetchPrereqFromNode(
   prereq: Prerequisite,
   args: Record<string, unknown>,
+  omittedOptionalParams: ReadonlySet<string>,
   platform: string,
   capability: string,
   identity?: string,
@@ -431,7 +471,12 @@ async function fetchPrereqFromNode(
   if (!prereq.url) {
     throw new Error(`prereq "${prereq.name}": missing url`);
   }
-  const resolvedUrl = interpolateVars(prereq.url, args);
+  const resolvedUrl = resolveUrlTemplate(
+    prereq.url,
+    args,
+    omittedOptionalParams,
+    `prerequisite ${JSON.stringify(prereq.name)} URL`,
+  );
 
   // fetch-extract: REST-style JSON lookup, no HTML parsing.
   if (prereq.kind === 'fetch-extract') {
@@ -442,10 +487,12 @@ async function fetchPrereqFromNode(
     }
     const httpMethod = (prereq.method ?? 'GET').toUpperCase();
     const headersMap = prereq.headers_map ?? { Accept: 'application/json' };
-    const bodyObj = prereq.fetch_body ? resolveBody(prereq.fetch_body, args) : undefined;
+    const bodyObj = prereq.fetch_body
+      ? resolveBody(prereq.fetch_body, args, omittedOptionalParams)
+      : undefined;
     const jar = skills.readStorageStateCookies(platform, resolvedUrl, identity);
     const headers = buildNodeHeaders(
-      resolveHeaders(headersMap, args),
+      resolveHeaders(headersMap, args, omittedOptionalParams),
       bodyObj !== undefined,
       false,
       jar.header,
@@ -453,14 +500,36 @@ async function fetchPrereqFromNode(
       resolvedUrl,
     );
     let admitted: AdmittedNodeResponse;
+    const dispatchState: NodeRequestDispatchState = { request_dispatches: 0 };
     try {
-      admitted = await fetchWithOriginAdmission(resolvedUrl, `${platform}/${capability}`, {
-        method: httpMethod,
-        headers,
-        body: bodyObj ? JSON.stringify(bodyObj) : undefined,
-      });
+      admitted = await fetchWithOriginAdmission(
+        resolvedUrl,
+        `${platform}/${capability}`,
+        {
+          method: httpMethod,
+          headers,
+          body: bodyObj ? JSON.stringify(bodyObj) : undefined,
+        },
+        dispatchState,
+      );
     } catch (err) {
+      const mappedTimeout = mapDispatchedHttpTimeout(err, httpMethod, resolvedUrl);
+      if (mappedTimeout !== err) throw mappedTimeout;
+      if (
+        err instanceof OriginSchedulerError &&
+        (!httpMethodMayMutate(httpMethod) || dispatchState.request_dispatches === 0)
+      ) {
+        throw err;
+      }
       const signal = classifyFetchThrow(err);
+      if (httpMethodMayMutate(httpMethod)) {
+        throw dispatchedHttpDeliveryUnknown(httpMethod, resolvedUrl, {
+          transport_signal: signal ?? 'unknown',
+          prerequisite: prereq.name,
+          request_dispatches: dispatchState.request_dispatches,
+          ...(err instanceof OriginSchedulerError ? { scheduler_code: err.code } : {}),
+        });
+      }
       if (signal) {
         throw new TransportFailureError(
           signal,
@@ -514,6 +583,8 @@ async function fetchPrereqFromNode(
         tokens[varName] = value;
       }
       return tokens;
+    } catch (error) {
+      throw mapDispatchedHttpTimeout(error, httpMethod, resolvedUrl);
     } finally {
       admitted.release(response.status >= 500 ? 'transient_failure' : 'success');
     }
@@ -660,14 +731,17 @@ export async function executeFetchNode(
     pool: AnyPool | null,
     tokenCache: TokenCache | null,
     depth: number,
+    omittedOptionalParams?: ReadonlySet<string>,
   ) => Promise<Record<string, unknown> | null>,
   stringifyScope: (v: unknown) => string,
   identity?: string,
 ): Promise<ExecuteResult> {
   const overrides = args._generated as Record<string, string> | undefined;
+  const omittedOptionalParams = omittedOptionalParamNames(strategy, args);
   const tokens = await resolveNodeCompatiblePrereqs(
     strategy.prerequisites,
     args,
+    omittedOptionalParams,
     platform,
     capability,
     tokenCache,
@@ -703,6 +777,7 @@ export async function executeFetchNode(
   if (Object.keys(needsLlm).length > 0) {
     return {
       status: 0,
+      executionState: 'not_run',
       body: {
         needs_generation: true,
         platform,
@@ -724,6 +799,7 @@ export async function executeFetchNode(
     body: strategy.body,
     params: strategy.params,
     generated: strategy.generated,
+    notes: strategy.notes,
     // `response` carries format + extract; fireRequestFromNode reads it via
     // applyHtmlExtract to convert raw HTML into the strategy's structured
     // row shape. Dropping it here silently degrades every html-extract
@@ -737,6 +813,7 @@ export async function executeFetchNode(
 export async function resolveNodeCompatiblePrereqs(
   prerequisites: Prerequisite[] | undefined,
   args: Record<string, unknown>,
+  omittedOptionalParams: ReadonlySet<string>,
   platform: string,
   capability: string,
   tokenCache: TokenCache | null,
@@ -750,11 +827,12 @@ export async function resolveNodeCompatiblePrereqs(
     pool: AnyPool | null,
     tokenCache: TokenCache | null,
     depth: number,
+    omittedOptionalParams?: ReadonlySet<string>,
   ) => Promise<Record<string, unknown> | null>,
-  stringifyScope: (v: unknown) => string,
+  _stringifyScope: (v: unknown) => string,
   identity?: string,
-): Promise<Record<string, string>> {
-  const tokens: Record<string, string> = {};
+): Promise<Record<string, unknown>> {
+  const tokens: Record<string, unknown> = {};
   for (const prereq of prerequisites ?? []) {
     if (prereq.kind === 'cached') {
       const cached = tokenCache?.get(platform, prereq.name);
@@ -770,9 +848,10 @@ export async function resolveNodeCompatiblePrereqs(
         pool,
         tokenCache,
         depth,
+        omittedOptionalParams,
       );
       if (bound) {
-        for (const [k, v] of Object.entries(bound)) tokens[k] = stringifyScope(v);
+        Object.assign(tokens, bound);
       }
       continue;
     }
@@ -785,6 +864,7 @@ export async function resolveNodeCompatiblePrereqs(
     const extractedTokens = await fetchPrereqFromNode(
       prereq,
       { ...tokens, ...args },
+      omittedOptionalParams,
       platform,
       capability,
       identity,

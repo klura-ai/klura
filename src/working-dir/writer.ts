@@ -26,7 +26,7 @@ import {
   type WsFramePayload,
 } from './schema';
 import { ensurePlatformDirs, ensureSessionDir, sessionArchivePath } from './layout';
-import { ensureCapabilityEntry, loadLogbook, refreshRecencyStats, writeLogbook } from './logbook';
+import { ensureCapabilityEntry, refreshRecencyStats, updateLogbook } from './logbook';
 import { archiveBundle } from './bundle-archive';
 import {
   foldFormsIntoLogbook,
@@ -35,6 +35,7 @@ import {
   type SessionNavigation,
 } from './url-graph';
 import { lastVerified } from '../strategies/health';
+import { writeTextAtomically } from '../utils/owner-file-lock';
 
 /**
  * Ingest a batch of capture events for one session on one platform. Writes the
@@ -161,43 +162,42 @@ export function ingestCaptureEvents(
   };
 
   const archivePath = sessionArchivePath(platform, sessionId, 'archive');
-  const tmp = `${archivePath}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(archive, null, 2));
-  fs.renameSync(tmp, archivePath);
+  writeTextAtomically(archivePath, JSON.stringify(archive, null, 2));
 
   // Update logbook.
-  const logbook = loadLogbook(platform);
-  logbook.sessions_total += 1;
-  if (meta.capability) {
-    const entry = ensureCapabilityEntry(logbook, meta.capability);
-    entry.sessions_contributed += 1;
-    entry.last_session_at = new Date(meta.ended_at).toISOString();
-    entry.last_session_id = sessionId;
-    // Fold the freshest successful-execute timestamp from health.json into the
-    // logbook rollup — the "last re-verified on <date>" signal.
-    const verified = lastVerified(platform, meta.capability);
-    if (verified) {
-      entry.last_verified_at = verified.at;
-      entry.last_verified_tier = verified.tier as CapabilityLogbookEntry['last_verified_tier'];
+  updateLogbook(platform, (logbook) => {
+    logbook.sessions_total += 1;
+    if (meta.capability) {
+      const entry = ensureCapabilityEntry(logbook, meta.capability);
+      entry.sessions_contributed += 1;
+      entry.last_session_at = new Date(meta.ended_at).toISOString();
+      entry.last_session_id = sessionId;
+      // Fold the freshest successful-execute timestamp from health.json into the
+      // logbook rollup — the "last re-verified on <date>" signal.
+      const verified = lastVerified(platform, meta.capability);
+      if (verified) {
+        entry.last_verified_at = verified.at;
+        entry.last_verified_tier = verified.tier as CapabilityLogbookEntry['last_verified_tier'];
+      }
+      refreshRecencyStats(entry, logbook.sessions_total);
     }
-    refreshRecencyStats(entry, logbook.sessions_total);
-  }
-  // Lift attempts append in order they were emitted.
-  for (const la of liftAttempts) {
-    const entry = ensureCapabilityEntry(logbook, la.capability);
-    entry.lift_attempts.push({
-      session_id: sessionId,
-      attempted_at: new Date(la.at).toISOString(),
-      outcome: la.payload.outcome,
-      rounds_spent: la.payload.rounds_spent,
-      notes: la.payload.notes,
-      sessions_total_at_attempt: logbook.sessions_total,
-    });
-    refreshRecencyStats(entry, logbook.sessions_total);
-  }
-  // Fold navigation + form observations into the platform-level surface map.
-  // Both are idempotent on re-ingest of the same events.
-  foldNavigationsIntoUrlGraph(logbook, sessionId, navigations);
-  foldFormsIntoLogbook(logbook, formObservations);
-  writeLogbook(logbook);
+    // Lift attempts append in order they were emitted.
+    for (const la of liftAttempts) {
+      const entry = ensureCapabilityEntry(logbook, la.capability);
+      entry.lift_attempts.push({
+        session_id: sessionId,
+        attempted_at: new Date(la.at).toISOString(),
+        outcome: la.payload.outcome,
+        rounds_spent: la.payload.rounds_spent,
+        notes: la.payload.notes,
+        sessions_total_at_attempt: logbook.sessions_total,
+      });
+      refreshRecencyStats(entry, logbook.sessions_total);
+    }
+    // Fold navigation + form observations into the platform-level surface map.
+    // Both are idempotent on re-ingest of the same events.
+    foldNavigationsIntoUrlGraph(logbook, sessionId, navigations);
+    foldFormsIntoLogbook(logbook, formObservations);
+    return logbook;
+  });
 }

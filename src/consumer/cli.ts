@@ -1,12 +1,7 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import {
-  parseCapabilityId,
-  parseInteger,
-  parsePackageId,
-  parsePackageVersion,
-  parseSessionName,
   parseStableContractId,
+  parseString,
   PublicContractError,
   PUBLIC_CONTRACT_LIMITS,
   type CapabilityIdV1,
@@ -14,11 +9,38 @@ import {
   type PackageVersionV1,
 } from '../public/contracts/common';
 import {
+  CALLER_BOUND_KEYS,
+  CONSUMER_BOUNDS,
+  CONSUMER_BYTE_LIMITS,
+} from '../public/contracts/consumer-bounds';
+import {
   assertJsonValue,
   canonicalJson,
   parseStrictJson,
   type JsonValueV1,
 } from '../public/contracts/json';
+import {
+  assertFlags,
+  callerBoundFlag,
+  CliInputError,
+  errorMessage,
+  optionalBoundedInteger,
+  optionalFlag,
+  optionalNonNegativeInteger,
+  optionalPageLimit,
+  optionalPositional,
+  optionalSessionName,
+  parseCliInput,
+  parseCliPackageId,
+  parseCliPackageVersion,
+  parseNamedLimits,
+  parseOutputFormat,
+  parsePackageCapabilitySelector,
+  parsePackageOptionalCapabilitySelector,
+  parsePackageVersionSelector,
+  requireFlag,
+  requirePositional,
+} from './cli-args';
 import {
   calculateCollectionContractDigest,
   type CsvColumnV1,
@@ -137,11 +159,7 @@ export async function runConsumerCli(
           2,
           new Set([
             '--input',
-            '--max-items',
-            '--max-pages',
-            '--max-requests',
-            '--timeout-ms',
-            '--max-concurrency',
+            ...CALLER_BOUND_KEYS.map(callerBoundFlag),
             '--input-mode',
             '--session',
             '--limit',
@@ -184,7 +202,12 @@ async function searchRegistry(
   if (query !== undefined) input.query = query;
   const cursor = optionalFlag(args, '--cursor');
   if (cursor !== undefined) input.cursor = cursor;
-  const limit = optionalBoundedInteger(args, '--limit', 1, 50);
+  const limit = optionalBoundedInteger(
+    args,
+    '--limit',
+    CONSUMER_BOUNDS.search_limit.minimum,
+    CONSUMER_BOUNDS.search_limit.maximum,
+  );
   if (limit !== undefined) input.limit = limit;
   const registry = dependencies.registry_service ?? createDefaultConsumerRegistryService();
   return renderConsumerResult(await registry.search(input), json);
@@ -235,7 +258,7 @@ function renderConsumerResult(value: { kind: string }, json: boolean): number {
 function listInstalledPackages(args: readonly string[], json: boolean): number {
   assertFlags(args, 1, new Set(['--cursor', '--limit']));
   const cursor = optionalFlag(args, '--cursor');
-  const limit = optionalBoundedInteger(args, '--limit', 1, 100);
+  const limit = optionalPageLimit(args);
   const input: { cursor?: string; limit?: number } = {};
   if (cursor !== undefined) input.cursor = cursor;
   if (limit !== undefined) input.limit = limit;
@@ -257,7 +280,7 @@ async function runInspectionCommand(args: readonly string[], json: boolean): Pro
     assertFlags(args, 2, new Set(['--cursor', '--limit']));
     const result = await invokeConsumerDaemon('/consumer/runs/list', {
       cursor: optionalFlag(args, '--cursor') ?? null,
-      limit: optionalBoundedInteger(args, '--limit', 1, 100) ?? null,
+      limit: optionalPageLimit(args) ?? null,
     });
     return renderConsumerResult(result as { kind: string }, json);
   }
@@ -321,7 +344,7 @@ async function runInspectionCommand(args: readonly string[], json: boolean): Pro
     const page = await invokeConsumerDaemon('/consumer/runs/items', {
       run_id: runId,
       after_sequence: optionalNonNegativeInteger(args, '--after-sequence') ?? null,
-      limit: optionalBoundedInteger(args, '--limit', 1, 100) ?? null,
+      limit: optionalPageLimit(args) ?? null,
     });
     if (isConsumerRunFailure(page)) return renderConsumerResult(page, json);
     return render({ kind: 'run_items', page }, json);
@@ -441,7 +464,12 @@ async function callPackage(args: readonly string[], json: boolean): Promise<numb
     requirePositional(args, 1, 'call <package.capability>'),
   );
   const inputArgument = requireFlag(args, '--input');
-  const timeout = optionalPositiveInteger(args, '--timeout-ms');
+  const timeout = optionalBoundedInteger(
+    args,
+    '--timeout-ms',
+    CONSUMER_BOUNDS.call_timeout_ms.minimum,
+    CONSUMER_BOUNDS.call_timeout_ms.maximum,
+  );
   const sessionName = optionalSessionName(args, '--session');
   const input = parseCliInput(inputArgument);
   const foreground = createForegroundAbort();
@@ -483,17 +511,16 @@ async function runPackage(args: readonly string[], json: boolean): Promise<numbe
   const input = parseCliInput(requireFlag(args, '--input'));
   const sessionName = optionalSessionName(args, '--session');
   const callerBounds: Record<string, JsonValueV1> = {};
-  const maxItems = optionalPositiveInteger(args, '--max-items');
-  const maxPages = optionalPositiveInteger(args, '--max-pages');
-  const maxRequests = optionalPositiveInteger(args, '--max-requests');
-  const timeout = optionalPositiveInteger(args, '--timeout-ms');
-  const maxConcurrency = optionalPositiveInteger(args, '--max-concurrency');
+  for (const key of CALLER_BOUND_KEYS) {
+    const bound = optionalBoundedInteger(
+      args,
+      callerBoundFlag(key),
+      CONSUMER_BOUNDS.caller_bound.minimum,
+      CONSUMER_BOUNDS.caller_bound.maximum,
+    );
+    if (bound !== undefined) callerBounds[key] = bound;
+  }
   const limits = parseNamedLimits(args);
-  if (maxItems !== undefined) callerBounds.max_items = maxItems;
-  if (maxPages !== undefined) callerBounds.max_pages = maxPages;
-  if (maxRequests !== undefined) callerBounds.max_requests = maxRequests;
-  if (timeout !== undefined) callerBounds.timeout_ms = timeout;
-  if (maxConcurrency !== undefined) callerBounds.max_concurrency = maxConcurrency;
   if (limits !== undefined) callerBounds.limits = limits;
   const output = optionalFlag(args, '--output');
   const format = parseOutputFormat(args);
@@ -708,10 +735,21 @@ async function sessionCommand(args: readonly string[], json: boolean): Promise<n
 async function loginCommand(args: readonly string[], json: boolean): Promise<number> {
   if (args[1] === 'complete') {
     assertFlags(args, 3, new Set());
+    let interactionId: string;
+    try {
+      interactionId = parseString(
+        requirePositional(args, 2, 'login complete <interaction-id>'),
+        'interaction-id',
+        CONSUMER_BYTE_LIMITS.interaction_id,
+      );
+    } catch (error) {
+      if (error instanceof CliInputError) throw error;
+      throw new CliInputError(errorMessage(error));
+    }
     const result = await invokeConsumerDaemon<
       CompletePackageLoginResultV1 | ConsumerDaemonFailureV1
     >('/consumer/login/complete', {
-      interaction_id: requirePositional(args, 2, 'login complete <interaction-id>'),
+      interaction_id: interactionId,
     });
     if (isConsumerDaemonFailure(result)) {
       throw new InstalledPackageError(
@@ -740,228 +778,6 @@ async function loginCommand(args: readonly string[], json: boolean): Promise<num
   return render(result, json);
 }
 
-function parsePackageCapabilitySelector(value: string): {
-  package_id: PackageIdV1;
-  capability: CapabilityIdV1;
-} {
-  const separator = value.indexOf('.');
-  if (separator <= 0 || separator !== value.lastIndexOf('.')) {
-    throw new CliInputError('call selector must be <package.capability>');
-  }
-  return {
-    package_id: parseCliPackageId(value.slice(0, separator)),
-    capability: parseCliCapabilityId(value.slice(separator + 1)),
-  };
-}
-
-function parsePackageOptionalCapabilitySelector(
-  value: string,
-  field: string,
-): { package_id: PackageIdV1; capability?: CapabilityIdV1 } {
-  const separator = value.indexOf('.');
-  if (separator === -1) return { package_id: parseCliPackageId(value) };
-  if (separator <= 0 || separator !== value.lastIndexOf('.')) {
-    throw new CliInputError(`${field} must be <package[.capability]>`);
-  }
-  return {
-    package_id: parseCliPackageId(value.slice(0, separator)),
-    capability: parseCliCapabilityId(value.slice(separator + 1)),
-  };
-}
-
-function parsePackageVersionSelector(value: string): {
-  package_id: PackageIdV1;
-  version?: PackageVersionV1;
-} {
-  const separator = value.indexOf('@');
-  if (separator === -1) return { package_id: parseCliPackageId(value) };
-  if (separator <= 0 || separator !== value.lastIndexOf('@')) {
-    throw new CliInputError('install selector must be <package[@version]>');
-  }
-  return {
-    package_id: parseCliPackageId(value.slice(0, separator)),
-    version: parseCliPackageVersion(value.slice(separator + 1)),
-  };
-}
-
-function parseCliPackageId(value: string): PackageIdV1 {
-  try {
-    return parsePackageId(value, 'package');
-  } catch (error) {
-    throw new CliInputError(errorMessage(error));
-  }
-}
-
-function parseCliCapabilityId(value: string): CapabilityIdV1 {
-  try {
-    return parseCapabilityId(value, 'capability');
-  } catch (error) {
-    throw new CliInputError(errorMessage(error));
-  }
-}
-
-function optionalSessionName(args: readonly string[], flag: string): string | undefined {
-  const value = optionalFlag(args, flag);
-  if (value === undefined) return undefined;
-  try {
-    return parseSessionName(value, flag);
-  } catch (error) {
-    throw new CliInputError(errorMessage(error));
-  }
-}
-
-function parseCliPackageVersion(value: string): PackageVersionV1 {
-  try {
-    return parsePackageVersion(value, 'version');
-  } catch (error) {
-    throw new CliInputError(errorMessage(error));
-  }
-}
-
-function parseCliInput(value: string): JsonValueV1 {
-  let bytes: Buffer;
-  if (value.startsWith('@')) {
-    const inputPath = value.slice(1);
-    if (!inputPath) throw new CliInputError('--input @path requires a path');
-    try {
-      const stats = fs.statSync(inputPath);
-      if (!stats.isFile() || stats.size > PUBLIC_CONTRACT_LIMITS.packageBytes) {
-        throw new CliInputError('--input file must be a bounded regular file');
-      }
-      bytes = fs.readFileSync(inputPath);
-    } catch (error) {
-      if (error instanceof CliInputError) throw error;
-      throw new CliInputError('--input file could not be read');
-    }
-  } else {
-    bytes = Buffer.from(value, 'utf8');
-  }
-  try {
-    return parseStrictJson(
-      bytes,
-      'call.input',
-      PUBLIC_CONTRACT_LIMITS.packageBytes,
-      PUBLIC_CONTRACT_LIMITS.maxDepth,
-    );
-  } catch (error) {
-    throw new CliInputError(errorMessage(error));
-  }
-}
-
-function optionalPositiveInteger(args: readonly string[], flag: string): number | undefined {
-  return optionalBoundedInteger(args, flag, 1, 300_000);
-}
-
-function optionalNonNegativeInteger(args: readonly string[], flag: string): number | undefined {
-  return optionalBoundedInteger(args, flag, 0, 1_000_000_000);
-}
-
-function optionalBoundedInteger(
-  args: readonly string[],
-  flag: string,
-  minimum: number,
-  maximum: number,
-): number | undefined {
-  const value = optionalFlag(args, flag);
-  if (value === undefined) return undefined;
-  try {
-    return parseInteger(Number(value), flag, minimum, maximum);
-  } catch (error) {
-    throw new CliInputError(errorMessage(error));
-  }
-}
-
-function parseNamedLimits(args: readonly string[]): Record<string, number> | undefined {
-  const values = flagValues(args, '--limit');
-  if (values.length === 0) return undefined;
-  const limits: Record<string, number> = {};
-  for (const value of values) {
-    const separator = value.indexOf('=');
-    if (separator < 1 || separator !== value.lastIndexOf('=')) {
-      throw new CliInputError('--limit requires <id>=<positive-integer>');
-    }
-    const id = value.slice(0, separator);
-    let amount: number;
-    try {
-      parseStableContractId(id, '--limit id');
-      amount = parseInteger(Number(value.slice(separator + 1)), '--limit value', 1, 1_000_000);
-    } catch (error) {
-      throw new CliInputError(errorMessage(error));
-    }
-    if (Object.hasOwn(limits, id)) throw new CliInputError(`duplicate --limit ${id}`);
-    limits[id] = amount;
-  }
-  return limits;
-}
-
-function parseOutputFormat(args: readonly string[]): RunOutputFormatV1 | undefined {
-  const value = optionalFlag(args, '--format');
-  if (value === undefined) return undefined;
-  if (value === 'json' || value === 'ndjson' || value === 'csv') return value;
-  throw new CliInputError('--format must be json, ndjson, or csv');
-}
-
-function requireFlag(args: readonly string[], flag: string): string {
-  const value = optionalFlag(args, flag);
-  if (value === undefined) throw new CliInputError(`${flag} is required`);
-  return value;
-}
-
-function optionalFlag(args: readonly string[], flag: string): string | undefined {
-  const index = args.indexOf(flag);
-  if (index === -1) return undefined;
-  const value = args[index + 1];
-  if (!value || value.startsWith('--')) throw new CliInputError(`${flag} requires a value`);
-  return value;
-}
-
-function flagValues(args: readonly string[], flag: string): string[] {
-  const values: string[] = [];
-  for (let index = 0; index < args.length; index += 1) {
-    if (args[index] !== flag) continue;
-    const value = args[index + 1];
-    if (!value || value.startsWith('--')) throw new CliInputError(`${flag} requires a value`);
-    values.push(value);
-    index += 1;
-  }
-  return values;
-}
-
-function assertFlags(
-  args: readonly string[],
-  start: number,
-  valueFlags: ReadonlySet<string>,
-  repeatedFlags = new Set<string>(),
-  bareFlags = new Set<string>(['--json']),
-): void {
-  const seen = new Set<string>();
-  for (let index = start; index < args.length; index += 1) {
-    const flag = args[index];
-    if (!flag || !flag.startsWith('--'))
-      throw new CliInputError(`unexpected argument ${flag ?? ''}`);
-    if (seen.has(flag) && !repeatedFlags.has(flag))
-      throw new CliInputError(`duplicate flag ${flag}`);
-    seen.add(flag);
-    if (bareFlags.has(flag)) continue;
-    if (!valueFlags.has(flag)) throw new CliInputError(`unknown flag ${flag}`);
-    const value = args[index + 1];
-    if (!value || value.startsWith('--')) throw new CliInputError(`${flag} requires a value`);
-    index += 1;
-  }
-}
-
-function requirePositional(args: readonly string[], index: number, usage: string): string {
-  const value = args[index];
-  if (!value || value.startsWith('--')) throw new CliInputError(`usage: klura ${usage}`);
-  return value;
-}
-
-function optionalPositional(args: readonly string[], index: number): string | undefined {
-  const value = args[index];
-  if (value === undefined || value.startsWith('--')) return undefined;
-  return value;
-}
-
 function render(value: unknown, _json: boolean): number {
   assertJsonValue(value, 'consumer_cli_result', PUBLIC_CONTRACT_LIMITS.maxDepth);
   const serialized = canonicalJson(value);
@@ -986,15 +802,4 @@ function renderFailure(error: unknown, json: boolean): number {
   if (json) process.stdout.write(`${JSON.stringify(value)}\n`);
   else process.stderr.write(`${errorMessage(error)}\n`);
   return 3;
-}
-
-class CliInputError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'CliInputError';
-  }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

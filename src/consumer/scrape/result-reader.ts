@@ -6,6 +6,7 @@ import {
   PublicContractError,
   type Sha256DigestV1,
 } from '../../public/contracts/common';
+import { CONSUMER_BOUNDS } from '../../public/contracts/consumer-bounds';
 import type { CsvColumnV1 } from '../../public/contracts/collection';
 import { canonicalJson, type JsonValueV1 } from '../../public/contracts/json';
 import { resolveJsonPointer } from '../../public/contracts/value-expression';
@@ -77,10 +78,15 @@ export function readCommittedRunItemsPage(
   const afterSequence = parseInteger(
     options.after_sequence ?? 0,
     'run.items.after_sequence',
-    0,
-    1e9,
+    CONSUMER_BOUNDS.after_sequence.minimum,
+    CONSUMER_BOUNDS.after_sequence.maximum,
   );
-  const limit = parseInteger(options.limit ?? 25, 'run.items.limit', 1, 100);
+  const limit = parseInteger(
+    options.limit ?? 25,
+    'run.items.limit',
+    CONSUMER_BOUNDS.page_limit.minimum,
+    CONSUMER_BOUNDS.page_limit.maximum,
+  );
   const items: CommittedRunItemV1[] = [];
   let nextAfterSequence: number | null = null;
   visitCommittedRunItems(store, runId, (item, _nodeId, sequence) => {

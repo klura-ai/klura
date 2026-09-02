@@ -7,9 +7,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { resolveVariables, interpolateVars, prepareRequest } = await import(
-  '../dist/execution/vars.js'
-);
+const { resolveVariables, interpolateVars, prepareRequest, resolveHeaders } =
+  await import('../dist/execution/vars.js');
 
 test("interpolateVars: encode='path' preserves / separators (path-position value)", () => {
   assert.equal(interpolateVars('{{p}}', { p: '/items' }, 'path'), '/items');
@@ -57,9 +56,31 @@ test('resolveVariables: value containing unicode chars', () => {
   assert.equal(out.x, 'π≈3.14 • 🎉');
 });
 
-test('resolveVariables: missing placeholder leaves literal in output', () => {
-  const out = resolveVariables({ x: '{{missing}}' }, {});
-  assert.equal(out.x, '{{missing}}');
+test('resolveVariables: unresolved placeholder fails before a browser step runs', () => {
+  assert.throws(
+    () => resolveVariables({ x: '{{missing}}' }, {}),
+    /unresolved_placeholders: recorded-path step.*\{\{missing\}\}.*request not sent/,
+  );
+});
+
+test('request body and headers reject unresolved placeholders before transport', () => {
+  assert.throws(
+    () =>
+      prepareRequest(
+        {
+          method: 'POST',
+          baseUrl: 'https://api.example.test',
+          endpoint: '/items',
+          body: { cursor: '{{cursor}}' },
+        },
+        {},
+      ),
+    /unresolved_placeholders: request body.*\{\{cursor\}\}.*request not sent/,
+  );
+  assert.throws(
+    () => resolveHeaders({ Authorization: 'Bearer {{token}}' }, {}),
+    /unresolved_placeholders: request header "Authorization".*\{\{token\}\}.*request not sent/,
+  );
 });
 
 test('resolveVariables: placeholder inside nested arrays and objects', () => {
@@ -69,6 +90,21 @@ test('resolveVariables: placeholder inside nested arrays and objects', () => {
   );
   assert.equal(out.headers.auth, 'Bearer xyz\\+abc');
   assert.deepEqual(out.items, ['alice']);
+});
+
+test('resolveVariables: nested caller path selects an array element', () => {
+  const out = resolveVariables(
+    { query: '{{searches.0}}', id: '{{records.0.id}}' },
+    { searches: ['coffee', 'tea'], records: [{ id: 'first' }] },
+  );
+  assert.deepEqual(out, { query: 'coffee', id: 'first' });
+});
+
+test('resolveVariables: nested paths do not read inherited properties', () => {
+  assert.throws(
+    () => resolveVariables({ value: '{{input.constructor}}' }, { input: {} }),
+    /unresolved_placeholders/,
+  );
 });
 
 // ---- interpolateVars direct behavior ----
@@ -81,10 +117,7 @@ test('interpolateVars: default mode leaves raw string values as-is', () => {
 });
 
 test('interpolateVars: encode=true URL-encodes the value', () => {
-  assert.equal(
-    interpolateVars('q={{t}}', { t: 'hello world' }, true),
-    'q=hello%20world',
-  );
+  assert.equal(interpolateVars('q={{t}}', { t: 'hello world' }, true), 'q=hello%20world');
 });
 
 test('interpolateVars: jsonEscape=true escapes backslashes and quotes', () => {

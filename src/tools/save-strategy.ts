@@ -5,28 +5,36 @@ import {
   asIdentifierSlug,
   ValidationError,
 } from '../validators';
-import { invokeCheckpointAndGate, type CheckpointEnvelope } from '../checkpoints';
+import { checkpointEvent, invokeCheckpointAndGate, type CheckpointEnvelope } from '../checkpoints';
 import { probeStrategySelectors } from '../strategies/probe';
 import { collectParamExamples } from '../strategies/probe-helpers';
 import { isMutatingStrategy } from '../gate/save-warnings-mutating-verification';
 import {
   verifySavedStrategy,
+  verifyStrategyCandidate,
   type VerifySavedStrategyResult,
 } from '../strategies/verify-saved-strategy';
 import { verifyWsUrlObserved, verifyRecordedPathOverBinaryWs } from '../strategies/verify-observed';
 import * as skills from '../strategies/skills';
 import type { Strategy, AuditAnswers } from '../strategies/skills';
-import { commitValidatedStrategy } from '../strategies/skills';
+import { commitValidatedStrategy, commitValidatedStrategyWithProof } from '../strategies/skills';
 import { ensureAccumulator } from '../strategies/discovery-artifact';
 import {
   saveStrategyAudit,
   extractAcksFromNotes,
   persistWarningsOnRuntimeMeta,
 } from '../audit/lift/save-strategy';
+import {
+  evaluateSavePolicy,
+  applySaveRejectionBounce,
+  type SaveEvidence,
+} from '../audit/lift/save-policy';
+import type { Session } from '../drivers/types/session';
+import { SAVE_ORIGINS, TOOL_NAMES } from '../vocab';
 import { rejectionToErrorMessage } from '../audit';
 import type { AuditRejection } from '../audit';
-import { trackRejectionAndMaybeBounce } from '../audit/lift/save-rejection-bounce';
 import { getRegisteredSaveConfirmationDecider } from '../audit/lift/save-confirmation-decider';
+import { composeUserPrompt } from '../audit/lift/save-confirmation-prompt';
 import {
   getRegisteredSaveWarningAcker,
   type SaveWarningAck,
@@ -41,10 +49,15 @@ import {
 } from '../response/session-observations';
 import { enumerateStringParams, readCurrentUrl } from './_internals';
 import { collectScannedFields } from '../strategies/validate/helpers';
+import { assessReadCandidateEligibility } from '../strategies/read-candidate-eligibility';
 import { rejectAgentEmittedRuntimeMeta } from '../strategies/validate/notes';
 import type { LiteralClassification } from '../gate/save-audit';
 import { detectAuthGatedWithoutAuthPrereq } from '../gate/save-warnings';
 import { composeBudgetWarning } from '../session-obligations/budget-warning';
+import {
+  createPostSaveVerificationProof,
+  type PostSaveVerificationProofV1,
+} from '../strategies/post-save-verification-proof';
 
 /** Per-phase wall-clock timings for one save_strategy call. Returned on
  *  success; attached to the thrown error on rejection (see
@@ -337,7 +350,7 @@ export async function saveStrategyFromCapture(args: {
       const seen = new Set<string>();
       for (const o of obsList) {
         if (o.source.kind !== 'ui_click') continue;
-        const key = `${o.value} ${o.source.label}`;
+        const key = `${o.value}\0${o.source.label}`;
         if (seen.has(key)) continue;
         seen.add(key);
         observed_values.push({ value: o.value, label: o.source.label });
@@ -499,20 +512,22 @@ export async function saveStrategyFromCapture(args: {
       // skip non-URL entries
     }
   }
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const auditSaveStrategy = require('../audit/lift/save-strategy') as typeof import('../audit/lift/save-strategy'); // prettier-ignore
-  const { saveStrategyAudit } = auditSaveStrategy;
-  const ctxForAudit = {
+  const evidenceForAudit: SaveEvidence = {
     sessionId: args.session_id,
-    platform: args.platform,
-    capability: args.capability,
     session,
     observedSiblings: [],
     observedParamValues: getAllParamObservations(args.session_id),
     capturedEndpointPaths,
     observedUrls: observedUrlsForAudit,
   };
-  const probeResult = saveStrategyAudit.process(strategy as Strategy, ctxForAudit, {});
+  const probeResult = evaluateSavePolicy({
+    origin: SAVE_ORIGINS.agentExplicit,
+    platform: args.platform,
+    capability: args.capability,
+    strategy: strategy as Strategy,
+    evidence: evidenceForAudit,
+    auditInput: {},
+  });
   let auditInput: { token?: string; answers?: AuditAnswers } | undefined;
   if (probeResult.status === 'rejected' && probeResult.rejection.token) {
     auditInput = {
@@ -635,10 +650,18 @@ export async function saveStrategy(
   data: Strategy,
   changelog?: string,
   sessionId?: string,
-  audit?: { token?: string; answers?: import('../strategies/skills').AuditAnswers },
+  audit?: {
+    token?: string;
+    answers?: import('../strategies/skills').AuditAnswers;
+    previousStrategy?: Strategy;
+  },
 ): Promise<{
   ok: true;
   path: string;
+  active?: boolean;
+  state?: 'candidate' | 'active';
+  candidate_id?: string;
+  post_save_validation?: VerifySavedStrategyResult;
   advisory?: string;
   _checkpoint?: CheckpointEnvelope;
   validation_target?: { method: string; url: string };
@@ -670,13 +693,16 @@ export async function saveStrategy(
     throw new SaveStrategyRejection(message, { ...timings });
   };
 
-  // Reject an audit rejection, escalating to a structural_dead_end bounce when
-  // the same (capability, rejection-family) has failed too many times this
-  // session — so the agent stops iterating cosmetic edits against a detector
-  // false-positive / schema contradiction and defers, switches tier, or aborts.
+  // Funnel for SURFACED audit rejections. Renders the envelope, then applies
+  // the save-rejection bounce policy: after the 3rd same-family rejection for
+  // this capability the thrown message escalates to a structural_dead_end
+  // whose exit menu leads with the rejection's own remedy (see
+  // `runtime/src/audit/lift/save-rejection-bounce.ts`). Internal policy
+  // evaluations that never throw to the agent bypass this funnel and don't
+  // spend the dead-end budget.
   const rejectAudit = (rejection: AuditRejection): never => {
-    const normal = rejectionToErrorMessage('save_strategy', rejection);
-    let session = null;
+    const rendered = rejectionToErrorMessage(TOOL_NAMES.saveStrategy, rejection);
+    let session: Session | null = null;
     if (sessionId) {
       try {
         session = pool.getSession(sessionId);
@@ -684,8 +710,16 @@ export async function saveStrategy(
         session = null;
       }
     }
-    const bounce = trackRejectionAndMaybeBounce(session, capability, rejection, normal);
-    return rejectWithTimings(bounce ?? normal);
+    return rejectWithTimings(
+      applySaveRejectionBounce({
+        origin: SAVE_ORIGINS.agentExplicit,
+        capability,
+        strategy: data,
+        session,
+        rejection,
+        renderedMessage: rendered,
+      }),
+    );
   };
 
   // Track every save attempt on the session — including ones that throw on
@@ -847,6 +881,9 @@ export async function saveStrategy(
   }
 
   // ---- Build audit context ----
+  const previousStrategy =
+    audit?.previousStrategy ??
+    skills.loadPreviousStrategyForTier(platform, capability, data.strategy);
   let observedParamValues = sessionId ? getAllParamObservations(sessionId) : undefined;
   // Enrich with PATH-SEGMENT enum observations: query-slot grounding already
   // rode `getAllParamObservations`, but a `{{param}}` living in a path segment
@@ -878,15 +915,25 @@ export async function saveStrategy(
       }
     }
   }
-  const auditCtx = {
+  const auditEvidence: SaveEvidence = {
     sessionId: sessionId ?? '',
-    platform,
-    capability,
     session: sessionForAudit,
     observedSiblings: [],
     observedParamValues: observedParamValues ?? {},
     capturedEndpointPaths: capturedEndpointPaths ?? new Set<string>(),
     observedUrls: observedUrlsForAudit,
+    previousStrategy,
+  };
+  const auditCtx = {
+    platform,
+    capability,
+    sessionId: sessionId ?? '',
+    session: sessionForAudit,
+    observedSiblings: auditEvidence.observedSiblings ?? [],
+    observedParamValues: auditEvidence.observedParamValues ?? {},
+    capturedEndpointPaths: auditEvidence.capturedEndpointPaths ?? new Set<string>(),
+    observedUrls: observedUrlsForAudit,
+    previousStrategy,
   };
 
   // ---- Stage 0 shape checks ----
@@ -914,9 +961,15 @@ export async function saveStrategy(
     const decider = getRegisteredSaveConfirmationDecider();
     if (decider) {
       const synthesized = decider.decide(data, auditCtx);
+      // Inject a deterministic composeUserPrompt rendering as agent_prompt —
+      // mirrors `skills.saveStrategy` — so the user_confirmation Classifier's
+      // fact-check passes on the branches where it stays active (decider
+      // rejects, or approves with an empty quote) instead of surfacing a
+      // spurious missing-agent_prompt bullet ahead of the decider's verdict.
       return {
         ...agentAnswers,
         user_confirmation: {
+          agent_prompt: composeUserPrompt(data, auditCtx),
           user_decision: synthesized.decision,
           user_quote: synthesized.quote,
         },
@@ -938,11 +991,18 @@ export async function saveStrategy(
     // which ackable warnings emit. Then ack each one via the harness,
     // override `resolvedAcks` with the user-attested verdicts, and let
     // the canonical preAudit below see the harness-attested values.
-    const discoveryAudit = saveStrategyAudit.process(data, auditCtx, {
-      token: audit?.token,
-      answers: buildAuditAnswers(),
-      acks: {},
-      dryRun: true,
+    const discoveryAudit = evaluateSavePolicy({
+      origin: SAVE_ORIGINS.agentExplicit,
+      platform,
+      capability,
+      strategy: data,
+      evidence: auditEvidence,
+      auditInput: {
+        token: audit?.token,
+        answers: buildAuditAnswers(),
+        acks: {},
+        dryRun: true,
+      },
     });
     if (discoveryAudit.status === 'rejected') {
       const emitted = discoveryAudit.rejection.warnings;
@@ -985,13 +1045,24 @@ export async function saveStrategy(
     }
   }
 
+  // Warnings the programmatic policy pass returns on sessionId-less saves.
+  // That origin persists nothing on runtime_meta, so the tool response is
+  // the only surface that can carry them to the caller.
+  let programmaticPolicyWarnings: Array<{ kind: string; message: string; hint?: string }> = [];
   if (sessionId) {
     const tAuditPreStart = Date.now();
-    const preAudit = saveStrategyAudit.process(data, auditCtx, {
-      token: audit?.token,
-      answers: buildAuditAnswers(),
-      acks: resolvedAcks,
-      dryRun: true,
+    const preAudit = evaluateSavePolicy({
+      origin: SAVE_ORIGINS.agentExplicit,
+      platform,
+      capability,
+      strategy: data,
+      evidence: auditEvidence,
+      auditInput: {
+        token: audit?.token,
+        answers: buildAuditAnswers(),
+        acks: resolvedAcks,
+        dryRun: true,
+      },
     });
     timings.audit_precheck_ms = Date.now() - tAuditPreStart;
     if (preAudit.status === 'rejected') {
@@ -1004,6 +1075,35 @@ export async function saveStrategy(
       // the agent with no clean exit on a session that did no new work.
       decrementOnDuplicateOnlyRejection(sessionId, preAudit.rejection.warnings);
       rejectAudit(preAudit.rejection);
+    }
+  } else {
+    // No session (daemon HTTP / programmatic API callers): the save still
+    // routes through the policy at the programmatic origin. That origin is
+    // embedder-owned code persisting a hand-constructed strategy, so
+    // UNATTENDED_RULES (save-policy.ts) demotes blocking invariants to
+    // warnings instead of refusing the caller's deliberate write — surfaced
+    // below on the tool response. Agent-driven saves always carry
+    // session_id (the MCP handler enforces it) and take the attended
+    // branch above, where blocking applies. Evidence is limited to what
+    // exists without a session.
+    try {
+      const policyResult = evaluateSavePolicy({
+        origin: SAVE_ORIGINS.programmatic,
+        platform,
+        capability,
+        strategy: data,
+        evidence: { previousStrategy },
+      });
+      if (policyResult.status === 'committed') {
+        programmaticPolicyWarnings = policyResult.warnings.map(({ kind, message, hint }) => ({
+          kind,
+          message,
+          ...(hint !== undefined ? { hint } : {}),
+        }));
+      }
+    } catch (e) {
+      if (e instanceof Error) rejectWithTimings(e.message);
+      throw e;
     }
   }
 
@@ -1085,23 +1185,31 @@ export async function saveStrategy(
 
   // ---- Post-probe audit (canonical pass — consumes token + persists warnings) ----
   // Probe may have demoted `data.strategy` (fetch → page-script). The
-  // user_confirmation classifier's hash binds to the whole payload, so a
-  // tier change re-rejects with payload_changed — correct behavior, the
-  // agent approved a fetch but we're saving page-script. The post-check
+  // user_confirmation classifier's hash binds to the strategy's identity
+  // slice, which includes tier, so a tier change re-rejects with
+  // payload_changed — correct behavior, the agent approved a fetch but
+  // we're saving page-script. The post-check
   // also runs when tier is unchanged so the token gets consumed and any
   // emitted warnings persist on `runtime_meta.save_warnings`.
   if (sessionId) {
     timings.audit_postcheck_skipped = false;
     const tAuditPostStart = Date.now();
-    const finalAudit = saveStrategyAudit.process(data, auditCtx, {
-      token: audit?.token,
-      answers: buildAuditAnswers(),
-      // resolvedAcks already reflects harness-attested verdicts when an
-      // acker was registered, or falls back to the LLM's notes when not.
-      // Re-read from notes here to pick up any post-probe mutations to
-      // save_warnings_acked (the harness-mode write above is already in
-      // place at this point).
-      acks: harnessAcker ? resolvedAcks : extractAcksFromNotes(data),
+    const finalAudit = evaluateSavePolicy({
+      origin: SAVE_ORIGINS.agentExplicit,
+      platform,
+      capability,
+      strategy: data,
+      evidence: auditEvidence,
+      auditInput: {
+        token: audit?.token,
+        answers: buildAuditAnswers(),
+        // resolvedAcks already reflects harness-attested verdicts when an
+        // acker was registered, or falls back to the LLM's notes when not.
+        // Re-read from notes here to pick up any post-probe mutations to
+        // save_warnings_acked (the harness-mode write above is already in
+        // place at this point).
+        acks: harnessAcker ? resolvedAcks : extractAcksFromNotes(data),
+      },
     });
     timings.audit_postcheck_ms = Date.now() - tAuditPostStart;
     if (finalAudit.status === 'rejected') {
@@ -1111,13 +1219,147 @@ export async function saveStrategy(
     }
   }
 
-  // ---- Commit ----
-  const filePath = commitValidatedStrategy(platform, capability, data, changelog, sessionId);
+  const validation = buildValidationTarget(data);
+  const verifiableTier =
+    (data as { strategy?: string }).strategy === 'fetch' ||
+    (data as { strategy?: string }).strategy === 'page-script';
+  const mutatingStrategy = isMutatingStrategy(data);
+  let validationCheckpoint: CheckpointEnvelope | undefined;
+  let postSaveValidation: VerifySavedStrategyResult | undefined;
+  let candidateId: string | undefined;
+  let activeVerificationProof: PostSaveVerificationProofV1 | undefined;
+  let active = true;
+  let filePath: string;
+
+  let readVerificationArgs: Record<string, unknown> | null = null;
+  let readCandidateEligible = false;
+  let readCandidateReason: 'eligible' | 'safe_read_unproven' | 'unsatisfied_placeholders' | null =
+    null;
+  let readCandidateMissing: string[] = [];
+  if (verifiableTier && sessionId) {
+    try {
+      const session = pool.getSession(sessionId);
+      const declared = session.declaredCapabilities?.find((d) => d.capability === capability);
+      readVerificationArgs =
+        declared?.args && Object.keys(declared.args).length > 0
+          ? declared.args
+          : collectParamExamples(data);
+      const assessment = assessReadCandidateEligibility(
+        data,
+        platform,
+        capability,
+        readVerificationArgs,
+      );
+      readCandidateEligible = assessment.eligible;
+      readCandidateReason = assessment.reason;
+      readCandidateMissing = assessment.unsatisfied_placeholders;
+    } catch {
+      readVerificationArgs = null;
+    }
+  }
+
+  if (readCandidateEligible && readVerificationArgs) {
+    const candidate = skills.stageValidatedStrategyCandidate(platform, capability, data, sessionId);
+    candidateId = candidate.candidate_id;
+    const verified = await verifyStrategyCandidate(
+      candidate,
+      readVerificationArgs,
+      pool,
+      changelog,
+    );
+    postSaveValidation = verified;
+    active = verified.active;
+    filePath = verified.path;
+  } else if (verifiableTier && sessionId && skills.loadStrategy(platform, capability)) {
+    const candidate = skills.stageValidatedStrategyCandidate(platform, capability, data, sessionId);
+    candidateId = candidate.candidate_id;
+    active = false;
+    filePath = candidate.path;
+    if (readCandidateReason === 'safe_read_unproven' && readVerificationArgs) {
+      const session = pool.getSession(sessionId);
+      session.pendingPostSaveValidation = {
+        platform,
+        capability,
+        args: readVerificationArgs,
+        proof: createPostSaveVerificationProof(platform, capability, data),
+        candidate_id: candidate.candidate_id,
+        ...(changelog ? { changelog } : {}),
+      };
+      const { resolution, envelope } = await invokeCheckpointAndGate(
+        checkpointEvent.post_save_validation_consent({
+          session_id: sessionId,
+          capability,
+          context: {
+            capability,
+            candidate_id: candidate.candidate_id,
+            pendingAction: `the runtime executing the inactive \`${capability}\` replacement once, end-to-end, before promotion`,
+            contextSummary: `Automatic read-safety proof is unavailable because the candidate's dependency graph includes stateful or otherwise indeterminate execution. The prior active strategy remains untouched unless this exact candidate returns explicit body.ok === true`,
+            declineHandler: `the candidate remains inactive and the prior active strategy remains unchanged`,
+            ...(validation ? { validation_target: validation } : {}),
+          },
+        }),
+      );
+      if (envelope) {
+        validationCheckpoint = envelope;
+      } else if (resolution.status === 'resolved') {
+        session.pendingPostSaveValidation = undefined;
+        const verified = await verifyStrategyCandidate(
+          candidate,
+          readVerificationArgs,
+          pool,
+          changelog,
+        );
+        postSaveValidation = verified;
+        active = verified.active;
+        filePath = verified.path;
+      } else {
+        session.pendingPostSaveValidation = undefined;
+        postSaveValidation = {
+          ok: false,
+          classification: 'not_run',
+          status: 0,
+          archived: false,
+          message:
+            `strategy_candidate_not_run: ${capability} remains inactive because the registered ` +
+            `checkpoint handler did not explicitly authorize indeterminate candidate execution. ` +
+            `The prior active strategy is unchanged.`,
+        };
+      }
+    } else {
+      const missingTokens = readCandidateMissing.map((name) => `{{${name}}}`).join(', ');
+      const detail = `verification args do not resolve ${missingTokens}`;
+      postSaveValidation = {
+        ok: false,
+        classification: 'not_run',
+        status: 0,
+        archived: false,
+        message:
+          `strategy_candidate_not_run: ${capability} was staged inactive because ${detail}. ` +
+          `The prior active strategy is unchanged. Re-save from a session declaring complete args ` +
+          `or add notes.params examples so the candidate can be executed and promoted transactionally.`,
+      };
+    }
+  } else {
+    if (verifiableTier) {
+      const committed = commitValidatedStrategyWithProof(
+        platform,
+        capability,
+        data,
+        changelog,
+        sessionId,
+      );
+      filePath = committed.path;
+      activeVerificationProof = committed.proof;
+    } else {
+      filePath = commitValidatedStrategy(platform, capability, data, changelog, sessionId);
+    }
+  }
+
   // Track the save on the session so close_session auto-synthesis knows which
   // capabilities to build fallbacks for. Only the capability name + tier +
   // timestamp are kept here — the synthesizer re-loads the saved strategy from
   // disk when it needs the full body.
-  if (sessionId) {
+  if (sessionId && active) {
     try {
       const session = pool.getSession(sessionId);
       if (!session.savedCapabilities) session.savedCapabilities = [];
@@ -1130,7 +1372,7 @@ export async function saveStrategy(
       // auto-execute failed at start_session. Without this clear, the flag
       // persists and the end_drive reverse-engineer handoff keeps routing the
       // capability through LIFT even though a fresh strategy just landed —
-      // contradicting STRATEGY_AMEND's drive-tier amend contract (the agent
+      // contradicting the strategy_amend drive-tier amend contract (the agent
       // sees both "saved" and "stale_existing_strategy: true" at once).
       session.staleStrategyCapabilities?.delete(capability);
     } catch {
@@ -1159,17 +1401,11 @@ export async function saveStrategy(
   // TIER, not on `buildValidationTarget` — a page-script strategy whose request
   // lives entirely inside a js-eval prereq has no top-level baseUrl/endpoint, so
   // no `{method,url}` can be derived, yet that is exactly the shape that most
-  // needs verifying. `verifySavedStrategy` runs the whole strategy through
-  // `execute()`, which loads it from disk and resolves the full prereq chain —
-  // it never needs a pre-derived target. `validation_target` rides along only
-  // as informational context for the agent's Tier classification.
-  const validation = buildValidationTarget(data);
-  const verifiableTier =
-    (data as { strategy?: string }).strategy === 'fetch' ||
-    (data as { strategy?: string }).strategy === 'page-script';
-  let validationCheckpoint: CheckpointEnvelope | undefined;
-  let postSaveValidation: VerifySavedStrategyResult | undefined;
-  if (verifiableTier && sessionId) {
+  // needs verifying. `verifySavedStrategy` runs the whole exact committed
+  // strategy through `execute()` and resolves the full prereq chain — it never
+  // needs a pre-derived target. `validation_target` rides along only as
+  // informational context for the agent's Tier classification.
+  if (verifiableTier && sessionId && !candidateId) {
     try {
       // Stage the deferred verification on the session. `ack_checkpoint` reads
       // `pendingPostSaveValidation` on consented resolution and runs
@@ -1192,6 +1428,9 @@ export async function saveStrategy(
       // stands unverified and the response carries the skip reason.
       const unsatisfied = findUnsatisfiedPlaceholders(data, verifyArgs);
       if (unsatisfied.size > 0) {
+        if (activeVerificationProof) {
+          skills.stampPostSaveValidationProof(activeVerificationProof, 'skipped', false);
+        }
         const placeholderList = [...unsatisfied].map((n) => '{{' + n + '}}').join(', ');
         postSaveValidation = {
           ok: false,
@@ -1212,7 +1451,9 @@ export async function saveStrategy(
         // agent to drop the auth prereq. Stamp unverified; a later authed
         // session (live cookie jar) validates it.
         session.pendingPostSaveValidation = undefined;
-        skills.stampRuntimeMeta(platform, capability, { post_save_validation: 'skipped' });
+        if (activeVerificationProof) {
+          skills.stampPostSaveValidationProof(activeVerificationProof, 'skipped', false);
+        }
         postSaveValidation = {
           ok: false,
           classification: 'not_run',
@@ -1226,23 +1467,30 @@ export async function saveStrategy(
             `validates on the next execute in an authenticated session.`,
         };
       } else {
-        session.pendingPostSaveValidation = { platform, capability, args: verifyArgs };
+        if (!activeVerificationProof) {
+          throw new Error(
+            `post_save_validation_target_missing: ${platform}/${capability} has no exact committed binding`,
+          );
+        }
+        session.pendingPostSaveValidation = {
+          platform,
+          capability,
+          args: verifyArgs,
+          proof: activeVerificationProof,
+        };
 
-        const mutating = isMutatingStrategy(data);
         const { resolution, envelope } = await invokeCheckpointAndGate(
-          'post_save_validation_consent',
-          {
+          checkpointEvent.post_save_validation_consent({
             session_id: sessionId,
             capability,
             context: {
-              kind: 'post_save_validation_consent',
               capability,
               pendingAction: `the runtime re-running the saved \`${capability}\` strategy once, end-to-end, to verify transport and any explicit body.ok result`,
-              contextSummary: `Strategy tier: ${(data as { strategy?: string }).strategy ?? 'unknown'}${mutating ? ', mutating-shaped — re-running repeats a real side effect, classify Tier 2 unless the action is genuinely idempotent' : ' — likely Tier 1 if the request is idempotent'}. On your consent (ack_checkpoint, non-cancelled) the RUNTIME itself re-runs the saved strategy end-to-end. A non-2xx or explicit body.ok:false archives it as broken; 2xx without boolean body.ok is recorded as transport-only, not semantic success. You do not fire anything yourself; classify Tier 1 (idempotent/read — ack immediately) vs Tier 2 (mutation / real-account side-effect / third-party recipient — explain, then ack only on user OK)`,
+              contextSummary: `Strategy tier: ${(data as { strategy?: string }).strategy ?? 'unknown'}${mutatingStrategy ? ', mutating-shaped — re-running repeats a real side effect, classify Tier 2 unless the action is genuinely idempotent' : ' — likely Tier 1 if the request is idempotent'}. On your consent (ack_checkpoint, non-cancelled) the RUNTIME itself re-runs the saved strategy end-to-end. A non-2xx or explicit body.ok:false archives it as broken; 2xx without boolean body.ok is recorded as transport-only, not semantic success. You do not fire anything yourself; classify Tier 1 (idempotent/read — ack immediately) vs Tier 2 (mutation / real-account side-effect / third-party recipient — explain, then ack only on user OK)`,
               declineHandler: `the save stands but is recorded unverified (runtime_meta.post_save_validation: "declined"); a later session can re-validate. Add a discovery note saying why consent was withheld.`,
               ...(validation ? { validation_target: validation } : {}),
             },
-          },
+          }),
         );
         if (envelope) {
           // Interactive host: the agent acks the checkpoint and `ackCheckpoint`
@@ -1252,14 +1500,14 @@ export async function saveStrategy(
           // Unattended host (no interactive consenter) pre-consented by
           // resolving the checkpoint to `continue` instead of handing over.
           session.pendingPostSaveValidation = undefined;
-          if (mutating) {
+          if (mutatingStrategy) {
             // A blanket `continue` from a non-interactive decider is NOT the
             // Tier-2 user OK the consent prompt requires for a mutating action.
             // Re-running the saved strategy end-to-end repeats the real side
             // effect (a second form submit / message / order / email). Record
             // the save as unverified instead of double-firing; an interactive
             // session can re-validate later.
-            skills.stampRuntimeMeta(platform, capability, { post_save_validation: 'declined' });
+            skills.stampPostSaveValidationProof(activeVerificationProof, 'declined', false);
             postSaveValidation = {
               ok: false,
               classification: 'not_run',
@@ -1276,13 +1524,28 @@ export async function saveStrategy(
             // Read/idempotent (Tier 1): run the verification inline now — there
             // is no later ack — and fold the result into this response. A
             // non-2xx archives the strategy.
-            postSaveValidation = await verifySavedStrategy(platform, capability, verifyArgs, pool);
+            postSaveValidation = await verifySavedStrategy(
+              platform,
+              capability,
+              verifyArgs,
+              pool,
+              activeVerificationProof,
+            );
           }
         }
       }
-    } catch {
-      // Best-effort — a missing session just means no advisory lands; the
-      // save itself still succeeds.
+    } catch (error) {
+      postSaveValidation = {
+        ok: false,
+        classification: 'not_run',
+        status: 0,
+        archived: false,
+        message:
+          `post_save_validation_not_run: the strategy remains saved locally, but runtime could ` +
+          `not complete its verification handoff: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+      };
     }
   }
   // Surface save-time warnings + agent acks on the immediate response so the
@@ -1302,6 +1565,9 @@ export async function saveStrategy(
         hint?: string;
       }>)
     : [];
+  // Programmatic-origin policy warnings (sessionId-less saves) ride the
+  // response only — that origin leaves runtime_meta undecorated.
+  const responseWarnings = [...persistedWarnings, ...programmaticPolicyWarnings];
   const persistedAcks = Array.isArray(notes.save_warnings_acked)
     ? (notes.save_warnings_acked as Array<{ kind: string; reason: string }>)
     : [];
@@ -1366,11 +1632,14 @@ export async function saveStrategy(
   return {
     ok: true,
     path: filePath,
+    active,
+    state: active ? 'active' : 'candidate',
+    ...(candidateId ? { candidate_id: candidateId } : {}),
     ...(validationCheckpoint
       ? { _checkpoint: validationCheckpoint, validation_target: validation }
       : {}),
     ...(postSaveValidation ? { post_save_validation: postSaveValidation } : {}),
-    ...(persistedWarnings.length > 0 ? { save_warnings: persistedWarnings } : {}),
+    ...(responseWarnings.length > 0 ? { save_warnings: responseWarnings } : {}),
     ...(persistedAcks.length > 0 ? { save_warnings_acked: persistedAcks } : {}),
     ...(authPrereqAutoInjected
       ? {
@@ -1627,29 +1896,60 @@ export async function updateStrategy(
       newTimings(),
     );
   }
-  return saveStrategy(
-    platform,
-    capability,
-    data,
-    changelog ?? 'update_strategy amend',
-    sessionId,
-    audit,
-  );
+  const submitted = data as Strategy & { runtime_meta?: unknown };
+  const withoutRuntimeMeta =
+    submitted.runtime_meta === undefined
+      ? data
+      : ({
+          ...submitted,
+          runtime_meta: undefined,
+        } as Strategy);
+  // Tier-matched: an amend compares against (and inherits notes from) the
+  // file on the SAME tier when the capability has files on several — the
+  // unobserved_url grandfather set and the notes fallback both key off it.
+  const submittedTier = (data as { strategy?: unknown }).strategy;
+  const existingStrategy = ((typeof submittedTier === 'string'
+    ? existing.find((s) => s.strategy === submittedTier)
+    : undefined) ?? existing[0]) as Strategy | undefined;
+  const updateData =
+    !Object.prototype.hasOwnProperty.call(submitted, 'notes') &&
+    existingStrategy?.notes !== undefined
+      ? ({
+          ...withoutRuntimeMeta,
+          notes: existingStrategy.notes,
+        } as Strategy)
+      : withoutRuntimeMeta;
+  try {
+    return await saveStrategy(
+      platform,
+      capability,
+      updateData,
+      changelog ?? `${TOOL_NAMES.updateStrategy} amend`,
+      sessionId,
+      { ...audit, previousStrategy: existingStrategy },
+    );
+  } catch (err) {
+    if (!(err instanceof SaveStrategyRejection)) throw err;
+    throw new SaveStrategyRejection(
+      err.message.replaceAll(TOOL_NAMES.saveStrategy, TOOL_NAMES.updateStrategy),
+      err.timings,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Tool registry metadata
 // ---------------------------------------------------------------------------
 
-import { TOOL_NAMES } from '../vocab';
 import type { ToolDef } from '../tools/types';
 import { patchStep } from '../public-api';
 
 export const TOOL_DEFS: ToolDef[] = [
   {
     name: TOOL_NAMES.saveStrategy,
+    phasePolicy: { category: 'triage_and_lift_write', allowedWhenExhaustedIn: ['lift'] },
     description:
-      'Save a discovered execution strategy for a platform capability. klura stores only complete, runnable strategies on disk; iterative progress goes into the capability\'s discovery_artifact via `save_verified_expression` / `add_discovery_note` / `add_resume_pointer`, and into the platform logbook via `record_observed_capability`. On `end_drive` with no complete save, auto-synth drops a recorded-path fallback from perform_action history.\n\n**save_strategy commits the strategy file only.** It does not close the session. The session stays open until you explicitly call `end_drive`. Multi-capability sessions: save each capability, then `end_drive` to finalize. Single-capability sessions: save, persist any RE findings via `add_discovery_note` / `add_resume_pointer`, then `end_drive`. The close-time audit (re_persistence, capability_declaration_required, auto-synth, logbook flush) all live on `end_drive`.\n\nCommon save-time rejections (error message names the field; catalog here to front-load):\n  - **Pre-save audit (two-phase, token-gated)** — first call always rejected with `audit_token` + checklist. Echo on next call with `audit_answers` classifying every literal. The rejection envelope enumerates every classifier inline.\n  - **`user_confirmation` audit** — every save requires the user\'s explicit approval. The first call returns `items.user_confirmation.prompt_for_user` — relay it verbatim to the user, get yes/no, retry with `audit_answers.user_confirmation: {user_decision: "approve"|"reject", user_quote: "<verbatim user reply>"}`. Token binds to the whole strategy hash, so any structural change forces a fresh ask.\n  - **Selector self-reference** — prereq extract that reads the id already in `endpoint`/`wsUrl`. Extract from a structural source (URL regex, page global, JSON script tag).\n  - **recorded-path over observed binary WS write** — capability is liftable above recorded-path; start with `inspect_ws_frame` + `try_generator`. Persist partial progress to discovery_artifact and let end_drive auto-synth the fallback.\n  - **fetch with empty `prerequisites: []` that needs in-page cookies** — set `transport: "browser"`.\n  - **`notes.<unknown_subkey>`** — allowlisted keys: `params`, `quirks`, `auth`, `discovery` (string), `observed_capabilities[]`, `changelog`, `anchor_type`, `save_warnings`, `save_warnings_acked`.\n  - **Save-time warnings** — `unparametrized_session_id`, `unresolved_name_to_id_gap`, `entity_pinned_infra_prereq`. Either fix the strategy or ack inline via `notes.save_warnings_acked: [{kind, reason}]`. Reason required.\n  - **URL not observed in discovery network log** — pass `session_id` so the cross-reference catches recalled-from-training-data endpoints.\n  - **Enum param without grounding** — `kind: "enum"` caller_input needs `observed_values: [{value, label}...]` from captured traffic, or `source: "capability:<slug>"`.\n  - **`status` field on strategy body** — not in the schema. Iterative progress lives in the discovery_artifact, not the strategy body.',
+      'Save a discovered execution strategy for a platform capability. klura stores only complete, runnable strategies on disk; iterative progress goes into the capability\'s discovery_artifact via `save_verified_expression` / `add_discovery_note` / `add_resume_pointer`, and into the platform logbook via `record_observed_capability`. On `end_drive` with no complete save, auto-synth drops a recorded-path fallback from perform_action history.\n\n**save_strategy commits the strategy file only.** It does not close the session. The session stays open until you explicitly call `end_drive`. Multi-capability sessions: save each capability, then `end_drive` to finalize. Single-capability sessions: save, persist any RE findings via `add_discovery_note` / `add_resume_pointer`, then `end_drive`. The close-time audit (re_persistence, capability_declaration_required, auto-synth, logbook flush) all live on `end_drive`.\n\nCommon save-time rejections (error message names the field; catalog here to front-load):\n  - **Pre-save audit (two-phase, token-gated)** — first call always rejected with `audit_token` + checklist. Echo on next call with `audit_answers` classifying every literal. The rejection envelope enumerates every classifier inline.\n  - **`user_confirmation` audit** — every save requires the user\'s explicit approval. The first call returns `items.user_confirmation.prompt_for_user` — relay it verbatim to the user, get yes/no, retry with `audit_answers.user_confirmation: {user_decision: "approve"|"reject", user_quote: "<verbatim user reply>"}`. Token binds to the strategy\'s identity slice (capability, tier, target, prereq identity, request-shape keys) — identity changes force a fresh ask; selector/value edits during probe recovery do not.\n  - **Selector self-reference** — prereq extract that reads the id already in `endpoint`/`wsUrl`. Extract from a structural source (URL regex, page global, JSON script tag).\n  - **recorded-path over observed binary WS write** — capability is liftable above recorded-path; start with `inspect_ws_frame` + `try_generator`. Persist partial progress to discovery_artifact and let end_drive auto-synth the fallback.\n  - **fetch with empty `prerequisites: []` that needs in-page cookies** — set `transport: "browser"`.\n  - **`notes.<unknown_subkey>`** — allowlisted keys: `params`, `quirks`, `auth`, `discovery` (string), `observed_capabilities[]`, `changelog`, `anchor_type`, `save_warnings`, `save_warnings_acked`.\n  - **Save-time warnings** — `unparametrized_session_id`, `unresolved_name_to_id_gap`, `entity_pinned_infra_prereq`. Either fix the strategy or ack inline via `notes.save_warnings_acked: [{kind, reason}]`. Reason required.\n  - **URL not observed in discovery network log** — pass `session_id` so the cross-reference catches recalled-from-training-data endpoints.\n  - **Enum param without grounding** — `kind: "enum"` caller_input needs `observed_values: [{value, label}...]` from captured traffic, or `source: "capability:<slug>"`.\n  - **`status` field on strategy body** — not in the schema. Iterative progress lives in the discovery_artifact, not the strategy body.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1711,8 +2011,9 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.updateStrategy,
+    phasePolicy: { category: 'strategy_amend' },
     description:
-      "Improve an ALREADY-SAVED strategy without re-discovery. Use when you have a better/enriched expression for a healthy capability (e.g. add fields to a page-script). Loads the saved strategy, applies your full replacement `strategy` body, and re-runs the SAME save-time audit + probe + commit as save_strategy (incl. user_confirmation) — an amend is held to a create's bar, so editing the JSON by hand is never needed. Load the current body via get_strategy, edit, resubmit. Rejects if no saved strategy exists yet (use save_strategy to create the first one). Admissible from drive/execute — no need to re-enter lift.",
+      "Improve an ALREADY-SAVED strategy without re-discovery. Use when you have a better/enriched expression for a healthy capability (e.g. add fields to a page-script). Loads the saved strategy, applies your full replacement `strategy` body, and re-runs the SAME save-time audit + probe + commit as save_strategy (incl. user_confirmation) — an amend is held to a create's bar, so editing the JSON by hand is never needed. Load the current body via get_strategy, edit, resubmit; update_strategy drops its runtime-owned `runtime_meta` field automatically. Rejects if no saved strategy exists yet (use save_strategy to create the first one). Admissible from drive/execute — no need to re-enter lift.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -1721,7 +2022,7 @@ export const TOOL_DEFS: ToolDef[] = [
         strategy: {
           type: 'object',
           description:
-            'Full replacement strategy body (same shape save_strategy takes). This REPLACES the saved strategy for {platform, capability}; supply the complete body (load the current one via get_strategy, then edit). Same schema/audit as save_strategy.',
+            'Full replacement strategy body (same shape save_strategy takes). This REPLACES the saved strategy for {platform, capability}; supply the complete body (load the current one via get_strategy, then edit). Any runtime_meta returned by get_strategy is ignored. Same schema/audit as save_strategy.',
         },
         changelog: {
           type: 'string',
@@ -1767,6 +2068,11 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.patchStep,
+    // extraPhases: the recorded_step_failed heal flow (inspect → patch_step
+    // → resume_execution) fires inside an auto-execute, so the tool must be
+    // admissible in the phase where the checkpoint surfaced. Precondition-
+    // guarded — rejects when there is no recorded-path step to patch.
+    phasePolicy: { category: 'lift_re_active', extraPhases: ['execute'] },
     description:
       'Patch a single step in a recorded-path strategy by its stable slug id. Use for step-level healing when execution fails at a specific step — update the locators, action, or value without rewriting the whole strategy. Steps carry a required `id` field (e.g. "click_send", "type_message"); pass that id as `step_id`. 404 error names the known ids in the strategy.',
     inputSchema: {

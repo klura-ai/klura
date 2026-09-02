@@ -11,11 +11,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { trimOversizedObjectBody, MAX_TOOL_OUTPUT_CHARS } = await import(
-  '../dist/response/response-size.js'
-);
+const { trimOversizedObjectBody, MAX_TOOL_OUTPUT_CHARS } =
+  await import('../dist/response/response-size.js');
 
-const HINT = 'networkLog omitted. Fetch via get_network_log({session_id}) or call execute({full: true}).';
+const HINT =
+  'networkLog omitted. Fetch via get_network_log({session_id}) or call execute({full: true}).';
 
 test('mode=full passes through unchanged even when oversized', () => {
   const bigLog = new Array(500).fill({ method: 'GET', url: 'x'.repeat(100) });
@@ -79,7 +79,11 @@ test('mode=smart drops only networkLog when oversized; other fields survive', ()
 
   assert.equal(out.body.ok, true);
   assert.equal(out.body.url, 'https://example.com/done');
-  assert.deepEqual(out.body.edit, { result: 'Success', newrevid: 42 }, 'app success marker survives');
+  assert.deepEqual(
+    out.body.edit,
+    { result: 'Success', newrevid: 42 },
+    'app success marker survives',
+  );
   assert.deepEqual(out.body.receipt, { status: 'ok' });
   assert.deepEqual(out.body.interrupts_fired, ['captcha_gate']);
   assert.ok(!('networkLog' in out.body), 'networkLog dropped');
@@ -170,13 +174,15 @@ test('compact: short string body left alone', () => {
   assert.equal(er.body_truncated, undefined);
 });
 
-test('compact: array body over KEEP threshold is head-sliced + total_entries attached', () => {
+test('compact: large array is structurally sliced + total_entries attached', () => {
   const er = { status: 200, body: new Array(5000).fill({ id: 1, name: 'x' }) };
   compactExecuteResultBody(er);
   assert.ok(Array.isArray(er.body));
-  assert.equal(er.body.length, 50);
+  assert.ok(er.body.length < 5000);
+  assert.ok(JSON.stringify(er.body).length <= 3_000);
   assert.equal(er.body_total_entries, 5000);
-  assert.equal(er.body_truncated_entries, true);
+  assert.equal(er.body_truncated, true);
+  assert.ok(Array.isArray(er.body_truncated_paths));
 });
 
 test('compact: small array of small entries left alone', () => {
@@ -186,18 +192,20 @@ test('compact: small array of small entries left alone', () => {
   assert.equal(er.body_truncated_entries, undefined);
 });
 
-test('compact: small array of huge entries triggers JSON preview path', () => {
+test('compact: small array of huge entries stays structured with clipped leaves', () => {
   const er = {
     status: 200,
     body: new Array(5).fill({ huge: 'x'.repeat(10_000) }),
   };
   compactExecuteResultBody(er);
   assert.equal(er.body_truncated, true);
-  assert.ok(er.body_total_chars > MAX_TOOL_OUTPUT_CHARS / 2);
-  assert.ok(typeof er.body === 'string' && er.body.startsWith('<truncated array body:'));
+  assert.ok(er.body_total_chars > 3_000);
+  assert.ok(Array.isArray(er.body));
+  assert.equal(er.body.length, 5);
+  assert.ok(er.body.every((entry) => entry.huge.includes('<truncated path=')));
 });
 
-test('compact: object body over budget is JSON-preview-replaced + status survives', () => {
+test('compact: object body over budget stays structured + status survives', () => {
   const er = {
     status: 200,
     body: { ok: true, original_body: 'x'.repeat(500_000) },
@@ -206,11 +214,13 @@ test('compact: object body over budget is JSON-preview-replaced + status survive
   assert.equal(er.status, 200);
   assert.equal(er.body_ok, true);
   assert.equal(er.body_truncated, true);
-  assert.ok(typeof er.body === 'string' && er.body.startsWith('<truncated:'));
-  assert.ok(er.body_preview.length <= MAX_TOOL_OUTPUT_CHARS / 2);
+  assert.equal(typeof er.body, 'object');
+  assert.equal(er.body.ok, true);
+  assert.match(er.body.original_body, /<truncated path=body\.original_body>/);
+  assert.ok(JSON.stringify(er.body).length <= 3_000);
 });
 
-test('compact: explicit failure survives oversized object replacement', () => {
+test('compact: explicit failure survives structured object compaction', () => {
   const er = {
     status: 200,
     body: { ok: false, outcome: 'failure', original_body: 'x'.repeat(500_000) },
@@ -218,7 +228,46 @@ test('compact: explicit failure survives oversized object replacement', () => {
   compactExecuteResultBody(er);
   assert.equal(er.body_ok, false);
   assert.equal(er.body_truncated, true);
-  assert.ok(typeof er.body === 'string' && er.body.startsWith('<truncated:'));
+  assert.equal(er.body.ok, false);
+  assert.equal(er.body.outcome, 'failure');
+  assert.match(er.body.original_body, /<truncated path=body\.original_body>/);
+});
+
+test('compact: small live item page retains structural IDs while clipping media URLs', () => {
+  const er = {
+    status: 200,
+    body: {
+      ok: true,
+      outcome: 'found',
+      items: ['A1', 'B2', 'C3'].map((shortcode) => ({
+        shortcode,
+        display_url: `https://cdn.example/image?${'a'.repeat(900)}`,
+        video_url: `https://cdn.example/video?${'b'.repeat(1_800)}`,
+        caption: 'short caption',
+      })),
+    },
+  };
+  compactExecuteResultBody(er);
+  assert.equal(er.body_truncated, true);
+  assert.deepEqual(
+    er.body.items.map((item) => item.shortcode),
+    ['A1', 'B2', 'C3'],
+  );
+  assert.ok(JSON.stringify(er.body).length <= 3_000);
+  assert.ok(er.body.items.some((item) => item.video_url.includes('<truncated path=')));
+});
+
+test('compact: result body line separators are transport-safe visible escapes', () => {
+  const er = {
+    status: 200,
+    body: {
+      ok: true,
+      items: [{ caption: 'line one\nline two\u2028line three' }],
+    },
+  };
+  compactExecuteResultBody(er);
+  assert.equal(er.body.items[0].caption, 'line one\\nline two\\u2028line three');
+  assert.doesNotMatch(er.body.items[0].caption, /[\n\u2028]/);
 });
 
 test('compact: small object body left alone', () => {

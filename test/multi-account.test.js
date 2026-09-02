@@ -148,11 +148,13 @@ test('pool: same-platform-different-identity calls don\'t share warm slots', asy
   // in distinct warm slots so the second doesn't reuse the first's cookies.
   const { Pool } = await import('../dist/pool/pool.js');
   let nextId = 0;
+  let nextLease = 0;
   class StubDriver {
     constructor() {
       this.created = [];
       this.reset = [];
       this.destroyed = [];
+      this.leases = new Map();
     }
     get capabilities() {
       return [];
@@ -164,9 +166,26 @@ test('pool: same-platform-different-identity calls don\'t share warm slots', asy
         intercepting: false,
         platform: opts?.platform,
         identity: opts?.identity,
+        _guts: { contextId: nextId },
       };
       this.created.push({ id: session.id, ...opts });
       return session;
+    }
+    detachLease(session) {
+      if (!session._guts) return null;
+      const leaseId = `lease_${++nextLease}`;
+      this.leases.set(leaseId, session._guts);
+      session._guts = undefined;
+      return { leaseId };
+    }
+    attachLease(session, lease) {
+      const guts = this.leases.get(lease.leaseId);
+      if (!guts) throw new Error(`lease ${lease.leaseId} not held`);
+      this.leases.delete(lease.leaseId);
+      session._guts = guts;
+    }
+    async destroyLease(lease) {
+      this.leases.delete(lease.leaseId);
     }
     async resetSession(session, opts) {
       this.reset.push({ id: session.id, ...opts });
@@ -195,7 +214,9 @@ test('pool: same-platform-different-identity calls don\'t share warm slots', asy
     const c = await pool.createSession({ platform: 'demo', identity: 'work' });
     assert.equal(driver.reset.length, 1, 'expected the work slot to reset on reuse');
     assert.equal(driver.created.length, 2, 'no new cold spawn for the reused identity');
-    // c is the same Session object as a was (id rotated by warm reuse).
+    // c is a fresh Session object bound to a's lease (warm reuse never
+    // reuses the Session itself).
+    assert.notEqual(c, a, 'warm reuse mints a fresh Session');
     assert.equal(c.identity, 'work');
   } finally {
     await pool.shutdown();

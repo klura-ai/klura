@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { responseSchema } from './response';
+import { REF_LINKS, type RefLink, type StrategyTier } from '../../vocab';
 
 const nonEmptyString = z.string().min(1, 'must be a non-empty string');
 const objectValue = z.record(z.string(), z.unknown());
@@ -187,12 +188,21 @@ export const recordedPathSchema = z.looseObject({
   cache: optionalSlot(objectValue).describe('{ ttl: "5m" } return-value cache hint'),
 });
 
+// Keyed by the tier vocabulary — `satisfies` makes tsc reject a registry
+// that misses a tier or invents a key outside `STRATEGY_TIERS`.
 export const strategySchemas = {
   fetch: fetchSchema,
   'page-script': pageScriptSchema,
   'recorded-path': recordedPathSchema,
-} as const;
+} as const satisfies Record<StrategyTier, z.ZodType>;
 
 export const strategySchema = z.union([fetchSchema, pageScriptSchema, recordedPathSchema]);
 
-export type StrategyTier = keyof typeof strategySchemas;
+export type { StrategyTier };
+
+/** REFERENCE.md section for each tier's full schema documentation. */
+export const TIER_REFERENCE_SLUGS: Record<StrategyTier, RefLink> = {
+  fetch: REF_LINKS.fetchSchema,
+  'page-script': REF_LINKS.pageScriptSchema,
+  'recorded-path': REF_LINKS.recordedPathSchema,
+};

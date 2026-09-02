@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 const { composeTriageAuthoringContract } = await import(
   '../dist/phases/triage/triage-authoring-contract.js'
 );
+const { triagePlanAudit } = await import('../dist/audit/triage/triage-plan.js');
 
 function session(overrides = {}) {
   return {
@@ -23,7 +24,7 @@ function session(overrides = {}) {
 
 // ---------- shape ----------
 
-test('contract: empty session → empty samples but all 5 constraints listed', () => {
+test('contract: empty session → empty samples but all 6 constraints listed', () => {
   const c = composeTriageAuthoringContract(session());
   assert.deepEqual(c.captured_urls_sample, []);
   assert.deepEqual(c.distinct_origins, []);
@@ -33,6 +34,7 @@ test('contract: empty session → empty samples but all 5 constraints listed', (
     kinds.sort(),
     [
       'capability_must_be_declared',
+      'recorded_path_navigate_url_in_patterns',
       'slug_must_not_bake_query_value',
       'tier_justification_must_cite_artifact',
       'url_grounded_in_captures_or_origins',
@@ -41,19 +43,15 @@ test('contract: empty session → empty samples but all 5 constraints listed', (
   );
 });
 
-test('contract: every constraint references a real triagePlanAudit detector kind', () => {
+test('contract: every constraint references a live triagePlanAudit detector kind', () => {
+  // Derived from the audit instance itself — a detector kind rename or a
+  // dead constraint reference fails here without a hand-maintained list.
   const c = composeTriageAuthoringContract(session());
-  const expected = new Set([
-    'request_pattern_url_extractable',
-    'request_pattern_url_observed',
-    'capability_not_declared',
-    'tier_justification_unciteable',
-    'enum_value_baked_into_slug',
-  ]);
+  const live = new Set(triagePlanAudit.detectorKinds());
   for (const constraint of c.constraints) {
     assert.ok(
-      expected.has(constraint.detector_kind),
-      `unknown detector_kind: ${constraint.detector_kind}`,
+      live.has(constraint.detector_kind),
+      `unknown detector_kind: ${constraint.detector_kind} (live: ${[...live].join(', ')})`,
     );
   }
 });
@@ -194,4 +192,28 @@ test('contract: slug-collision surfaces the github false-positive shape (canonic
   // The rule mentions the ack path so the agent has a recovery option.
   assert.match(constraint.rule, /Ackable/);
   assert.match(constraint.rule, /enum_value_baked_into_slug/);
+});
+
+// ---------- recorded_path_navigate_url_in_patterns ----------
+
+test('contract: captured_nav_url_keys canonicalizes and dedupes session navigations', () => {
+  const c = composeTriageAuthoringContract(
+    session({
+      domNavigations: [
+        { url: 'https://x.com/compose?draft=1', at: 1 },
+        { url: 'https://x.com/compose', at: 2 }, // same urlKey → dedup
+        { url: 'https://x.com/inbox/', at: 3 }, // trailing slash stripped
+      ],
+    }),
+  );
+  const constraint = c.constraints.find(
+    (k) => k.kind === 'recorded_path_navigate_url_in_patterns',
+  );
+  assert.ok(constraint);
+  assert.deepEqual(constraint.captured_nav_url_keys.sort(), [
+    'https://x.com/compose',
+    'https://x.com/inbox',
+  ]);
+  // The rule names the ack path so the agent has a recovery option.
+  assert.match(constraint.rule, /recorded_path_navigate_url_unbound/);
 });

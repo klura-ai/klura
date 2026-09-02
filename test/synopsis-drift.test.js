@@ -35,9 +35,10 @@ test('paramDocSchema renders inline with kind enum + observed_values + semantic 
   // counts/numbers, id for opaque server IDs, ...") that surfaces inline as
   // a `// <description>` tail comment — single source, no external doubling.
   const inline = renderZodSkeletonInline(paramDocSchema);
-  assert.match(inline, /^\{ description\?: string, kind\?: "id" \| "slug" \| "email" \| "url" \| "uuid" \| "enum" \| "text"  \/\//);
+  assert.match(inline, /^\{ description\?: string, kind\?: "id" \| "slug" \| "email" \| "url" \| "uuid" \| "enum" \| "text" \| "array" \| "object"  \/\//);
   assert.match(inline, /Counts\/limits\/numbers.*are "text"/);
-  assert.match(inline, /, source\?: string, example\?: string, optional\?: boolean  \/\/ true when this param is a filter the caller may omit/);
+  assert.match(inline, /"array" and "object" are structured JSON caller inputs/);
+  assert.match(inline, /, source\?: string, example\?: string \| number \| boolean \| null \| unknown\[\] \| \{ <key>: unknown \}, optional\?: boolean  \/\/ true when this param is a filter the caller may omit/);
   assert.match(inline, /, observed_values\?: \{ value: string, label\?: string \}\[\], text_kind_justification\?: string  \/\/ one-sentence justification when kind: "text" despite UI-click observations on this param/);
   assert.match(inline, /this field just declares the slot\. \}$/);
 });

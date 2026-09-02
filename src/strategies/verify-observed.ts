@@ -98,7 +98,9 @@ export function findObservedMatch(
  * template reference has no example, `resolveTemplate` throws — which is fine,
  * that's a pre-existing error the caller surfaces.
  */
-function collectStrategyUrls(data: Record<string, unknown>): Array<{ where: string; url: string }> {
+export function collectStrategyUrls(
+  data: Record<string, unknown>,
+): Array<{ where: string; url: string }> {
   const examples = collectParamExamples(data);
   const out: Array<{ where: string; url: string }> = [];
   const tier = typeof data.strategy === 'string' ? data.strategy : '';

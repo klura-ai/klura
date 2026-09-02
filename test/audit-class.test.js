@@ -416,6 +416,10 @@ test('rejectionToErrorMessage: Stage-1 rejection renders warnings + hint, no tok
   assert.match(msg, /invalid_strategy: save_strategy/);
   assert.match(msg, /flagger.*flagged thing/);
   assert.match(msg, /hint: do X/);
+  assert.ok(
+    msg.indexOf('[flagger]') < msg.indexOf('To commit:'),
+    'the actionable warning must precede generic retry prose',
+  );
 });
 
 test('rejectionToErrorMessage: Stage-2 rejection renders audit_token + how_to_respond', () => {

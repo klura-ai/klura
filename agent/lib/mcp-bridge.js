@@ -16,9 +16,9 @@
 const { loadMcpServer } = require('./klura-modules');
 
 /** Create a fresh, unconnected klura MCP server instance. */
-async function createKluraServer() {
+async function createKluraServer(options = {}) {
   const { createKluraMcpServer } = loadMcpServer();
-  return createKluraMcpServer();
+  return createKluraMcpServer(options);
 }
 
 /**

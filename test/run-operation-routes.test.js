@@ -11,6 +11,7 @@ const { ConsumerRunServiceV1 } = require('../dist/consumer/runs.js');
 const { PackageStoreV1 } = require('../dist/consumer/store/package-store.js');
 const { RunOperationStoreV1 } = require('../dist/consumer/scrape/run-operations.js');
 const { RunOutputError } = require('../dist/consumer/scrape/output.js');
+const { PublicContractError } = require('../dist/public/contracts/common.js');
 
 const startOperationId = 'op_v1_11111111111111111111111111111111';
 const resumeOperationId = 'op_v1_22222222222222222222222222222222';
@@ -155,6 +156,37 @@ test('daemon run operations replay durable outcomes without repeating traffic', 
       discarded,
     );
     assert.equal(discards, 1);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('an out-of-bounds caller bound is rejected on the wire before any reservation', async () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), 'klura-run-wire-bounds-'));
+  try {
+    const operations = new RunOperationStoreV1(home);
+    let starts = 0;
+    const routes = createRoutes(home, operations, {
+      startDetached() {
+        starts += 1;
+        throw new Error('not reached');
+      },
+      resume() {
+        return Promise.resolve();
+      },
+    });
+    await assert.rejects(
+      () =>
+        routes.invoke('POST', '/consumer/run', {
+          ...startBody({ id: '42' }, rejectedOperationId),
+          caller_bounds: { max_items: 5_000_000 },
+        }),
+      (error) =>
+        error instanceof PublicContractError &&
+        error.field === 'consumer.run.caller_bounds.max_items',
+    );
+    assert.equal(starts, 0);
+    assert.equal(operations.read(rejectedOperationId), null);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

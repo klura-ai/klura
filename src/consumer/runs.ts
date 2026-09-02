@@ -12,6 +12,7 @@ import {
   type StoredRunInspectionV1,
 } from './scrape/inspection';
 import { canonicalJson, parseStrictJson, type JsonValueV1 } from '../public/contracts/json';
+import { CONSUMER_BOUNDS } from '../public/contracts/consumer-bounds';
 import { parseRunId, type RunIdV1 } from './scrape/journal';
 import {
   readCommittedRunItemsPage,
@@ -192,8 +193,8 @@ export class ConsumerRunServiceV1 {
     let afterSequence = parseInteger(
       options.after_sequence ?? 0,
       'run.items.after_sequence',
-      0,
-      1e9,
+      CONSUMER_BOUNDS.after_sequence.minimum,
+      CONSUMER_BOUNDS.after_sequence.maximum,
     );
     this.show(runId);
     const watcher = new JournalChangeWatcherV1(this.runs.journalPath(runId));

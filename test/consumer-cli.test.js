@@ -200,6 +200,36 @@ test('consumer CLI rejects malformed call grammar before local state access', ()
     assert.equal(unknownFlag.status, 2);
     assert.deepEqual(JSON.parse(unknownFlag.stdout), { kind: 'failure', code: 'invalid_input' });
 
+    const overCallerBound = invoke(home, [
+      'run',
+      'ikea.get_product',
+      '--input',
+      '{}',
+      '--max-items',
+      '5000000',
+      '--json',
+    ]);
+    assert.equal(overCallerBound.status, 2);
+    assert.deepEqual(JSON.parse(overCallerBound.stdout), {
+      kind: 'failure',
+      code: 'invalid_input',
+    });
+
+    const overCallTimeout = invoke(home, [
+      'call',
+      'ikea.get_product',
+      '--input',
+      '{}',
+      '--timeout-ms',
+      '300001',
+      '--json',
+    ]);
+    assert.equal(overCallTimeout.status, 2);
+    assert.deepEqual(JSON.parse(overCallTimeout.stdout), {
+      kind: 'failure',
+      code: 'invalid_input',
+    });
+
     const missingDiscardConfirmation = invoke(home, [
       'runs',
       'discard',

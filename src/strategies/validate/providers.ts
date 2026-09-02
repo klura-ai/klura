@@ -15,7 +15,7 @@ export function getTryGeneratorStatsForSession(sessionId: string): TryGeneratorS
 }
 
 // Declared args provider
-export type DeclaredArgsProvider = (sessionId: string) => Record<string, string> | null;
+export type DeclaredArgsProvider = (sessionId: string) => Record<string, unknown> | null;
 let declaredArgsProvider: DeclaredArgsProvider | null = null;
 export function setDeclaredArgsProvider(p: DeclaredArgsProvider | null): void {
   declaredArgsProvider = p;

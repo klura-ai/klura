@@ -17,7 +17,7 @@ import type { ToolDef } from '../tools/types';
 export interface LiftObservedCapabilityArgs {
   session_id: string;
   name: string;
-  args?: Record<string, string>;
+  args?: Record<string, unknown>;
 }
 
 export interface LiftObservedCapabilityResult {
@@ -84,22 +84,12 @@ export function liftObservedCapability(
     );
   }
 
-  const argMap = (input.args && typeof input.args === 'object' ? input.args : {}) as Record<
-    string,
-    unknown
-  >;
-  for (const [k, v] of Object.entries(argMap)) {
-    if (typeof v !== 'string') {
-      throw new Error(
-        `args.${k} must be a string (got ${typeof v}) — pass the literal values the agent will type`,
-      );
-    }
-  }
+  const argMap = input.args && typeof input.args === 'object' ? input.args : {};
 
   if (!session.declaredCapabilities) session.declaredCapabilities = [];
   session.declaredCapabilities.push({
     capability: input.name,
-    args: argMap as Record<string, string>,
+    args: argMap,
     declared_at: Date.now(),
   });
 
@@ -115,24 +105,24 @@ export function liftObservedCapability(
       `tier_justification, and summary_for_user. The triage_plan checkpoint hands off to lift; ` +
       `${TOOL_NAMES.saveStrategy} lands the strategy. After save you remain in the session — call ` +
       `${TOOL_NAMES.liftObservedCapability} again for the next slug or ${TOOL_NAMES.endDrive} when done. ` +
-      `IMPORTANT: \`perform_action\` is inadmissible in triage/lift — once you enter this cycle, ` +
-      `you cannot navigate to new pages. Recommended map-mode pattern: BEFORE the first ` +
-      `${TOOL_NAMES.liftObservedCapability} call, navigate to every candidate surface and ` +
-      `${TOOL_NAMES.recordObservedCapability} for each. Lifting too early strands the remaining ` +
-      `candidates and costs you an extra session-open/close per slug.`,
+      `\`perform_action\` remains unavailable while composing triage, then becomes available again ` +
+      `in lift so you can generate the bound surface's request or rendered state. A navigation to a ` +
+      `new surface triggers a fresh triage transition before saving against that surface.`,
   };
 }
 
 export const TOOL_DEF: ToolDef = {
   name: TOOL_NAMES.liftObservedCapability,
+  phasePolicy: { category: 'map_lift_initiator' },
   description:
     `Map-graph only: open a triage+lift cycle for one observed capability without ending the session. ` +
     `The slug must already exist on \`platform_logbook.observed_capabilities[]\` — call ` +
     `${TOOL_NAMES.recordObservedCapability} first to register it with evidence. The FSM transitions to ` +
     `triage; the agent runs the normal triage → lift → ${TOOL_NAMES.saveStrategy} flow. After save the ` +
     `session stays in lift — call this tool again for the next slug or ${TOOL_NAMES.endDrive} to close. ` +
-    `\`args\` is the same \`{paramName: literalValue}\` map of user-supplied literals the agent will type; ` +
-    `the runtime templates captured request bodies with \`{{paramName}}\` placeholders.`,
+    `\`args\` is the same \`{paramName: value}\` map of user-supplied inputs; values may be strings, ` +
+    `numbers, booleans, arrays, objects, or null. Scalar strings remain available for captured-literal ` +
+    `templating, while structured values are available through nested placeholders such as \`{{items.0}}\`.`,
   inputSchema: {
     type: 'object',
     properties: {
@@ -145,7 +135,7 @@ export const TOOL_DEF: ToolDef = {
       args: {
         type: 'object',
         description:
-          'Map of user-supplied literals the agent will type (e.g. `{q: "thai"}`). Optional but recommended — without args, auto-save can\'t template captured traffic into a reusable strategy.',
+          'Map of user-supplied inputs (e.g. `{q: "thai", bounds: [1, 2]}`). Optional but recommended — scalar strings can template captured traffic and structured values support nested placeholders.',
       },
     },
     required: ['session_id', 'name'],

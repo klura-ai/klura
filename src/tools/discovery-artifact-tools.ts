@@ -282,7 +282,7 @@ export async function saveVerifiedExpression(
   const declaredForCap = session.declaredCapabilities?.find(
     (d) => d.capability === args.capability,
   );
-  const declaredArgs = (declaredForCap?.args ?? {}) as Record<string, unknown>;
+  const declaredArgs = declaredForCap?.args ?? {};
   let expressionToRun = args.expression;
   for (const name of args.binds_args) {
     const token = `{{${name}}}`;
@@ -405,6 +405,7 @@ import type { ToolDef } from '../tools/types';
 export const TOOL_DEFS: ToolDef[] = [
   {
     name: TOOL_NAMES.addDiscoveryNote,
+    phasePolicy: { category: 'discovery_artifact' },
     description:
       'Drop a typed, prose-length hint for the next session to read from the discovery artifact. Unlike `add_resume_pointer` (pointers to bytes at specific offsets), notes carry reasoning — function hints, module paths, field-rotation rules, byte-layout observations, open questions. Next session\'s agent reads these inline in `list_platform_skills.discovery_artifact.notes` and picks up where you left off. When reverse-engineering a complex send, drop a note whenever you confirm something non-obvious: "appId is sourced from meta[name=app_id]", "epoch_id = (Date.now() << 22) | random22", "sync tasks use label 46 for SendMessage, label 21 for MarkRead", etc. Cap 20 entries per capability.',
     inputSchema: {
@@ -452,6 +453,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.saveVerifiedExpression,
+    phasePolicy: { category: 'discovery_artifact' },
     description:
       "Persist an expression the agent has confirmed works this session. The runtime evaluates the expression once via `evaluateExpression` (with the same hex-wrapping as `js_eval`) to confirm it doesn't throw and matches the declared `returns` shape; only then does it land in the discovery artifact. Next session reads these from `list_platform_skills.discovery_artifact.verified_expressions` and can try them first instead of re-deriving. For WS sends, a successful `try_generator_in_page` result is typically the expression you save here. Cap 5 entries per capability; expressions referencing {{paramName}} placeholders must list them in `binds_args`.",
     inputSchema: {
@@ -498,6 +500,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.addResumePointer,
+    phasePolicy: { category: 'discovery_artifact' },
     description:
       "Record a forward-looking pointer on this session for `capability` — an intention the next run should read when deciding where to resume discovery. `kind` is one of: `js_source` (URL of a script to read; pair with `line` for a specific offset), `request_index` (captured HTTP request index), `frame_index` (captured WS frame index), `page_url` (a page worth re-visiting), `other` (free-form). `ref` carries the kind-specific reference string. Use when you identified a productive next step but the current session ran out of budget — the pointer lands on the capability's discovery artifact and the next session sees it inline in list_platform_skills / start_session / execute responses. Works even when no save_strategy succeeded this session.",
     inputSchema: {
@@ -546,6 +549,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.getDiscoveryArtifactField,
+    phasePolicy: { category: 'universal' },
     description:
       'Fetch a single named field from an on-disk discovery artifact when `list_platform_skills` / `start_session` / `execute` elided it due to the MCP output budget. Check the `_elided_fields` marker on the inlined artifact to see which fields to request via this tool. Mirrors `get_network_log {full: true}`: default responses stay inside the budget, you opt into detail on demand. `field` is one of: `tool_call_trace`, `observations`, `resume_pointers`, `recommended_next_steps`.',
     inputSchema: {
@@ -570,6 +574,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.recordObservedCapability,
+    phasePolicy: { category: 'logbook_write' },
     description:
       "Record a companion capability you noticed during discovery but didn't lift as its own saved strategy. Persists to the platform logbook under `observed_capabilities[]`. Next run's `list_platform_skills` surfaces these so the next agent sees known unfinished candidates and can lift them. Dedup-by-name: re-observing updates `last_observed_at` and bumps `observed_in_sessions` once per session.",
     inputSchema: {

@@ -13,11 +13,12 @@
 // truth whether a declared `notes.params[X].example` was actually produced by
 // the server.
 //
-// Module-level state follows the existing pattern used by: -
-// saveRejectionsPerSession (skills.ts:~2754) - starter-cache
-// (response/starter-cache.ts) - _tryGeneratorStats (Pool) All cleared on
-// end_drive via symmetric `clearForSession` helpers.
+// Module-level state follows the existing pattern used by starter-cache
+// (response/starter-cache.ts) and _tryGeneratorStats (Pool). Dropped with
+// the session by the session-scope disposer registered on first write
+// (runtime/src/pool/session-scope.ts).
 
+import { onSessionDispose, removeSessionDisposeHook } from '../pool/session-scope';
 import type { LookupCandidate } from './lookup-classifier';
 import type { InterceptedRequest } from '../drivers/types/network';
 import type { PerformActionRecord } from '../drivers/types/session';
@@ -26,6 +27,19 @@ import { enumerateStringParams } from './param-enumeration';
 
 const PER_SESSION_CAP = 500;
 const _observations = new Map<string, LookupCandidate[]>();
+
+// Session-scope hook name — one hook covers all three per-session maps in
+// this module (they share `clearForSession`). Registered on the first write
+// for a session id, whichever map it lands in.
+const SESSION_OBSERVATIONS_HOOK = 'session-observations';
+
+function ensureDisposeHook(sessionId: string): void {
+  onSessionDispose(sessionId, SESSION_OBSERVATIONS_HOOK, () => {
+    _observations.delete(sessionId);
+    _rawCaptures.delete(sessionId);
+    _paramObservations.delete(sessionId);
+  });
+}
 
 // Parallel to `_observations`: a per-session index of raw captured-response
 // bodies (and their URLs + postData) for exact-substring search. Used as a
@@ -138,6 +152,7 @@ export function recordParamObservation(sessionId: string, obs: ParamObservation)
   if (!perSession) {
     perSession = new Map();
     _paramObservations.set(sessionId, perSession);
+    ensureDisposeHook(sessionId);
   }
   let list = perSession.get(obs.param_name);
   if (!list) {
@@ -500,6 +515,7 @@ export function recordLookupCandidate(sessionId: string, candidate: LookupCandid
   if (!buf) {
     buf = [];
     _observations.set(sessionId, buf);
+    ensureDisposeHook(sessionId);
   }
   // Replace any prior entry for the same request_i (reclassification on re-read
   // — the network log is populated at capture time but reclassified when the
@@ -551,7 +567,7 @@ export function getCandidateCount(sessionId: string): number {
 /** Record the raw captured bytes for a request so match paths can do
  * exact substring matching against caller-declared literals. The index is
  * shared lineage with `_observations` — same session key, same
- *  PER_SESSION_CAP, cleared together on end_drive. */
+ *  PER_SESSION_CAP, cleared together by the session-scope disposer. */
 export function recordRawCapture(
   sessionId: string,
   record: {
@@ -567,6 +583,7 @@ export function recordRawCapture(
   if (!buf) {
     buf = [];
     _rawCaptures.set(sessionId, buf);
+    ensureDisposeHook(sessionId);
   }
   const bodyStr = stringifyCapped(record.response_body, RAW_BODY_CAP);
   const postStr = stringifyCapped(record.post_data, RAW_BODY_CAP);
@@ -650,12 +667,14 @@ export function findRawCaptureMatches(
   return out;
 }
 
-/** Clear all accumulated candidates for a session. Called from
- *  `endDrive` in index.ts (pattern matches clearStartersForSession). */
+/** Clear all accumulated candidates for a session eagerly. Session close
+ *  paths don't need to call this — the session-scope disposer registered on
+ *  first write covers every close path via `pool.endDrive`. */
 export function clearForSession(sessionId: string): void {
   _observations.delete(sessionId);
   _rawCaptures.delete(sessionId);
   _paramObservations.delete(sessionId);
+  removeSessionDisposeHook(sessionId, SESSION_OBSERVATIONS_HOOK);
 }
 
 /** Test-only reset. Clears ALL sessions. Exported so vm-sandbox tests

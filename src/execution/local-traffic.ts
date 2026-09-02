@@ -5,14 +5,44 @@ import {
   type OriginSchedulerTrafficPolicyV1,
 } from './origin-scheduler';
 import { getSharedOriginScheduler } from './shared-origin-scheduler';
+import { FactoryExecutionStateError } from './result-classification';
 
 const LOCAL_MAX_REDIRECT_HOPS = 5;
 
 export class LocalRequestTimeoutError extends Error {
-  constructor(timeoutMs: number) {
+  constructor(readonly timeoutMs: number) {
     super(`trusted local request timed out after ${timeoutMs}ms`);
     this.name = 'LocalRequestTimeoutError';
   }
+}
+
+/** True when a dispatched HTTP method may have changed remote state. */
+export function httpMethodMayMutate(method: unknown): boolean {
+  const normalized = typeof method === 'string' ? method.toUpperCase() : 'GET';
+  return normalized !== 'GET' && normalized !== 'HEAD' && normalized !== 'OPTIONS';
+}
+
+export function dispatchedHttpDeliveryUnknown(
+  method: unknown,
+  url: string,
+  details: Record<string, unknown> = {},
+): FactoryExecutionStateError {
+  const normalized = typeof method === 'string' ? method.toUpperCase() : 'GET';
+  return new FactoryExecutionStateError(
+    'sent_unconfirmed',
+    'http_delivery_unknown',
+    `${normalized} ${url} was dispatched but no response confirmed its delivery`,
+    { method: normalized, url, ...details },
+  );
+}
+
+/**
+ * Convert a local deadline into a neutral delivery outcome only after the
+ * caller has dispatched a mutation-shaped HTTP request.
+ */
+export function mapDispatchedHttpTimeout(error: unknown, method: unknown, url: string): unknown {
+  if (!(error instanceof LocalRequestTimeoutError) || !httpMethodMayMutate(method)) return error;
+  return dispatchedHttpDeliveryUnknown(method, url, { timeout_ms: error.timeoutMs });
 }
 
 /** Returns the configured traffic policy for one trusted local HTTP(S) or WS(S) request. */

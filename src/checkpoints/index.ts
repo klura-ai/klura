@@ -4,9 +4,10 @@
 //
 // 1. Runtime detects a known-kind event (round counter crossed
 //    threshold, recorded step failed, LIFT transition, session
-//    expired, post-save validation pending).
-// 2. Runtime calls `invokeCheckpointAndGate(kind, event)` which picks
-//    the last-registered handler claiming that kind and invokes it.
+//    expired, post-save validation pending) and builds a typed event
+//    via the `checkpointEvent.<kind>` constructor.
+// 2. Runtime calls `invokeCheckpointAndGate(event)` which picks the
+//    last-registered handler claiming `event.kind` and invokes it.
 // 3. On `handover` resolutions, the runtime mints a
 //    `checkpoint_token`, attaches `_checkpoint: {kind, prompt?,
 //    viewer_url?, checkpoint_token}` to the next tool response.
@@ -39,8 +40,15 @@ export {
 export type {
   CheckpointKind,
   CheckpointEvent,
+  CheckpointContextMap,
   CheckpointResolution,
   CheckpointHandler,
+  TriagePlanCheckpointContext,
+  SurfaceChangedCheckpointContext,
+  RecordedStepFailedCheckpointContext,
+  SessionExpiredCheckpointContext,
+  PostSaveValidationConsentCheckpointContext,
+  AbortSessionConsentCheckpointContext,
 } from './types';
-export { CHECKPOINT_KINDS } from './types';
+export { CHECKPOINT_KINDS, checkpointEvent } from './types';
 export { composeAckHint } from './ack-hints';

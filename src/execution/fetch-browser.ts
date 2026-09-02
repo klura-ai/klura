@@ -1,16 +1,8 @@
-// In-browser fetch executor + prereq dispatch.
-//
-// Runs fetch() inside a browser page, NOT through Node. Used for two shapes: -
-// `page-script` strategies — the natural home; the page is the execution
-// context, fingerprint cookies & sec-* headers attach. - `fetch` strategies
-// that the dispatcher retried in the browser after the Node call hit a TLS /
-// bot-check signature it couldn't satisfy. Same captured payload, different
-// transport — `transport: 'browser'` on the result.
-//
-// Also owns the prereq dispatch that lives entirely on the browser side:
-// scanCachedPrereqs (cheap pre-pass), runBrowserPrereqs (the live page loop),
-// and runPrerequisites (the public single-shot entry point used by the listener
-// proactive-refresh watcher).
+// In-browser fetch executor and browser-side prerequisite dispatch. It serves
+// native `page-script` strategies plus browser transport for `fetch`
+// strategies, keeping page-bound cookies and request context intact.
+// It also owns scanCachedPrereqs, runBrowserPrereqs, and the public
+// single-shot runPrerequisites entry point.
 
 import * as skills from '../strategies/skills';
 import type { BrowserDriver } from '../drivers/interface';
@@ -24,11 +16,12 @@ import type { TokenCache } from '../strategies/tokens';
 import {
   applyHtmlExtract,
   extractByPath,
-  interpolateVars,
+  omittedOptionalParamNames,
   prepareRequest,
   resolveBrowserPrereqStep,
   resolveBody,
   resolveHeaders,
+  resolveUrlTemplate,
 } from './vars';
 import {
   readJsEvalCache,
@@ -44,36 +37,23 @@ import type {
   Prerequisite,
   RequestStrategy,
 } from './types';
-import { currentDeviceSessionOpts, resolveCapabilityPrereq, stringifyScope } from '../execution';
+import { currentDeviceSessionOpts, resolveCapabilityPrereq } from '../execution';
 import { looksLikeHtml } from '../execution';
+import { navigateWithOriginAdmission } from './browser-origin-admission';
+export { navigateWithOriginAdmission } from './browser-origin-admission';
 import {
   acquireLocalOriginPermit,
+  dispatchedHttpDeliveryUnknown,
+  httpMethodMayMutate,
   LocalRequestTimeoutError,
+  mapDispatchedHttpTimeout,
   localRequestTimeoutMs,
 } from './local-traffic';
+import { captureBrowserDiagnosticEvidence, recordDiagnosticUrl } from './diagnostic-evidence';
+import { stripForbiddenBrowserFetchHeaders } from './browser-request-headers';
 
 function workloadId(platform: string, capability: string): string {
   return `${platform}/${capability}`;
-}
-
-export async function navigateWithOriginAdmission(
-  session: Session,
-  driver: BrowserDriver,
-  url: string,
-  workload: string,
-  options?: { waitUntil?: 'commit' | 'domcontentloaded' | 'networkidle' },
-): Promise<void> {
-  const permit = await acquireLocalOriginPermit(url, workload);
-  try {
-    await driver.navigate(session, url, {
-      ...options,
-      timeout_ms: localRequestTimeoutMs(),
-    });
-    permit.release('success');
-  } catch (error) {
-    permit.release('neutral');
-    throw error;
-  }
 }
 
 async function fetchInBrowserWithOriginAdmission(
@@ -86,15 +66,24 @@ async function fetchInBrowserWithOriginAdmission(
   const permit = await acquireLocalOriginPermit(url, workload);
   try {
     const timeoutMs = localRequestTimeoutMs();
+    recordDiagnosticUrl('request', url);
     const result = await driver.fetchInBrowser(session, url, { ...options, timeout_ms: timeoutMs });
     let completion: 'success' | 'transient_failure' | 'neutral' = 'neutral';
     if (result.ok) completion = result.status >= 500 ? 'transient_failure' : 'success';
     permit.release(completion);
-    if (!result.ok && result.timed_out) throw new LocalRequestTimeoutError(timeoutMs);
+    if (!result.ok) {
+      if (httpMethodMayMutate(options.method) && result.delivery_state !== 'not_sent') {
+        throw dispatchedHttpDeliveryUnknown(options.method, url, {
+          driver_delivery_state: result.delivery_state ?? 'unreported',
+          ...(result.timed_out ? { timeout_ms: timeoutMs } : {}),
+        });
+      }
+      if (result.timed_out) throw new LocalRequestTimeoutError(timeoutMs);
+    }
     return result;
   } catch (error) {
     permit.release('neutral');
-    throw error;
+    throw mapDispatchedHttpTimeout(error, options.method, url);
   }
 }
 
@@ -113,8 +102,9 @@ export async function scanCachedPrereqs(
   pool: AnyPool,
   tokenCache: TokenCache | null,
   depth: number,
-): Promise<{ tokens: Record<string, string>; browserPrereqs: Prerequisite[] }> {
-  const tokens: Record<string, string> = {};
+  omittedOptionalParams: ReadonlySet<string> = new Set(),
+): Promise<{ tokens: Record<string, unknown>; browserPrereqs: Prerequisite[] }> {
+  const tokens: Record<string, unknown> = {};
   const browserPrereqs: Prerequisite[] = [];
   for (const prereq of prerequisites ?? []) {
     if (prereq.kind === 'cached') {
@@ -131,9 +121,11 @@ export async function scanCachedPrereqs(
         pool,
         tokenCache,
         depth,
+        undefined,
+        omittedOptionalParams,
       );
       if (bound) {
-        for (const [k, v] of Object.entries(bound)) tokens[k] = stringifyScope(v);
+        Object.assign(tokens, bound);
       }
       continue;
     }
@@ -158,8 +150,9 @@ async function runFetchExtractPrereq(
   session: Session,
   driver: BrowserDriver,
   scope: Record<string, unknown>,
-  tokens: Record<string, string>,
+  tokens: Record<string, unknown>,
   workload: string,
+  omittedOptionalParams: ReadonlySet<string>,
 ): Promise<void> {
   if (!prereq.url) {
     throw new Error(`prereq "${prereq.name}": fetch-extract requires "url" string`);
@@ -170,16 +163,25 @@ async function runFetchExtractPrereq(
     );
   }
 
-  const resolvedUrl = interpolateVars(prereq.url, scope);
+  const resolvedUrl = resolveUrlTemplate(
+    prereq.url,
+    scope,
+    omittedOptionalParams,
+    `prerequisite ${JSON.stringify(prereq.name)} URL`,
+  );
   const currentUrl = await driver.getUrl(session).catch(() => '');
   if (!currentUrl || currentUrl === 'about:blank' || currentUrl === '') {
     await driver.navigate(session, 'about:blank', { waitUntil: 'domcontentloaded' });
   }
 
   const httpMethod = (prereq.method ?? 'GET').toUpperCase();
-  const headers = resolveHeaders(prereq.headers_map ?? { Accept: 'application/json' }, scope);
+  const headers = resolveHeaders(
+    prereq.headers_map ?? { Accept: 'application/json' },
+    scope,
+    omittedOptionalParams,
+  );
   const body = prereq.fetch_body
-    ? JSON.stringify(resolveBody(prereq.fetch_body, scope))
+    ? JSON.stringify(resolveBody(prereq.fetch_body, scope, omittedOptionalParams))
     : undefined;
   const result = await fetchInBrowserWithOriginAdmission(session, driver, resolvedUrl, workload, {
     method: httpMethod,
@@ -218,8 +220,9 @@ async function runPageExtractPrereq(
   session: Session,
   driver: BrowserDriver,
   scope: Record<string, unknown>,
-  tokens: Record<string, string>,
+  tokens: Record<string, unknown>,
   workload: string,
+  omittedOptionalParams: ReadonlySet<string>,
 ): Promise<void> {
   if (!prereq.url) {
     throw new Error(
@@ -232,7 +235,12 @@ async function runPageExtractPrereq(
     );
   }
 
-  const resolvedUrl = interpolateVars(prereq.url, scope);
+  const resolvedUrl = resolveUrlTemplate(
+    prereq.url,
+    scope,
+    omittedOptionalParams,
+    `prerequisite ${JSON.stringify(prereq.name)} URL`,
+  );
   await navigateWithOriginAdmission(session, driver, resolvedUrl, workload, {
     waitUntil: 'domcontentloaded',
   });
@@ -258,13 +266,19 @@ async function runJsEvalBrowserPrereq(
   driver: BrowserDriver,
   platform: string,
   pool: AnyPool,
-  tokens: Record<string, string>,
+  tokens: Record<string, unknown>,
   scope: Record<string, unknown>,
+  omittedOptionalParams: ReadonlySet<string>,
   forceFresh: boolean,
   workload: string,
 ): Promise<void> {
   const bindsTo = prereq.binds ?? prereq.name;
-  const resolvedUrl = interpolateVars(prereq.url ?? '', scope);
+  const resolvedUrl = resolveUrlTemplate(
+    prereq.url ?? '',
+    scope,
+    omittedOptionalParams,
+    `prerequisite ${JSON.stringify(prereq.name)} URL`,
+  );
   const timeoutMs = prereq.timeout_ms ?? JS_EVAL_TIMEOUT_DEFAULT_MS;
   const expression = prereq.expression ?? '';
 
@@ -274,7 +288,9 @@ async function runJsEvalBrowserPrereq(
   // `args_template` is body-dependent and has the same per-call requirement.
   if (forceFresh || prereq.args_template !== undefined) {
     const resolvedArgs =
-      prereq.args_template !== undefined ? resolveBody(prereq.args_template, scope) : undefined;
+      prereq.args_template !== undefined
+        ? resolveBody(prereq.args_template, scope, omittedOptionalParams)
+        : undefined;
     const minted = await runJsEvalPrereq(driver, session, {
       name: prereq.name,
       url: resolvedUrl,
@@ -343,12 +359,13 @@ async function runBrowserStepPrereq(
   session: Session,
   driver: BrowserDriver,
   args: Record<string, unknown>,
-  tokens: Record<string, string>,
+  tokens: Record<string, unknown>,
   workload: string,
+  omittedOptionalParams: ReadonlySet<string>,
 ): Promise<void> {
   for (const step of prereq.steps || []) {
     const stepScope: Record<string, unknown> = { ...tokens, ...args };
-    const resolvedStep = resolveBrowserPrereqStep(step, stepScope);
+    const resolvedStep = resolveBrowserPrereqStep(step, stepScope, omittedOptionalParams);
     switch (resolvedStep.action) {
       case 'navigate':
         if (resolvedStep.url) {
@@ -391,20 +408,40 @@ export async function runBrowserPrereqs(
   args: Record<string, unknown>,
   pool: AnyPool,
   tokenCache: TokenCache | null,
-  tokens: Record<string, string>,
-  options?: { freshJsEvalBindings?: ReadonlySet<string> },
+  tokens: Record<string, unknown>,
+  options?: {
+    freshJsEvalBindings?: ReadonlySet<string>;
+    omittedOptionalParams?: ReadonlySet<string>;
+  },
 ): Promise<void> {
   const workload = workloadId(platform, capability);
+  const omittedOptionalParams = options?.omittedOptionalParams ?? new Set<string>();
   for (const prereq of browserPrereqs) {
     const scope: Record<string, unknown> = { ...tokens, ...args };
 
     if (prereq.kind === 'fetch-extract') {
-      await runFetchExtractPrereq(prereq, session, driver, scope, tokens, workload);
+      await runFetchExtractPrereq(
+        prereq,
+        session,
+        driver,
+        scope,
+        tokens,
+        workload,
+        omittedOptionalParams,
+      );
       continue;
     }
 
     if (prereq.kind === 'page-extract') {
-      await runPageExtractPrereq(prereq, session, driver, scope, tokens, workload);
+      await runPageExtractPrereq(
+        prereq,
+        session,
+        driver,
+        scope,
+        tokens,
+        workload,
+        omittedOptionalParams,
+      );
       continue;
     }
 
@@ -418,15 +455,30 @@ export async function runBrowserPrereqs(
         pool,
         tokens,
         scope,
+        omittedOptionalParams,
         options?.freshJsEvalBindings?.has(bindsTo) ?? false,
         workload,
       );
       continue;
     }
 
-    await runBrowserStepPrereq(prereq, session, driver, args, tokens, workload);
+    await runBrowserStepPrereq(
+      prereq,
+      session,
+      driver,
+      args,
+      tokens,
+      workload,
+      omittedOptionalParams,
+    );
     const extracted = tokens[prereq.name];
-    if (prereq.name && extracted && tokenCache && prereq.ttl !== null) {
+    if (
+      prereq.name &&
+      typeof extracted === 'string' &&
+      extracted.length > 0 &&
+      tokenCache &&
+      prereq.ttl !== null
+    ) {
       tokenCache.set(platform, prereq.name, extracted, { ttl: prereq.ttl ?? 1800 });
     }
   }
@@ -441,7 +493,7 @@ export async function runBrowserPrereqs(
  * `runBrowserPrereqs` directly instead.
  */
 export async function runPrerequisites(opts: {
-  strategy: { prerequisites?: Prerequisite[]; baseUrl?: string };
+  strategy: { prerequisites?: Prerequisite[]; baseUrl?: string; notes?: unknown };
   args: Record<string, unknown>;
   platform: string;
   /** Stable capability label used for shared origin-scheduler fairness. */
@@ -451,16 +503,19 @@ export async function runPrerequisites(opts: {
   depth?: number;
   /** Account name on the platform — see klura://reference#identities. */
   identity?: string;
-}): Promise<{ tokens: Record<string, string> }> {
+}): Promise<{ tokens: Record<string, unknown> }> {
   const { strategy, args, platform, pool, tokenCache, depth = 0, identity } = opts;
+  const callArgs = args;
+  const omittedOptionalParams = omittedOptionalParamNames(strategy, callArgs);
   const capability = opts.capability ?? 'prerequisite';
   const { tokens, browserPrereqs } = await scanCachedPrereqs(
     strategy.prerequisites,
     platform,
-    args,
+    callArgs,
     pool,
     tokenCache,
     depth,
+    omittedOptionalParams,
   );
   if (browserPrereqs.length === 0) return { tokens };
 
@@ -501,13 +556,19 @@ export async function runPrerequisites(opts: {
       driver,
       platform,
       capability,
-      args,
+      callArgs,
       pool,
       tokenCache,
       tokens,
+      { omittedOptionalParams },
     );
     return { tokens };
   } finally {
+    try {
+      await captureBrowserDiagnosticEvidence(pool.driverFor(session.id), session);
+    } catch {
+      /* diagnostic capture is best-effort */
+    }
     await pool.endDrive(session.id);
   }
 }
@@ -526,11 +587,13 @@ export async function executeFetchInBrowser(
   depth: number = 0,
   identity?: string,
 ): Promise<ExecuteResult> {
+  const callArgs = args;
+  const omittedOptionalParams = omittedOptionalParamNames(strategy, callArgs);
   // Generators run AFTER prereqs (see below) so they can reference the values
   // prereqs extract — e.g. a `repositoryId` generator that base64- encodes a
   // numeric db id that was just extracted from a meta tag. This makes
   // extract-then-transform flows work without a dedicated prereq type.
-  const overrides = args._generated as Record<string, string> | undefined;
+  const overrides = callArgs._generated as Record<string, string> | undefined;
 
   // Pre-scan prerequisites to collect cached tokens without touching the
   // browser. Any prereq that can't be satisfied from cache goes into
@@ -538,10 +601,11 @@ export async function executeFetchInBrowser(
   const { tokens, browserPrereqs } = await scanCachedPrereqs(
     strategy.prerequisites,
     platform,
-    args,
+    callArgs,
     pool,
     tokenCache,
     depth,
+    omittedOptionalParams,
   );
 
   // One session for prerequisites AND the final fetch. The prereq navigation
@@ -591,15 +655,16 @@ export async function executeFetchInBrowser(
       driver,
       platform,
       capability,
-      args,
+      callArgs,
       pool,
       tokenCache,
       tokens,
       directResultBinding
         ? {
             freshJsEvalBindings: new Set([directResultBinding]),
+            omittedOptionalParams,
           }
-        : undefined,
+        : { omittedOptionalParams },
     );
 
     // `response.from` short-circuit — strategy returns the named prereq's value
@@ -630,7 +695,7 @@ export async function executeFetchInBrowser(
     await fireInterrupts(
       (strategy as { interrupts?: readonly InterruptEntry[] }).interrupts,
       'pre_execution',
-      { session, driver, tokens, args },
+      { session, driver, tokens, args: callArgs },
     );
 
     // Resolve generators NOW that prereqs have finished extracting tokens. Pass
@@ -639,7 +704,7 @@ export async function executeFetchInBrowser(
     // base64-encoding generator consume a numeric id pulled out of a meta tag
     // moments ago. Running generators up-front instead would make
     // extract-then-transform flows impossible without a dedicated prereq type.
-    const genInputArgs: Record<string, unknown> = { ...tokens, ...args };
+    const genInputArgs: Record<string, unknown> = { ...tokens, ...callArgs };
     const { resolved: gen, needsLlm } = resolveGenerated(
       strategy.generated,
       overrides,
@@ -648,6 +713,7 @@ export async function executeFetchInBrowser(
     if (Object.keys(needsLlm).length > 0) {
       return {
         status: 0,
+        executionState: 'not_run',
         body: {
           needs_generation: true,
           platform,
@@ -660,7 +726,7 @@ export async function executeFetchInBrowser(
 
     // Merge extracted tokens + resolved generators into the caller's args, then
     // fire the fetch on the same session.
-    const mergedArgs: Record<string, unknown> = { ...tokens, ...args, __gen: gen };
+    const mergedArgs: Record<string, unknown> = { ...tokens, ...callArgs, __gen: gen };
     const fireStrategy: FetchStrategy = {
       strategy: 'fetch',
       method: strategy.method,
@@ -676,6 +742,7 @@ export async function executeFetchInBrowser(
       // make every html-extract fetch return the raw body instead of the
       // extracted shape — same regression pattern as fetch-node.
       response: strategy.response,
+      notes: strategy.notes,
     };
 
     // Navigate decision: observe the page's actual origin and compare against
@@ -716,9 +783,17 @@ export async function executeFetchInBrowser(
       const bfs = strategy as PageScriptStrategy;
       const originTemplate = bfs.origin ?? strategy.baseUrl;
       const resolvedArgsForOrigin = strategy.params
-        ? { ...mergedArgs, ...resolveBody(strategy.params, mergedArgs) }
+        ? {
+            ...mergedArgs,
+            ...resolveBody(strategy.params, mergedArgs, omittedOptionalParams),
+          }
         : mergedArgs;
-      const navigateTo = interpolateVars(originTemplate, resolvedArgsForOrigin, true);
+      const navigateTo = resolveUrlTemplate(
+        originTemplate,
+        resolvedArgsForOrigin,
+        omittedOptionalParams,
+        'page-script origin',
+      );
       fireOpts = { navigateTo, waitUntil: 'commit' };
     }
 
@@ -732,45 +807,13 @@ export async function executeFetchInBrowser(
       fireOpts,
     );
   } finally {
+    try {
+      await captureBrowserDiagnosticEvidence(pool.driverFor(session.id), session);
+    } catch {
+      /* diagnostic capture is best-effort */
+    }
     await pool.endDrive(session.id);
   }
-}
-
-// Headers the browser refuses to let fetch() set. Stripped silently before
-// page.evaluate so strategies authored from network logs (which show these
-// auto-added by Chrome) don't throw.
-const FORBIDDEN_FETCH_HEADERS = new Set([
-  'accept-charset',
-  'accept-encoding',
-  'access-control-request-headers',
-  'access-control-request-method',
-  'connection',
-  'content-length',
-  'cookie',
-  'cookie2',
-  'date',
-  'dnt',
-  'expect',
-  'host',
-  'keep-alive',
-  'origin',
-  'referer',
-  'te',
-  'trailer',
-  'transfer-encoding',
-  'upgrade',
-  'via',
-]);
-
-function stripForbiddenHeaders(headers: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(headers)) {
-    const lower = k.toLowerCase();
-    if (FORBIDDEN_FETCH_HEADERS.has(lower)) continue;
-    if (lower.startsWith('proxy-') || lower.startsWith('sec-')) continue;
-    out[k] = v;
-  }
-  return out;
 }
 
 interface FireRequestOptions {
@@ -807,14 +850,15 @@ async function fireRequestInSession(
   options: FireRequestOptions = {},
 ): Promise<ExecuteResult> {
   const { method, url, isForm, bodyObj, serializedBody } = prepareRequest(strategy, args);
+  const omittedOptionalParams = omittedOptionalParamNames(strategy, args);
 
   const rawHeaders: Record<string, string> = {
     ...(method !== 'GET' && bodyObj
       ? { 'Content-Type': isForm ? 'application/x-www-form-urlencoded' : 'application/json' }
       : {}),
-    ...resolveHeaders(strategy.headers, args),
+    ...resolveHeaders(strategy.headers, args, omittedOptionalParams),
   };
-  const headers = stripForbiddenHeaders(rawHeaders);
+  const headers = stripForbiddenBrowserFetchHeaders(rawHeaders);
 
   const driver = pool.driverFor(session.id);
   if (options.navigateTo) {

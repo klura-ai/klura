@@ -21,7 +21,9 @@ import {
   parseStrictJson,
   type JsonValueV1,
 } from '../../public/contracts/json';
-import { parseRunId, readJournal, type RunIdV1 } from '../scrape/journal';
+import { parseRunId, type RunIdV1 } from '../scrape/journal';
+import { isRunTerminalOrUnstarted } from '../scrape/run-store';
+import { withOwnerFileLock } from '../../utils/owner-file-lock';
 
 const SESSION_POINTER_BYTES_V1 = 16 * 1024;
 const SESSION_GENERATION_BYTES_V1 = 8 * 1024 * 1024;
@@ -299,29 +301,7 @@ export class SessionStoreV1 {
   }
 
   private isRunLeaseTerminalOrUnstarted(runId: RunIdV1): boolean {
-    const runDirectory = path.join(this.paths.home, 'runs', runId);
-    const metaPath = path.join(runDirectory, 'meta.json');
-    const journalPath = path.join(runDirectory, 'journal.log');
-    try {
-      const meta = fs.lstatSync(metaPath);
-      if (!meta.isFile() || meta.isSymbolicLink()) return false;
-    } catch (error) {
-      return isMissing(error);
-    }
-    let journal: fs.Stats;
-    try {
-      journal = fs.lstatSync(journalPath);
-    } catch (error) {
-      return isMissing(error);
-    }
-    if (!journal.isFile() || journal.isSymbolicLink()) return false;
-    try {
-      const frames = readJournal(fs.readFileSync(journalPath), runId).frames;
-      if (frames.length === 0) return true;
-      return frames.at(-1)?.body.event.kind === 'terminal';
-    } catch {
-      return false;
-    }
+    return isRunTerminalOrUnstarted(this.paths.home, runId);
   }
 
   private writePointer(selector: ParsedSessionSelectorV1, pointer: LocalSessionPointerV1): void {
@@ -335,12 +315,10 @@ export class SessionStoreV1 {
   private withLock<T>(selector: ParsedSessionSelectorV1, operation: () => T): T {
     this.ensureDirectories(selector);
     const lockPath = path.join(this.sessionDirectory(selector), 'session.lock');
-    acquireLock(lockPath);
-    try {
-      return operation();
-    } finally {
-      releaseLock(lockPath);
-    }
+    return withOwnerFileLock(lockPath, operation, {
+      onLocked: () =>
+        new SessionStoreError('session_in_use', 'session is locked by another local process'),
+    });
   }
 
   private readEncryptionKey(): Buffer {
@@ -680,66 +658,6 @@ function readPrivateFile(filePath: string, field: string): Buffer {
     );
   }
   return fs.readFileSync(filePath);
-}
-
-function acquireLock(lockPath: string): void {
-  for (let attempts = 0; attempts < 2; attempts += 1) {
-    try {
-      const fd = fs.openSync(lockPath, 'wx', 0o600);
-      try {
-        fs.writeFileSync(fd, Buffer.from(canonicalJson({ pid: process.pid }), 'utf8'));
-        fs.fsyncSync(fd);
-      } finally {
-        fs.closeSync(fd);
-      }
-      return;
-    } catch (error) {
-      if (!isExists(error)) throw error;
-      if (isProcessLive(readLockOwner(lockPath))) {
-        throw new SessionStoreError('session_in_use', 'session is locked by another local process');
-      }
-      fs.unlinkSync(lockPath);
-    }
-  }
-  throw new SessionStoreError('session_in_use', 'could not acquire the local session lock');
-}
-
-function releaseLock(lockPath: string): void {
-  try {
-    fs.unlinkSync(lockPath);
-  } catch (error) {
-    if (!isMissing(error)) throw error;
-  }
-}
-
-function readLockOwner(lockPath: string): number {
-  try {
-    const record = parseExactRecord(
-      parseStrictJson(readPrivateFile(lockPath, 'session.lock'), 'session.lock', 1_024, 3),
-      'session.lock',
-      ['pid'],
-    );
-    return parseInteger(record.pid, 'session.lock.pid', 1, Number.MAX_SAFE_INTEGER);
-  } catch (error) {
-    if (error instanceof PublicContractError) {
-      throw new SessionStoreError('local_state_invalid', 'session lock is malformed');
-    }
-    throw error;
-  }
-}
-
-function isProcessLive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return !(
-      typeof error === 'object' &&
-      error !== null &&
-      'code' in error &&
-      error.code === 'ESRCH'
-    );
-  }
 }
 
 function fsyncDirectory(directory: string): void {

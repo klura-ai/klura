@@ -150,6 +150,7 @@ import type { ToolDef } from '../tools/types';
 export const TOOL_DEFS: ToolDef[] = [
   {
     name: TOOL_NAMES.startRemoteSession,
+    phasePolicy: { category: 'universal' },
     description:
       'Start a remote viewer so the user can see and interact with the browser. Returns `{viewerUrl, _render_verbatim_block}` — the runtime hoists the URL into a leading content block with a "paste this verbatim" preface, no backticks/markdown/quotes around it (the user copy-pastes the URL out of chat and any wrapping characters break the JWT-signed request). Use when you hit a gate you cannot pass (captcha, bot detection, QR code). Also invoked transparently at execute time by `strategy.interrupts[]` entries whose handler is `user-assist` — those fire the viewer on an existing warm session without an explicit tool call. Idempotent within the 60s short-token TTL: a second call returns the same URL while the relay token is live, and auto-rotates to a fresh short URL once the prior one expired (so "user missed the 60s click window, give me a new link" Just Works by re-calling). The short link is multi-use within its TTL — clicking the same URL several times during the window is fine, so a failed page-load is recoverable by re-clicking. For a full session refresh (rare — corrupted relay, dead tunnel), call `stop_remote_session` then `start_remote_session`.',
     inputSchema: {
@@ -169,6 +170,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.stopRemoteSession,
+    phasePolicy: { category: 'universal' },
     description: 'Stop a remote viewer session.',
     inputSchema: {
       type: 'object',
@@ -180,6 +182,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.waitForRemote,
+    phasePolicy: { category: 'universal' },
     description:
       'Block until the user clicks Done in the remote viewer. Call this immediately after start_remote_session instead of a bash polling loop. Returns {done: true} when the user clicks Done, or {done: false, reason: "timeout"} if they did not respond in time.',
     inputSchema: {

@@ -23,11 +23,11 @@
 
 import { z } from 'zod';
 import { pool } from '../runtime-state';
-import { loadLogbook, writeLogbook } from '../working-dir/logbook';
+import { updateLogbook } from '../working-dir/logbook';
 import type { TriagePlan, DefenseSurface } from '../working-dir/schema';
 import { dispatch } from '../phases/state-machine';
 import { currentPhase } from '../phases/registry';
-import { invokeCheckpointAndGate, type CheckpointEnvelope } from '../checkpoints';
+import { checkpointEvent, invokeCheckpointAndGate, type CheckpointEnvelope } from '../checkpoints';
 import { parseOrThrow } from '../strategies/schemas/zod-helpers';
 import { bindUrlsToSurface, urlKey } from '../phases/surface-binding';
 import type { Session } from '../drivers/types/session';
@@ -44,18 +44,17 @@ import {
   resolveAgainstOrigin,
 } from '../audit/triage/triage-plan';
 import { classifyTriageSurface } from '../audit/triage/triage-surface-classifier';
+import { resetSaveRejectionFamilies } from '../audit/lift/save-rejection-bounce';
 import { rejectionToErrorMessage, type Issue } from '../audit/index';
 import { renderSaveStrategySchemaMarkdown, type StrategyTier } from '../strategies/schema-catalog';
-
-const EXPECTED_TIERS = ['fetch', 'page-script', 'recorded-path'] as const;
+import { STRATEGY_TIERS } from '../vocab';
 
 // observed_origins entries must round-trip through `new URL()` because
-// `originOf()` downstream relies on it. Bare hostnames like "x.com" used
-// to reject explicitly (forcing an extra round-trip); now we auto-prepend
-// `https://` and accept. The runtime can compute the canonical form
-// harmlessly — "prefer-runtime-enforcement" cuts both ways: when the
-// runtime CAN auto-fix, it should, instead of bouncing the agent.
-// Non-http(s) schemes (file:, javascript:, data:) still reject — those
+// `originOf()` downstream relies on it. Bare hostnames like "x.com" get
+// `https://` auto-prepended and accepted — the runtime can compute the
+// canonical form harmlessly, and "prefer-runtime-enforcement" cuts both
+// ways: when the runtime CAN auto-fix, it should, instead of bouncing the
+// agent. Non-http(s) schemes (file:, javascript:, data:) reject — those
 // aren't a missing-scheme typo.
 const observedOriginSchema = z.string().transform((entry, ctx) => {
   const trimmed = entry.trim();
@@ -90,7 +89,7 @@ const defenseSurfaceSchema = z
     observed_scripts: z.array(z.string()),
     cookies_set: z.array(z.string()),
     request_patterns: z.array(z.string()),
-    mechanism_hypothesis: z.string(),
+    mechanism_hypothesis: z.string().optional(),
   })
   .strict();
 
@@ -100,7 +99,7 @@ const submitTriagePlanArgsSchema = z
     capability: z.string(),
     surface_label: z.string(),
     defense_surface: defenseSurfaceSchema,
-    expected_tier: z.enum(EXPECTED_TIERS),
+    expected_tier: z.enum(STRATEGY_TIERS),
     tier_justification: z.string(),
     summary_for_user: z.string(),
     acks: z.record(z.string(), z.string()).optional(),
@@ -112,7 +111,7 @@ export interface SubmitTriagePlanArgs {
   capability: string;
   surface_label: string;
   defense_surface: DefenseSurface;
-  expected_tier: 'fetch' | 'page-script' | 'recorded-path';
+  expected_tier: StrategyTier;
   tier_justification: string;
   summary_for_user: string;
   /** Per-Detector acknowledgements: keyed by detector kind, value is the
@@ -280,31 +279,37 @@ export async function submitTriagePlan(rawArgs: unknown): Promise<SubmitTriagePl
     summary_for_user: args.summary_for_user,
   };
 
-  const logbook = loadLogbook(platform);
-  let entry = logbook.per_capability[args.capability];
-  if (!entry) {
-    entry = {
-      sessions_contributed: 0,
-      last_session_at: new Date().toISOString(),
-      last_session_id: session.id,
-      lift_attempts: [],
-      strategy_events: [],
-      current_tier: 'none',
-    };
-    logbook.per_capability[args.capability] = entry;
-  }
-  if (!entry.triage_plans_by_surface) entry.triage_plans_by_surface = {};
-  if (!entry.triage_plan_history_by_surface) entry.triage_plan_history_by_surface = {};
-  const prior = entry.triage_plans_by_surface[args.surface_label];
-  if (prior) {
-    const history = entry.triage_plan_history_by_surface[args.surface_label] ?? [];
-    history.push(prior);
-    while (history.length > TRIAGE_PLAN_HISTORY_CAP) history.shift();
-    entry.triage_plan_history_by_surface[args.surface_label] = history;
-  }
-  entry.triage_plans_by_surface[args.surface_label] = plan;
-  logbook.updated_at = new Date().toISOString();
-  writeLogbook(logbook);
+  updateLogbook(platform, (logbook) => {
+    let entry = logbook.per_capability[args.capability];
+    if (!entry) {
+      entry = {
+        sessions_contributed: 0,
+        last_session_at: new Date().toISOString(),
+        last_session_id: session.id,
+        lift_attempts: [],
+        strategy_events: [],
+        current_tier: 'none',
+      };
+      logbook.per_capability[args.capability] = entry;
+    }
+    if (!entry.triage_plans_by_surface) entry.triage_plans_by_surface = {};
+    if (!entry.triage_plan_history_by_surface) entry.triage_plan_history_by_surface = {};
+    const prior = entry.triage_plans_by_surface[args.surface_label];
+    if (prior) {
+      const history = entry.triage_plan_history_by_surface[args.surface_label] ?? [];
+      history.push(prior);
+      while (history.length > TRIAGE_PLAN_HISTORY_CAP) history.shift();
+      entry.triage_plan_history_by_surface[args.surface_label] = history;
+    }
+    entry.triage_plans_by_surface[args.surface_label] = plan;
+    return logbook;
+  });
+
+  // An accepted plan is a fresh generation of intent for this capability —
+  // restart the save-rejection structural-dead-end budgets so post-pivot
+  // saves aren't charged for pre-pivot rejections. See
+  // `runtime/src/audit/lift/save-rejection-bounce.ts`.
+  resetSaveRejectionFamilies(session, args.capability);
 
   // Bind URLs to the surface label so future navigations don't re-fire
   // `surface_changed`. The triage audit above has already validated that
@@ -399,20 +404,21 @@ export async function submitTriagePlan(rawArgs: unknown): Promise<SubmitTriagePl
     // `ack_checkpoint({user_response})` after this returns and decides
     // whether to re-submit (rejected) or proceed (approved). The runtime
     // does not classify the reply itself.
-    const result = await invokeCheckpointAndGate('triage_plan', {
-      session_id: session.id,
-      capability: args.capability,
-      context: {
-        kind: 'triage_plan',
+    const result = await invokeCheckpointAndGate(
+      checkpointEvent.triage_plan({
+        session_id: session.id,
         capability: args.capability,
-        surface_label: args.surface_label,
-        summary_for_user: args.summary_for_user,
-        expected_tier: args.expected_tier,
-        tier_justification: args.tier_justification,
-        defense_surface: args.defense_surface,
-        is_replan: cameFromLift,
-      },
-    });
+        context: {
+          capability: args.capability,
+          surface_label: args.surface_label,
+          summary_for_user: args.summary_for_user,
+          expected_tier: args.expected_tier,
+          tier_justification: args.tier_justification,
+          defense_surface: args.defense_surface,
+          is_replan: cameFromLift,
+        },
+      }),
+    );
     envelope = result.envelope;
   }
 
@@ -473,16 +479,17 @@ export async function submitTriagePlan(rawArgs: unknown): Promise<SubmitTriagePl
     ...((): { save_authoring_contract?: SaveAuthoringContract } => {
       // Compose + cache the save-authoring contract on the session. The
       // agent reads this once at LIFT entry and authors save_strategy
-      // correctly upfront — every constraint maps 1:1 to a save-strategy
-      // detector but is surfaced before commitment instead of after the
-      // first rejection. Cached on session.saveAuthoringContract so
-      // re-reads via get_save_authoring_contract are free.
+      // correctly upfront — every constraint projects a save-strategy
+      // audit concern but is surfaced before commitment instead of after
+      // the first rejection. Cached on session.saveAuthoringContract; the
+      // end_drive triage handoff echoes the same cached contract, so the
+      // agent re-reads it from either response without recomposing.
       try {
         const declaredArgs = ((): Record<string, unknown> => {
           const dc = (session.declaredCapabilities ?? []).find(
             (c) => c.capability === args.capability,
           );
-          return dc && typeof dc.args === 'object' ? (dc.args as Record<string, unknown>) : {};
+          return dc && typeof dc.args === 'object' ? dc.args : {};
         })();
         const contract = composeSaveAuthoringContract(
           session,
@@ -499,7 +506,7 @@ export async function submitTriagePlan(rawArgs: unknown): Promise<SubmitTriagePl
       }
     })(),
     save_strategy_schema: renderSaveStrategySchemaMarkdown({
-      tier: args.expected_tier as StrategyTier,
+      tier: args.expected_tier,
     }),
   };
 }
@@ -513,8 +520,12 @@ import type { ToolDef } from '../tools/types';
 
 export const TOOL_DEF: ToolDef = {
   name: TOOL_NAMES.submitTriagePlan,
+  phasePolicy: {
+    category: 'triage_and_lift_write',
+    allowedWhenExhaustedIn: ['triage', 'lift'],
+  },
   description:
-    'Commit a defense-surface triage plan (per `surface_label`) and request user ack to enter LIFT. Inspect third-party origins / scripts / cookies / request patterns on the page; identify the bot-detection posture using your own knowledge (runtime never names vendors). Inputs: surface_label, defense_surface, expected_tier, tier_justification (must cite an observed origin / script / cookie / URL verbatim — runtime rejects empty or uncited justifications), summary_for_user. Tier suggestion is informational; the agent still aims T0 → T1 → T2 in lift. Multi-surface flows submit one plan per surface; the runtime fires a `surface_changed` checkpoint when navigation crosses to an un-triaged surface.',
+    'Commit a defense-surface triage plan (per `surface_label`) and request user ack to enter LIFT. Inspect third-party origins / scripts / cookies / request patterns on the page; optionally include a mechanism hypothesis when evidence supports one. Inputs: surface_label, defense_surface, expected_tier, tier_justification (must cite an observed origin / script / cookie / URL verbatim — runtime rejects empty or uncited justifications), summary_for_user. Tier suggestion is informational; the agent still aims T0 → T1 → T2 in lift. Multi-surface flows submit one plan per surface; the runtime fires a `surface_changed` checkpoint when navigation crosses to an un-triaged surface.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -534,15 +545,9 @@ export const TOOL_DEF: ToolDef = {
           request_patterns: { type: 'array', items: { type: 'string' } },
           mechanism_hypothesis: { type: 'string' },
         },
-        required: [
-          'observed_origins',
-          'observed_scripts',
-          'cookies_set',
-          'request_patterns',
-          'mechanism_hypothesis',
-        ],
+        required: ['observed_origins', 'observed_scripts', 'cookies_set', 'request_patterns'],
       },
-      expected_tier: { type: 'string', enum: ['fetch', 'page-script', 'recorded-path'] },
+      expected_tier: { type: 'string', enum: [...STRATEGY_TIERS] },
       tier_justification: {
         type: 'string',
         description:

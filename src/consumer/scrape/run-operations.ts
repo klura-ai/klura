@@ -21,6 +21,7 @@ import {
   type RunIdV1,
   type RunOperationIdV1,
 } from './journal';
+import { withOwnerFileLock } from '../../utils/owner-file-lock';
 
 const OPERATION_BYTES_V1 = 64 * 1024;
 
@@ -187,51 +188,10 @@ export class RunOperationStoreV1 {
   private withLock<Value>(operation: () => Value): Value {
     this.ensureDirectory();
     const lockPath = path.join(this.home, 'run-operations.lock');
-    let lockFd: number | null = null;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        const candidate = fs.openSync(lockPath, 'wx', 0o600);
-        try {
-          fs.writeFileSync(candidate, Buffer.from(canonicalJson({ pid: process.pid }), 'utf8'));
-          fs.fsyncSync(candidate);
-        } catch (error) {
-          fs.closeSync(candidate);
-          try {
-            fs.unlinkSync(lockPath);
-          } catch {
-            // A failed setup leaves no usable operation lock.
-          }
-          throw error;
-        }
-        lockFd = candidate;
-        break;
-      } catch (error) {
-        if (!isExists(error)) throw error;
-        if (isProcessLive(readLockPid(lockPath))) {
-          throw new RunOperationError(
-            'operation_in_progress',
-            'another local run operation is active',
-          );
-        }
-        fs.unlinkSync(lockPath);
-      }
-    }
-    if (lockFd === null) {
-      throw new RunOperationError(
-        'operation_in_progress',
-        'could not acquire the run operation lock',
-      );
-    }
-    try {
-      return operation();
-    } finally {
-      fs.closeSync(lockFd);
-      try {
-        fs.unlinkSync(lockPath);
-      } catch {
-        // A stale lock is checked structurally by the next operation attempt.
-      }
-    }
+    return withOwnerFileLock(lockPath, operation, {
+      onLocked: () =>
+        new RunOperationError('operation_in_progress', 'another local run operation is active'),
+    });
   }
 
   private ensureDirectory(): void {
@@ -336,44 +296,6 @@ function fsyncDirectory(directory: string): void {
   } finally {
     fs.closeSync(fd);
   }
-}
-
-function readLockPid(lockPath: string): number {
-  try {
-    const record = parseExactRecord(
-      parseStrictJson(fs.readFileSync(lockPath), 'run_operation.lock', 1_024, 3),
-      'run_operation.lock',
-      ['pid'],
-    );
-    if (typeof record.pid !== 'number' || !Number.isSafeInteger(record.pid) || record.pid < 1) {
-      throw new RunOperationError('local_state_invalid', 'run operation lock has an invalid owner');
-    }
-    return record.pid;
-  } catch (error) {
-    if (error instanceof RunOperationError) throw error;
-    if (error instanceof PublicContractError) {
-      throw new RunOperationError('local_state_invalid', 'run operation lock is malformed');
-    }
-    throw error;
-  }
-}
-
-function isProcessLive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return !(
-      typeof error === 'object' &&
-      error !== null &&
-      'code' in error &&
-      error.code === 'ESRCH'
-    );
-  }
-}
-
-function isExists(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST';
 }
 
 function isMissing(error: unknown): boolean {

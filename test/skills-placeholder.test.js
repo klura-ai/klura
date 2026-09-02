@@ -30,6 +30,34 @@ test('notes.params refs are accepted', () => {
   validatePlaceholderReferences(data);
 });
 
+test('nested caller paths are accepted when their root param is declared', () => {
+  const data = {
+    strategy: 'page-script',
+    origin: 'https://example.com',
+    response: { from: 'result', format: 'json' },
+    prerequisites: [
+      {
+        name: 'read',
+        kind: 'js-eval',
+        url: 'https://example.com/search/{{searches.0}}',
+        expression: '({ok:true,items:[]})',
+        binds: 'result',
+      },
+    ],
+    notes: { params: { searches: { kind: 'text', example: ['coffee'] } } },
+  };
+  validatePlaceholderReferences(data);
+});
+
+test('nested placeholder paths cannot traverse inherited properties', () => {
+  const data = {
+    strategy: 'fetch',
+    endpoint: 'https://api.example.com/{{input.constructor}}',
+    notes: { params: { input: { kind: 'text', example: 'value' } } },
+  };
+  expectReject(data, /\{\{input\.constructor\}\}/);
+});
+
 test('undeclared top-level ref is rejected and lists available', () => {
   const data = {
     strategy: 'fetch',

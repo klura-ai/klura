@@ -28,9 +28,25 @@ import {
 } from './fetch-node';
 import { navigateWithOriginAdmission, runBrowserPrereqs, scanCachedPrereqs } from './fetch-browser';
 import { acquireLocalOriginPermit, localRequestTimeoutMs } from './local-traffic';
+import { captureBrowserDiagnosticEvidence, recordDiagnosticUrl } from './diagnostic-evidence';
 import { runInlineRecordedSteps } from './step-runner';
-import { interpolateVars, resolveHeaders } from './vars';
-import type { ExecuteResult, WebSocketStrategy, RecordedPathStep, AnyPool } from './types';
+import {
+  assertNoUnresolvedPlaceholders,
+  interpolateVars,
+  omittedOptionalParamNames,
+  renderUrlTemplate,
+  resolveHeaders,
+  resolveUrlTemplate,
+  unresolvedPlaceholderNames,
+} from './vars';
+import type {
+  ExecuteResult,
+  WebSocketStrategy,
+  RecordedPathStep,
+  AnyPool,
+  Prerequisite,
+} from './types';
+import { FactoryExecutionStateError } from './result-classification';
 
 // ---- WebSocket executors (protocol:"websocket") ----
 //
@@ -66,6 +82,7 @@ export async function dispatchWebSocket(
   depth: number,
   errors: string[],
   identity?: string,
+  suppressStrategyState = false,
 ): Promise<WsDispatchResult | null> {
   // Environment is implicit in tier: `fetch` dials the WS from Node (via the
   // `ws` package), `page-script` rides the page's existing connection through
@@ -111,7 +128,9 @@ export async function dispatchWebSocket(
         errors.push(`${tier}/ws/node: ${err.signal} and no pool for browser fallback`);
         return null;
       }
-      recordNodeTransportFailure(platform, capability, 'fetch', 'websocket', err.signal);
+      if (!suppressStrategyState) {
+        recordNodeTransportFailure(platform, capability, 'fetch', 'websocket', err.signal);
+      }
       const result = await executeWebSocketBrowser(
         strategy,
         tier,
@@ -156,6 +175,7 @@ async function resolveWsFrame(
     }
     const ffp = strategy.frameFromPage;
     const interpolated = resolveSecrets(interpolateVars(ffp.expression, args));
+    assertNoUnresolvedPlaceholders(interpolated, 'WebSocket frame expression');
     const wrapped = wrapAgentExpression(interpolated);
     const timeoutMs = ffp.timeout_ms ?? 5000;
     const result = await driver.evaluateExpression(session, wrapped, { timeoutMs });
@@ -189,7 +209,9 @@ async function resolveWsFrame(
     if (typeof out !== 'string') {
       throw new Error(`generated.frame resolved to non-string (${typeof out})`);
     }
-    return { ok: true, frame: out };
+    const frame = resolveSecrets(interpolateVars(out, args));
+    assertNoUnresolvedPlaceholders(frame, 'generated WebSocket frame');
+    return { ok: true, frame };
   }
   if (typeof strategy.frame !== 'string') {
     // Save-time validator rejects this, but keep the runtime guard so a
@@ -198,7 +220,9 @@ async function resolveWsFrame(
       'ws strategy is missing all of `frame`, `generated.frame`, and `frameFromPage` — save-time schema should have rejected this',
     );
   }
-  return { ok: true, frame: resolveSecrets(interpolateVars(strategy.frame, args)) };
+  const frame = resolveSecrets(interpolateVars(strategy.frame, args));
+  assertNoUnresolvedPlaceholders(frame, 'WebSocket frame');
+  return { ok: true, frame };
 }
 
 // Execute the recorded-step list that `wsOpen.steps` declares. Runs inline (no
@@ -238,11 +262,16 @@ async function executeWebSocketBrowser(
   const needsOrigin = wsOpenPre !== 'none';
   const originUrl = strategy.origin;
   if (needsOrigin && typeof originUrl === 'string' && originUrl.length > 0) {
-    // Resolve wsUrl without args first — purely for the probe. The real resolve
-    // (with genInputArgs including prereq tokens) happens below.
-    const wsUrlForProbe = resolveSecrets(interpolateVars(strategy.wsUrl, args));
-    const originForProbe = originUrl;
-    if (pool.tryCheckoutReadySession) {
+    // The ready-session probe runs before prerequisites. If either URL still
+    // needs a prerequisite binding, skip the optimization and let the strict
+    // post-prerequisite resolution below decide whether execution can proceed.
+    const probeOptionalParams = omittedOptionalParamNames(strategy, args);
+    const wsUrlForProbe = renderUrlTemplate(strategy.wsUrl, args, probeOptionalParams);
+    const originForProbe = renderUrlTemplate(originUrl, args, probeOptionalParams);
+    const probeReady =
+      unresolvedPlaceholderNames(wsUrlForProbe).length === 0 &&
+      unresolvedPlaceholderNames(originForProbe).length === 0;
+    if (probeReady && pool.tryCheckoutReadySession) {
       session = await pool.tryCheckoutReadySession(
         platform,
         async (s, d) => {
@@ -263,6 +292,7 @@ async function executeWebSocketBrowser(
   }
   session.device = resolvedDevice;
   const driver = pool.driverFor(session.id);
+  const omittedOptionalParams = omittedOptionalParamNames(strategy, args);
 
   try {
     // Prereqs (when present) run before we navigate to baseUrl, since many of
@@ -272,7 +302,7 @@ async function executeWebSocketBrowser(
     const hasPrereqs =
       Array.isArray((strategy as { prerequisites?: unknown[] }).prerequisites) &&
       ((strategy as { prerequisites?: unknown[] }).prerequisites?.length ?? 0) > 0;
-    const tokens: Record<string, string> = {};
+    const tokens: Record<string, unknown> = {};
     if (hasPrereqs) {
       const scanned = await scanCachedPrereqs(
         strategy.prerequisites,
@@ -281,6 +311,7 @@ async function executeWebSocketBrowser(
         pool,
         tokenCache,
         depth,
+        omittedOptionalParams,
       );
       Object.assign(tokens, scanned.tokens);
       await runBrowserPrereqs(
@@ -293,12 +324,14 @@ async function executeWebSocketBrowser(
         pool,
         tokenCache,
         tokens,
+        { omittedOptionalParams },
       );
     }
 
     // Generators run after prereqs so frame generators can reference
     // prereq-extracted values (same contract as HTTP fetch).
     const genInputArgs: Record<string, unknown> = { ...tokens, ...args };
+    const resolvedOptionalParams = omittedOptionalParamNames(strategy, genInputArgs);
 
     // Navigate to baseUrl so the page's own JS opens the WebSocket. Skip for
     // wsOpen:'none' — caller has arranged a warm session already on the target
@@ -314,18 +347,24 @@ async function executeWebSocketBrowser(
     // already verified page_on_url + ws_open, so navigating again would be
     // wasted work (and would tear down the live WS).
     if (wsOpen !== 'none' && !session.borrowed) {
-      const originForNav = strategy.origin;
-      if (typeof originForNav !== 'string' || originForNav.length === 0) {
+      const originTemplate = strategy.origin;
+      if (typeof originTemplate !== 'string' || originTemplate.length === 0) {
         return {
           status: 0,
           body: {
             error: 'ws_navigate_failed',
             detail:
               'strategy.origin is missing or empty. A ws strategy must set origin (the HTTP(S) URL to navigate to before polling the page for the live WebSocket) OR wsOpen:"none" (warm session already on the target page). Re-save the strategy with origin populated.',
-            origin: originForNav,
+            origin: originTemplate,
           },
         };
       }
+      const originForNav = resolveUrlTemplate(
+        originTemplate,
+        genInputArgs,
+        resolvedOptionalParams,
+        'WebSocket origin',
+      );
       try {
         await navigateWithOriginAdmission(
           session,
@@ -348,7 +387,13 @@ async function executeWebSocketBrowser(
 
     // Poll the page's WebSocket registry until a live one matching wsUrl is
     // OPEN, or the wsOpenTimeoutMs budget expires.
-    const resolvedWsUrl = resolveSecrets(interpolateVars(strategy.wsUrl, genInputArgs));
+    const resolvedWsUrl = resolveUrlTemplate(
+      strategy.wsUrl,
+      genInputArgs,
+      resolvedOptionalParams,
+      'WebSocket URL',
+    );
+    recordDiagnosticUrl('request', resolvedWsUrl);
     const wsOpenBudget = strategy.wsOpenTimeoutMs ?? WS_OPEN_DEFAULT_TIMEOUT_MS;
     let opened = await waitForWsOpen(driver, session, resolvedWsUrl, wsOpenBudget);
     if (!opened && typeof wsOpen === 'object' && Array.isArray(wsOpen.steps)) {
@@ -356,6 +401,7 @@ async function executeWebSocketBrowser(
       try {
         await runWsOpenSteps(driver, session, wsOpen.steps, genInputArgs);
       } catch (err) {
+        if (err instanceof FactoryExecutionStateError) throw err;
         return {
           status: 0,
           body: {
@@ -386,6 +432,7 @@ async function executeWebSocketBrowser(
     if (!frameResolution.ok) {
       return {
         status: 0,
+        executionState: 'not_run',
         body: {
           needs_generation: true,
           platform,
@@ -412,8 +459,10 @@ async function executeWebSocketBrowser(
     if (!sendResult.ok) {
       return {
         status: 0,
+        executionState: 'sent_unconfirmed',
         body: {
-          error: 'ws_send_failed',
+          error: 'ws_send_unconfirmed',
+          sent: 'unknown',
           detail: sendResult.error ?? 'unknown send error',
           wsUrl: resolvedWsUrl,
         },
@@ -435,6 +484,7 @@ async function executeWebSocketBrowser(
       if (!ack.matched) {
         return {
           status: 0,
+          executionState: 'sent_unconfirmed',
           body: {
             error: 'ack_timeout',
             sent: true,
@@ -461,6 +511,11 @@ async function executeWebSocketBrowser(
       body: { ok: true, sent: true, wsUrl: resolvedWsUrl },
     };
   } finally {
+    try {
+      await captureBrowserDiagnosticEvidence(pool.driverFor(session.id), session);
+    } catch {
+      /* diagnostic capture is best-effort */
+    }
     await pool.endDrive(session.id);
   }
 }
@@ -474,7 +529,7 @@ async function executeWebSocketNode(
   pool: AnyPool | null,
   tokenCache: TokenCache | null,
   depth: number,
-  _identity?: string,
+  identity?: string,
 ): Promise<ExecuteResult> {
   // Node-transport WebSocket dial doesn't load storage state — cookies on a
   // ws:// handshake travel via the `Cookie` header, which the strategy must
@@ -485,17 +540,39 @@ async function executeWebSocketNode(
   // Prereq resolution: Node-shaped prereqs only. browser / js-eval prereqs
   // force a demotion to browser transport via TransportFailureError, mirroring
   // executeFetchNode's rule.
-  const tokens: Record<string, string> =
+  const resolveCapabilityPrereqForIdentity = (
+    prereq: Prerequisite,
+    callerPlatform: string,
+    callerArgs: Record<string, unknown>,
+    callerTokens: Record<string, unknown>,
+    currentPool: AnyPool | null,
+    currentTokenCache: TokenCache | null,
+    currentDepth: number,
+    omittedOptionalParams?: ReadonlySet<string>,
+  ): Promise<Record<string, unknown> | null> =>
+    resolveCapabilityPrereq(
+      prereq,
+      callerPlatform,
+      callerArgs,
+      callerTokens,
+      currentPool,
+      currentTokenCache,
+      currentDepth,
+      identity,
+      omittedOptionalParams,
+    );
+  const tokens: Record<string, unknown> =
     tier === 'fetch'
       ? await resolveNodeCompatiblePrereqs(
           strategy.prerequisites,
           args,
+          omittedOptionalParamNames(strategy, args),
           platform,
           capability,
           tokenCache,
           pool,
           depth,
-          resolveCapabilityPrereq,
+          resolveCapabilityPrereqForIdentity,
           stringifyScope,
         )
       : {};
@@ -505,6 +582,7 @@ async function executeWebSocketNode(
   if (!frameResolution.ok) {
     return {
       status: 0,
+      executionState: 'not_run',
       body: {
         needs_generation: true,
         platform,
@@ -515,8 +593,17 @@ async function executeWebSocketNode(
     };
   }
 
-  const resolvedWsUrl = resolveSecrets(interpolateVars(strategy.wsUrl, genInputArgs));
-  const resolvedHeaders = resolveHeaders(strategy.wsHeaders, genInputArgs);
+  const resolvedWsUrl = resolveUrlTemplate(
+    strategy.wsUrl,
+    genInputArgs,
+    omittedOptionalParamNames(strategy, genInputArgs),
+    'WebSocket URL',
+  );
+  const resolvedHeaders = resolveHeaders(
+    strategy.wsHeaders,
+    genInputArgs,
+    omittedOptionalParamNames(strategy, genInputArgs),
+  );
 
   // Binary frames arrive over the wire as base64 — decode before send.
   const framePayload: string | Uint8Array =
@@ -528,6 +615,7 @@ async function executeWebSocketNode(
   const permit = await acquireLocalOriginPermit(resolvedWsUrl, `${platform}/${capability}`);
   let result: Awaited<ReturnType<typeof sendNodeWebSocketFrame>>;
   try {
+    recordDiagnosticUrl('request', resolvedWsUrl);
     result = await sendNodeWebSocketFrame(resolvedWsUrl, resolvedHeaders, framePayload, {
       ackMatch: strategy.ackMatch,
       ackTimeoutMs: strategy.ackTimeoutMs ?? WS_ACK_DEFAULT_TIMEOUT_MS,
@@ -545,17 +633,12 @@ async function executeWebSocketNode(
   }
 
   if (!result.ok) {
-    // Classify handshake failures as transport-shaped so the dispatcher retries
-    // in browser (captures the fingerprint-block case automatically, same as
-    // HTTP-Node).
-    if (isWebSocketTransportFailure(result.code)) {
-      throw new TransportFailureError('ws_handshake_failed', result.error);
-    }
-    if (result.code === 'ack_timeout') {
+    if (result.sent) {
       return {
         status: 0,
+        executionState: 'sent_unconfirmed',
         body: {
-          error: 'ack_timeout',
+          error: result.code,
           sent: true,
           wsUrl: resolvedWsUrl,
           ackMatch: strategy.ackMatch,
@@ -563,6 +646,12 @@ async function executeWebSocketNode(
           detail: result.error,
         },
       };
+    }
+    // Classify handshake failures as transport-shaped so the dispatcher retries
+    // in browser (captures the fingerprint-block case automatically, same as
+    // HTTP-Node).
+    if (isWebSocketTransportFailure(result.code)) {
+      throw new TransportFailureError('ws_handshake_failed', result.error);
     }
     return {
       status: 0,

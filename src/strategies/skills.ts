@@ -3,12 +3,18 @@ import path from 'path';
 import type { GeneratorEntry } from './generators';
 import { isTierAllowed, isCapabilityForbidden } from './policy';
 import { stampTier, type TierStamp } from '../telemetry/telemetry';
-import { asPlatformSlug, asIdentifierSlug, asEnum, ValidationError } from '../validators';
+import { asPlatformSlug, asIdentifierSlug, ValidationError } from '../validators';
+import { DECISION_VALUES, SAVE_ORIGINS, type SaveOrigin, type StrategyTier } from '../vocab';
+import type { JsonValueV1 } from '../public/contracts/json';
 
 import { KLURA_DIR, SKILLS_DIR, WORKDIR_DIR } from '../paths';
 import { appendStrategyEvent } from '../working-dir/logbook';
 import { readPlatformSkillInfo } from './skills-list-helpers';
-import { escapeRegExp } from '../utils/regex';
+import { STRATEGY_SUBDIR_MAP as SUBDIR_MAP, stageStrategyCandidate } from './strategy-candidates';
+import { withCapabilityMutationLock, writeJsonAtomically } from './capability-mutation';
+import { snapshotEnumObservationsIntoSave } from './enum-snapshot';
+import type { PostSaveVerificationProofV1 } from './post-save-verification-proof';
+import { commitPreparedStrategy } from './strategy-commit';
 export { KLURA_DIR, SKILLS_DIR };
 
 // Shape / prereq / placeholder validators live in ./validate; gate consumers
@@ -57,13 +63,16 @@ export interface ParamDoc {
   description: string;
   // Loose enum — a novel kind value won't break execution. But the shape-marker
   // kinds (slug/email/url/uuid) are enforced at save time (see above).
-  kind?: 'id' | 'slug' | 'email' | 'url' | 'uuid' | 'enum' | 'text';
+  kind?: 'id' | 'slug' | 'email' | 'url' | 'uuid' | 'enum' | 'text' | 'array' | 'object';
   // Where the value comes from: "identities.<platform>.username", "URL slug",
   // "response.id from GET /api/users", free-form prose, etc.
   source?: string;
   // A concrete example value. Crucial — one real-looking example does more for
   // the LLM's shape-spotting than any prose description.
-  example?: string;
+  example?: JsonValueV1;
+  // Optional caller input. Whole-value object/header/query placeholders are
+  // omitted structurally when the caller leaves the value absent.
+  optional?: boolean;
 }
 
 // Strict allowlist of top-level keys under `notes`. Free-text containers became
@@ -180,25 +189,53 @@ export interface RuntimeMeta {
   /** Soft warnings the save-time probe accumulated (e.g. login-wall redirects). */
   probe_warnings?: string[];
   /**
-   * Outcome of the post-commit verification (the `post_save_validation_consent`
-   * checkpoint). `passed` — `execute()` returned 2xx with explicit
+   * Outcome of factory verification. `passed` — `execute()` returned 2xx with explicit
    * `body.ok:true`. `transport_passed` — `execute()` returned 2xx without an
    * explicit boolean `body.ok`; transport worked but factory execution did not
    * classify the semantic body. `declined` — the user declined the verification
    * fire; the strategy stands but is unverified.
    * `skipped` — the runtime structurally couldn't probe (e.g. the strategy
    * declares an auth prerequisite whose credentials aren't available at save-time
-   * probe); the strategy stands and self-validates on the next authed execute. A
-   * non-2xx result or explicit `body.ok:false` is not recorded here: the
-   * strategy is archived to `.broken.json` instead, so the archive itself is
-   * the failure record.
+   * probe); the strategy stands and self-validates on the next authed execute.
+   * Inactive read candidates retain this metadata in a candidate-bound
+   * verification sidecar until an explicit-success promotion.
    */
   post_save_validation?: 'passed' | 'transport_passed' | 'declined' | 'skipped';
+  /** Exact runtime-owned artifact binding for the corresponding validation result. */
+  post_save_verification?: PostSaveVerificationProofV1;
+  /** Verification evidence retained on an inactive strategy candidate. */
+  candidate_verification?: {
+    classification:
+      | 'explicit_success'
+      | 'explicit_failure'
+      | 'transport_accepted'
+      | 'transport_failure'
+      | 'not_run'
+      | 'delivery_unknown';
+    status: number;
+    checked_at_ms: number;
+    body_preview?: string;
+    /** SHA-256 of the immutable, candidate-bound execution evidence artifact. */
+    evidence_digest?: string;
+    /** False when exact evidence exceeded the local review artifact bound. */
+    evidence_reviewable?: boolean;
+  };
+  /** LLM judgment over exact candidate evidence; runtime validates only the binding. */
+  semantic_review?: {
+    verdict:
+      | typeof DECISION_VALUES.verifiedSuccess
+      | typeof DECISION_VALUES.verifiedFailure
+      | typeof DECISION_VALUES.inconclusive;
+    candidate_id: string;
+    evidence_digest: string;
+    reviewed_at_ms: number;
+    rationale: string;
+  };
 }
 
 export interface Strategy {
   schema_version?: number;
-  strategy: 'fetch' | 'page-script' | 'recorded-path';
+  strategy: StrategyTier;
   notes?: StrategyNotes;
   runtime_meta?: RuntimeMeta;
   generated?: Record<string, GeneratorEntry>;
@@ -229,14 +266,6 @@ export interface Strategy {
 
 // Strategy type → on-disk subdirectory. Each type gets its own folder so a
 // `fetch` and a `page-script` for the same capability can coexist.
-const SUBDIR_MAP: Record<string, string> = {
-  fetch: 'fetch',
-  'page-script': 'scripts',
-  'recorded-path': 'paths',
-};
-
-const STRATEGY_TYPES = ['fetch', 'page-script', 'recorded-path'] as const;
-
 const SUBDIRS = ['fetch', 'scripts', 'paths'] as const;
 
 export interface StrategyInfo {
@@ -332,22 +361,35 @@ function ensureDir(dir: string): void {
  * from version N to N+1. Returns the (possibly mutated) strategy at
  * SCHEMA_VERSION.
  */
-function migrateStrategy(data: Strategy, filePath: string): Strategy {
+function applyStrategyMigrations(data: Strategy): { data: Strategy; changed: boolean } {
   const version = data.schema_version ?? 0;
-  if (version >= SCHEMA_VERSION) return data;
+  if (version >= SCHEMA_VERSION) return { data, changed: false };
 
   // Migration 0 → 1: stamp schema_version (no structural changes)
   if (version < 1) {
     data.schema_version = 1;
   }
 
-  // Write back migrated strategy so we only migrate once
-  try {
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
-  } catch {
-    // Best-effort — don't fail on write error
-  }
-  return data;
+  return { data, changed: true };
+}
+
+function migrateStrategy(
+  data: Strategy,
+  filePath: string,
+  platform: string,
+  capability: string,
+): Strategy | null {
+  if ((data.schema_version ?? 0) >= SCHEMA_VERSION) return data;
+
+  return withCapabilityMutationLock(platform, capability, () => {
+    if (!fs.existsSync(filePath)) return null;
+    const latest = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Strategy;
+    const migrated = applyStrategyMigrations(latest);
+    if (migrated.changed) {
+      writeJsonAtomically(filePath, migrated.data);
+    }
+    return migrated.data;
+  });
 }
 
 export interface SaveAuditInput {
@@ -380,6 +422,9 @@ export interface SaveAuditInput {
    *  recalled from training data instead. Per principles.md §"Observe,
    *  not probe", runtime-enforced. */
   observedUrls?: readonly string[];
+  /** Active strategy being amended. The audit accepts URL fields that are
+   *  unchanged at the same structural path without demanding fresh capture. */
+  previousStrategy?: Strategy;
   /** Live session — used by the audit's `observed_property_keys` Detector
    *  to read the per-session observation trace for provenance checking
    *  baked property-access keys in expression bodies. Null for programmatic
@@ -387,96 +432,15 @@ export interface SaveAuditInput {
   session?: import('../drivers/types/session').Session | null;
 }
 
-/** Cap on how many observed values to snapshot per enum param at save
- *  time. Listing surfaces stay compact under the MCP budget; values
- *  beyond this count are still resolvable dynamically via
- *  `source: capability:list_<entity>`. */
-const ENUM_SNAPSHOT_BUDGET = 24;
-
-/** Walk the strategy's `notes.params`, find any enum-shaped param, and
- *  merge values observed by the session (click→XHR pairs, URL-variance
- *  visits) into `observed_values`. Idempotent: doesn't duplicate values
- *  the agent already declared. Skips when there are no session
- *  observations for the param's URL-key. */
-function snapshotEnumObservationsIntoSave(data: Strategy, sessionId: string): void {
-  const params = (data as { notes?: { params?: Record<string, unknown> } }).notes?.params;
-  if (!params || typeof params !== 'object') return;
-  let allObs: Record<string, unknown[]> | null = null;
-  for (const [placeholder, info] of Object.entries(params)) {
-    if (!info || typeof info !== 'object') continue;
-    const i = info as { kind?: unknown; observed_values?: unknown };
-    if (i.kind !== 'enum') continue;
-
-    // The session observation index is keyed by URL-param name. Map the
-    // strategy's placeholder to its URL-param via the endpoint:
-    // `?<urlParam>={{<placeholder>}}`. Fall back to the placeholder name
-    // when no mapping is found (the common case where placeholder ===
-    // url-param).
-    const urlParam = findUrlParamForPlaceholder(data, placeholder) ?? placeholder;
-    if (allObs === null) {
-      try {
-        // Lazy import to avoid a top-level circular dep.
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const mod = require('../response/session-observations') as {
-          getAllParamObservations: (id: string) => Record<string, unknown[]>;
-        };
-        allObs = mod.getAllParamObservations(sessionId);
-      } catch {
-        allObs = {};
-      }
-    }
-    const obs = allObs[urlParam];
-    if (!Array.isArray(obs) || obs.length === 0) continue;
-
-    const existing = Array.isArray(i.observed_values)
-      ? (i.observed_values as Array<{ value?: unknown; label?: unknown }>)
-      : [];
-    const seen = new Set<string>();
-    const merged: Array<{ value: string; label?: string }> = [];
-    for (const entry of existing) {
-      if (typeof entry !== 'object') continue;
-      const value = entry.value;
-      if (typeof value !== 'string' || seen.has(value)) continue;
-      seen.add(value);
-      const label = entry.label;
-      merged.push(typeof label === 'string' ? { value, label } : { value });
-    }
-    for (const o of obs) {
-      if (!o || typeof o !== 'object') continue;
-      const v = (o as { value?: unknown }).value;
-      if (typeof v !== 'string' || seen.has(v)) continue;
-      seen.add(v);
-      const labelRaw = (o as { source?: { label?: unknown } }).source?.label;
-      const label = typeof labelRaw === 'string' ? labelRaw : undefined;
-      merged.push(label ? { value: v, label } : { value: v });
-      if (merged.length >= ENUM_SNAPSHOT_BUDGET) break;
-    }
-    if (merged.length === 0) continue;
-    (info as { observed_values?: unknown }).observed_values = merged;
-  }
-}
-
-/** Given a strategy's endpoint, find the URL-param key bound to a given
- *  `{{placeholder}}`. e.g. `/api/restaurants?category={{cuisine}}` →
- *  placeholder "cuisine" maps to url-param "category". Returns null when
- *  the placeholder isn't templated into a URL-param slot (e.g. body
- *  template, header). */
-function findUrlParamForPlaceholder(data: Strategy, placeholder: string): string | null {
-  const baseUrl = (data as { baseUrl?: unknown }).baseUrl;
-  const endpoint = (data as { endpoint?: unknown }).endpoint;
-  if (typeof endpoint !== 'string' || endpoint.length === 0) return null;
-  let urlString = endpoint;
-  if (typeof baseUrl === 'string' && baseUrl.length > 0) {
-    try {
-      urlString = new URL(endpoint, baseUrl).toString();
-    } catch {
-      // Fall through with raw endpoint
-    }
-  }
-  // Match `?<key>={{placeholder}}` or `&<key>={{placeholder}}`.
-  const re = new RegExp(`[?&]([^=&]+)=\\{\\{${escapeRegExp(placeholder)}\\}\\}`);
-  const m = re.exec(urlString);
-  return m ? (m[1] ?? null) : null;
+/** Producer-identity + evidence for the save policy. Producers that are
+ *  not the attended agent pipeline (auto-synth, graduation) name their
+ *  origin here; `evidence` feeds the audit's comparative detectors and,
+ *  when it carries a `sessionId`, the enum-observation snapshot at commit
+ *  time. Omitted → origin defaults from `sessionId` (present →
+ *  `agent_explicit`, absent → `programmatic`). */
+export interface SavePolicyOptions {
+  origin?: SaveOrigin;
+  evidence?: import('../audit/lift/save-policy').SaveEvidence;
 }
 
 export function saveStrategy(
@@ -486,6 +450,7 @@ export function saveStrategy(
   changelog?: string,
   sessionId?: string,
   audit?: SaveAuditInput,
+  policy?: SavePolicyOptions,
 ): string {
   // Slug check at the door — platform and capability become filesystem
   // keys, so reject path-traversal attempts before any other work.
@@ -499,30 +464,22 @@ export function saveStrategy(
     throw e;
   }
 
-  // Stage 0 shape validation runs for every save, including programmatic
-  // ones (auto-synth, tests). The full audit pipeline (detectors +
-  // classifiers) gates on sessionId below — those layers depend on session
-  // context. Lazy-require breaks the audit-chain require cycle.
+  // Every save routes through the save policy: the origin selects how the
+  // saveStrategyAudit applies, never whether it runs. sessionId-bearing
+  // saves default to the attended agent_explicit pipeline; sessionId-less
+  // ones to the unattended programmatic pipeline unless the producer names
+  // itself (auto-synth, graduation). Lazy-require breaks the audit-chain
+  // require cycle.
   /* eslint-disable @typescript-eslint/no-require-imports */
+  const savePolicy =
+    require('../audit/lift/save-policy') as typeof import('../audit/lift/save-policy');
   const auditSaveStrategy =
     require('../audit/lift/save-strategy') as typeof import('../audit/lift/save-strategy');
   /* eslint-enable @typescript-eslint/no-require-imports */
-  const { saveStrategyAudit } = auditSaveStrategy;
-  saveStrategyAudit.runShapeChecks(data, {
-    sessionId,
-    platform,
-    capability,
-    session: audit?.session ?? null,
-    observedSiblings: audit?.observedSiblings ?? [],
-    observedParamValues: audit?.observedParamValues ?? {},
-    capturedEndpointPaths: audit?.capturedEndpointPaths ?? new Set<string>(),
-    observedUrls: audit?.observedUrls ?? [],
-  });
+  const origin =
+    policy?.origin ?? (sessionId ? SAVE_ORIGINS.agentExplicit : SAVE_ORIGINS.programmatic);
 
-  // Audit pipeline (Stage 1 detectors + Stage 2 classifiers). Skipped for
-  // programmatic saves without session context — Stage 0 above covers the
-  // shape gate either way.
-  if (sessionId) {
+  if (origin === SAVE_ORIGINS.agentExplicit) {
     /* eslint-disable @typescript-eslint/no-require-imports */
     const auditIndex = require('../audit') as typeof import('../audit');
     const auditDecider =
@@ -531,15 +488,27 @@ export function saveStrategy(
     const { extractAcksFromNotes, persistWarningsOnRuntimeMeta } = auditSaveStrategy;
     const { rejectionToErrorMessage } = auditIndex;
     const { getRegisteredSaveConfirmationDecider } = auditDecider;
-    const auditCtx = {
+    const previousStrategy =
+      audit?.previousStrategy ?? loadPreviousStrategyForTier(platform, capability, data.strategy);
+    const evidence: import('../audit/lift/save-policy').SaveEvidence = {
       sessionId,
-      platform,
-      capability,
       session: audit?.session ?? null,
       observedSiblings: audit?.observedSiblings ?? [],
       observedParamValues: audit?.observedParamValues ?? {},
       capturedEndpointPaths: audit?.capturedEndpointPaths ?? new Set<string>(),
       observedUrls: audit?.observedUrls ?? [],
+      previousStrategy,
+    };
+    const auditCtx = {
+      platform,
+      capability,
+      sessionId,
+      session: evidence.session ?? null,
+      observedSiblings: evidence.observedSiblings ?? [],
+      observedParamValues: evidence.observedParamValues ?? {},
+      capturedEndpointPaths: evidence.capturedEndpointPaths ?? new Set<string>(),
+      observedUrls: evidence.observedUrls,
+      previousStrategy: evidence.previousStrategy,
     };
     // SaveConfirmationDecider injection — when registered, the decider
     // ALWAYS wins. Production has no decider registered, so the audit
@@ -574,10 +543,17 @@ export function saveStrategy(
         },
       };
     }
-    const auditResult = saveStrategyAudit.process(data, auditCtx, {
-      token: audit?.token,
-      answers: mergedAnswers,
-      acks: extractAcksFromNotes(data),
+    const auditResult = savePolicy.evaluateSavePolicy({
+      origin,
+      platform,
+      capability,
+      strategy: data,
+      evidence,
+      auditInput: {
+        token: audit?.token,
+        answers: mergedAnswers,
+        acks: extractAcksFromNotes(data),
+      },
     });
     if (auditResult.status === 'rejected') {
       throw new Error(rejectionToErrorMessage('save_strategy', auditResult.rejection));
@@ -587,9 +563,22 @@ export function saveStrategy(
     // list_platform_skills / get_strategy sees what concerns this save
     // acknowledged.
     persistWarningsOnRuntimeMeta(data, auditResult.warnings);
+    return commitValidatedStrategy(platform, capability, data, changelog, sessionId);
   }
 
-  return commitValidatedStrategy(platform, capability, data, changelog, sessionId);
+  // Unattended origins: shape checks + Stage-1 detectors per each
+  // detector's unattendedPolicy. Throws SavePolicyBlockedError on a
+  // blocking issue; persists warn-tier issues per the origin's rules.
+  const evidence: import('../audit/lift/save-policy').SaveEvidence = {
+    ...(policy?.evidence ?? {}),
+  };
+  if (evidence.previousStrategy === undefined) {
+    const prior = loadPreviousStrategyForTier(platform, capability, data.strategy);
+    if (prior !== undefined) evidence.previousStrategy = prior;
+  }
+  savePolicy.evaluateSavePolicy({ origin, platform, capability, strategy: data, evidence });
+  const effectiveSessionId = sessionId ?? evidence.sessionId;
+  return commitValidatedStrategy(platform, capability, data, changelog, effectiveSessionId);
 }
 
 // Persist a pre-validated, pre-audited strategy: policy check, schema-version
@@ -603,6 +592,31 @@ export function commitValidatedStrategy(
   changelog?: string,
   sessionId?: string,
 ): string {
+  prepareValidatedStrategyForPersistence(platform, capability, data, sessionId);
+  return commitPreparedStrategy(platform, capability, data, changelog).path;
+}
+
+export function commitValidatedStrategyWithProof(
+  platform: string,
+  capability: string,
+  data: Strategy,
+  changelog?: string,
+  sessionId?: string,
+): { path: string; proof: PostSaveVerificationProofV1 } {
+  prepareValidatedStrategyForPersistence(platform, capability, data, sessionId);
+  const committed = commitPreparedStrategy(platform, capability, data, changelog, true);
+  if (!committed.proof) {
+    throw new Error('post_save_validation_proof_missing: committed strategy has no proof');
+  }
+  return { path: committed.path, proof: committed.proof };
+}
+
+function prepareValidatedStrategyForPersistence(
+  platform: string,
+  capability: string,
+  data: Strategy,
+  sessionId?: string,
+): void {
   if (isCapabilityForbidden(platform, capability)) {
     throw new Error(
       `policy_violation: capability "${capability}" is forbidden for platform "${platform}"`,
@@ -632,25 +646,28 @@ export function commitValidatedStrategy(
   if (sessionId) {
     snapshotEnumObservationsIntoSave(data, sessionId);
   }
+}
 
-  const subdir = SUBDIR_MAP[data.strategy] || 'api';
-  const dir = path.join(SKILLS_DIR, platform, subdir);
-  ensureDir(dir);
-  const filePath = path.join(dir, `${capability}.json`);
-  const existed = fs.existsSync(filePath);
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
-  appendStrategyEvent(platform, capability, {
-    strategy: data.strategy,
-    kind: existed ? 'rediscovered' : 'discovered',
-    detail: changelog || (existed ? 'overwriting existing' : `saved ${data.strategy} strategy`),
-  });
-  return filePath;
+export function stageValidatedStrategyCandidate(
+  platform: string,
+  capability: string,
+  data: Strategy,
+  sessionId?: string,
+): import('./strategy-candidates').StrategyCandidateRef {
+  prepareValidatedStrategyForPersistence(platform, capability, data, sessionId);
+  return stageStrategyCandidate(platform, capability, data);
 }
 
 export function loadStrategy(platform: string, capability: string): Strategy | null {
   const all = loadStrategies(platform, capability);
   return all[0] ?? null;
 }
+
+export {
+  capturePostSaveVerificationTarget,
+  loadCurrentPostSaveVerificationTarget,
+  stampPostSaveValidationProof,
+} from './post-save-verification-store';
 
 /**
  * Demote a `fetch` strategy to `page-script` by rewriting the strategy tier in
@@ -664,35 +681,37 @@ export function loadStrategy(platform: string, capability: string): Strategy | n
  * save is canonical and its page-script sibling was stale).
  */
 export function demoteFetchToPageScript(platform: string, capability: string): void {
-  const srcPath = path.join(
-    SKILLS_DIR,
-    platform,
-    SUBDIR_MAP.fetch ?? 'fetch',
-    `${capability}.json`,
-  );
-  if (!fs.existsSync(srcPath)) return;
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(fs.readFileSync(srcPath, 'utf-8')) as Record<string, unknown>;
-  } catch {
-    return;
-  }
-  if (parsed.strategy !== 'fetch') return;
-  parsed.strategy = 'page-script';
-  validateStrategyShape(parsed);
-  const dstDir = path.join(SKILLS_DIR, platform, SUBDIR_MAP['page-script'] ?? 'scripts');
-  ensureDir(dstDir);
-  const dstPath = path.join(dstDir, `${capability}.json`);
-  fs.writeFileSync(dstPath, JSON.stringify(parsed, null, 2));
-  try {
-    fs.unlinkSync(srcPath);
-  } catch {
-    // best-effort — leaving the old file around is non-fatal
-  }
-  appendStrategyEvent(platform, capability, {
-    strategy: 'page-script',
-    kind: 'tier_demote',
-    detail: 'fetch → page-script (persistent after N Node-fire failures)',
+  withCapabilityMutationLock(platform, capability, () => {
+    const srcPath = path.join(
+      SKILLS_DIR,
+      platform,
+      SUBDIR_MAP.fetch ?? 'fetch',
+      `${capability}.json`,
+    );
+    if (!fs.existsSync(srcPath)) return;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(fs.readFileSync(srcPath, 'utf-8')) as Record<string, unknown>;
+    } catch {
+      return;
+    }
+    if (parsed.strategy !== 'fetch') return;
+    parsed.strategy = 'page-script';
+    validateStrategyShape(parsed);
+    const dstDir = path.join(SKILLS_DIR, platform, SUBDIR_MAP['page-script'] ?? 'scripts');
+    ensureDir(dstDir);
+    const dstPath = path.join(dstDir, `${capability}.json`);
+    writeJsonAtomically(dstPath, parsed);
+    try {
+      fs.unlinkSync(srcPath);
+    } catch {
+      // Best-effort — leaving the old file around is non-fatal.
+    }
+    appendStrategyEvent(platform, capability, {
+      strategy: 'page-script',
+      kind: 'tier_demote',
+      detail: 'fetch → page-script (persistent after N Node-fire failures)',
+    });
   });
 }
 
@@ -707,7 +726,8 @@ export function loadStrategies(platform: string, capability: string): Strategy[]
     const filePath = path.join(SKILLS_DIR, platform, subdir, `${capability}.json`);
     if (fs.existsSync(filePath)) {
       const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Strategy;
-      strategies.push(migrateStrategy(raw, filePath));
+      const migrated = migrateStrategy(raw, filePath, platform, capability);
+      if (migrated) strategies.push(migrated);
     }
   }
 
@@ -719,6 +739,26 @@ export function loadStrategies(platform: string, capability: string): Strategy[]
   strategies.sort((a, b) => (priority[a.strategy] ?? 99) - (priority[b.strategy] ?? 99));
 
   return strategies;
+}
+
+/**
+ * The saved file a (re)save at `tier` amends: the same-tier file when one
+ * exists, else the highest-priority sibling. Save paths use this both for
+ * the unobserved_url grandfather set — whose entries key on tier-prefixed
+ * structural paths (`fetch.endpoint` vs `page-script.endpoint`), so a
+ * sibling-tier default would never match the amended tier's endpoint — and
+ * for the notes fallback on amends that omit `notes`.
+ */
+export function loadPreviousStrategyForTier(
+  platform: string,
+  capability: string,
+  tier: unknown,
+): Strategy | undefined {
+  const existing = loadStrategies(platform, capability);
+  return (
+    (typeof tier === 'string' ? existing.find((s) => s.strategy === tier) : undefined) ??
+    existing[0]
+  );
 }
 
 /**
@@ -805,16 +845,18 @@ export function archiveStrategy(
   const baseCapability = capability.endsWith('.broken')
     ? capability.slice(0, -'.broken'.length)
     : capability;
-  const active = path.join(SKILLS_DIR, platform, subdir, `${baseCapability}.json`);
-  const archived = path.join(SKILLS_DIR, platform, subdir, `${baseCapability}.broken.json`);
-  if (fs.existsSync(active)) {
-    fs.renameSync(active, archived);
-    appendStrategyEvent(platform, baseCapability, {
-      strategy: strategyType,
-      kind: 'archived',
-      detail: detail || 'archived as broken',
-    });
-  }
+  withCapabilityMutationLock(platform, baseCapability, () => {
+    const active = path.join(SKILLS_DIR, platform, subdir, `${baseCapability}.json`);
+    const archived = path.join(SKILLS_DIR, platform, subdir, `${baseCapability}.broken.json`);
+    if (fs.existsSync(active)) {
+      fs.renameSync(active, archived);
+      appendStrategyEvent(platform, baseCapability, {
+        strategy: strategyType,
+        kind: 'archived',
+        detail: detail || 'archived as broken',
+      });
+    }
+  });
 }
 
 export function unarchiveStrategy(
@@ -824,16 +866,18 @@ export function unarchiveStrategy(
 ): void {
   const subdir = SUBDIR_MAP[strategyType];
   if (!subdir) return;
-  const archived = path.join(SKILLS_DIR, platform, subdir, `${capability}.broken.json`);
-  const active = path.join(SKILLS_DIR, platform, subdir, `${capability}.json`);
-  if (fs.existsSync(archived)) {
-    fs.renameSync(archived, active);
-    appendStrategyEvent(platform, capability, {
-      strategy: strategyType,
-      kind: 'unarchived',
-      detail: 'manually reset',
-    });
-  }
+  withCapabilityMutationLock(platform, capability, () => {
+    const archived = path.join(SKILLS_DIR, platform, subdir, `${capability}.broken.json`);
+    const active = path.join(SKILLS_DIR, platform, subdir, `${capability}.json`);
+    if (fs.existsSync(archived)) {
+      fs.renameSync(archived, active);
+      appendStrategyEvent(platform, capability, {
+        strategy: strategyType,
+        kind: 'unarchived',
+        detail: 'manually reset',
+      });
+    }
+  });
 }
 
 export function clearAll(): void {
@@ -852,14 +896,17 @@ export function stampRuntimeMeta(
   capability: string,
   patch: Partial<RuntimeMeta>,
 ): void {
-  const strat = loadStrategy(platform, capability);
-  if (!strat) return;
-  const subdir = SUBDIR_MAP[strat.strategy];
-  if (!subdir) return;
-  const filePath = path.join(SKILLS_DIR, platform, subdir, `${capability}.json`);
-  if (!fs.existsSync(filePath)) return;
-  strat.runtime_meta = { ...(strat.runtime_meta ?? {}), ...patch };
-  fs.writeFileSync(filePath, JSON.stringify(strat, null, 2));
+  withCapabilityMutationLock(platform, capability, () => {
+    for (const subdir of SUBDIRS) {
+      const filePath = path.join(SKILLS_DIR, platform, subdir, `${capability}.json`);
+      if (!fs.existsSync(filePath)) continue;
+      const strat = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Strategy;
+      const migrated = applyStrategyMigrations(strat).data;
+      migrated.runtime_meta = { ...(migrated.runtime_meta ?? {}), ...patch };
+      writeJsonAtomically(filePath, migrated);
+      return;
+    }
+  });
 }
 
 /**
@@ -886,85 +933,4 @@ export function clearSkills(): void {
   }
 }
 
-// --- Strategy patching (step-level healing) ---
-
-export function patchStep(
-  platform: string,
-  capability: string,
-  strategyType: string,
-  stepId: string,
-  patch: Record<string, unknown>,
-): { ok: true; path: string } | { error: string } {
-  // Validate inputs through the centralized validator layer
-  try {
-    asPlatformSlug(platform, 'platform');
-    asIdentifierSlug(capability, 'capability');
-    asEnum(strategyType, 'strategyType', STRATEGY_TYPES);
-  } catch (e) {
-    if (e instanceof ValidationError) {
-      return { error: `invalid_patch: ${e.message}` };
-    }
-    return { error: String(e) };
-  }
-
-  if (typeof stepId !== 'string' || stepId.length === 0) {
-    return {
-      error: `invalid_patch: step_id must be a non-empty string (the slug id declared on the recorded-path step, e.g. "click_send"). See klura://reference#recorded-path-schema.`,
-    };
-  }
-
-  const subdir = SUBDIR_MAP[strategyType];
-  if (!subdir) return { error: `unknown strategy type: ${strategyType}` };
-  const filePath = path.join(SKILLS_DIR, platform, subdir, `${capability}.json`);
-  if (!fs.existsSync(filePath)) return { error: 'strategy file not found' };
-
-  const data = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as { steps?: unknown[] };
-  const steps = data.steps;
-  if (!Array.isArray(steps)) return { error: 'strategy type has no steps' };
-
-  const knownIds: string[] = [];
-  let targetIndex = -1;
-  for (let i = 0; i < steps.length; i += 1) {
-    const s = steps[i];
-    if (!s || typeof s !== 'object') continue;
-    const id = (s as { id?: unknown }).id;
-    if (typeof id !== 'string') continue;
-    knownIds.push(id);
-    if (id === stepId) targetIndex = i;
-  }
-  if (targetIndex === -1) {
-    const idList = knownIds.map((k) => `"${k}"`).join(', ') || '(none)';
-    return {
-      error: `invalid_strategy: no step with id "${stepId}" in strategy; known ids: [${idList}]`,
-    };
-  }
-
-  const step = steps[targetIndex] as Record<string, unknown>;
-  // Control key (not a step field): when `merge_locators: true`, a `locators`
-  // patch is shallow-merged onto the step's existing locator cascade instead of
-  // flat-replacing it, so alternatives the patch didn't mention survive. Opt-in
-  // — the default flat-overwrite is unchanged for callers who don't set it.
-  const mergeLocators = patch.merge_locators === true;
-  const isPlainObj = (v: unknown): v is Record<string, unknown> =>
-    !!v && typeof v === 'object' && !Array.isArray(v);
-  const appliedKeys: string[] = [];
-  for (const [k, v] of Object.entries(patch)) {
-    if (k === 'merge_locators') continue;
-    if (mergeLocators && k === 'locators' && isPlainObj(v) && isPlainObj(step.locators)) {
-      step.locators = { ...step.locators, ...v };
-    } else {
-      step[k] = v;
-    }
-    appliedKeys.push(k);
-  }
-
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
-
-  appendStrategyEvent(platform, capability, {
-    strategy: strategyType,
-    kind: 'patched',
-    detail: `step "${stepId}": patched ${appliedKeys.join(', ')}`,
-  });
-
-  return { ok: true, path: filePath };
-}
+export { patchStep } from './patch-step';

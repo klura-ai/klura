@@ -5,6 +5,10 @@
 // by integration runs; these tests cover the surfaces that are pure
 // runtime: the abort_events ledger (append + read + cap + sort) and the
 // argument validators that reject bad calls before pool access.
+//
+// Ledger bounding (ring buffer, TTL, dedupe) lives in
+// abort-ledger-bounded.test.js; provenance stamping in
+// abort-provenance-stamping.test.js.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -41,6 +45,11 @@ test('appendAbortEvent → readRecentAborts round-trip', () => {
   assert.equal(aborts[0].session_id, 'sess_1');
   assert.equal(aborts[0].phase_at_abort, 'drive');
   assert.ok(aborts[0].at, 'at timestamp set by appender');
+  assert.equal(
+    aborts[0].provenance,
+    'agent_asserted',
+    'an entry nothing corroborated reads as a claim',
+  );
 });
 
 test('readRecentAborts: newest-first ordering', async () => {

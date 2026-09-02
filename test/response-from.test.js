@@ -203,6 +203,13 @@ test('applyResponseFrom throws with a clear message on unparseable JSON', () => 
   );
 });
 
+test('applyResponseFrom rejects an empty value when format is json', () => {
+  assert.throws(
+    () => applyResponseFrom({ response: { from: 'result', format: 'json' } }, { result: '' }),
+    /prereq produced an empty value.*not valid JSON/,
+  );
+});
+
 test('applyResponseFrom throws when the named prereq did not produce a value', () => {
   assert.throws(
     () => applyResponseFrom({ response: { from: 'missing' } }, {}),

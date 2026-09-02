@@ -11,6 +11,7 @@ const {
   detectSessionScopedIdExtraction,
   detectNameIdMismatch,
   detectPrereqBindKeyMismatch,
+  detectEntityPinnedPrereqUrls,
 } = await import('../dist/gate/index.js');
 const { setDeclaredArgsProvider, setCapturedRequestsProvider } = await import(
   '../dist/strategies/validate.js'
@@ -19,6 +20,45 @@ const { setDeclaredArgsProvider, setCapturedRequestsProvider } = await import(
 test.afterEach(() => {
   setDeclaredArgsProvider(null);
   setCapturedRequestsProvider(null);
+});
+
+test('detectEntityPinnedPrereqUrls: ignores caller values that only match the hostname', () => {
+  setDeclaredArgsProvider(() => ({ reviewsOrigin: 'google' }));
+  const strategy = {
+    strategy: 'page-script',
+    origin: 'https://www.google.com',
+    prerequisites: [
+      {
+        name: 'page',
+        kind: 'js-eval',
+        url: 'https://www.google.com/maps',
+        expression: 'document.title',
+      },
+    ],
+  };
+
+  assert.deepEqual(detectEntityPinnedPrereqUrls(strategy, 'sess-hostname'), []);
+});
+
+test('detectEntityPinnedPrereqUrls: flags an exact caller value in a path segment', () => {
+  setDeclaredArgsProvider(() => ({ recipient: 'alice' }));
+  const strategy = {
+    strategy: 'page-script',
+    origin: 'https://example.com',
+    prerequisites: [
+      {
+        name: 'profile',
+        kind: 'js-eval',
+        url: 'https://example.com/profile/alice',
+        expression: 'document.title',
+      },
+    ],
+  };
+
+  const warnings = detectEntityPinnedPrereqUrls(strategy, 'sess-path');
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0].kind, 'entity_pinned_infra_prereq');
+  assert.match(warnings[0].message, /recipient/);
 });
 
 test('detectSessionScopedIdExtraction: flags frameFromPage reading window.location.pathname + .match()', () => {
@@ -73,6 +113,26 @@ test('detectSessionScopedIdExtraction: no warning when expression only reads arg
         "(()=>{ const text = args.text; const threadId = args.thread_id; return text + threadId; })()",
       returns: 'hex',
     },
+  };
+  assert.deepEqual(detectSessionScopedIdExtraction(strategy), []);
+});
+
+test('detectSessionScopedIdExtraction: no warning when the expression also reads args.* (caller fallback)', () => {
+  // Mixed provenance: the caller-supplied arg is the primary source and the
+  // page-state read is only a fallback — the caller binding threaded into
+  // the same body clears the warning.
+  const strategy = {
+    strategy: 'page-script',
+    origin: 'https://example.com',
+    prerequisites: [
+      {
+        name: 'place_id',
+        kind: 'js-eval',
+        url: 'https://example.com',
+        expression:
+          "(()=>{const u=String(args.place_url||location.href);return u.match(/place\\/([^/?]+)/)?.[1]||null})()",
+      },
+    ],
   };
   assert.deepEqual(detectSessionScopedIdExtraction(strategy), []);
 });

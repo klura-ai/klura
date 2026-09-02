@@ -92,9 +92,10 @@ function isBalancedBracketsAndQuotes(s: string): boolean {
  * Allowed `kind` values for a js-eval prereq's return-shape declaration. Narrow
  * on purpose — a richer shape language (nested objects, arrays-of-X,
  * discriminated unions) is easy to invent but the current caller only needs
- * primitive scalars + one-level objects.
+ * primitive scalars, one-level objects and flat collections. `object` / `array`
+ * match the `result_shape.kind` vocabulary the public page-script contract uses.
  */
-export const JS_EVAL_SHAPE_KINDS = ['string', 'number', 'boolean', 'object'] as const;
+export const JS_EVAL_SHAPE_KINDS = ['string', 'number', 'boolean', 'object', 'array'] as const;
 
 export type JsEvalShapeKind = (typeof JS_EVAL_SHAPE_KINDS)[number];
 
@@ -106,6 +107,13 @@ export interface JsEvalReturnShape {
   max_length?: number;
   /** Only meaningful for `kind: "object"` — object must contain these keys. */
   required_keys?: string[];
+  /**
+   * Only meaningful for `kind: "array"` — inclusive lower bound on element
+   * count. Leave unset when zero rows is a legitimate answer: an empty
+   * collection is a semantic-review question, not a prereq transport failure.
+   * Set it only when the site cannot legitimately return fewer rows.
+   */
+  min_items?: number;
 }
 
 /**
@@ -142,6 +150,15 @@ export function asReturnShape(value: unknown, field: string): JsEvalReturnShape 
     });
     out.required_keys = keys;
   }
+  if (obj.min_items !== undefined) {
+    out.min_items = asNonNegativeInt(obj.min_items, `${field}.min_items`);
+  }
+  if (kind !== 'array' && out.min_items !== undefined) {
+    throw new ValidationError(
+      field,
+      `min_items is only valid when kind === "array" (got kind = "${kind}")`,
+    );
+  }
   if (kind !== 'string' && (out.min_length !== undefined || out.max_length !== undefined)) {
     throw new ValidationError(
       field,
@@ -164,10 +181,13 @@ export function asReturnShape(value: unknown, field: string): JsEvalReturnShape 
  * throws `ValidationError` so the caller can reject cleanly.
  *
  * Returns the serializable token — for `kind: "string"` / `number` / `boolean`
- * this is the value coerced to a string, and for `kind: "object"` this is the
- * JSON-serialized form. The result slot that consumes this is a `Record<string,
- * string>` token table, so object shapes are stored as JSON text and the caller
- * is responsible for re-parsing at interpolation time.
+ * this is the value coerced to a string, and for `kind: "object"` / `"array"`
+ * this is the JSON-serialized form. The result slot that consumes this is a
+ * `Record<string, string>` token table, so structured shapes are stored as JSON
+ * text and the caller is responsible for re-parsing at interpolation time.
+ *
+ * An empty array satisfies `kind: "array"` unless `min_items` says otherwise —
+ * zero rows is a result the review gate weighs, not a shape violation.
  */
 export function assertReturnShape(value: unknown, shape: JsEvalReturnShape, field: string): string {
   if (shape.kind === 'string') {
@@ -197,6 +217,25 @@ export function assertReturnShape(value: unknown, shape: JsEvalReturnShape, fiel
       throw new ValidationError(field, `must be a boolean (got ${describe(value)})`);
     }
     return String(value);
+  }
+  if (shape.kind === 'array') {
+    if (!Array.isArray(value)) {
+      throw new ValidationError(field, `must be an array (got ${describe(value)})`);
+    }
+    if (shape.min_items !== undefined && value.length < shape.min_items) {
+      throw new ValidationError(
+        field,
+        `array of ${value.length} item(s) is shorter than declared min_items ${shape.min_items}`,
+      );
+    }
+    try {
+      return JSON.stringify(value);
+    } catch (err) {
+      throw new ValidationError(
+        field,
+        `array could not be JSON-serialized: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
   // kind === 'object'
   const obj = asObject(value, field);

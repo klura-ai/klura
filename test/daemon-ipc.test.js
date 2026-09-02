@@ -129,6 +129,20 @@ test('unknown endpoint returns 404 with an error body', async () => {
   assert.match(body.error, /Unknown endpoint/);
 });
 
+test('a second daemon over the same KLURA_HOME refuses to start', async () => {
+  // The daemon singleton lock must reject the second instance BEFORE it runs
+  // startup recovery or unlinks the live daemon's socket.
+  const second = cp.fork(DAEMON_SCRIPT, [], {
+    env: { ...process.env, KLURA_HOME: TMP },
+    stdio: 'ignore',
+  });
+  const [code] = await new Promise((resolve) => second.once('exit', (c, s) => resolve([c, s])));
+  assert.notStrictEqual(code, 0, 'second daemon must exit with a failure code');
+  assert.ok(fs.existsSync(SOCKET), 'live daemon socket must survive the refused start');
+  const { status } = await ipc('GET', '/status');
+  assert.strictEqual(status, 200, 'first daemon must keep serving');
+});
+
 test('POST /session/start with missing pool driver returns 500 with error body', async () => {
   // Without chromium installed via playwright, pool.createSession throws.
   // Even if chromium is installed, the URL is invalid → navigation throws.
@@ -689,11 +703,11 @@ test('sendToDaemon: TCP mode round-trips against a mock server; handles non-JSON
   }
 });
 
-test('ensureDaemon: no-op when a daemon is already running', () => {
-  // The forked daemon from test.before is alive; ensureDaemon should return
+test('ensureDaemon: no-op when a daemon is already running', async () => {
+  // The forked daemon from test.before is alive; ensureDaemon should resolve
   // immediately without spawning a second one.
   const before = fs.readFileSync(path.join(TMP, 'daemon.pid'), 'utf-8').trim();
-  ensureDaemon();
+  await ensureDaemon();
   const after = fs.readFileSync(path.join(TMP, 'daemon.pid'), 'utf-8').trim();
   assert.strictEqual(before, after, 'PID should be unchanged');
 });
@@ -762,4 +776,30 @@ test('POST /shutdown returns {ok:true} and exits the daemon', async () => {
 
 test('primary daemon still alive after /shutdown on a second daemon', () => {
   assert.strictEqual(isDaemonRunning(), true);
+});
+
+// Runs last: it stops the primary daemon so ensureDaemon takes the spawn
+// path, resolving on the child's ready IPC message rather than by watching
+// the filesystem.
+test('ensureDaemon: spawns a daemon and resolves on its ready IPC message', async () => {
+  const exited = new Promise((resolve) => daemon.once('exit', resolve));
+  daemon.kill('SIGTERM');
+  await exited;
+  assert.strictEqual(isDaemonRunning(), false, 'primary daemon stopped');
+
+  await ensureDaemon();
+
+  assert.strictEqual(isDaemonRunning(), true, 'ensureDaemon resolved with a live daemon');
+  const status = await sendToDaemon('GET', '/status');
+  assert.strictEqual(typeof status.uptime, 'number');
+
+  // The spawned daemon is detached — shut it down explicitly so the test
+  // process doesn't leak it, and wait for its pid file to disappear so
+  // test.after's TMP cleanup is deterministic.
+  await sendToDaemon('POST', '/shutdown');
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline && fs.existsSync(path.join(TMP, 'daemon.pid'))) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.strictEqual(fs.existsSync(path.join(TMP, 'daemon.pid')), false);
 });

@@ -108,6 +108,9 @@ export function rediscoverFailureGate(_session: Session, payload: unknown): bool
   //    the typed body; keeping the live session in triage gives it the
   //    observation surface needed to make that decision.
   if (p.result_classification === 'explicit_failure') return true;
+  if (p.result_classification === 'not_run' || p.result_classification === 'delivery_unknown') {
+    return false;
+  }
 
   // 3. Rate-based fallback for `unknown` / absent diagnosis: only trip
   //    when the rolling success rate has fallen below threshold.

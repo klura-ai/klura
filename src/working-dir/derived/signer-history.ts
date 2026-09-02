@@ -9,9 +9,9 @@
 // appears across N sessions.
 
 import fs from 'fs';
-import path from 'path';
 import { isSessionArchive, type SessionArchive } from '../schema';
 import { derivedPath, listSessions, sessionArchivePath } from '../layout';
+import { writeTextAtomically } from '../../utils/owner-file-lock';
 
 interface SignerAnchor {
   url: string;
@@ -81,11 +81,7 @@ export function recomputeSignerHistory(platform: string): SignerHistoryReport {
       }))
       .sort((x, y) => y.sessions - x.sessions),
   };
-  const p = derivedPath(platform, 'signer-history');
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  const tmp = `${p}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(report, null, 2));
-  fs.renameSync(tmp, p);
+  writeTextAtomically(derivedPath(platform, 'signer-history'), JSON.stringify(report, null, 2));
   return report;
 }
 

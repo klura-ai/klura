@@ -8,7 +8,6 @@ import {
 } from '../../strategies/synthesize-on-close';
 import { ingestCaptureEvents } from '../../working-dir/writer';
 import {
-  clearObservedSessionTracking,
   readObservedCapabilities,
   recordObservedCapability,
   appendAckedNoiseEndpoints,
@@ -17,7 +16,6 @@ import {
   inferObservedCapabilitiesFromGraph,
   normalizeUrlForGraph,
 } from '../../working-dir/url-graph';
-import { deleteJournal } from '../../working-dir/capture-journal';
 import { buildSessionSummary, countPerformActionCalls } from './session-summary';
 import { inferObservedCapabilitiesFromTriage } from './triage-inference';
 import { buildCaptureEvents } from './build-capture-events';
@@ -26,8 +24,6 @@ import {
   accumulatorAuthoredCapabilities,
   flushAccumulatorArtifacts,
 } from '../../strategies/discovery-artifact';
-import { clearStartersForSession } from '../../response/starter-cache';
-import { clearForSession as clearSessionObservations } from '../../response/session-observations';
 import {
   computeReverseEngineerHandoff,
   wouldReverseEngineerHandoffFire,
@@ -250,7 +246,12 @@ export async function endDrive(
   // it would be wrong (and would expect a strategy that's already committed).
   // Return a clean no-op instead of rejecting a tool the runtime told the agent
   // to call. (registry.checkAdmissibility lets end_drive through when closed.)
+  // The pool release still runs: the execute-graph FSM stamps terminal{closed}
+  // without touching the pool, so this call is where the id actually dies —
+  // warm-stash/destroy of the browser context, session-scope disposal, and
+  // the `busy()` predicate going quiet all hang off it.
   if (session.status === 'closed') {
+    await pool.endDrive(sessionId);
     return { ok: true, already_closed: true };
   }
 
@@ -386,17 +387,17 @@ export async function endDrive(
 
   // Close-session handoff into LIFT (phase: "lift"): any declared capability
   // must either have a saved strategy OR an explicit policy decline before
-  // close succeeds. The first end_drive call from drive (`session.lift` not
-  // yet set) returns the LIFT handoff response — the agent becomes a reverse
-  // engineer, works through candidate XHRs + RE signals, saves a strategy OR
-  // declines with evidence.
+  // close succeeds. The first end_drive call from drive (`session.liftHandoffAt`
+  // not yet stamped) returns the LIFT handoff response — the agent becomes a
+  // reverse engineer, works through candidate XHRs + RE signals, saves a
+  // strategy OR declines with evidence.
   //
-  // Subsequent end_drive calls FROM lift (`session.lift` already set, meaning
-  // the prior handoff already fired) take the abandon path: skip the handoff,
-  // fall through to auto-synth + close. This is the agent's escape hatch for
-  // audit loops that fail to converge — the lift phase admits end_drive
-  // exactly so the agent can bail without leaking the session. Auto-synth
-  // still runs over the captured action history, so a salvageable
+  // Subsequent end_drive calls FROM lift (`session.liftHandoffAt` stamped,
+  // meaning the prior handoff already fired) take the abandon path: skip the
+  // handoff, fall through to auto-synth + close. This is the agent's escape
+  // hatch for audit loops that fail to converge — the lift phase admits
+  // end_drive exactly so the agent can bail without leaking the session.
+  // Auto-synth still runs over the captured action history, so a salvageable
   // recorded-path can land from drive history even when the agent couldn't
   // compose a manual save.
   //
@@ -405,14 +406,21 @@ export async function endDrive(
   // null when every capability has a save). The save itself is gated by the
   // user_confirmation classifier in the save-strategy audit, so the user has
   // the final say at save time on whether the proposed strategy lands.
-  const isAbandonFromLift = session.lift !== undefined;
+  //
+  // The orchestrator never writes `session.lift` — LIFT_SPEC.onEnter (the
+  // state machine) is the phase struct's sole initializer, which is what
+  // keeps the lift budget sourced from config and the counter untouched by
+  // triage-phase activity. Abandon has two triggers: the handoff already
+  // fired this session (`liftHandoffAt`), or the session is literally in
+  // the lift phase (covers the execute graph's fail→triage→lift route,
+  // where lift is entered without an end_drive handoff and a close from
+  // lift must still be the escape hatch, not a fresh handoff).
+  const isAbandonFromLift = session.liftHandoffAt !== undefined || session.phase === 'lift';
   // Only graphs that include a lift phase can run the LIFT handoff. Map's
-  // topology is `drive → terminal{closed}` — writing session.lift bookkeeping
-  // for a map session would leave session.phase undefined while session.lift
-  // is populated, tripping the half-init invariant on the next currentPhase()
-  // call. start_session already rejects `capability + map`, so this guard
-  // is a defensive backstop — no in-process programmatic caller should reach
-  // this branch on a graph without a lift phase.
+  // topology is `drive → terminal{closed}`; start_session already rejects
+  // `capability + map`, so this guard is a defensive backstop — no in-process
+  // programmatic caller should reach this branch on a graph without a lift
+  // phase.
   const graphHasLift = currentGraph(session).nodes.has('lift');
   if (platform && !isAbandonFromLift && graphHasLift) {
     progress({ stage: 'composing drive→triage handoff' });
@@ -430,16 +438,11 @@ export async function endDrive(
       // aborts). Without a dump on this path, post-hoc inspectors see an empty
       // network-logs dir despite the runtime having full captures in memory.
       await maybeDumpCapturedLogs(sessionId, platform);
-      // Mark the session as having entered LIFT. The round counter starts
-      // fresh each close-attempt that hits this branch.
-      if (!session.lift) {
-        session.lift = {
-          handoffAt: Date.now(),
-          roundsSinceHandoff: 0,
-          budget: 0,
-          softBlockEngaged: false,
-        };
-      }
+      // Mark the handoff as fired and snapshot the user-round count so the
+      // repeat-close detector can tell "agent did nothing between closes"
+      // from real intervening work.
+      if (session.liftHandoffAt === undefined) session.liftHandoffAt = Date.now();
+      session.roundCountAtLastCloseAttempt = pool.getSessionRoundCount?.(sessionId) ?? 0;
       return handoff;
     }
   }
@@ -660,9 +663,10 @@ export async function endDrive(
       /* swallow */
     }
     // The clean-close fold above is authoritative and complete, so the
-    // durability journal is now redundant. Drop it so orphan-recovery on a
-    // later start_session never re-folds a session that closed cleanly.
-    deleteJournal(session.id);
+    // durability journal is now redundant. Its session-scope disposer
+    // (registered at the journal write site) deletes it when `pool.endDrive`
+    // below kills the session id, so orphan-recovery on a later
+    // start_session never re-folds a session that closed cleanly.
   }
 
   // session_summary: verbatim ground truth for the agent's retrospective.
@@ -671,9 +675,9 @@ export async function endDrive(
   // this-session prose. Agents quote `recent_aborts[*].reason` strings as
   // "tested this session", inflating the abort ledger with fabricated path
   // coverage that future sessions then paraphrase. Each field below is
-  // observable from session state only. Built BEFORE the teardown clears
-  // below: observed_unlifted_this_session reads the per-session observed-
-  // names map that clearObservedSessionTracking wipes.
+  // observable from session state only. Built BEFORE `pool.endDrive` below:
+  // observed_unlifted_this_session reads the per-session observed-names map
+  // that the session-scope disposal inside endDrive wipes.
   const sessionSummary = buildSessionSummary(
     session,
     autoSynthesized,
@@ -684,10 +688,13 @@ export async function endDrive(
   // Non-blocking nudge for covered gateways the session re-read via js_eval.
   const recurringReadAdvisory = buildRecurringReadAdvisory(session, platform);
 
+  // The single teardown call. Every module holding session-keyed state
+  // (starter cache, session observations, logbook dedupe, capture journal,
+  // pending checkpoints/interruptions, paused executions, remote viewers,
+  // adopted child sessions) registered a session-scope disposer at its write
+  // site; `pool.endDrive` runs them all when the id dies. See
+  // `runtime/src/pool/session-scope.ts`.
   await pool.endDrive(sessionId);
-  clearStartersForSession(sessionId);
-  clearSessionObservations(sessionId);
-  clearObservedSessionTracking(sessionId);
 
   const result: {
     ok: true;
@@ -703,7 +710,7 @@ export async function endDrive(
     recurring_read_advisory?: string[];
     _diagnostics?: {
       synth: typeof synthDiag;
-      declared_capabilities?: Array<{ capability: string; args: Record<string, string> }>;
+      declared_capabilities?: Array<{ capability: string; args: Record<string, unknown> }>;
     };
   } = { ok: true, session_summary: sessionSummary };
   if (autoSynthesized.length > 0) result.auto_synthesized = autoSynthesized;

@@ -24,6 +24,12 @@ import type { ToolDef } from '../tools/types';
 
 export const TOOL_DEF: ToolDef = {
   name: TOOL_NAMES.resumeExecution,
+  // extraPhases: the recorded_step_failed heal flow (inspect → patch_step →
+  // resume_execution) fires inside an auto-execute, so the tool must be
+  // admissible in the phase where the checkpoint surfaced. Precondition-
+  // guarded — throws when no execution is paused — so admissibility stays
+  // liberal.
+  phasePolicy: { category: 'drive_active', extraPhases: ['execute'] },
   description:
     'Resume a paused recorded-path execution from the step after the last failure. Use after patching the failed step.',
   inputSchema: {

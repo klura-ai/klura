@@ -24,6 +24,9 @@ import {
   ValidationError,
 } from '../validators';
 import { didYouMeanSuffix } from '../utils/string-distance';
+import { STRATEGY_TIERS, type AbortProvenance } from '../vocab';
+import { updateJsonFile, writeTextAtomically, type JsonFileCodec } from '../utils/owner-file-lock';
+import { onSessionDispose, removeSessionDisposeHook } from '../pool/session-scope';
 import type { AbortKind } from './schema';
 
 function emptyLogbook(platform: string): PlatformLogbook {
@@ -57,37 +60,62 @@ function emptyCapabilityEntry(): CapabilityLogbookEntry {
   };
 }
 
+function logbookCodec(platform: string): JsonFileCodec<PlatformLogbook> {
+  return {
+    read: (raw) => {
+      if (raw !== null) {
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          if (isPlatformLogbook(parsed)) return parsed;
+        } catch {
+          /* unreadable → fall through to empty */
+        }
+      }
+      return emptyLogbook(platform);
+    },
+    write: (logbook) =>
+      JSON.stringify({ ...logbook, updated_at: new Date().toISOString() }, null, 2),
+  };
+}
+
 /**
  * Load the platform logbook. Returns an empty logbook when the file is missing
  * or has the wrong schema — klura isn't released yet, so we don't attempt to
  * migrate drifted shapes. See feedback_no_backwards_compat.md.
  */
 export function loadLogbook(platform: string): PlatformLogbook {
-  const p = logbookPath(platform);
+  const codec = logbookCodec(platform);
   try {
-    const raw = fs.readFileSync(p, 'utf8');
-    const parsed: unknown = JSON.parse(raw);
-    if (isPlatformLogbook(parsed)) return parsed;
+    return codec.read(fs.readFileSync(logbookPath(platform), 'utf8'));
   } catch {
-    /* file missing / unreadable → fall through to empty */
+    return codec.read(null);
   }
-  return emptyLogbook(platform);
 }
 
 /**
- * Atomically write the logbook to disk. Bumps updated_at. Creates platform dirs
- * if missing.
+ * Serialized read-modify-write over the platform logbook. Every logbook
+ * mutation (session flush, strategy events, observed capabilities, abort
+ * events, acked noise endpoints, triage plans) routes through here so
+ * concurrent writers — including writers in other processes — never lose each
+ * other's updates. Bumps updated_at on write; returning `null` from `mutate`
+ * skips the write. Creates platform dirs if missing.
+ */
+export function updateLogbook(
+  platform: string,
+  mutate: (logbook: PlatformLogbook) => PlatformLogbook | null,
+): void {
+  ensurePlatformDirs(platform);
+  updateJsonFile(logbookPath(platform), logbookCodec(platform), mutate);
+}
+
+/**
+ * Atomically replace the logbook on disk. Bumps updated_at. Creates platform
+ * dirs if missing. Full-replace surface — read-modify-write callers use
+ * `updateLogbook`, which serializes against concurrent writers.
  */
 export function writeLogbook(logbook: PlatformLogbook): void {
   ensurePlatformDirs(logbook.platform);
-  const updated: PlatformLogbook = {
-    ...logbook,
-    updated_at: new Date().toISOString(),
-  };
-  const p = logbookPath(logbook.platform);
-  const tmp = `${p}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(updated, null, 2));
-  fs.renameSync(tmp, p);
+  writeTextAtomically(logbookPath(logbook.platform), logbookCodec(logbook.platform).write(logbook));
 }
 
 /**
@@ -159,37 +187,33 @@ export function appendStrategyEvent(
   capability: string,
   event: { strategy: string; kind: StrategyEventKind; detail?: string },
 ): void {
-  const logbook = loadLogbook(platform);
-  const entry = ensureCapabilityEntry(logbook, capability);
-  if (!Array.isArray(entry.strategy_events)) {
-    entry.strategy_events = [];
-  }
-  const record: StrategyEvent = {
-    at: new Date().toISOString(),
-    strategy: event.strategy,
-    kind: event.kind,
-  };
-  if (event.detail !== undefined && event.detail !== '') {
-    record.detail = event.detail;
-  }
-  entry.strategy_events.push(record);
+  updateLogbook(platform, (logbook) => {
+    const entry = ensureCapabilityEntry(logbook, capability);
+    if (!Array.isArray(entry.strategy_events)) {
+      entry.strategy_events = [];
+    }
+    const record: StrategyEvent = {
+      at: new Date().toISOString(),
+      strategy: event.strategy,
+      kind: event.kind,
+    };
+    if (event.detail !== undefined && event.detail !== '') {
+      record.detail = event.detail;
+    }
+    entry.strategy_events.push(record);
 
-  // Keep `current_tier` in sync with the active strategy. Events that establish
-  // or change the live tier stamp it; archiving the active tier clears it back
-  // to 'none' (a later rediscovery / unarchive re-establishes it).
-  const TIER_VALUES: ReadonlyArray<CapabilityLogbookEntry['current_tier']> = [
-    'fetch',
-    'page-script',
-    'recorded-path',
-  ];
-  const eventTier = TIER_VALUES.find((t) => t === event.strategy);
-  if (event.kind === 'archived') {
-    if (entry.current_tier === event.strategy) entry.current_tier = 'none';
-  } else if (eventTier) {
-    entry.current_tier = eventTier;
-  }
+    // Keep `current_tier` in sync with the active strategy. Events that establish
+    // or change the live tier stamp it; archiving the active tier clears it back
+    // to 'none' (a later rediscovery / unarchive re-establishes it).
+    const eventTier = STRATEGY_TIERS.find((t) => t === event.strategy);
+    if (event.kind === 'archived') {
+      if (entry.current_tier === event.strategy) entry.current_tier = 'none';
+    } else if (eventTier) {
+      entry.current_tier = eventTier;
+    }
 
-  writeLogbook(logbook);
+    return logbook;
+  });
 }
 
 const OBSERVED_WHY_NOT_LIFTED_VALUES = [
@@ -209,12 +233,19 @@ const OBSERVED_HYPOTHESIS_MAX = 800;
  */
 const observedBumpedPerSession = new Map<string, Set<string>>();
 
+// Session-scope hook name — registered on the first observed-capability bump
+// for a session id, so the dedupe set dies with the session on any close
+// path. See runtime/src/pool/session-scope.ts.
+const OBSERVED_TRACKING_HOOK = 'observed-session-tracking';
+
 /**
- * Clear the per-session dedupe set for observed_capabilities bumps. Called at
- * end_drive so the session id can be reused cleanly.
+ * Clear the per-session dedupe set for observed_capabilities bumps eagerly.
+ * Session close paths don't need to call this — the session-scope disposer
+ * registered on first write covers every close path via `pool.endDrive`.
  */
 export function clearObservedSessionTracking(sessionId: string): void {
   observedBumpedPerSession.delete(sessionId);
+  removeSessionDisposeHook(sessionId, OBSERVED_TRACKING_HOOK);
 }
 
 /**
@@ -267,43 +298,48 @@ export function recordObservedCapability(platform: string, input: ObservedCapabi
     throw e;
   }
 
-  const logbook = loadLogbook(platform);
-  if (!Array.isArray(logbook.observed_capabilities)) {
-    logbook.observed_capabilities = [];
-  }
-  const now = new Date().toISOString();
+  updateLogbook(platform, (logbook) => {
+    if (!Array.isArray(logbook.observed_capabilities)) {
+      logbook.observed_capabilities = [];
+    }
+    const now = new Date().toISOString();
 
-  const sessionBumped = input.session_id
-    ? (observedBumpedPerSession.get(input.session_id) ?? new Set<string>())
-    : null;
-  if (sessionBumped && input.session_id) {
-    observedBumpedPerSession.set(input.session_id, sessionBumped);
-  }
+    const sessionBumped = input.session_id
+      ? (observedBumpedPerSession.get(input.session_id) ?? new Set<string>())
+      : null;
+    if (sessionBumped && input.session_id) {
+      const sessionId = input.session_id;
+      observedBumpedPerSession.set(sessionId, sessionBumped);
+      onSessionDispose(sessionId, OBSERVED_TRACKING_HOOK, () => {
+        observedBumpedPerSession.delete(sessionId);
+      });
+    }
 
-  const existing = logbook.observed_capabilities.find((e) => e.name === input.name);
-  if (existing) {
-    existing.evidence = input.evidence;
-    existing.why_not_lifted = input.why_not_lifted;
-    if (input.hypothesis !== undefined) existing.hypothesis = input.hypothesis;
-    existing.last_observed_at = now;
-    if (!sessionBumped || !sessionBumped.has(input.name)) {
-      existing.observed_in_sessions += 1;
+    const existing = logbook.observed_capabilities.find((e) => e.name === input.name);
+    if (existing) {
+      existing.evidence = input.evidence;
+      existing.why_not_lifted = input.why_not_lifted;
+      if (input.hypothesis !== undefined) existing.hypothesis = input.hypothesis;
+      existing.last_observed_at = now;
+      if (!sessionBumped || !sessionBumped.has(input.name)) {
+        existing.observed_in_sessions += 1;
+        sessionBumped?.add(input.name);
+      }
+    } else {
+      const record: ObservedPlatformCapability = {
+        name: input.name,
+        evidence: input.evidence,
+        why_not_lifted: input.why_not_lifted,
+        first_observed_at: now,
+        last_observed_at: now,
+        observed_in_sessions: 1,
+      };
+      if (input.hypothesis !== undefined) record.hypothesis = input.hypothesis;
+      logbook.observed_capabilities.push(record);
       sessionBumped?.add(input.name);
     }
-  } else {
-    const record: ObservedPlatformCapability = {
-      name: input.name,
-      evidence: input.evidence,
-      why_not_lifted: input.why_not_lifted,
-      first_observed_at: now,
-      last_observed_at: now,
-      observed_in_sessions: 1,
-    };
-    if (input.hypothesis !== undefined) record.hypothesis = input.hypothesis;
-    logbook.observed_capabilities.push(record);
-    sessionBumped?.add(input.name);
-  }
-  writeLogbook(logbook);
+    return logbook;
+  });
 }
 
 export interface AbortEventInput {
@@ -317,8 +353,31 @@ export interface AbortEventInput {
    *  match historical aborts to the requested URL by host without
    *  parsing free-text `reason`. */
   host?: string;
+  /** Where `kind` came from. Omit for an agent's own classification — the
+   *  reader defaults to `'agent_asserted'`, which is what an uncorroborated
+   *  claim is. `'runtime_observed'` is reserved for a claim the runtime's own
+   *  detector independently corroborated on the same host. */
+  provenance?: AbortProvenance;
+  /** Structural signals behind a `runtime_observed` entry. */
+  signals?: readonly string[];
   captured_actions_count: number;
   phase_at_abort: string;
+}
+
+/** Newest N abort events kept per platform. The ledger is a replay surface for
+ *  future sessions, not an archive — older entries can neither be read (the
+ *  read cap is an order of magnitude smaller) nor scored (the escalation
+ *  window is 24h). */
+const ABORT_EVENT_CAP = 200;
+/** Age past which an abort event is dropped on the next write. */
+const ABORT_EVENT_TTL_MS = 30 * 24 * 3_600_000;
+
+/** True when `event` is older than the ledger TTL. Entries whose timestamp
+ *  doesn't parse are kept — corrupt data is bounded by the ring buffer, and
+ *  silently deleting what we can't reason about is worse. */
+function isExpiredAbortEvent(event: { at: string }, now: number): boolean {
+  const at = Date.parse(event.at);
+  return Number.isFinite(at) && now - at > ABORT_EVENT_TTL_MS;
 }
 
 /**
@@ -327,25 +386,48 @@ export interface AbortEventInput {
  * prior wrong starts on this platform. Defensive-init: pre-existing logbooks
  * (no abort_events field) are upgraded in place rather than discarded, same
  * pattern as `observed_capabilities`.
+ *
+ * Bounded at write time, no background job: expired entries are pruned, an
+ * append that repeats the newest entry's `session_id` + `kind` + `host` is
+ * dropped (one session's retried abort must not read as a pattern), and the
+ * list is trimmed to the newest `ABORT_EVENT_CAP`.
  */
 export function appendAbortEvent(platform: string, input: AbortEventInput): void {
-  const logbook = loadLogbook(platform);
-  const wide = logbook.platform_wide as PlatformLogbook['platform_wide'] & {
-    abort_events?: PlatformLogbook['platform_wide']['abort_events'];
-  };
-  if (!Array.isArray(wide.abort_events)) {
-    wide.abort_events = [];
-  }
-  wide.abort_events.push({
-    at: new Date().toISOString(),
-    session_id: input.session_id,
-    reason: input.reason,
-    ...(input.kind !== undefined ? { kind: input.kind } : {}),
-    ...(input.host !== undefined ? { host: input.host } : {}),
-    captured_actions_count: input.captured_actions_count,
-    phase_at_abort: input.phase_at_abort,
+  updateLogbook(platform, (logbook) => {
+    const wide = logbook.platform_wide as PlatformLogbook['platform_wide'] & {
+      abort_events?: PlatformLogbook['platform_wide']['abort_events'];
+    };
+    if (!Array.isArray(wide.abort_events)) {
+      wide.abort_events = [];
+    }
+    const now = Date.now();
+    const kept = wide.abort_events.filter((e) => !isExpiredAbortEvent(e, now));
+    const newest = kept.at(-1);
+    const duplicate =
+      newest !== undefined &&
+      newest.session_id === input.session_id &&
+      (newest.kind ?? 'other') === (input.kind ?? 'other') &&
+      (newest.host ?? '') === (input.host ?? '');
+    if (duplicate) {
+      wide.abort_events = kept;
+      return logbook;
+    }
+    kept.push({
+      at: new Date(now).toISOString(),
+      session_id: input.session_id,
+      reason: input.reason,
+      ...(input.kind !== undefined ? { kind: input.kind } : {}),
+      ...(input.host !== undefined ? { host: input.host } : {}),
+      ...(input.provenance !== undefined ? { provenance: input.provenance } : {}),
+      ...(input.signals !== undefined && input.signals.length > 0
+        ? { signals: [...input.signals] }
+        : {}),
+      captured_actions_count: input.captured_actions_count,
+      phase_at_abort: input.phase_at_abort,
+    });
+    wide.abort_events = kept.length > ABORT_EVENT_CAP ? kept.slice(-ABORT_EVENT_CAP) : kept;
+    return logbook;
   });
-  writeLogbook(logbook);
 }
 
 /**
@@ -358,11 +440,12 @@ export function appendAbortEvent(platform: string, input: AbortEventInput): void
 export function appendAckedNoiseEndpoints(platform: string, paths: readonly string[]): void {
   const clean = paths.filter((p) => typeof p === 'string' && p.length > 0);
   if (clean.length === 0) return;
-  const logbook = loadLogbook(platform);
-  const wide = logbook.platform_wide;
-  const existing = Array.isArray(wide.acked_noise_endpoints) ? wide.acked_noise_endpoints : [];
-  wide.acked_noise_endpoints = Array.from(new Set([...existing, ...clean]));
-  writeLogbook(logbook);
+  updateLogbook(platform, (logbook) => {
+    const wide = logbook.platform_wide;
+    const existing = Array.isArray(wide.acked_noise_endpoints) ? wide.acked_noise_endpoints : [];
+    wide.acked_noise_endpoints = Array.from(new Set([...existing, ...clean]));
+    return logbook;
+  });
 }
 
 /** Read the platform's acked-as-noise XHR endpoint paths (empty if none).
@@ -382,6 +465,11 @@ export interface AbortEventRead {
   reason: string;
   kind?: AbortKind;
   host?: string;
+  /** Always present on read: entries persisted without the field are
+   *  `'agent_asserted'` — an agent's claim is exactly what an unstamped
+   *  historical entry recorded. */
+  provenance: AbortProvenance;
+  signals?: string[];
   captured_actions_count: number;
   phase_at_abort: string;
   /** Hours since the abort fired, rounded to one decimal. Computed on read. */
@@ -409,12 +497,14 @@ export function readRecentAborts(platform: string, limit = 10): AbortEventRead[]
         at: e.at,
         session_id: e.session_id,
         reason: e.reason,
+        provenance: e.provenance ?? 'agent_asserted',
         captured_actions_count: e.captured_actions_count,
         phase_at_abort: e.phase_at_abort,
         hours_since: Math.round(((now - Date.parse(e.at)) / 3600000) * 10) / 10,
       };
       if (e.kind !== undefined) enriched.kind = e.kind;
       if (e.host !== undefined) enriched.host = e.host;
+      if (Array.isArray(e.signals) && e.signals.length > 0) enriched.signals = [...e.signals];
       return enriched;
     });
 }

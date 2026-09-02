@@ -86,6 +86,7 @@ import { getSecret } from '../public-api';
 export const TOOL_DEFS: ToolDef[] = [
   {
     name: TOOL_NAMES.getConfig,
+    phasePolicy: { category: 'universal' },
     description:
       'Read the current klura runtime config (the merged ~/.klura/config.json, with defaults filled in). Returns the full DaemonConfig object — pool settings, driver, warm-pool, remote viewer, runtime boot fields, etc.',
     inputSchema: { type: 'object', properties: {} },
@@ -94,6 +95,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.describeConfig,
+    phasePolicy: { category: 'universal' },
     description:
       'List every tunable config field with its type, valid values, default, and whether it needs a runtime restart to take effect. Call this before `configure` so you know the exact dot-path and what values are allowed — it prevents hallucinated field names. Returns `{fields: [{path, type, enum?, range?, default, description, needsRestart}], current}`.',
     inputSchema: { type: 'object', properties: {} },
@@ -102,6 +104,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.configure,
+    phasePolicy: { category: 'universal' },
     description:
       'Set a single klura config field by dot-path. Example: `{path: "pool.driver", value: "playwright-stealth"}` to enable the stealth driver, or `{path: "pool.headful", value: true}` to show a visible browser window. Call `describe_config` first if you are unsure of the path or valid values. Returns `{config, changed, runtime_restart_required, runtime_restart_fields, suggested_user_prompt}`. When `runtime_restart_required` is true, relay `suggested_user_prompt` to the user as an assistant text turn and wait for their yes/no before calling `restart_runtime`.',
     inputSchema: {
@@ -123,6 +126,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.restartRuntime,
+    phasePolicy: { category: 'universal' },
     description:
       'Restart the klura runtime so boot-time config (runtime.listen, runtime.idleTimeout) takes effect. Only works when klura runs as a standalone background daemon — refuses when the runtime is embedded in the caller (klura chat / execute --agent / an MCP host), since exiting would kill your session. Also refuses if any sessions are active unless `force: true` (which will kill them). After a daemon restart, the runtime auto-respawns on your next tool call — expect a ~1s delay.',
     inputSchema: {
@@ -136,6 +140,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.getSecret,
+    phasePolicy: { category: 'universal' },
     description:
       'Fetch a secret from a configured shell-command resolver (macOS keychain, 1password CLI, pass, etc). Use during discovery when you hit a login form and the user has a password manager resolver configured — fetch the password with `get_secret(scheme, ref)` and type it into the form instead of escalating to the remote viewer. The response value is the raw secret; pass it directly to `perform_action({action: "type", selector: "input[type=password]", value})` and **never log, persist, or echo it**. If no resolver is configured for `scheme`, this throws with a setup hint — fall back to `start_remote_session` in that case. Call `get_config` first to see the `secrets` map (scheme → command template) so you know which schemes are configured; ask the user in chat once per platform per session for the `ref` if you don\'t already know it (never guess — wrong guesses are a silent exfil risk).',
     inputSchema: {

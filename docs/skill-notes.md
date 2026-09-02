@@ -8,7 +8,7 @@ The alternative would be: return the signal from the `save_strategy` / `execute`
 
 ## Current `notes.*` slots
 
-- **`notes.save_warnings[]`** — runtime-emitted advisories attached at save time when a structural pattern is worth flagging (validation already passed). Currently the only emitted kind is `unparametrized_session_id` — fired when an expression body reads a session-scoped id from `window.location.*` / `document.cookie` / similar without a lookup companion. The next agent reading the skill knows the saved strategy works for the discovery-session's entity only and needs parametrization before warm runs scale.
+- **`notes.save_warnings[]`** — runtime-emitted advisories attached at save time when a structural pattern is worth flagging (validation already passed). Kinds come from the `WARNING_KINDS` catalog (`runtime/src/vocab/index.ts`) — e.g. `unparametrized_session_id`, fired when an expression body reads a session-scoped id from `window.location.*` / `document.cookie` / similar without a lookup companion, telling the next agent the saved strategy works for the discovery-session's entity only and needs parametrization before warm runs scale. The per-kind detector catalog lives in [gates.md](gates.md).
 
 Sibling-capability pointers ("I observed another capability but didn't lift it") live on the **platform logbook** (`working/logbook.json` → `observed_capabilities[]`), written via the `record_observed_capability` MCP tool. That observation is a platform-level signal, not a property of any one saved strategy — keeping it on the logbook avoids the asymmetry of pinning a platform-wide fact to one capability's notes.
 
@@ -17,4 +17,4 @@ Sibling-capability pointers ("I observed another capability but didn't lift it")
 1. Prefer the skill body (or the platform logbook) over the return-value path. If a signal is purely in-the-moment (no next-session value), it belongs in the `save_strategy` / `execute` response, not on disk.
 2. Signal entries must be structured (JSON objects with enumerated `kind` values), not free-text blobs. Free-text rots into cover-story justifications and next agents learn to ignore it. The save-time validator enforces this on every `notes.*` key.
 3. Producers don't mix on the same key — add a new key if a new producer needs an outlet. Currently `notes.save_warnings[]` is runtime-only.
-4. Validate the key in `NOTES_ALLOWED_KEYS` (`runtime/src/strategies/validate.ts`) and document it in `runtime/REFERENCE.md` before emitting it. Every allowed key has a documented schema and a documented producer.
+4. Validate the key in `NOTES_ALLOWED_KEYS` (`runtime/src/strategies/validate/notes.ts`, derived from the notes Zod schema) and document it in `runtime/REFERENCE.md` before emitting it. Every allowed key has a documented schema and a documented producer.

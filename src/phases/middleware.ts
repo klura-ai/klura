@@ -68,10 +68,13 @@ export function tickPhaseCounter(session: Session, toolName: string): void {
 
 export { ToolNotAdmissibleError };
 
-/** MCP-side entry point. Looks up the session by id, runs admissibility,
- *  and ticks the counter on admitted calls. Universal tools (control
- *  plane, memory reads, escape valve) bypass entirely — they're valid
- *  even when the targeted session is closed or never existed. For
+/** MCP-side entry point — the single place a user round is registered.
+ *  Looks up the session by id (a pure lookup), runs admissibility, ticks
+ *  the per-phase counter, and registers exactly one round with the pool
+ *  per admitted call. Handlers calling `pool.getSession` any number of
+ *  times add nothing. Universal tools (control plane, memory reads,
+ *  escape valve) bypass entirely — they're valid even when the targeted
+ *  session is closed or never existed, and they burn no budget. For
  *  non-universal tools, an unknown / closed session surfaces a clean
  *  ToolNotAdmissibleError rather than the silent no-op that masked
  *  references to deleted sessions. */
@@ -90,4 +93,5 @@ export function assertToolAdmissibleBySessionId(sessionId: string, toolName: str
   }
   assertToolAdmissible(session, toolName);
   tickPhaseCounter(session, toolName);
+  pool.registerUserRound?.(sessionId);
 }

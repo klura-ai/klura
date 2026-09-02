@@ -23,6 +23,7 @@ import fs from 'fs';
 import path from 'path';
 import { derivedPath } from '../layout';
 import { SKILLS_DIR } from '../../paths';
+import { writeTextAtomically } from '../../utils/owner-file-lock';
 
 const STRATEGY_SUBDIRS = ['fetch', 'scripts', 'paths'] as const;
 
@@ -112,11 +113,7 @@ export function recomputeKnownModules(platform: string): KnownModulesReport {
 }
 
 function writeReport(platform: string, report: KnownModulesReport): void {
-  const p = derivedPath(platform, 'known-modules');
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  const tmp = `${p}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(report, null, 2));
-  fs.renameSync(tmp, p);
+  writeTextAtomically(derivedPath(platform, 'known-modules'), JSON.stringify(report, null, 2));
 }
 
 function emptyReport(platform: string): KnownModulesReport {

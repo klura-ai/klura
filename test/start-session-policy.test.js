@@ -94,3 +94,18 @@ test('start_session policy requires platform', async () => {
     /policy requires platform/,
   );
 });
+
+test('start_session accepts an argument value that is also a legitimate capability noun', async () => {
+  const restore = patchPoolForFakeBrowser();
+  try {
+    const result = await startSession('https://x.example/', {
+      platform: 'maps-start',
+      capability: 'scrape_google_places_actor',
+      args: { reviewsOrigin: 'google' },
+    });
+
+    assert.match(result.sessionId, /^sess-policy-/);
+  } finally {
+    restore();
+  }
+});

@@ -381,7 +381,7 @@ export function diffFingerprints(
  * Runtime error thrown by the recorded-path step loop when the live page
  * fingerprint diverges from the step-authored fingerprint beyond recovery.
  * Caught by the outer executor wrapper and routed through
- * `invokeCheckpointAndGate('recorded_step_failed', ...)` with
+ * `invokeCheckpointAndGate(checkpointEvent.recorded_step_failed({...}))` with
  * `context.reason: "page_drifted_before_step"` + the diff.
  */
 export class PageDriftError extends Error {

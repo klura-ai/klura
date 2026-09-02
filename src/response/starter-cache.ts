@@ -6,12 +6,13 @@
 // round. When the agent ignores it, the runtime emits a `runtime_hint` on the
 // try_generator response nudging them to use the starter first.
 //
-// Module-level state because the cache is short-lived (cleared on endDrive)
-// and there is exactly one process-local instance per Node runtime. Keeping it
-// on the Pool would force every Pool implementation (local + docker) to ship
-// the same plumbing for a detection-only signal that has no remote-side
-// dependency.
+// Module-level state because the cache is short-lived (dropped by the
+// session-scope disposer registered on first write) and there is exactly one
+// process-local instance per Node runtime. Keeping it on the Pool would force
+// every Pool implementation (local + docker) to ship the same plumbing for a
+// detection-only signal that has no remote-side dependency.
 
+import { onSessionDispose, removeSessionDisposeHook } from '../pool/session-scope';
 import type { InspectStarter } from './ws-frame-starter';
 
 interface StarterEntry {
@@ -25,6 +26,10 @@ interface StarterEntry {
 
 const STARTERS_PER_SESSION_CAP = 8;
 const _starters = new Map<string, StarterEntry[]>();
+
+// Session-scope hook name — registered on first write so the cache dies with
+// the session on any close path. See runtime/src/pool/session-scope.ts.
+const STARTER_CACHE_HOOK = 'starter-cache';
 
 export function recordStarterIssued(
   sessionId: string,
@@ -45,6 +50,9 @@ export function recordStarterIssued(
   if (!buf) {
     buf = [];
     _starters.set(sessionId, buf);
+    onSessionDispose(sessionId, STARTER_CACHE_HOOK, () => {
+      _starters.delete(sessionId);
+    });
   }
   // Replace any prior entry for the same ws_i (re-inspection updates the cached
   // starter rather than accumulating duplicates).
@@ -81,4 +89,5 @@ export function codeReferencesStarter(code: string, entry: StarterEntry): boolea
 
 export function clearStartersForSession(sessionId: string): void {
   _starters.delete(sessionId);
+  removeSessionDisposeHook(sessionId, STARTER_CACHE_HOOK);
 }

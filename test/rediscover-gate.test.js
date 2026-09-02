@@ -114,6 +114,12 @@ test('gate: transport failure alone remains on the rate-based path', () => {
   );
 });
 
+test('gate: not_run and delivery_unknown are neutral terminal classifications', () => {
+  for (const result_classification of ['not_run', 'delivery_unknown']) {
+    assert.equal(rediscoverFailureGate(fakeSession, payload({ result_classification })), false);
+  }
+});
+
 test('gate: unknown falls through to rate-based fallback (no rate → no trip)', () => {
   // No saved strategies for the test platform/capability → rate is
   // null → gate doesn't trip on its own. Same shape as a fresh

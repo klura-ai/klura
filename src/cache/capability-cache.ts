@@ -118,6 +118,7 @@ function isCacheable(status: number, body: unknown): boolean {
   if (status < 200 || status >= 300) return false;
   if (!body || typeof body !== 'object') return true; // primitive/null body — fine
   const rec = body as Record<string, unknown>;
+  if (rec.ok === false) return false;
   if (rec.error !== undefined && rec.error !== null) return false;
   if (rec.needs_generation === true) return false;
   if (rec.blocker !== undefined && rec.blocker !== null) return false;

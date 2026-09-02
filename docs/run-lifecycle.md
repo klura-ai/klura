@@ -7,8 +7,9 @@ Every klura invocation runs through the same lifecycle. The flowchart and a high
 `start_session(url, {platform, capability, args, graph, lift_mode, on_complexity_signal})` opens (or borrows) a browser session and returns the initial context the agent needs to drive. Internally:
 
 1. **Load policy.** `~/.klura/skills/<platform>/policy.json` — user-set tier caps and forbid lists. If the requested capability is capped at `recorded-path` by user policy or by a fresh agent decline hypothesis, the response carries `prior_decline` so the agent doesn't try to RE again.
-2. **Load saved strategies.** All on-disk strategies for `{platform, capability}` are read. If a complete strategy exists AND the served tier is at or above `fetch` (the LIFT threshold), the runtime auto-executes it and returns `executed: true` with the result. The agent skips straight to `end_drive`. See [Auto-execute session topology](#auto-execute-session-topology) for what "auto-executes" means at the session-graph level — `fetch` and `page-script` cold-spawn an isolated session that closes when execute returns; `recorded-path` does the same and additionally pauses the session intact when a step fails.
-3. **Otherwise return drive context.** If no strategy auto-fires, the response carries the a11y tree, current URL, a `task_contract` describing what the agent is supposed to accomplish (graph-aware — `discover` and `map` shape it differently), and the active complexity-signal opt-out.
+2. **Load saved strategies.** All on-disk strategies for `{platform, capability}` are read. If a complete strategy exists, every required caller-supplied `notes.params` value is present, and the served tier is at or above `fetch` (the LIFT threshold), the runtime auto-executes it and returns `executed: true` with the result. Params with a runtime `source` or `optional: true` do not block auto-execute, matching execution preflight. The agent skips straight to `end_drive`. See [Auto-execute session topology](#auto-execute-session-topology) for what "auto-executes" means at the session-graph level — `fetch` and `page-script` cold-spawn an isolated session that closes when execute returns; `recorded-path` does the same and additionally pauses the session intact when a step fails.
+
+`update_strategy` treats an omitted `notes` field as “keep the saved caller contract.” An explicit `notes: null` remains the way to remove it. This keeps body-only repairs from accidentally erasing `notes.params` and making their placeholders undeclared. 3. **Otherwise return drive context.** If no strategy auto-fires, the response carries the a11y tree, current URL, a `task_contract` describing what the agent is supposed to accomplish (graph-aware — `discover` and `map` shape it differently), and the active complexity-signal opt-out.
 
 The `graph` parameter selects the FSM topology and per-graph behavior. Three graphs ship — `discover` (default goal-directed flow), `map` (surface mapping), `execute` (run-a-saved-strategy with auto-fall into triage on stale failure). Full topology + per-graph `GraphConfig` reference: [session-phases.md](session-phases.md). When the `discover` graph drives a session and the agent doesn't save a strategy, `end_drive` either auto-synthesizes a recorded-path from the action history or hands LIFT to the agent depending on `lift_mode`.
 
@@ -43,12 +44,12 @@ The two sessions load from the same on-disk `storageState` (so they start with t
 
 For `fetch` and `page-script`, this is invisible: execute returns a final result, the inner session is destroyed, and only the outer remains. There's nothing to resume.
 
-For `recorded-path`, the asymmetry surfaces when a step fails mid-flow. The runtime registers the paused execution in `pausedExecutions` keyed by the **inner** session id (`recorded-path.ts:444`), and the failure envelope's `session_id` field is also the inner id. The agent's `start_session` response, however, only carries the outer id. Two consequences:
+For `recorded-path`, the asymmetry surfaces when a step fails mid-flow. The runtime registers the paused execution in `pausedExecutions` keyed by the **inner** session id, and the failure envelope's `session_id` field is also the inner id. The agent's `start_session` response, however, only carries the outer id. The runtime bridges that gap with two structures registered at the pause:
 
-- `resume_execution(<outer_id>)` returns `No paused execution for session ...`. The agent has to read `session_id` out of the failure envelope (or the `_checkpoint` context) and call `resume_execution(<inner_id>)` instead.
-- `ack_checkpoint(<outer_id>, ...)` succeeds (checkpoint dispatch is keyed by checkpoint_token, not session id), but the inner session may carry its own pending checkpoint state that an additional ack against the inner id resolves.
+- **Outer→inner alias** (`runtime/src/execution/auto-execute-alias.ts`). `resume_execution(<outer_id>)` and `ack_checkpoint(<outer_id>, ...)` resolve the alias on a direct-lookup miss, so the agent can keep using the only id it knows. The alias is re-registered on every pause — a resume whose tail pauses again keeps outer-id calls resolving.
+- **Child adoption** (`runtime/src/pool/session-scope.ts`). The inner session is adopted as a child of the outer session, so any close of the outer id — `end_drive`, `abort_session`, pool shutdown — closes the paused inner browser context first and clears the paused entry and the alias with it. A paused auto-execute can never outlive the session that started it.
 
-This is a known sharp edge of the topology. A future change can either alias outer↔inner so resume_execution(outer_id) finds the right paused entry, or unify auto-execute and the agent-driving session for recorded-path. Until then, callers that programmatically drive auto-execute → resume should read the resume target from the failure envelope's `session_id`, not from `start_session`.
+Callers may still read the inner id from the failure envelope's `session_id` and drive it directly; both ids resolve to the same paused entry until the pause is consumed or the sessions close.
 
 ## end_drive
 
@@ -60,6 +61,8 @@ This is a known sharp edge of the topology. A future change can either alias out
 4. **Compute unresolved capabilities.** Anything the agent declared via `start_session({capability})` or `declare_capability` that didn't end up with a saved strategy AND isn't user-policy-capped becomes a candidate for the LIFT handoff.
 
 If unresolved capabilities exist, the close response carries a handoff payload whose shape depends on `lift_mode` (see below). Otherwise end_drive returns clean.
+
+Teardown itself is one call: `pool.endDrive`, whose session-scope disposal runs every disposer registered against the id (pending checkpoints/interruptions, paused executions, per-session caches, the capture journal, remote viewers, adopted child sessions). `abort_session` converges on the same call, so the two close paths cannot drift. See [pool.md](pool.md) §"Session scope".
 
 ## Per-platform working dir (logbook)
 

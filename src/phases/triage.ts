@@ -10,29 +10,7 @@
 import type { PhaseSpec, AdmissibilityResult, PhaseEvent, GraphConfig } from './types';
 import type { Session } from '../drivers/types/session';
 import type { DaemonConfig } from '../config/handler';
-import {
-  CAPABILITY_DECLARATION,
-  DISCOVERY_ARTIFACT,
-  ESCAPE_VALVE,
-  LOGBOOK_WRITE,
-  READ_ONLY_DIAGNOSTIC,
-  TRIAGE_AND_LIFT_WRITE,
-  unionSets,
-} from './tool-catalog';
-
-const ALLOWED = unionSets(
-  READ_ONLY_DIAGNOSTIC,
-  TRIAGE_AND_LIFT_WRITE,
-  CAPABILITY_DECLARATION,
-  DISCOVERY_ARTIFACT,
-  LOGBOOK_WRITE,
-  ESCAPE_VALVE,
-);
-
-const ALLOWED_WHEN_EXHAUSTED: ReadonlySet<string> = new Set([
-  'submit_triage_plan',
-  'abort_session',
-]);
+import { phaseAllowedTools, phaseExhaustedTools } from './tool-catalog';
 
 /** Default triage round budget when the user hasn't set
  *  `triage.max_rounds`. Tight by design — deliberation is short, lift is
@@ -41,8 +19,9 @@ export const DEFAULT_TRIAGE_MAX_ROUNDS = 10;
 
 export const TRIAGE_SPEC: PhaseSpec = {
   name: 'triage',
-  allowedTools: ALLOWED,
-  allowedToolsWhenExhausted: ALLOWED_WHEN_EXHAUSTED,
+  // Derived from each ToolDef's phasePolicy — see tool-catalog.ts.
+  allowedTools: phaseAllowedTools('triage'),
+  allowedToolsWhenExhausted: phaseExhaustedTools('triage'),
 
   onEnter(
     session: Session,

@@ -37,6 +37,18 @@ interface BrowserDriver {
   destroySession(session: Session): void;
   resetSession(session: Session): void; // navigate to about:blank, reset interception state
 
+  // Warm-slot lease surface. A BrowserLease is the driver-held browser-
+  // resource bundle (context, pages, capture plumbing) detached from a
+  // closing session so the pool can stash it; the next checkout binds it
+  // onto a freshly-minted Session. Logical Session fields never travel
+  // with a lease — that's the pool's no-state-leakage guarantee. Defaults
+  // in the abstract class keep BYO drivers working without lease support:
+  // detachLease returns null (pool destroys instead of stashing),
+  // attachLease throws, destroyLease is a no-op.
+  detachLease(session: Session): BrowserLease | null;
+  attachLease(session: Session, lease: BrowserLease): void;
+  destroyLease(lease: BrowserLease): Promise<void>;
+
   // Navigation
   navigate(session, url: string): void;
   waitForNavigation(session, options?): void;

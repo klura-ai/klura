@@ -48,7 +48,7 @@ export function hasResponseFrom(
  *  violations — caller surfaces these as their existing error envelope. */
 export function applyResponseFrom(
   strategy: { response?: StrategyResponseLike } | null | undefined,
-  prereqResults: Record<string, string>,
+  prereqResults: Record<string, unknown>,
 ): { body: unknown } {
   const response = strategy?.response;
   const fromName = (response?.from as string | undefined) ?? '';
@@ -59,6 +59,11 @@ export function applyResponseFrom(
   if (raw === undefined) {
     throw new Error(
       `response.from = "${fromName}" but prereq did not produce a bound value (the prereq may have failed silently or returned undefined)`,
+    );
+  }
+  if (raw === null) {
+    throw new Error(
+      `response.from = "${fromName}" but the optional prereq produced an empty value, which cannot prove a successful result`,
     );
   }
 
@@ -72,7 +77,9 @@ export function applyResponseFrom(
     } else {
       const trimmed = raw.trim();
       if (trimmed.length === 0) {
-        body = '';
+        throw new Error(
+          `response.from = "${fromName}" with format:"json": prereq produced an empty value, which is not valid JSON and cannot prove a successful result`,
+        );
       } else {
         try {
           body = JSON.parse(raw);

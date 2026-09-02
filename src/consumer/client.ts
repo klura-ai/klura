@@ -1,6 +1,5 @@
 import path from 'node:path';
 import {
-  parseCapabilityId,
   parseInteger,
   parsePackageId,
   parseSessionName,
@@ -11,7 +10,19 @@ import {
   type CapabilityIdV1,
   type PackageIdV1,
 } from '../public/contracts/common';
+import {
+  CALLER_BOUND_KEYS,
+  CONSUMER_BOUNDS,
+  CONSUMER_BYTE_LIMITS,
+} from '../public/contracts/consumer-bounds';
 import { assertJsonValue, type JsonValueV1 } from '../public/contracts/json';
+import {
+  capabilitySelectorContract,
+  CONSUMER_TOOL_CONTRACTS,
+  parseConsumerArgs,
+  startScrapeRunOptionsContract,
+} from './contracts/tool-contracts';
+import { TOOL_NAMES } from '../vocab';
 import { isConsumerRunOutputFailure, type ConsumerRunOutputFailureV1 } from './run-output-failure';
 import {
   isConsumerDaemonFailure,
@@ -280,18 +291,32 @@ export class KluraConsumerClientV1 {
   }
 
   async show(input: unknown): Promise<ShowPackageResultV1> {
-    const record = registryInputRecord(input, 'show');
+    let record;
+    try {
+      record = parseConsumerArgs(CONSUMER_TOOL_CONTRACTS[TOOL_NAMES.showPackage], input, 'show');
+    } catch (error) {
+      return registryInputFailure('show', error);
+    }
     return this.invokeDaemon<ShowPackageResultV1>('/consumer/show', {
-      package_id: record.package_id ?? null,
+      package_id: record.package_id,
       version: record.version ?? null,
       capability: record.capability ?? null,
     });
   }
 
   async install(input: unknown): Promise<InstallPackageResultV1> {
-    const record = registryInputRecord(input, 'install');
+    let record;
+    try {
+      record = parseConsumerArgs(
+        CONSUMER_TOOL_CONTRACTS[TOOL_NAMES.installPackage],
+        input,
+        'install',
+      );
+    } catch (error) {
+      return registryInputFailure('install', error);
+    }
     return this.invokeDaemon<InstallPackageResultV1>('/consumer/install', {
-      package_id: record.package_id ?? null,
+      package_id: record.package_id,
       version: record.version ?? null,
     });
   }
@@ -373,7 +398,11 @@ export class KluraConsumerClientV1 {
 
   async completeLogin(interactionId: string): Promise<ConsumerCompleteLoginResultV1> {
     try {
-      const selectedInteractionId = parseString(interactionId, 'complete_login.interaction_id', 48);
+      const selectedInteractionId = parseString(
+        interactionId,
+        'complete_login.interaction_id',
+        CONSUMER_BYTE_LIMITS.interaction_id,
+      );
       const result = await this.invokeDaemon<CompletePackageLoginResultV1>(
         '/consumer/login/complete',
         { interaction_id: selectedInteractionId },
@@ -391,12 +420,17 @@ export class KluraConsumerClientV1 {
   ): Promise<ConsumerCallInvocationResultV1> {
     let selected: ConsumerCapabilitySelectorV1;
     try {
-      selected = parseCapabilitySelector(selector, 'call.selector');
+      selected = parseConsumerArgs(capabilitySelectorContract, selector, 'call.selector');
       assertJsonValue(input, 'call.input', PUBLIC_CONTRACT_LIMITS.maxDepth);
       const timeout =
         options.timeout_ms === undefined
           ? null
-          : parseInteger(options.timeout_ms, 'call.options.timeout_ms', 1, 300_000);
+          : parseInteger(
+              options.timeout_ms,
+              'call.options.timeout_ms',
+              CONSUMER_BOUNDS.call_timeout_ms.minimum,
+              CONSUMER_BOUNDS.call_timeout_ms.maximum,
+            );
       const sessionName =
         options.session_name === undefined
           ? null
@@ -429,13 +463,30 @@ export class KluraConsumerClientV1 {
   ): Promise<ConsumerStartRunResultV1> {
     let selected: ConsumerCapabilitySelectorV1;
     try {
-      selected = parseCapabilitySelector(selector, 'start_run.selector');
+      selected = parseConsumerArgs(capabilitySelectorContract, selector, 'start_run.selector');
       assertJsonValue(input, 'start_run.input', PUBLIC_CONTRACT_LIMITS.maxDepth);
-      const { callerBounds, inputMode, output, sessionName } = parseStartOptions(options);
-      const operationId =
-        options.operation_id === undefined
-          ? createRunOperationId()
-          : parseRunOperationId(options.operation_id, 'start_run.options.operation_id');
+      const parsed = parseConsumerArgs(startScrapeRunOptionsContract, options, 'start_run.options');
+      const callerBounds: Record<string, JsonValueV1> = {};
+      for (const key of CALLER_BOUND_KEYS) {
+        const bound = parsed[key];
+        if (bound !== undefined) callerBounds[key] = bound;
+      }
+      if (parsed.limits !== undefined) callerBounds.limits = parsed.limits;
+      const inputMode = parsed.input_mode_id;
+      const sessionName = parsed.session_name;
+      let output: RunOutputV1 | undefined;
+      if (parsed.output !== undefined) {
+        const declared =
+          parsed.output.kind === 'inline'
+            ? { kind: 'inline' }
+            : {
+                kind: 'file',
+                requested_path: path.resolve(parsed.output.path),
+                format: parsed.output.format,
+              };
+        output = parseRunOutput(declared, 'start_run.options.output');
+      }
+      const operationId = parsed.operation_id ?? createRunOperationId();
       const result = await this.invokeDaemon<
         | DetachedRunAcceptedV1
         | ConsumerDaemonFailureV1
@@ -476,11 +527,12 @@ export class KluraConsumerClientV1 {
     input: JsonValueV1,
     options: ConsumerStartRunOptionsV1 & { signal?: AbortSignal } = {},
   ): Promise<ConsumerWaitRunResultV1 | ConsumerStartRunResultV1> {
-    const started = await this.startRun(selector, input, options);
+    const { signal, ...startOptions } = options;
+    const started = await this.startRun(selector, input, startOptions);
     if (started.kind === 'consumer_failure') return started;
     const runId = parseRunId(started.run_id, 'start_run.result.run_id');
     try {
-      return await this.waitRun(runId, { signal: options.signal });
+      return await this.waitRun(runId, { signal });
     } catch (error) {
       if (!isCancellation(error)) throw error;
       const cancelled = await this.cancelRun(runId);
@@ -533,11 +585,21 @@ export class KluraConsumerClientV1 {
       const afterSequence =
         options.after_sequence === undefined
           ? null
-          : parseInteger(options.after_sequence, 'list_run_items.options.after_sequence', 0, 1e9);
+          : parseInteger(
+              options.after_sequence,
+              'list_run_items.options.after_sequence',
+              CONSUMER_BOUNDS.after_sequence.minimum,
+              CONSUMER_BOUNDS.after_sequence.maximum,
+            );
       const limit =
         options.limit === undefined
           ? null
-          : parseInteger(options.limit, 'list_run_items.options.limit', 1, 100);
+          : parseInteger(
+              options.limit,
+              'list_run_items.options.limit',
+              CONSUMER_BOUNDS.page_limit.minimum,
+              CONSUMER_BOUNDS.page_limit.maximum,
+            );
       const result = await this.invokeDaemon<CommittedRunItemsPageV1 | ConsumerRunFailureV1>(
         '/consumer/runs/items',
         {
@@ -566,7 +628,12 @@ export class KluraConsumerClientV1 {
       const afterSequence =
         options.after_sequence === undefined
           ? null
-          : parseInteger(options.after_sequence, 'items.options.after_sequence', 0, 1e9);
+          : parseInteger(
+              options.after_sequence,
+              'items.options.after_sequence',
+              CONSUMER_BOUNDS.after_sequence.minimum,
+              CONSUMER_BOUNDS.after_sequence.maximum,
+            );
       for await (const event of followConsumerDaemon<ConsumerDaemonRunItemStreamEventV1>(
         '/consumer/runs/items/follow',
         { run_id: parsed, after_sequence: afterSequence },
@@ -664,8 +731,8 @@ export class KluraConsumerClientV1 {
           : parseInteger(
               options.after_state_version,
               'wait_run_state.options.after_state_version',
-              0,
-              Number.MAX_SAFE_INTEGER,
+              CONSUMER_BOUNDS.after_state_version.minimum,
+              CONSUMER_BOUNDS.after_state_version.maximum,
             );
       const waitTimeoutMs =
         options.wait_timeout_ms === undefined
@@ -673,8 +740,8 @@ export class KluraConsumerClientV1 {
           : parseInteger(
               options.wait_timeout_ms,
               'wait_run_state.options.wait_timeout_ms',
-              0,
-              25_000,
+              CONSUMER_BOUNDS.wait_timeout_ms.minimum,
+              CONSUMER_BOUNDS.wait_timeout_ms.maximum,
             );
       const result = await this.invokeDaemon<ConsumerDaemonRunStateWaitResponseV1>(
         '/consumer/runs/wait-state',
@@ -732,97 +799,6 @@ export class KluraConsumerClientV1 {
   }
 }
 
-function parseCapabilitySelector(value: unknown, field: string): ConsumerCapabilitySelectorV1 {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new PublicContractError(field, 'must be an object');
-  }
-  const record = value as Record<string, unknown>;
-  if (
-    Object.keys(record).length !== 2 ||
-    !Object.hasOwn(record, 'package_id') ||
-    !Object.hasOwn(record, 'capability')
-  ) {
-    throw new PublicContractError(field, 'must contain only package_id and capability');
-  }
-  return {
-    package_id: parsePackageId(record.package_id, `${field}.package_id`),
-    capability: parseCapabilityId(record.capability, `${field}.capability`),
-  };
-}
-
-function parseStartOptions(options: ConsumerStartRunOptionsV1): {
-  callerBounds: JsonValueV1;
-  inputMode: string | undefined;
-  output: RunOutputV1 | undefined;
-  sessionName: string | undefined;
-} {
-  const bounds: Record<string, JsonValueV1> = {};
-  for (const key of [
-    'max_items',
-    'max_pages',
-    'max_requests',
-    'timeout_ms',
-    'max_concurrency',
-  ] as const) {
-    const value = options[key];
-    if (value !== undefined)
-      bounds[key] = parseInteger(value, `start_run.options.${key}`, 1, 1_000_000_000);
-  }
-  if (options.limits !== undefined) {
-    const limitsInput: unknown = options.limits;
-    if (!limitsInput || typeof limitsInput !== 'object' || Array.isArray(limitsInput)) {
-      throw new PublicContractError('start_run.options.limits', 'must be an object');
-    }
-    const limits: Record<string, number> = {};
-    for (const [key, value] of Object.entries(limitsInput)) {
-      parseStableContractId(key, `start_run.options.limits.${key}`);
-      limits[key] = parseInteger(value, `start_run.options.limits.${key}`, 1, 1_000_000_000);
-    }
-    bounds.limits = limits;
-  }
-  const inputMode =
-    options.input_mode_id === undefined
-      ? undefined
-      : parseStableContractId(options.input_mode_id, 'start_run.options.input_mode_id');
-  const output = parseConsumerRunOutput(options.output);
-  const sessionName =
-    options.session_name === undefined
-      ? undefined
-      : parseSessionName(options.session_name, 'start_run.options.session_name');
-  return { callerBounds: bounds, inputMode, output, sessionName };
-}
-
-function parseConsumerRunOutput(value: unknown): RunOutputV1 | undefined {
-  if (value === undefined) return undefined;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new PublicContractError('start_run.options.output', 'must be an object');
-  }
-  const record = value as Record<string, unknown>;
-  if (record.kind === 'inline') {
-    if (Object.keys(record).length !== 1) {
-      throw new PublicContractError(
-        'start_run.options.output',
-        'inline output has no extra fields',
-      );
-    }
-    return parseRunOutput({ kind: 'inline' }, 'start_run.options.output');
-  }
-  if (record.kind !== 'file' || Object.keys(record).length !== 3) {
-    throw new PublicContractError(
-      'start_run.options.output',
-      'must be an inline output or file output with path and format',
-    );
-  }
-  return parseRunOutput(
-    {
-      kind: 'file',
-      requested_path: typeof record.path === 'string' ? path.resolve(record.path) : record.path,
-      format: record.format,
-    },
-    'start_run.options.output',
-  );
-}
-
 function knownPackageId(input: unknown): PackageIdV1 | null {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
   try {
@@ -832,23 +808,26 @@ function knownPackageId(input: unknown): PackageIdV1 | null {
   }
 }
 
-function registryInputRecord(
-  value: unknown,
+function registryInputFailure(
   operation: 'show' | 'install',
-): Record<string, JsonValueV1> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new PublicContractError(operation, 'must be an object');
-  }
-  const record = value as Record<string, unknown>;
-  const allowed =
-    operation === 'show' ? ['package_id', 'version', 'capability'] : ['package_id', 'version'];
-  for (const key of Object.keys(record)) {
-    if (!allowed.includes(key)) {
-      throw new PublicContractError(`${operation}.${key}`, 'is not allowed');
-    }
-  }
-  assertJsonValue(record, operation, PUBLIC_CONTRACT_LIMITS.maxDepth);
-  return record as Record<string, JsonValueV1>;
+  error: unknown,
+): {
+  result_schema_version: 1;
+  kind: 'consumer_failure';
+  operation: 'show' | 'install';
+  code: 'invalid_options';
+  retryable: false;
+  package_id: null;
+} {
+  if (!(error instanceof PublicContractError)) throw error;
+  return {
+    result_schema_version: 1,
+    kind: 'consumer_failure',
+    operation,
+    code: 'invalid_options',
+    retryable: false,
+    package_id: null,
+  };
 }
 
 function daemonFailure(

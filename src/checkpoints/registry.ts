@@ -20,8 +20,13 @@ const handlers: CheckpointHandler[] = [];
 /** Register a handler. Push to the end — dispatch picks the last match,
  *  so defaults register first and scenario stubs register after to
  *  pre-empt them. Same-name re-register replaces the prior entry in
- *  place (preserves its position). */
-export function registerCheckpointHandler(handler: CheckpointHandler): void {
+ *  place (preserves its position). Generic over the claimed kinds so a
+ *  handler declaring `kinds: ['triage_plan']` gets `event` narrowed to
+ *  that kind's typed context; the runtime string checks stay because the
+ *  public JS API admits untyped registrations. */
+export function registerCheckpointHandler<K extends CheckpointKind>(
+  handler: CheckpointHandler<K>,
+): void {
   if (typeof handler.name !== 'string' || handler.name.length === 0) {
     throw new Error('registerCheckpointHandler: handler.name required (non-empty string)');
   }
@@ -40,12 +45,16 @@ export function registerCheckpointHandler(handler: CheckpointHandler): void {
   if (typeof handler.handle !== 'function') {
     throw new Error(`registerCheckpointHandler(${handler.name}): handle (async function) required`);
   }
+  // Storage is the widest handler type; the `kinds` claim is what scopes
+  // dispatch, so widening here is safe — `invokeCheckpoint` only hands a
+  // handler events whose `kind` is in its claimed set.
+  const stored = handler as unknown as CheckpointHandler;
   const existing = handlers.findIndex((h) => h.name === handler.name);
   if (existing >= 0) {
-    handlers[existing] = handler;
+    handlers[existing] = stored;
     return;
   }
-  handlers.push(handler);
+  handlers.push(stored);
 }
 
 /** Remove a previously-registered handler by name. No-op if unknown. */
@@ -68,23 +77,22 @@ export function listCheckpointHandlers(): Array<{ name: string; kinds: Checkpoin
 
 /**
  * Direct-dispatch invoke. Picks the LAST-registered handler whose
- * `kinds` includes the supplied `kind`. Throws if no handler claims the
+ * `kinds` includes `event.kind`. Throws if no handler claims the
  * kind — that is a runtime misconfiguration (every shipped kind has a
  * default handler).
  */
 export async function invokeCheckpoint(
-  kind: CheckpointKind,
   event: CheckpointEvent,
   session: Session,
 ): Promise<CheckpointResolution> {
   for (let i = handlers.length - 1; i >= 0; i -= 1) {
     const h = handlers[i];
-    if (h && h.kinds.includes(kind)) {
+    if (h && h.kinds.includes(event.kind)) {
       return h.handle(event, session);
     }
   }
   throw new Error(
-    `no checkpoint handler claims kind="${kind}" — registered: [${handlers
+    `no checkpoint handler claims kind="${event.kind}" — registered: [${handlers
       .map((h) => `${h.name}:${h.kinds.join('|')}`)
       .join(', ')}]`,
   );

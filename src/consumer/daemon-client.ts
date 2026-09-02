@@ -5,6 +5,7 @@ import path from 'node:path';
 import { canonicalJson, assertJsonValue, type JsonValueV1 } from '../public/contracts/json';
 import { PUBLIC_CONTRACT_LIMITS } from '../public/contracts/common';
 import { defaultConsumerHome } from './store/package-store';
+import { releaseOwnerFileLock, tryAcquireOwnerFileLock } from '../utils/owner-file-lock';
 
 const DAEMON_READY_TIMEOUT_MS = 10_000;
 
@@ -98,27 +99,17 @@ async function ensureConsumerDaemon(home: string, signal?: AbortSignal): Promise
   if (isDaemonReady(home)) return;
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });
   fs.chmodSync(home, 0o700);
-  const lockPath = path.join(home, 'daemon-start.lock');
-  let lockFd: number | null = null;
+  const lock = tryAcquireOwnerFileLock(path.join(home, 'daemon-start.lock'));
+  if (lock === null) {
+    // A live process is starting the daemon — wait for its readiness signal.
+    await waitForDaemonReady(home, signal);
+    return;
+  }
   try {
-    try {
-      lockFd = fs.openSync(lockPath, 'wx', 0o600);
-    } catch (error) {
-      if (!isAlreadyExists(error)) throw error;
-      await waitForDaemonReady(home, signal);
-      return;
-    }
     if (isDaemonReady(home)) return;
     await startConsumerDaemon(home, signal);
   } finally {
-    if (lockFd !== null) {
-      fs.closeSync(lockFd);
-      try {
-        fs.unlinkSync(lockPath);
-      } catch {
-        // The lock is best-effort cleanup after daemon startup.
-      }
-    }
+    releaseOwnerFileLock(lock);
   }
 }
 
@@ -414,8 +405,4 @@ function asConsumerDaemonError(error: unknown): ConsumerDaemonClientError {
 
 function cancelledError(): ConsumerDaemonClientError {
   return new ConsumerDaemonClientError('cancelled', 'consumer request was cancelled');
-}
-
-function isAlreadyExists(error: unknown): boolean {
-  return !!error && typeof error === 'object' && (error as { code?: unknown }).code === 'EEXIST';
 }

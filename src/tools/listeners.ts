@@ -111,6 +111,7 @@ import type { ToolDef } from '../tools/types';
 export const TOOL_DEFS: ToolDef[] = [
   {
     name: TOOL_NAMES.startListener,
+    phasePolicy: { category: 'lift_re_active' },
     description:
       'Start a real-time event listener (WebSocket, SSE, or HTTP polling). Requires a saved listener strategy. Returns a listenerId for polling events.',
     inputSchema: {
@@ -127,6 +128,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.stopListener,
+    phasePolicy: { category: 'lift_re_active' },
     description: 'Stop a running event listener.',
     inputSchema: {
       type: 'object',
@@ -138,6 +140,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.getEvents,
+    phasePolicy: { category: 'lift_re_active' },
     description:
       'Get events received by active listeners. Paginated — default 20 events per page, max 100. Per-event `data` field is truncated to 1KB with `data_truncated: true` + `data_total_chars` markers when longer. Response shape: `{events, page, page_size, total, has_more}`. Without `since`, returns (and clears) the full queue. With `since` (timestamp ms), returns events after that time without clearing.',
     inputSchema: {

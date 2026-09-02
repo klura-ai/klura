@@ -33,6 +33,9 @@ const { invokeCheckpointAndGate } = await import('../dist/checkpoints/index.js')
 const { ackCheckpoint } = await import('../dist/checkpoints/api.js');
 const { registerCheckpointDefaults } = await import('../dist/checkpoints/default-handlers.js');
 const { pool } = await import('../dist/runtime-state/index.js');
+const skills = await import('../dist/strategies/skills.js');
+const { createPostSaveVerificationProof } =
+  await import('../dist/strategies/post-save-verification-proof.js');
 
 // The default `post_save_validation_consent` handler returns `handover` — so
 // `invokeCheckpointAndGate` mints an envelope + registers a pending checkpoint.
@@ -84,11 +87,17 @@ function patchPool(session) {
 // Mirror what save_strategy does: stage the verify payload on the session, then
 // emit the checkpoint. Returns the envelope the agent would ack.
 async function stageAndEmit(session, platform, capability) {
-  session.pendingPostSaveValidation = { platform, capability, args: {} };
-  const { envelope } = await invokeCheckpointAndGate('post_save_validation_consent', {
+  session.pendingPostSaveValidation = {
+    platform,
+    capability,
+    args: {},
+    proof: skills.capturePostSaveVerificationTarget(platform, capability, 'fetch').proof,
+  };
+  const { envelope } = await invokeCheckpointAndGate({
+    kind: 'post_save_validation_consent',
     session_id: session.id,
     capability,
-    context: { kind: 'post_save_validation_consent', capability },
+    context: { capability },
   });
   return envelope;
 }
@@ -151,6 +160,71 @@ test('consent ack → a 2xx strategy passes and stays, stamped passed', async ()
     assert.ok(fs.existsSync(activePath(platform, capability)), 'verified strategy stays active');
     const saved = JSON.parse(fs.readFileSync(activePath(platform, capability), 'utf8'));
     assert.equal(saved.runtime_meta?.post_save_validation, 'passed');
+  } finally {
+    restore();
+  }
+});
+
+test('consent ack verifies an inactive candidate and atomically replaces the prior active strategy', async () => {
+  const platform = 'psv-wire-candidate';
+  const capability = 'list_things';
+  writeFetchStrategy(platform, capability, '/fail');
+  const priorPath = activePath(platform, capability);
+  const priorBytes = fs.readFileSync(priorPath);
+  const candidate = skills.stageValidatedStrategyCandidate(platform, capability, {
+    strategy: 'fetch',
+    baseUrl: `http://127.0.0.1:${port}`,
+    endpoint: '/ok',
+    method: 'GET',
+    transport: 'node',
+    schema_version: 1,
+  });
+  const session = {
+    id: 'sess_psv_candidate',
+    pendingPostSaveValidation: {
+      platform,
+      capability,
+      args: {},
+      proof: createPostSaveVerificationProof(
+        platform,
+        capability,
+        JSON.parse(fs.readFileSync(candidate.path, 'utf8')),
+      ),
+      candidate_id: candidate.candidate_id,
+      changelog: 'verify replacement',
+    },
+  };
+  const restore = patchPool(session);
+  try {
+    const { envelope } = await invokeCheckpointAndGate({
+      kind: 'post_save_validation_consent',
+      session_id: session.id,
+      capability,
+      context: { capability },
+    });
+    assert.ok(envelope);
+    assert.deepEqual(fs.readFileSync(priorPath), priorBytes);
+
+    const ack = await ackCheckpoint({
+      session_id: session.id,
+      checkpoint_token: envelope.checkpoint_token,
+      user_response: 'yes, execute this exact inactive candidate once',
+    });
+
+    assert.equal(ack.post_save_validation?.classification, 'explicit_success');
+    assert.equal(ack.post_save_validation?.active, true);
+    assert.equal(session.pendingPostSaveValidation, undefined);
+    assert.deepEqual(
+      session.savedCapabilities.map(({ capability: savedCapability, tier }) => ({
+        capability: savedCapability,
+        tier,
+      })),
+      [{ capability, tier: 'fetch' }],
+    );
+    const promoted = JSON.parse(fs.readFileSync(priorPath, 'utf8'));
+    assert.equal(promoted.endpoint, '/ok');
+    assert.equal(promoted.runtime_meta?.post_save_validation, 'passed');
+    assert.equal(fs.existsSync(candidate.path), false);
   } finally {
     restore();
   }

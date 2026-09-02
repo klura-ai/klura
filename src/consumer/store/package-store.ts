@@ -22,6 +22,7 @@ import {
 } from '../../public/contracts/common';
 import { canonicalJson, parseStrictJson, type JsonValueV1 } from '../../public/contracts/json';
 import { parsePublicToolPackage } from '../../public/contracts/package';
+import { withOwnerFileLock } from '../../utils/owner-file-lock';
 
 const INSTALLED_SCHEMA_VERSION_V1 = 1;
 const INSTALLED_STATE_BYTES_V1 = 1024 * 1024;
@@ -247,26 +248,10 @@ export class PackageStoreV1 {
 
   private withActivationLock<Value>(operation: () => Value): Value {
     const lockPath = path.join(this.paths.home, 'activation.lock');
-    let lockFd: number | null = null;
-    try {
-      try {
-        lockFd = fs.openSync(lockPath, 'wx', 0o600);
-      } catch (error) {
-        if (isAlreadyExists(error)) {
-          throw new PublicContractError(
-            'activation_lock',
-            'is held by another local install or remove',
-          );
-        }
-        throw error;
-      }
-      return operation();
-    } finally {
-      if (lockFd !== null) {
-        fs.closeSync(lockFd);
-        fs.unlinkSync(lockPath);
-      }
-    }
+    return withOwnerFileLock(lockPath, operation, {
+      onLocked: () =>
+        new PublicContractError('activation_lock', 'is held by another local install or remove'),
+    });
   }
 }
 

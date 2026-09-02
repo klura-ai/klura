@@ -5,6 +5,12 @@ import {
   PublicContractError,
   type StableContractIdV1,
 } from './common';
+import {
+  CALLER_BOUND_KEYS,
+  CONSUMER_BOUNDS,
+  CONSUMER_LIMITS_MAX_ENTRIES_V1,
+  type CallerBoundKeyV1,
+} from './consumer-bounds';
 import { parseCallRetryPolicy, type CallRetryPolicyV1 } from './outcome';
 
 export interface DurableRunBoundsV1 {
@@ -39,16 +45,11 @@ export interface EffectiveRunBoundsV1 {
   named_limits: Record<StableContractIdV1, number>;
 }
 
-export interface ScrapeCallerBoundsV1 {
-  max_concurrency?: number;
-  max_items?: number;
-  max_pages?: number;
-  max_requests?: number;
-  timeout_ms?: number;
+export type ScrapeCallerBoundsV1 = Partial<Record<CallerBoundKeyV1, number>> & {
   limits?: Record<string, number>;
-}
+};
 
-const MAX_ITEM_LIMIT_V1 = 1_000_000;
+const MAX_ITEM_LIMIT_V1 = CONSUMER_BOUNDS.caller_limit.maximum;
 const RESERVED_LIMIT_IDS = new Set(['caller_max_items', 'caller_max_pages']);
 
 export function parseScrapeRunPolicy(value: unknown, field: string): ScrapeRunPolicyV1 {
@@ -140,7 +141,7 @@ export function resolveEffectiveRunBounds(
   value: unknown,
   field: string,
 ): EffectiveRunBoundsV1 {
-  const options = parseCallerBounds(value, field);
+  const options = parseScrapeCallerBounds(value, field);
   const limits = indexLimits(declaredLimits, `${field}.limits`);
   const namedLimits = {} as Record<StableContractIdV1, number>;
   for (const limit of declaredLimits) {
@@ -225,46 +226,49 @@ function parseDurableBounds(value: unknown, field: string): DurableRunBoundsV1 {
   };
 }
 
-function parseCallerBounds(value: unknown, field: string): ScrapeCallerBoundsV1 {
+/** Parses one nested caller-bounds object with the shared consumer bounds. */
+export function parseScrapeCallerBounds(value: unknown, field: string): ScrapeCallerBoundsV1 {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new PublicContractError(field, 'must be an object');
   }
   const record = value as Record<string, unknown>;
-  const allowed = [
-    'max_concurrency',
-    'max_items',
-    'max_pages',
-    'max_requests',
-    'timeout_ms',
-    'limits',
-  ];
+  const allowed: readonly string[] = [...CALLER_BOUND_KEYS, 'limits'];
   for (const key of Object.keys(record)) {
     if (!allowed.includes(key)) throw new PublicContractError(`${field}.${key}`, 'is not allowed');
   }
-  const limits =
-    record.limits === undefined ? undefined : parseCallerLimitMap(record.limits, `${field}.limits`);
-  return {
-    max_concurrency: parseOptionalPositiveInteger(
-      record.max_concurrency,
-      `${field}.max_concurrency`,
-    ),
-    max_items: parseOptionalPositiveInteger(record.max_items, `${field}.max_items`),
-    max_pages: parseOptionalPositiveInteger(record.max_pages, `${field}.max_pages`),
-    max_requests: parseOptionalPositiveInteger(record.max_requests, `${field}.max_requests`),
-    timeout_ms: parseOptionalPositiveInteger(record.timeout_ms, `${field}.timeout_ms`),
-    limits,
-  };
+  const bounds: ScrapeCallerBoundsV1 = {};
+  for (const key of CALLER_BOUND_KEYS) {
+    const parsed = parseOptionalPositiveInteger(record[key], `${field}.${key}`);
+    if (parsed !== undefined) bounds[key] = parsed;
+  }
+  if (record.limits !== undefined) {
+    bounds.limits = parseScrapeCallerLimitMap(record.limits, `${field}.limits`);
+  }
+  return bounds;
 }
 
-function parseCallerLimitMap(value: unknown, field: string): Record<string, number> {
+/** Parses one named caller-limit map with the shared entry and value bounds. */
+export function parseScrapeCallerLimitMap(value: unknown, field: string): Record<string, number> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new PublicContractError(field, 'must be an object');
   }
   const record = value as Record<string, unknown>;
+  const entries = Object.entries(record);
+  if (entries.length > CONSUMER_LIMITS_MAX_ENTRIES_V1) {
+    throw new PublicContractError(
+      field,
+      `must contain at most ${CONSUMER_LIMITS_MAX_ENTRIES_V1} entries`,
+    );
+  }
   const parsed: Record<string, number> = {};
-  for (const [id, candidate] of Object.entries(record)) {
+  for (const [id, candidate] of entries) {
     parseStableContractId(id, `${field}.${id}`);
-    parsed[id] = parseInteger(candidate, `${field}.${id}`, 1, MAX_ITEM_LIMIT_V1);
+    parsed[id] = parseInteger(
+      candidate,
+      `${field}.${id}`,
+      CONSUMER_BOUNDS.caller_limit.minimum,
+      CONSUMER_BOUNDS.caller_limit.maximum,
+    );
   }
   return parsed;
 }
@@ -289,7 +293,12 @@ function parseLimitId(value: unknown, field: string): StableContractIdV1 {
 
 function parseOptionalPositiveInteger(value: unknown, field: string): number | undefined {
   if (value === undefined) return undefined;
-  return parseInteger(value, field, 1, 3_600_000);
+  return parseInteger(
+    value,
+    field,
+    CONSUMER_BOUNDS.caller_bound.minimum,
+    CONSUMER_BOUNDS.caller_bound.maximum,
+  );
 }
 
 function lowerBound(requested: number | undefined, maximum: number, field: string): number {

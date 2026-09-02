@@ -53,6 +53,8 @@ See [pool.md](pool.md) for the warm-pool / ready-page checkout protocol and [dri
 | `pool.connect.endpoint` | string | (unset) | CDP endpoint for `mode: attach`, e.g. `http://localhost:9222`. |
 | `pool.connect.chromePath` | string | (unset) | Chrome binary path override for `mode: spawn`. Defaults to the platform install. |
 | `pool.connect.profileDir` | string | (unset) | Persistent user-data-dir for `mode: spawn`. Defaults to `{KLURA_HOME}/connect-profile`. |
+| `pool.rediscoverThreshold` | number, 0–1 | `0.7` | Rolling success-rate floor below which `execute` raises the rediscover ack-gate. `0` disables. See [health.md](health.md). |
+| `pool.brokenProbationHours` | number, 0–8760 | `6` | Hours a `broken` tier sits out before `execute` runs it once as a probation probe. Without it a skipped tier appends no outcome and its record freezes. `0` keeps broken tiers skipped until a heal or health reset. See [health.md](health.md#broken-tier-probation). |
 
 ### `remote.*` — viewer tunnel
 
@@ -88,6 +90,13 @@ Each non-terminal session phase carries a configurable round budget. When the ag
 | `lift.max_rounds` | number, 0–10 000 | `0` (unlimited) | Round budget for the lift phase (agent executes the RE playbook). Default unlimited because the agent's primary work happens here. When >0, only `save_strategy` and `submit_triage_plan` admit once the budget is hit. |
 
 Convention: `max_rounds: 0` means unlimited — the middleware skips the soft-block check entirely. Counter resets on every transition INTO a phase (including self-loops on `plan_submitted`, the symmetric re-plan path).
+
+`drive.*` also carries the weighting for the abort-ledger escalation signal `start_session` computes (`must_escalate`). The ledger mixes an agent's own classification with one the runtime's origin-blocked detector corroborated; counting them equally is what let three guesses read as a proven wall. See [logbook.md](logbook.md#abort-ledger).
+
+| Field | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `drive.abort_escalation.agent_asserted_weight` | number, 0–1 | `0.4` | Weight of an agent-asserted abort event. Runtime-corroborated entries always weigh 1.0. At the default, three agent claims score 1.2 and do not escalate while three runtime-observed aborts do. `0` ignores agent claims entirely; `1` restores raw counting. |
+| `drive.abort_escalation.half_life_hours` | number, 1–8760 | `12` | Hours of age at which an abort event halves in weight, applied in whole half-lives. |
 
 ### `secrets.*` — password-manager resolvers
 

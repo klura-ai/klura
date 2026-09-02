@@ -7,37 +7,18 @@
 import type { PhaseSpec, AdmissibilityResult, PhaseEvent, GraphConfig } from './types';
 import type { Session } from '../drivers/types/session';
 import type { DaemonConfig } from '../config/handler';
-
-const ALLOWED: ReadonlySet<string> = new Set([
-  // Strategy invocation lifecycle the agent can drive while inside execute.
-  'end_drive',
-  'get_screenshot',
-  // Recorded-path step heal: a `recorded_step_failed` checkpoint fires inside
-  // an auto-execute (graph: 'execute'), so the documented recovery — inspect →
-  // patch_step → resume_execution — has to be admissible right here, in the
-  // phase where the checkpoint surfaced. Both tools are precondition-guarded
-  // (patch_step rejects with no recorded-path step to patch; resume_execution
-  // throws with no paused execution), so admitting them stays liberal like
-  // update_strategy below. Without them the failed step is never re-run: the
-  // patch lands on disk while the mutating action never fires.
-  'patch_step',
-  'resume_execution',
-  // Amend the saved strategy in place when execute surfaced a better shape —
-  // runs the full save audit; no need to re-enter discovery.
-  'update_strategy',
-  // Auth recovery via the human-in-the-loop primitive.
-  'start_remote_session',
-  'stop_remote_session',
-  'wait_for_remote',
-  'get_secret',
-]);
-
-const ALLOWED_WHEN_EXHAUSTED: ReadonlySet<string> = new Set(['end_drive']);
+import { phaseAllowedTools, phaseExhaustedTools } from './tool-catalog';
 
 export const EXECUTE_SPEC: PhaseSpec = {
   name: 'execute',
-  allowedTools: ALLOWED,
-  allowedToolsWhenExhausted: ALLOWED_WHEN_EXHAUSTED,
+  // Derived from each ToolDef's phasePolicy — see tool-catalog.ts. The
+  // execute-phase members reach here via extraPhases on their TOOL_DEFs
+  // (end_drive, get_screenshot, and the recorded_step_failed heal pair
+  // patch_step + resume_execution) or via the strategy_amend category
+  // (update_strategy). Auth recovery (start_remote_session, wait_for_remote,
+  // get_secret, ...) is universal and bypasses the spec entirely.
+  allowedTools: phaseAllowedTools('execute'),
+  allowedToolsWhenExhausted: phaseExhaustedTools('execute'),
 
   onEnter(
     session: Session,

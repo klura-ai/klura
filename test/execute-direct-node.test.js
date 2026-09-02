@@ -26,6 +26,9 @@ process.env.KLURA_HOME = TMP;
 const klura = await import('../dist/index.js');
 const skillsMod = await import('../dist/strategies/skills.js');
 const runtimeState = await import('../dist/runtime-state/index.js');
+const { getHealth } = await import('../dist/strategies/health.js');
+const { getSharedOriginScheduler } = await import('../dist/execution/shared-origin-scheduler.js');
+const { localTrafficPolicyForUrl } = await import('../dist/execution/local-traffic.js');
 const { execute, setDeviceProfile } = klura;
 // Use the low-level skills.saveStrategy (synchronous) to skip the probe —
 // these tests are unit-level and don't want the save-time browser probe
@@ -108,6 +111,79 @@ test('executeDirectNode fires with default transport=node, no browser, correct U
     assert.strictEqual(fetchCalls.length, 1);
     assert.strictEqual(fetchCalls[0].url, 'https://api.example.com/search?q=hello');
     assert.strictEqual(fetchCalls[0].method, 'GET');
+  } finally {
+    restoreFetch();
+  }
+});
+
+test('HTTP 200 with body.ok false is returned as failure and never recorded healthy', async () => {
+  installMockFetch();
+  nextResponse = new Response(
+    JSON.stringify({ ok: false, outcome: 'not_found', code: 'entity_absent' }),
+    {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    },
+  );
+  try {
+    seedStrategy('exnode-explicit-failure', 'search');
+    const result = await execute('exnode-explicit-failure', 'search', { query: 'missing' });
+
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.body, {
+      ok: false,
+      outcome: 'not_found',
+      code: 'entity_absent',
+    });
+    assert.equal(result.tier, 'fetch');
+    assert.equal(fetchCalls.length, 1);
+
+    const health = getHealth('exnode-explicit-failure', 'search', 'fetch');
+    assert.equal(health.failureCount, 0);
+    assert.equal(health.recent, undefined);
+  } finally {
+    restoreFetch();
+  }
+});
+
+test('HTTP non-redirect 3xx is a transport failure and never recorded healthy', async () => {
+  installMockFetch();
+  nextResponse = new Response(null, { status: 304 });
+  try {
+    seedStrategy('exnode-redirect-failure', 'search');
+    const result = await execute('exnode-redirect-failure', 'search', { query: 'missing' });
+
+    assert.equal(result.status, 0);
+    assert.equal(result.body.original_status, 304);
+    const health = getHealth('exnode-redirect-failure', 'search', 'fetch');
+    assert.equal(health.failureCount, 1);
+    assert.deepEqual(health.recent, [false]);
+  } finally {
+    restoreFetch();
+  }
+});
+
+test('an unresolved generator is not_run and leaves health neutral', async () => {
+  installMockFetch();
+  try {
+    seedStrategy('exnode-not-run-failure', 'search', {
+      endpoint: '/search?nonce={{__gen.nonce}}',
+      generated: {
+        nonce: {
+          instruction: 'Generate the request nonce required by this endpoint.',
+          examples: ['nonce-example-123456'],
+        },
+      },
+    });
+    const result = await execute('exnode-not-run-failure', 'search', { query: 'missing' });
+
+    assert.equal(result.status, 0);
+    assert.equal(result.executionState, 'not_run');
+    assert.equal(result.body.needs_generation, true);
+    assert.equal(fetchCalls.length, 0);
+    const health = getHealth('exnode-not-run-failure', 'search', 'fetch');
+    assert.equal(health.failureCount, 0);
+    assert.equal(health.recent, undefined);
   } finally {
     restoreFetch();
   }
@@ -291,6 +367,37 @@ test('non-GET serialized body Content-Type defaults to JSON unless strategy over
   }
 });
 
+test('Node transport omits absent optional body and header fields', async () => {
+  installMockFetch();
+  try {
+    saveStrategy('exnode-optional', 'search_page', {
+      strategy: 'fetch',
+      method: 'POST',
+      baseUrl: 'https://api.example.com',
+      endpoint: '/search',
+      headers: { 'X-Cursor': '{{cursor}}' },
+      body: { query: '{{query}}', cursor: '{{cursor}}' },
+      notes: {
+        params: {
+          query: { description: 'query', kind: 'text', example: 'books' },
+          cursor: {
+            description: 'continuation cursor',
+            kind: 'id',
+            optional: true,
+          },
+        },
+      },
+    });
+
+    await execute('exnode-optional', 'search_page', { query: 'books' });
+    const call = fetchCalls[0];
+    assert.strictEqual(call.body, JSON.stringify({ query: 'books' }));
+    assert.equal(Object.hasOwn(call.headers, 'X-Cursor'), false);
+  } finally {
+    restoreFetch();
+  }
+});
+
 test('form body serializes as urlencoded with matching Content-Type', async () => {
   installMockFetch();
   try {
@@ -394,11 +501,7 @@ test('executing the page-script tier without a pool fails cleanly (Node fetch mo
     // assert on the exact message — only that the call doesn't
     // accidentally route through the Node path (no fetch call captured).
     await execute('exnode11', 'browseronly', {}).catch(() => {});
-    assert.strictEqual(
-      fetchCalls.length,
-      0,
-      'page-script tier must not touch the Node fetch mock',
-    );
+    assert.strictEqual(fetchCalls.length, 0, 'page-script tier must not touch the Node fetch mock');
   } finally {
     restoreFetch();
   }
@@ -466,15 +569,169 @@ test('trusted local node execution aborts an overdue request instead of reportin
   });
   globalThis.fetch = async (_url, init = {}) =>
     await new Promise((_resolve, reject) => {
-      init.signal.addEventListener('abort', () => reject(new Error('request aborted by deadline')), {
-        once: true,
-      });
+      init.signal.addEventListener(
+        'abort',
+        () => reject(new Error('request aborted by deadline')),
+        {
+          once: true,
+        },
+      );
     });
 
   try {
     const result = await execute('exnode-timeout', 'search', { query: 'late' });
     assert.equal(result.body.error, 'all_strategies_failed');
     assert.match(JSON.stringify(result.body), /timed out/);
+  } finally {
+    restoreFetch();
+  }
+});
+
+test('a dispatched mutating HTTP timeout is sent_unconfirmed and remains health-neutral', async () => {
+  fs.writeFileSync(
+    path.join(TMP, 'config.json'),
+    JSON.stringify({ traffic: { request_timeout_ms: 1_000 } }),
+  );
+  seedStrategy('exnode-mutating-timeout', 'submit', {
+    method: 'POST',
+    endpoint: '/submit',
+    body: { query: '{{query}}' },
+  });
+  let dispatched = 0;
+  globalThis.fetch = async (_url, init = {}) => {
+    dispatched += 1;
+    return await new Promise((_resolve, reject) => {
+      init.signal.addEventListener(
+        'abort',
+        () => reject(new Error('request aborted after dispatch')),
+        { once: true },
+      );
+    });
+  };
+
+  try {
+    const result = await execute('exnode-mutating-timeout', 'submit', { query: 'once' });
+    assert.equal(result.status, 0);
+    assert.equal(result.executionState, 'sent_unconfirmed');
+    assert.equal(result.body.error, 'http_delivery_unknown');
+    assert.equal(result.body.method, 'POST');
+    assert.equal(dispatched, 1);
+    const health = getHealth('exnode-mutating-timeout', 'submit', 'fetch');
+    assert.equal(health.failureCount, 0);
+    assert.equal(health.recent, undefined);
+  } finally {
+    restoreFetch();
+  }
+});
+
+test('an ambiguous post-dispatch write failure is sent_unconfirmed, not browser-retried', async () => {
+  seedStrategy('exnode-mutating-reset', 'submit', {
+    method: 'POST',
+    endpoint: '/submit',
+    body: { query: '{{query}}' },
+  });
+  let dispatched = 0;
+  globalThis.fetch = async () => {
+    dispatched += 1;
+    const error = new Error('request connection closed');
+    error.cause = { code: 'ECONNRESET' };
+    throw error;
+  };
+
+  try {
+    const result = await execute('exnode-mutating-reset', 'submit', { query: 'once' });
+    assert.equal(result.executionState, 'sent_unconfirmed');
+    assert.equal(result.body.error, 'http_delivery_unknown');
+    assert.equal(result.body.transport_signal, 'connection_reset');
+    assert.equal(dispatched, 1);
+  } finally {
+    restoreFetch();
+  }
+});
+
+test('transport-shaped prose cannot prove a mutating request was not sent', async () => {
+  seedStrategy('exnode-mutating-prose', 'submit', {
+    method: 'POST',
+    endpoint: '/submit',
+    body: { query: '{{query}}' },
+  });
+  let dispatched = 0;
+  globalThis.fetch = async () => {
+    dispatched += 1;
+    const error = new Error('unable to verify the first certificate after dispatch');
+    error.cause = { message: 'client network socket disconnected before secure TLS connection' };
+    throw error;
+  };
+
+  try {
+    const result = await execute('exnode-mutating-prose', 'submit', { query: 'once' });
+    assert.equal(result.executionState, 'sent_unconfirmed');
+    assert.equal(result.body.error, 'http_delivery_unknown');
+    assert.equal(result.body.transport_signal, 'unknown');
+    assert.equal(dispatched, 1);
+  } finally {
+    restoreFetch();
+  }
+});
+
+test('a TLS protocol code after mutating dispatch remains sent_unconfirmed', async () => {
+  seedStrategy('exnode-mutating-tls-record', 'submit', {
+    method: 'POST',
+    endpoint: '/submit',
+    body: { query: '{{query}}' },
+  });
+  let dispatched = 0;
+  globalThis.fetch = async () => {
+    dispatched += 1;
+    const error = new Error('TLS record failed after dispatch');
+    error.cause = { code: 'ERR_SSL_BAD_RECORD_MAC' };
+    throw error;
+  };
+
+  try {
+    const result = await execute('exnode-mutating-tls-record', 'submit', { query: 'once' });
+    assert.equal(result.executionState, 'sent_unconfirmed');
+    assert.equal(result.body.error, 'http_delivery_unknown');
+    assert.equal(result.body.transport_signal, 'tls_handshake');
+    assert.equal(dispatched, 1);
+  } finally {
+    restoreFetch();
+  }
+});
+
+test('redirect admission failure after a mutating dispatch cannot replay the first hop', async () => {
+  const redirectTarget = 'https://exnode-redirect-circuit.example.test/continue';
+  const scheduler = getSharedOriginScheduler(TMP);
+  const policy = localTrafficPolicyForUrl(redirectTarget);
+  policy.circuit_breaker.transient_failure_threshold = 1;
+  policy.circuit_breaker.cooldown_ms = 60_000;
+  const setupPermit = await scheduler.acquire(policy, { workload_id: 'open-test-circuit' });
+  setupPermit.release('transient_failure');
+
+  seedStrategy('exnode-mutating-redirect-circuit', 'submit', {
+    method: 'POST',
+    endpoint: '/submit',
+    body: { query: '{{query}}' },
+  });
+  let dispatched = 0;
+  globalThis.fetch = async () => {
+    dispatched += 1;
+    assert.equal(dispatched, 1, 'the original mutation must not be replayed');
+    return new Response(null, {
+      status: 307,
+      headers: { location: redirectTarget },
+    });
+  };
+
+  try {
+    const result = await execute('exnode-mutating-redirect-circuit', 'submit', {
+      query: 'once',
+    });
+    assert.equal(result.executionState, 'sent_unconfirmed');
+    assert.equal(result.body.error, 'http_delivery_unknown');
+    assert.equal(result.body.scheduler_code, 'origin_circuit_open');
+    assert.equal(result.body.request_dispatches, 1);
+    assert.equal(dispatched, 1);
   } finally {
     restoreFetch();
   }
@@ -538,7 +795,8 @@ test('trusted local node execution stops before a sixth redirect hop', async () 
     };
 
     const result = await execute('exnode-redirect-limit', 'search', { query: 'redirect' });
-    assert.equal(result.body.error, 'fetch_failed');
+    assert.equal(result.body.error, 'all_strategies_failed');
+    assert.equal(result.body.original_body.error, 'fetch_failed');
     assert.match(JSON.stringify(result.body), /redirect limit of 5 hops is exhausted/);
     assert.equal(fetchCalls.length, 6);
   } finally {

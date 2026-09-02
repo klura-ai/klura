@@ -3,13 +3,18 @@
 // replacer keeps regex drift out of both paths.
 
 const PLACEHOLDER_REF_RE = /\{\{([\w.]+)\}\}/g;
+const URL_COLON_PLACEHOLDER_RE = /(^|[/=]):((?!\d)\w+)(?!\w)/g;
 
 export function lookupPlaceholderPath(args: Record<string, unknown>, path: string): unknown {
   if (!path.includes('.')) return args[path];
   const parts = path.split('.');
   let cur: unknown = args;
   for (const part of parts) {
-    if (cur && typeof cur === 'object' && part in (cur as Record<string, unknown>)) {
+    if (
+      cur &&
+      typeof cur === 'object' &&
+      Object.prototype.hasOwnProperty.call(cur as Record<string, unknown>, part)
+    ) {
       cur = (cur as Record<string, unknown>)[part];
     } else {
       return undefined;
@@ -33,4 +38,11 @@ export function replacePlaceholders(
 ): string {
   const re = new RegExp(PLACEHOLDER_REF_RE);
   return value.replace(re, (match, path: string) => replacer(path, match));
+}
+
+export function normalizeUrlColonPlaceholders(value: string): string {
+  const re = new RegExp(URL_COLON_PLACEHOLDER_RE);
+  return value.replace(re, (_match, prefix: string, name: string) => {
+    return `${prefix}{{${name}}}`;
+  });
 }

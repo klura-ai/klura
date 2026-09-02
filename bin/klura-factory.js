@@ -34,6 +34,7 @@ const CLI_COMMAND_NAMES = {
   getScreenshot: 'get-screenshot',
   endDrive: 'end-drive',
   saveStrategy: 'save-strategy',
+  exportPackage: 'export',
   execute: 'execute',
   startRemoteSession: 'start-remote-session',
   stopRemoteSession: 'stop-remote-session',
@@ -64,6 +65,7 @@ const COMMANDS = {
   [CLI_COMMAND_NAMES.getScreenshot]: describeTool(TOOL_NAMES.getScreenshot),
   [CLI_COMMAND_NAMES.endDrive]: describeTool(TOOL_NAMES.endDrive),
   [CLI_COMMAND_NAMES.saveStrategy]: describeTool(TOOL_NAMES.saveStrategy),
+  [CLI_COMMAND_NAMES.exportPackage]: describeTool(TOOL_NAMES.exportPlatformPackage),
   [CLI_COMMAND_NAMES.execute]: 'Execute a saved strategy (--agent: LLM recovers it if it fails)',
   [CLI_COMMAND_NAMES.startRemoteSession]: describeTool(TOOL_NAMES.startRemoteSession),
   [CLI_COMMAND_NAMES.stopRemoteSession]: describeTool(TOOL_NAMES.stopRemoteSession),
@@ -139,7 +141,7 @@ async function handleDaemon() {
     } else if (args.includes('--foreground') || args.includes('-f')) {
       startDaemon();
     } else {
-      ensureDaemon();
+      await ensureDaemon();
       console.log('Daemon started');
     }
   } else if (sub === 'stop') {
@@ -208,6 +210,10 @@ async function main() {
     await handleChat();
     return;
   }
+  if (command === 'export') {
+    await handlePackageExport();
+    return;
+  }
   if (command === 'execute' && agentFlagPresent()) {
     await handleExecuteWithAgent();
     return;
@@ -215,7 +221,7 @@ async function main() {
 
   // Auto-start daemon for all other commands (skip if remote daemon configured)
   if (!process.env.KLURA_DAEMON_ADDR) {
-    ensureDaemon();
+    await ensureDaemon();
   }
 
   try {
@@ -602,6 +608,30 @@ async function main() {
     console.error(JSON.stringify({ error: err.message }));
     process.exit(1);
   }
+}
+
+async function handlePackageExport() {
+  const platform = args[1];
+  const reviewPath = parseFlag('--review');
+  const toolsRepositoryPath = parseFlag('--tools-repo');
+  if (!platform || !reviewPath || !toolsRepositoryPath) {
+    console.error(
+      'Usage: klura factory export <platform> --review <review.json> --tools-repo <absolute-path>',
+    );
+    process.exit(1);
+  }
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { exportPlatformPackageToTools } = require(
+    '../dist/factory/public-package/platform-export',
+  );
+  const result = await exportPlatformPackageToTools({
+    platform,
+    tools_repository_path: path.resolve(toolsRepositoryPath),
+    review: JSON.parse(fs.readFileSync(path.resolve(reviewPath), 'utf8')),
+  });
+  out(result);
+  if (result.kind !== 'package_exported') process.exitCode = 1;
 }
 
 async function handleDevice() {

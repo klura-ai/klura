@@ -20,9 +20,10 @@ import {
 } from '../strategies/discovery-artifact';
 import type { CapabilityLogbookEntry } from './schema';
 import { loadLogbook as loadLogbookForPlatform } from './logbook';
+import type { StrategyTier } from '../vocab';
 
 export interface TriageBundle {
-  current_tier: 'fetch' | 'page-script' | 'recorded-path' | 'none';
+  current_tier: StrategyTier | 'none';
   prior_attempts: {
     count: number;
     last_attempt_days_ago: number | null;

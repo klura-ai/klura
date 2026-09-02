@@ -8,18 +8,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 const { composeAckHint } = await import('../dist/checkpoints/ack-hints.js');
+const { CHECKPOINT_KINDS } = await import('../dist/checkpoints/types.js');
 
 // ---------- exhaustiveness: every CheckpointKind returns a hint ----------
 
 test('composeAckHint: every CheckpointKind returns a non-empty string', () => {
-  const kinds = [
-    'triage_plan',
-    'surface_changed',
-    'recorded_step_failed',
-    'session_expired',
-    'post_save_validation_consent',
-  ];
-  for (const k of kinds) {
+  // Derived from the runtime's kind list, never hand-copied — a new kind
+  // without a hint case fails here loudly.
+  assert.ok(Array.isArray(CHECKPOINT_KINDS) && CHECKPOINT_KINDS.length >= 6);
+  for (const k of CHECKPOINT_KINDS) {
     const hint = composeAckHint(k, {});
     assert.equal(typeof hint, 'string', `${k}: hint must be a string`);
     assert.ok(hint.length > 0, `${k}: hint must be non-empty`);
@@ -58,4 +55,10 @@ test('post_save_validation_consent: hint mentions Tier 1 / Tier 2 + decline path
   assert.match(hint, /Tier 1/);
   assert.match(hint, /Tier 2/);
   assert.match(hint, /add_discovery_note/);
+});
+
+test('abort_session_consent: hint warns against re-calling abort_session', () => {
+  const hint = composeAckHint('abort_session_consent', {});
+  assert.match(hint, /abort_session/);
+  assert.match(hint, /NOT re-call/);
 });

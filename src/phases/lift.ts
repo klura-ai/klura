@@ -15,54 +15,17 @@
 import type { PhaseSpec, AdmissibilityResult, PhaseEvent, GraphConfig } from './types';
 import type { Session } from '../drivers/types/session';
 import type { DaemonConfig } from '../config/handler';
-import {
-  CAPABILITY_DECLARATION,
-  DISCOVERY_ARTIFACT,
-  ESCAPE_VALVE,
-  LOGBOOK_WRITE,
-  MAP_LIFT_INITIATOR,
-  READ_ONLY_DIAGNOSTIC,
-  TRIAGE_AND_LIFT_WRITE,
-  STRATEGY_AMEND,
-  LIFT_RE_ACTIVE,
-  unionSets,
-} from './tool-catalog';
-
-// `end_drive` is admitted in lift as the abandon path. Without it the agent
-// has no exit when an audit loop fails to converge — the rejection messages
-// even point at end_drive as the abandon mechanism. Auto-synth still runs
-// at end_drive's own orchestrator, so a salvageable recorded-path can land
-// from drive history even when the agent couldn't compose a save manually.
-// `abort_session` is the honest exit when the work was misguided in the
-// first place; admitting it here means a misguided lift can be torn down
-// without the audit-loop dance.
-const ALLOWED = unionSets(
-  READ_ONLY_DIAGNOSTIC,
-  TRIAGE_AND_LIFT_WRITE,
-  STRATEGY_AMEND,
-  CAPABILITY_DECLARATION,
-  LIFT_RE_ACTIVE,
-  DISCOVERY_ARTIFACT,
-  LOGBOOK_WRITE,
-  MAP_LIFT_INITIATOR,
-  ESCAPE_VALVE,
-  new Set(['end_drive']),
-);
-
-const ALLOWED_WHEN_EXHAUSTED: ReadonlySet<string> = new Set([
-  'save_strategy',
-  'submit_triage_plan',
-  'end_drive',
-  'abort_session',
-]);
-
-/** Default lift budget when the user hasn't set `lift.max_rounds`. `0` =
- *  unlimited; the soft-block check short-circuits when budget is 0. */
+import { phaseAllowedTools, phaseExhaustedTools } from './tool-catalog';
 
 export const LIFT_SPEC: PhaseSpec = {
   name: 'lift',
-  allowedTools: ALLOWED,
-  allowedToolsWhenExhausted: ALLOWED_WHEN_EXHAUSTED,
+  // Derived from each ToolDef's phasePolicy — see tool-catalog.ts.
+  // `end_drive` and `perform_action` reach lift via extraPhases on their
+  // TOOL_DEFs: end_drive is the abandon path when an audit loop fails to
+  // converge, and perform_action generates the request or rendered state
+  // being reverse-engineered.
+  allowedTools: phaseAllowedTools('lift'),
+  allowedToolsWhenExhausted: phaseExhaustedTools('lift'),
 
   onEnter(
     session: Session,
@@ -94,18 +57,13 @@ export const LIFT_SPEC: PhaseSpec = {
     _graphConfig: GraphConfig,
   ): AdmissibilityResult {
     if (!this.allowedTools.has(toolName)) {
-      const isPerformAction = toolName === 'perform_action';
-      const mapModeNav = isPerformAction && session.graph === 'map';
-      const mapModeHint = mapModeNav
-        ? ` Map-mode loop-continuation: \`perform_action\` is inadmissible here because triage/lift is bound to the surface from \`lift_observed_capability\`. To explore additional surfaces, \`end_drive\` first (the FSM rebinds on the next \`start_session\` graph:"map" + \`record_observed_capability\` cycle). Recommended pattern: record EVERY candidate observed via \`record_observed_capability\` BEFORE the first lift so the per-slug cost stays inside one session.`
-        : '';
       return {
         ok: false,
         reason:
           `tool '${toolName}' is not available in phase 'lift'. ` +
           `In lift, you execute the RE playbook against the bound surface and aim T0 (fetch) → T1 (page-script) → T2 (recorded-path) in order. ` +
           `Save the resulting strategy via \`save_strategy\` (gates on a triage plan for the targeted surface), ` +
-          `or revise via \`submit_triage_plan\` if reality contradicts the verdict.${mapModeHint}`,
+          `or revise via \`submit_triage_plan\` if reality contradicts the verdict.`,
       };
     }
     if (session.lift?.softBlockEngaged && !this.allowedToolsWhenExhausted.has(toolName)) {

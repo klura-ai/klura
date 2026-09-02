@@ -10,7 +10,11 @@
 // zero dependency on runtime Session / pool / driver / MCP types. The only
 // bridge is a thin adapter in runtime/src/index.ts that reshapes live session
 // state into CaptureEvents at end_drive time. Keep the asymmetry: the
-// adapter knows about both layers, these modules don't.
+// adapter knows about both layers, these modules don't. (The vocab module is
+// a dependency-free identifier catalog, not a runtime layer — type imports
+// from it are fine.)
+
+import type { AbortProvenance, SessionOutcome, StrategyTier } from '../vocab';
 
 /**
  * Machine-actionable abort classification persisted on `abort_events[].kind`.
@@ -126,15 +130,9 @@ export interface SessionMetaPayload {
   /** Primary capability the session declared, if any. */
   capability?: string;
   /** Caller-supplied args for the capability. */
-  args?: Record<string, string>;
+  args?: Record<string, unknown>;
   /** Final outcome reported by the caller. */
-  outcome:
-    | 'fetch_saved'
-    | 'page_script_saved'
-    | 'recorded_path_saved'
-    | 'no_save'
-    | 'user_deferred'
-    | 'error';
+  outcome: SessionOutcome;
   /** Free-text prose, ≤500 chars, optional. */
   notes?: string;
 }
@@ -252,13 +250,22 @@ export interface PlatformLogbook {
       at: string;
       session_id: string;
       reason: string;
-      /** Optional machine-actionable classification (added in v0.3.3).
-       *  Historical entries lack this field; readers default to "other". */
+      /** Optional machine-actionable classification. Historical entries lack
+       *  this field; readers default to "other". */
       kind?: AbortKind;
       /** Host of the requested URL the session aborted on. Lets the
        *  start_session pre-nav check match by host without parsing
        *  free-text reason. */
       host?: string;
+      /** Where `kind` came from: an agent's claim, or the same claim
+       *  corroborated by the runtime's own origin-blocked detector on that
+       *  host. Optional — historical entries lack it and readers default to
+       *  `'agent_asserted'`, which is what an un-corroborated entry is. */
+      provenance?: AbortProvenance;
+      /** Structural signals behind a `runtime_observed` entry (the
+       *  `OriginBlockedAdvisory.signals` list). Absent on agent-asserted
+       *  entries — there is nothing structural to cite. */
+      signals?: string[];
       captured_actions_count: number;
       phase_at_abort: string;
     }>;
@@ -352,17 +359,17 @@ export interface StrategyEvent {
   detail?: string;
 }
 
-/** Defense-surface observations the agent gathered during triage. The
- *  agent draws `mechanism_hypothesis` and `request_patterns` from its own
- *  knowledge of bot-detection technology — the runtime never names
- *  vendors. The other arrays are concrete cite-able artifacts that
- *  `tier_justification` is validated against. */
+/** Defense-surface observations the agent gathered during triage.
+ *  `mechanism_hypothesis` is optional context when the evidence supports
+ *  one; it is not needed for surface binding or runtime safety. The arrays
+ *  are concrete cite-able artifacts that `tier_justification` is validated
+ *  against. */
 export interface DefenseSurface {
   observed_origins: string[];
   observed_scripts: string[];
   cookies_set: string[];
   request_patterns: string[];
-  mechanism_hypothesis: string;
+  mechanism_hypothesis?: string;
 }
 
 /** Durable plan written by the agent during the triage phase. One plan per
@@ -387,7 +394,7 @@ export interface TriagePlan {
    *  later navigation crosses to an un-triaged surface. */
   observed_at_urls: string[];
   defense_surface: DefenseSurface;
-  expected_tier: 'fetch' | 'page-script' | 'recorded-path';
+  expected_tier: StrategyTier;
   /** Free-text justification for the tier suggestion. Runtime cite-validated
    *  to reference at least one entry in `defense_surface.observed_origins`,
    *  `defense_surface.observed_scripts`, `defense_surface.cookies_set`, or
@@ -418,7 +425,7 @@ export interface CapabilityLogbookEntry {
    * `demoteFetchToPageScript`, `markHealed`.
    */
   strategy_events: StrategyEvent[];
-  current_tier: 'fetch' | 'page-script' | 'recorded-path' | 'none';
+  current_tier: StrategyTier | 'none';
   /**
    * ISO timestamp of the most recent successful execute across any saved tier
    * of this capability, derived from `health.json` and refreshed on every
@@ -429,7 +436,7 @@ export interface CapabilityLogbookEntry {
    * that produced that success.
    */
   last_verified_at?: string;
-  last_verified_tier?: 'fetch' | 'page-script' | 'recorded-path';
+  last_verified_tier?: StrategyTier;
   last_lift_attempt_at?: string;
   days_since_last_attempt?: number;
   sessions_since_last_attempt?: number;

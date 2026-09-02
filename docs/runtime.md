@@ -57,16 +57,18 @@ LLM calls klura tool for the first time
   │
   ├─ Klura skill checks: is daemon running? (pid file / health check)
   │
-  ├─ Not running → start daemon as background process
+  ├─ Not running → fork daemon as background process
   │   └─ daemon writes pid to ~/.klura/daemon.pid
   │   └─ listens on ~/.klura/klura.sock (unix socket)
+  │   └─ announces readiness over the fork's IPC channel;
+  │      the parent resolves on that message (bounded 10s fallback)
   │
   ├─ Running → connect to existing daemon
   │
   └─ Send request, wait for response
 ```
 
-The daemon shuts down after `runtime.idleTimeout` seconds with no active sessions, listeners, or consumer execution (default 1800 = 30 min). Active listeners and consumer execution keep the daemon alive until their terminal work completes. The session-level `pool.idleTimeout` (default 300 = 5 min) is a separate timer for individual session hang-detection.
+The daemon shuts down after `runtime.idleTimeout` seconds with no pool-owned browser state, listeners, or consumer execution (default 1800 = 30 min). "Pool-owned browser state" is `Pool.busy()` — live sessions OR warm slots — so a live warm pool keeps the daemon alive even with zero active sessions (see [pool.md](pool.md)). Active listeners and consumer execution keep the daemon alive until their terminal work completes. The session-level `pool.idleTimeout` (default 300 = 5 min) is a separate timer for individual session hang-detection.
 
 ## Tool interface — what the LLM sees
 
@@ -134,7 +136,7 @@ Eight tools wrapping CDP's `Debugger` domain. See [reverse-engineering.md#source
 | Tool | Purpose |
 | --- | --- |
 | `save_strategy(platform, capability, strategy)` | Save a discovered strategy to disk. Runs the full validation pipeline (see [validation.md](validation.md)); rejects malformed strategies with `invalid_strategy` errors in the same turn. |
-| `execute(platform, capability, args)` | Run a saved capability. Returns `{status, body, elapsedMs, tier}`. |
+| `execute(platform, capability, args)` | Programmatic / CLI operation, not an MCP tool. Run a saved capability. Returns `{status, body, elapsedMs, tier}`. The MCP-visible surface for a paused execute is `resume_execution`. |
 | `list_platform_skills()` | All saved skills, with per-capability summary digests including the discovery_artifact and notes. |
 | `get_strategy({platform, capability, strategy_type?})` | Load the full strategy JSON for inspection. |
 | `get_strategy_events({platform, capability?, limit?})` | Strategy life-cycle events (discovered, rediscovered, tier_demote, archived, unarchived, patched, healed) folded into the per-platform logbook. |
@@ -150,16 +152,16 @@ Eight tools wrapping CDP's `Debugger` domain. See [reverse-engineering.md#source
 | `add_resume_pointer(args)` | js_source url+line+frame index pointer the next session reads to resume RE. |
 | `save_verified_expression(args)` | Reproducible JS expression that produced a byte-equivalent encoder result. Capped at 8192 chars. |
 | `get_discovery_artifact_field(args)` | Read a single field from the artifact (e.g. just `verified_expressions`). |
-| `set_capability_policy(args)` | Persist a per-capability tier cap. Triggered by user decline of the end-drive RE nag. |
-| `record_lookup_candidate(args)` | Internal: classifier feeds candidates into the per-session accumulator. |
+| `set_capability_policy(args)` | Programmatic / CLI operation, not an MCP tool. Persist a per-capability tier cap. Triggered by user decline of the end-drive RE nag. |
+| `record_lookup_candidate(args)` | Internal programmatic operation, not an MCP tool: classifier feeds candidates into the per-session accumulator. |
 
 ### Strategy healing
 
 | Tool | Purpose |
 | --- | --- |
 | `patch_step(platform, capability, strategy_type, step_id, {locators})` | Patch a broken recorded-path step by its stable `step_id` (snake_case slug). The patched locator is written back as an `alternatives` entry. |
-| `mark_healed(platform, capability, strategy_type)` | Reset health to healthy after a successful manual heal. |
-| `reset_health(platform, capability, strategy_type)` | Clear failure counters for a strategy tier. |
+| `mark_healed(platform, capability, strategy_type)` | Programmatic / CLI operation, not an MCP tool. Reset health to healthy after a successful manual heal. |
+| `reset_health(platform, capability, strategy_type)` | Programmatic / CLI operation, not an MCP tool. Clear failure counters for a strategy tier. |
 | `get_strategy_health(...)` | Read current health status. |
 | `resume_execution(sessionId)` | Continue a paused execute (after patch_step or after a blocker resolved). |
 

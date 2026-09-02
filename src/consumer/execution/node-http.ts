@@ -52,10 +52,22 @@ export class PublicHttpExecutionError extends PublicContractError {
     message: string,
     public readonly target_requests = 0,
     public readonly interaction_failure: BrowserInteractionFailureV1 | null = null,
+    public readonly diagnostic: PublicExecutionDiagnosticV1 | null = null,
   ) {
     super('public_http', message);
     this.name = 'PublicHttpExecutionError';
   }
+}
+
+export interface PublicExecutionDiagnosticV1 {
+  kind: 'egress_rejected';
+  phase: 'navigation' | 'resource' | 'interaction' | 'runtime_request' | 'page_script';
+  origin: string | null;
+  path: string | null;
+  query_keys: string[];
+  method: string;
+  resource_type: string;
+  requested_method: string | null;
 }
 
 export async function executeNodeHttpStrategy(
@@ -326,7 +338,15 @@ async function sendPinnedHttpsRequest(
         return;
       }
       const failureCode = error instanceof PublicHttpExecutionError ? error.code : code;
-      reject(new PublicHttpExecutionError(failureCode, asError(error).message, dispatched ? 1 : 0));
+      reject(
+        new PublicHttpExecutionError(
+          failureCode,
+          asError(error).message,
+          dispatched ? 1 : 0,
+          null,
+          error instanceof PublicHttpExecutionError ? error.diagnostic : null,
+        ),
+      );
     };
     const succeed = (value: ReceivedResponseV1): void => {
       if (settled) return;

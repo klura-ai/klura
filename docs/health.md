@@ -24,6 +24,27 @@ Execute strategy
 
 Health status can be queried via `get_strategy_health(platform, capability, strategy_type)` and reset via `reset_strategy_health(platform, capability, strategy_type)`.
 
+### Broken-tier probation
+
+A `broken` tier is skipped by the executor **before it runs**, which means it appends no further outcome — so on its own the record can never change again. A tier that broke during a site outage would stay quarantined after the site recovered, and every later call would read `broken (skipped)` from a record frozen at the moment of the outage.
+
+Probation is the way out. On the next `execute` that reaches the tier, the runtime compares `max(lastFailure, lastProbeAt)` against `pool.brokenProbationHours` (default 6, `0` disables). Past the window, the tier runs once as a probe and the outcome re-decides its health exactly like any other execute: clean → healthy, failure → broken again with a fresh clock.
+
+Two properties are load-bearing:
+
+- **Lazy, never timed.** The check happens at execute time. There is no timer, no sweeper, and nothing happens to a strategy nobody calls.
+- **The clock is stamped before the probe, not after.** `not_run` and `delivery_unknown` return early without touching health by design; without `lastProbeAt` — written immediately before the probe fires — a probe that ended in either state would leave the clock at the old `lastFailure` and re-fire on every subsequent call.
+
+When a tier is skipped, the cascade error names when it next becomes probe-eligible instead of dead-ending at `broken (skipped)`. `get_strategy_health` exposes the same policy as `quarantined` (broken and inside the window) and `probe_eligible_at` (unix-ms of the next probe, `null` when not applicable) — both derived from the function the executor consults, so the surface cannot disagree with what the next call does.
+
+### What counts as healing
+
+`markHealed` is the deliberate write that says "this capability works again": it resets the failure count, bumps `healCount`, appends a `healed` strategy event, and clears the probation clock. Three producers call it — a manual heal, a verified candidate promotion, and post-save verification of an **active** strategy on explicit success. The last one matters because health is keyed by capability + tier while a re-saved strategy is new bytes: without it, a strategy that broke, was fixed, and verified end-to-end would inherit the broken record of the bytes it replaced and be skipped on its first real call.
+
+Verification traffic is otherwise health-silent (`_suppressStrategyState`), so grading never pollutes caller-visible health; `markHealed` is the one narrow exception, and it does not fire when the verified result was an empty declared collection — that routes to semantic review instead (see [ARCHITECTURE.md](../ARCHITECTURE.md) "Empty declared collections").
+
+Healing also clears the capability's rediscover silence (`_dontAskRediscover`), as does `resetHealth`. A "don't ask again" answer was given about a strategy that was failing; keeping it after the capability demonstrably works would mute the gate for a future, unrelated rot.
+
 A separate per-protocol counter (`NODE_TRANSPORT_FAIL_THRESHOLD = 3` in `runtime/src/strategies/health.ts`) handles the narrower case of `fetch` Node transport failing on a strategy that does work in-browser — TLS fingerprint mismatch, ECONNRESET, that class. After 3 consecutive Node-transport failures, the runtime persistently demotes the strategy from `fetch` to `page-script` for subsequent execute calls without marking it broken.
 
 ---

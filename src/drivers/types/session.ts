@@ -2,6 +2,7 @@ import type { BrowserDriver } from '../interface';
 import type { InterceptedRequest } from './network';
 import type { WebSocketFrame } from './websocket';
 import type { AbortKind } from '../../working-dir/schema';
+import type { PostSaveVerificationProofV1 } from '../../strategies/post-save-verification-proof';
 
 export interface SessionOptions {
   storageState?: string;
@@ -43,6 +44,28 @@ export interface SessionOptions {
    * like any other session. Default: false.
    */
   internal?: boolean;
+  /**
+   * Require a newly-created browser context for this session. Pools must skip
+   * both warm-context checkout and warm-slot registration when this is true,
+   * so closing the session destroys the context instead of making it reusable.
+   * Callers independently decide whether to seed that new context with an
+   * explicit `storageState`.
+   */
+  freshContext?: boolean;
+}
+
+/**
+ * Opaque handle to a driver-held browser-resource bundle (BrowserContext,
+ * pages, capture plumbing) detached from a closing session so a warm pool can
+ * stash it. A lease carries browser state only — logical Session fields
+ * (phase bookkeeping, consent flags, action history, save records) never
+ * travel with it. Every warm checkout binds the lease to a freshly-minted
+ * Session via `BrowserDriver.attachLease`, so no logical field can survive
+ * from one klura session into the next. The payload behind `leaseId` is
+ * driver-private.
+ */
+export interface BrowserLease {
+  readonly leaseId: string;
 }
 
 /**
@@ -60,7 +83,9 @@ export interface SessionOptions {
 export interface BrowserPool {
   /**
    * Create a new klura session. The pool decides internally whether to reuse an
-   * idle backend or provision a fresh one.
+   * idle backend or provision a fresh one, except when
+   * `opts.freshContext === true`, which requires fresh provisioning and
+   * forbids warm-slot retention.
    */
   createSession(opts?: SessionOptions): Promise<Session>;
 
@@ -79,7 +104,9 @@ export interface BrowserPool {
    */
   endDrive(sessionId: string): Promise<void>;
 
-  /** Look up a session by id. Throws if unknown. */
+  /** Look up a session by id. Throws if unknown. Pure — never mutates
+   *  session state or round accounting; the phase middleware is the single
+   *  place a user round is registered (via `registerUserRound`). */
   getSession(sessionId: string): Session;
 
   /** Return the `BrowserDriver` responsible for a given session. */
@@ -87,6 +114,20 @@ export interface BrowserPool {
 
   /** Tear down every resource the pool owns. Called on daemon shutdown. */
   shutdown(): Promise<void>;
+
+  /**
+   * The single idle/teardown authority: true while the pool holds browser
+   * state a teardown would destroy — live sessions AND warm slots, which
+   * `activeSessions` alone does not cover. Any layer deciding whether klura
+   * is idle enough to tear browser state down (the pool's own hibernation,
+   * the daemon's idle shutdown) must consult this predicate rather than
+   * re-deriving its own from session counts.
+   *
+   * Optional only for facades and test stubs that own no browser state beyond
+   * the sessions they delegate; callers treat an absent implementation as
+   * `activeSessions > 0`.
+   */
+  busy?(): boolean;
 
   /** Number of currently-active klura sessions. */
   readonly activeSessions: number;
@@ -149,11 +190,18 @@ export interface BrowserPool {
    *  type is `RecentDiffEntry`. */
   getRecentDiffs?(sessionId: string): unknown[];
 
-  /** Approximate count of tool calls against this session — incremented
-   *  on every getSession()/getDriver() lookup. Used by the envelope
-   *  advisory to escalate when the agent has spent many rounds without
-   *  a verified iteration. */
+  /** Count of admitted user-facing tool calls against this session —
+   *  incremented once per admitted non-universal tool call at the phase-
+   *  middleware dispatch boundary (`registerUserRound`). Session lookups
+   *  never affect it. Used by the envelope advisory as evidence narration
+   *  and by the end_drive repeat-close detector's snapshot comparison. */
   getSessionRoundCount?(sessionId: string): number;
+
+  /** Register one user-facing tool round against a session. Called exactly
+   *  once per admitted non-universal tool call by the phase middleware
+   *  (`assertToolAdmissibleBySessionId`); no other caller registers rounds.
+   *  Unknown ids are a no-op. */
+  registerUserRound?(sessionId: string): void;
 
   /**
    * Ready-page checkout protocol. Ask the pool "is there an existing
@@ -402,7 +450,10 @@ export interface Session {
    * never has to manually save a recorded-path themselves.
    *
    * Populated by the perform_action handler in index.ts AFTER the action
-   * executes successfully. Cleared on end_drive (after synthesis runs).
+   * executes successfully. Lives for the Session object's lifetime: the pool
+   * mints a fresh Session on every checkout (warm reuse stashes only the
+   * driver-side BrowserLease), so history never carries across klura
+   * sessions.
    */
   performActionHistory?: PerformActionRecord[];
   /**
@@ -484,6 +535,15 @@ export interface Session {
     platform: string;
     capability: string;
     args: Record<string, unknown>;
+    /** Runtime-owned proof for the exact active artifact selected at commit. */
+    proof: PostSaveVerificationProofV1;
+    /**
+     * Present when validation targets an inactive replacement rather than the
+     * active strategy. Consent executes exactly this immutable candidate and
+     * promotes it only on verified success.
+     */
+    candidate_id?: string;
+    changelog?: string;
   };
   /**
    * Deferred abort teardown. `abort_session` stages the validated args here
@@ -539,15 +599,11 @@ export interface Session {
    */
   saveAttemptCount?: number;
   /**
-   * Per-`(capability, rejection-family)` count of how many times save_strategy
-   * has been rejected this session with the same rejection family (the audit
-   * `reason` + the set of warning/classifier kinds that fired). Keyed by
-   * `${capability}::${familyKey}`. Drives the structural-dead-end hard bounce:
-   * after the 3rd same-family rejection the runtime stops returning the same
-   * audit prose and forces the agent to defer / switch tier / abort, instead of
-   * iterating cosmetic edits against a detector false-positive or schema
-   * contradiction. Switching tier changes which detectors fire, so it yields a
-   * fresh family key (and a fresh budget).
+   * Per-`(capability, tier, rejection-family)` counters for surfaced
+   * `save_strategy` audit rejections, backing the structural-dead-end
+   * bounce (`runtime/src/audit/lift/save-rejection-bounce.ts`). Keys are
+   * `<capability>::<family>`; an accepted `submit_triage_plan` for the
+   * capability clears its keys (a plan pivot restarts the budget).
    */
   saveRejectionFamilyCounts?: Record<string, number>;
   /**
@@ -565,7 +621,7 @@ export interface Session {
    */
   declaredCapabilities?: Array<{
     capability: string;
-    args: Record<string, string>;
+    args: Record<string, unknown>;
     declared_at: number;
   }>;
   /**
@@ -630,6 +686,23 @@ export interface Session {
    */
   endDriveAttempts?: number;
   /**
+   * Unix-ms timestamp of the first end_drive call that returned the LIFT
+   * handoff response. Presence marks "the handoff already fired": subsequent
+   * end_drive calls take the abandon path (auto-synth + close) instead of
+   * re-emitting the handoff. Written by the end-drive orchestrator; distinct
+   * from the `lift` phase struct, which is initialized exclusively by
+   * LIFT_SPEC.onEnter when the session actually enters the lift phase.
+   */
+  liftHandoffAt?: number;
+  /**
+   * Snapshot of the pool's user-round count (`getSessionRoundCount`) taken
+   * each time end_drive returns the LIFT handoff. The repeat-close detector
+   * compares the live count against this snapshot: a delta of at most one
+   * round (the repeat end_drive call itself) means the agent took no action
+   * between close attempts.
+   */
+  roundCountAtLastCloseAttempt?: number;
+  /**
    * Per-session accumulator for discovery-artifact construction. Every tool
    * handler that does investigative work (inspect_ws_frame, try_generator,
    * get_js_source, get_send_encoder, find_in_page, get_network_log,
@@ -647,10 +720,11 @@ export interface Session {
    */
   getActionHistoryCallCount?: number;
   /**
-   * LIFT phase state. Set by end_drive when it returns the LIFT
-   * (`phase: "lift"`) handoff response; tracks the agent's round count since
-   * the role shift so the phase middleware can enforce the `lift.max_rounds`
-   * budget.
+   * LIFT phase state. Initialized exclusively by LIFT_SPEC.onEnter (the
+   * state machine) when the session enters the lift phase; tracks the
+   * agent's round count since the role shift so the phase middleware can
+   * enforce the `lift.max_rounds` budget. Absent until the first lift
+   * entry — the end_drive handoff itself stamps `liftHandoffAt`, not this.
    */
   lift?: {
     handoffAt: number;
@@ -720,6 +794,18 @@ export interface Session {
   /** Most recent canonical URL the runtime evaluated for `surface_changed`
    *  routing, used by the path-distinct check in `perform_action`. */
   lastSurfaceUrl?: string;
+  /**
+   * Origin-blocked advisories the runtime's own detector produced during this
+   * session, oldest first and capped. `abort_session` reads them to decide
+   * whether the abort_event it writes is `runtime_observed` — a claim the
+   * runtime independently corroborated on the aborted host — or
+   * `agent_asserted`. Without this the ledger cannot tell an agent's
+   * conclusion from a structural observation, and replayed history is scored
+   * as if every entry were a measurement.
+   */
+  originBlockedObservations?: Array<
+    import('../../phases/origin-blocked-detector').OriginBlockedAdvisory
+  >;
   /** True iff at least one mutating action (click/type/fill_editor/select/
    *  key_press) has been performed on `lastSurfaceUrl` since the last
    *  `surface_changed` fire or session start. Drives the DRIVE-phase

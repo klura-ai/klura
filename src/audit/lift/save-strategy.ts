@@ -3,11 +3,14 @@
 // rejection envelope. See runtime/src/audit/index.ts for the Audit class.
 
 import { Audit, type Detector, type ShapeCheck, type Issue, type AuditResult } from '../index';
-import { WARNING_KINDS } from '../../vocab';
+import { AUDIT_KINDS, WARNING_KINDS } from '../../vocab';
+import { TIER_RANK } from '../concerns/tier-rank';
+import { findTriageVerdict } from '../concerns/triage-verdict';
 import type { Strategy } from '../../strategies/skills';
 import {
   loadStrategies as loadStrategiesForPlatformAndCapability,
   listPlatformSkills as listAllSkills,
+  findCapabilitiesProviding,
 } from '../../strategies/skills';
 import {
   validateStrategyShape,
@@ -19,6 +22,7 @@ import {
 } from '../../strategies/validate';
 import type { Session } from '../../drivers/types/session';
 import {
+  collectStrategyUrls,
   findMissingCapturedQueryParams,
   findUnobservedStrategyUrls,
   firstObservableUrl,
@@ -26,7 +30,6 @@ import {
 import { loadLogbook } from '../../working-dir/logbook';
 import { lookupSurface, urlKey } from '../../phases/surface-binding';
 import {
-  detectSessionScopedIdExtraction,
   detectNameIdMismatch,
   detectEntityPinnedPrereqUrls,
   detectInlineMultiFetchPrereqs,
@@ -38,6 +41,7 @@ import {
   detectEndpointCollidesWithSavedCapability,
   detectEnumParamListingUnfactored,
   detectEnumValueInCapabilitySlug,
+  detectSessionScopedIdExtraction,
   detectUnreferencedPrereqBinding,
   detectLookupSiblingNotReferenced,
   detectUnreferencedParams,
@@ -45,6 +49,7 @@ import {
 } from '../../gate/save-warnings';
 import { detectSensitiveActionShape } from '../../gate/save-warnings-sensitive-shape';
 import { detectUselessCapabilityPrereq } from '../../gate/save-warnings-useless-prereq';
+import { detectSideEffectPrereqUnproven } from '../../gate/save-warnings-side-effect-prereq';
 import { detectHardcodedPaginationValue } from '../../gate/save-warnings-pagination';
 import {
   validateLookupPrereqsAreCapabilities,
@@ -97,6 +102,9 @@ export interface SaveStrategyCtx {
    *  Per principles.md §"Observe, not probe", this is runtime-enforced
    *  with `ackReason: 'none'`. */
   observedUrls?: readonly string[];
+  /** Active strategy being amended. URL fields that resolve identically at
+   *  the same structural path remain grounded by that active artifact. */
+  previousStrategy?: Strategy;
 }
 
 // Cast helper: existing detect functions return SaveWarning[]; the Audit's
@@ -117,7 +125,7 @@ function asIssues(ws: SaveWarning[]): Issue[] {
 // deliberate ownership the prior `recorded_path_in_triage` block was
 // protecting, now generalized to all tiers.
 const surfaceTriageMissingDetector: Detector<Strategy, SaveStrategyCtx> = {
-  kind: 'surface_triage_missing',
+  kind: AUDIT_KINDS.surfaceTriageMissing,
   detect: (data, ctx) => {
     if (!ctx.session) return [];
     // Save-strategy is admissible only in lift / triage per the phase
@@ -212,6 +220,11 @@ const surfaceTriageMissingDetector: Detector<Strategy, SaveStrategyCtx> = {
     return [];
   },
   ackReason: 'none',
+  // Triage-flow bookkeeping — meaningless without an agent to run
+  // submit_triage_plan. Unattended producers (auto-synth fallbacks at
+  // end_drive, graduation) must still land strategies on sessions whose
+  // surfaces were never triaged.
+  unattendedPolicy: 'skip',
 };
 
 /** Describe where in the strategy the target URL came from, for the
@@ -283,12 +296,13 @@ function listTriagedSurfaces(
 // fixes the actual blocker (probe failure, surface binding, etc.) or
 // re-submits triage with a downgraded verdict and `tier_justification`.
 //
-// `ackReason: 'required'` — Level-2 acked-warning. Single-fire per
-// (capability, surface, tier) hash, no token-gating per
-// runtime/docs/gates.md §"once-per-session vs N-per-session".
-const TIER_RANK: Record<string, number> = { fetch: 0, 'page-script': 1, 'recorded-path': 2 };
+// `ackReason: 'none'` — no ack-bypass. If the verdict is right, fix the
+// save; if it's wrong, re-submit triage with a revised `expected_tier`.
+// The save-authoring contract's tier-floor constraint teaches the same
+// rule upfront ("not ack-bypassable") from the same verdict source
+// (`findTriageVerdict`, audit/concerns/triage-verdict.ts).
 const tierBelowTriageVerdictDetector: Detector<Strategy, SaveStrategyCtx> = {
-  kind: 'tier_below_triage_verdict',
+  kind: AUDIT_KINDS.tierBelowTriageVerdict,
   detect: (data, ctx) => {
     if (!ctx.session?.platform) return [];
     const savedTier = (data as { strategy?: unknown }).strategy;
@@ -297,21 +311,18 @@ const tierBelowTriageVerdictDetector: Detector<Strategy, SaveStrategyCtx> = {
     if (!targetUrl) return [];
     const surface = lookupSurface(ctx.session, targetUrl);
     if (!surface) return [];
-    const logbook = loadLogbook(ctx.session.platform);
-    const plan = logbook.per_capability[ctx.capability]?.triage_plans_by_surface?.[surface];
-    if (!plan) return [];
-    const verdictTier = plan.expected_tier;
-    if (typeof verdictTier !== 'string' || !(verdictTier in TIER_RANK)) return [];
+    const verdict = findTriageVerdict(ctx.session.platform, ctx.capability, surface);
+    if (!verdict) return [];
+    const verdictTier = verdict.tier;
     const savedRank = TIER_RANK[savedTier];
     const verdictRank = TIER_RANK[verdictTier];
     if (savedRank === undefined || verdictRank === undefined || savedRank <= verdictRank) return [];
-    const verdictExcerpt =
-      typeof plan.tier_justification === 'string' && plan.tier_justification.length > 0
-        ? ` Verdict cited: ${JSON.stringify(plan.tier_justification.slice(0, 240))}.`
-        : '';
+    const verdictExcerpt = verdict.justification
+      ? ` Verdict cited: ${JSON.stringify(verdict.justification.slice(0, 240))}.`
+      : '';
     return [
       {
-        kind: 'tier_below_triage_verdict',
+        kind: AUDIT_KINDS.tierBelowTriageVerdict,
         message:
           `\`save_strategy\` is committing tier=${JSON.stringify(savedTier)} for surface "${surface}", but ` +
           `the triage plan you approved for this surface called expected_tier=${JSON.stringify(verdictTier)}.${verdictExcerpt} ` +
@@ -333,10 +344,16 @@ const tierBelowTriageVerdictDetector: Detector<Strategy, SaveStrategyCtx> = {
     ];
   },
   ackReason: 'none',
+  // Triage-flow bookkeeping — the verdict is an agent commitment and only
+  // an agent can revise it. Auto-synth deliberately lands the honest lower
+  // tier as a fallback (e.g. recorded-path when the agent's fetch verdict
+  // never produced a save); blocking would strip the no-silent-close
+  // guarantee at end_drive.
+  unattendedPolicy: 'skip',
 };
 
 const sessionScopedIdDetector: Detector<Strategy, SaveStrategyCtx> = {
-  kind: 'unparametrized_session_id',
+  kind: WARNING_KINDS.unparametrizedSessionId,
   detect: (data) => asIssues(detectSessionScopedIdExtraction(data)),
   ackReason: 'required',
 };
@@ -381,10 +398,14 @@ const lookupEmbeddedInPrereqDetector: Detector<Strategy, SaveStrategyCtx> = {
   kind: 'lookup_embedded_in_prereq',
   detect: (data, ctx) => asIssues(detectLookupEmbeddedInPrereq(data, ctx.capability)),
   ackReason: 'none',
+  // The remedy (factor the lookup into a sibling capability) is agent work
+  // no unattended producer can perform — warn-tier so the advisory reaches
+  // the next attended session instead of stripping the save.
+  unattendedPolicy: 'warn',
 };
 
 const authGatedWithoutAuthPrereqDetector: Detector<Strategy, SaveStrategyCtx> = {
-  kind: 'auth_gated_without_auth_prereq',
+  kind: AUDIT_KINDS.authGatedWithoutAuthPrereq,
   detect: (data, ctx) => asIssues(detectAuthGatedWithoutAuthPrereq(data, ctx.sessionId)),
   ackReason: 'required',
 };
@@ -434,6 +455,10 @@ const recordedPathInlinesLookupDetector: Detector<Strategy, SaveStrategyCtx> = {
       ),
     ),
   ackReason: 'none',
+  // Auto-synth recorded-paths replay the agent's real flow, which often
+  // legitimately includes an inline search/pick step; factoring it out is
+  // agent work. Warn-tier keeps the fallback while surfacing the shape.
+  unattendedPolicy: 'warn',
 };
 
 const ungroundedEnumPlaceholderDetector: Detector<Strategy, SaveStrategyCtx> = {
@@ -473,6 +498,10 @@ const enumParamListingUnfactoredDetector: Detector<Strategy, SaveStrategyCtx> = 
   // capability itself can have its own prereqs); they don't need an
   // ack-bypass on this detector.
   ackReason: 'none',
+  // Saving the listing as its own capability is agent work — warn-tier on
+  // unattended saves so the advisory lands on the artifact instead of
+  // stripping the fallback.
+  unattendedPolicy: 'warn',
 };
 
 // A side-effect-only (no-vars) capability prereq whose target is a saved pure
@@ -491,6 +520,28 @@ const uselessCapabilityPrereqDetector: Detector<Strategy, SaveStrategyCtx> = {
     );
   },
   ackReason: 'required',
+};
+
+// Exact complement of the detector above: a no-vars capability/tag prereq whose
+// target is NOT a pure read, so nothing the runtime can check proves the effect
+// landed. ackReason: 'required' — an effect with no observable trace in the
+// target's response is the ack escape. Warn-tier unattended: binding a proof
+// value is agent work, and an unattended save keeps its fallback with the
+// advisory on the artifact.
+const sideEffectPrereqUnprovenDetector: Detector<Strategy, SaveStrategyCtx> = {
+  kind: WARNING_KINDS.sideEffectPrereqUnproven,
+  detect: (data, ctx) => {
+    const platform = ctx.session?.platform;
+    if (!platform) return [];
+    return asIssues(
+      detectSideEffectPrereqUnproven(data, {
+        loadStrategiesForCapability: (cap) => loadStrategiesForPlatformAndCapability(platform, cap),
+        resolveTagProviders: (tag) => findCapabilitiesProviding(platform, tag),
+      }),
+    );
+  },
+  ackReason: 'required',
+  unattendedPolicy: 'warn',
 };
 
 // Slug has _by_X / _for_X / lookup_X segments + a saved sibling on the
@@ -531,9 +582,17 @@ const lookupSiblingNotReferencedDetector: Detector<Strategy, SaveStrategyCtx> = 
 // audit layer, before commit. Repro: v8 platform-map/map-lift-safe —
 // agent saved `place_order` with body {address, card_number, exp, cvv}.
 const sensitiveActionShapeDetector: Detector<Strategy, SaveStrategyCtx> = {
-  kind: 'sensitive_action_must_be_recorded_not_saved',
+  kind: AUDIT_KINDS.sensitiveActionMustBeRecordedNotSaved,
   detect: (data) => asIssues(detectSensitiveActionShape(data)),
   ackReason: 'none',
+  // Blocks on every LLM-authored origin (the ackReason:'none' default):
+  // agent_explicit, auto-synth, graduation. A payment / identity /
+  // credential-shaped strategy must never land as a runnable file from an
+  // LLM producer — this detector row is the single copy of that invariant.
+  // `programmatic` saves are embedder-owned payloads, so UNATTENDED_RULES
+  // (save-policy.ts) demotes this, like every blocking issue, to a
+  // returned warning on that origin.
+  unattendedPolicy: 'block',
 };
 
 const enumValueInCapabilitySlugDetector: Detector<Strategy, SaveStrategyCtx> = {
@@ -602,7 +661,7 @@ const endpointCollidesWithSavedCapabilityDetector: Detector<Strategy, SaveStrate
 // allowing the agent to bypass would mean URL hallucination from training
 // data could land on disk. ackReason: 'none'.
 const unobservedUrlDetector: Detector<Strategy, SaveStrategyCtx> = {
-  kind: 'unobserved_url',
+  kind: AUDIT_KINDS.unobservedUrl,
   detect: (data, ctx) => {
     // Tolerate ctx omitting observedUrls (programmatic saves, detector-unit
     // tests). Production save paths pass the captured URL list explicitly;
@@ -614,13 +673,27 @@ const unobservedUrlDetector: Detector<Strategy, SaveStrategyCtx> = {
       data as unknown as Record<string, unknown>,
       observedUrls,
     );
-    return issues.map((i) => ({
-      kind: 'unobserved_url',
-      message: i.message,
-      context: { where: i.where, url: i.url },
-    }));
+    const unchangedUrls = new Set(
+      ctx.previousStrategy
+        ? collectStrategyUrls(ctx.previousStrategy as unknown as Record<string, unknown>).map(
+            ({ where, url }) => `${where}\0${url}`,
+          )
+        : [],
+    );
+    return issues
+      .filter((issue) => !unchangedUrls.has(`${issue.where}\0${issue.url}`))
+      .map((i) => ({
+        kind: AUDIT_KINDS.unobservedUrl,
+        message: i.message,
+        context: { where: i.where, url: i.url },
+      }));
   },
   ackReason: 'none',
+  // Synthesized strategies template URLs ({{param}} navigate steps, VE-
+  // templated endpoints) that won't literally match captures — a hard block
+  // would refuse legitimate fallbacks on exactly the sessions that need
+  // them. Warn-tier preserves the observability signal on the artifact.
+  unattendedPolicy: 'warn',
 };
 
 // Query-param completeness: every query param that appeared in the captured
@@ -632,7 +705,7 @@ const unobservedUrlDetector: Detector<Strategy, SaveStrategyCtx> = {
 // can ack tracking-only params (`utm_*`, `gclid`, etc.) or server-tolerated
 // optional params with a one-sentence justification.
 const urlParamCompletenessDetector: Detector<Strategy, SaveStrategyCtx> = {
-  kind: 'captured_query_param_missing_from_strategy',
+  kind: AUDIT_KINDS.capturedQueryParamMissingFromStrategy,
   detect: (data, ctx) => {
     if (ctx.observedUrls === undefined) return [];
     const missing = findMissingCapturedQueryParams(
@@ -640,7 +713,7 @@ const urlParamCompletenessDetector: Detector<Strategy, SaveStrategyCtx> = {
       ctx.observedUrls,
     );
     return missing.map((m) => ({
-      kind: 'captured_query_param_missing_from_strategy',
+      kind: AUDIT_KINDS.capturedQueryParamMissingFromStrategy,
       message:
         `The captured request URL included \`?${m.param}=${m.observed_value}\` but the saved ` +
         `strategy endpoint doesn't reference \`${m.param}\` anywhere. Saved strategies that drop a ` +
@@ -676,6 +749,9 @@ const lookupPrereqMustBeCapabilityDetector: Detector<Strategy, SaveStrategyCtx> 
     }));
   },
   ackReason: 'none',
+  // Splitting the lookup into a sibling capability is agent work — see
+  // lookupEmbeddedInPrereqDetector's annotation.
+  unattendedPolicy: 'warn',
 };
 
 // `observed_property_keys` and `observed_literal_values` are token-bound
@@ -827,6 +903,7 @@ export const saveStrategyAudit = new Audit<Strategy, SaveStrategyCtx>({
     unreferencedPrereqBindingDetector,
     unreferencedParamsDetector,
     uselessCapabilityPrereqDetector,
+    sideEffectPrereqUnprovenDetector,
     recordedPathInlinesLookupDetector,
     ungroundedEnumPlaceholderDetector,
     enumParamListingUnfactoredDetector,

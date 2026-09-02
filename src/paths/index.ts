@@ -15,5 +15,6 @@ export function getKluraHome(): string {
 
 export const KLURA_DIR = getKluraHome();
 export const SKILLS_DIR = path.join(KLURA_DIR, 'skills');
+export const STRATEGY_CANDIDATES_DIR = path.join(KLURA_DIR, 'strategy-candidates');
 export const WORKDIR_DIR = path.join(KLURA_DIR, 'workdir');
 export const STORAGE_DIR = path.join(KLURA_DIR, 'storage-state');

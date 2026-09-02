@@ -14,8 +14,9 @@
 import type { Strategy } from '../strategies/skills';
 import type { SaveWarning } from './save-warnings';
 
-function strategyMethod(s: Strategy): string {
+function strategyMethod(s: Strategy): string | null {
   const obj = s as Record<string, unknown>;
+  if (obj.strategy !== 'fetch' && obj.strategy !== 'page-script') return null;
   if (typeof obj.method === 'string') return obj.method.toUpperCase();
   const ep = obj.endpoint;
   if (typeof ep === 'string' && ep.includes(' ')) return (ep.split(' ')[0] ?? 'GET').toUpperCase();
@@ -52,9 +53,10 @@ export function detectUselessCapabilityPrereq(
     // Not saved → can't verify it's a pure read → never flag.
     if (!Array.isArray(targets) || targets.length === 0) continue;
 
-    // Positive pure-read confirmation: EVERY saved tier is a GET with no
-    // `provides`. Any `provides`, or any non-GET tier, means the prereq may
-    // carry a real side effect (auth, session cookie, mutation) → don't flag.
+    // Positive pure-read confirmation: EVERY saved tier is an HTTP GET with no
+    // `provides`. Recorded paths have no HTTP method and may intentionally
+    // change browser-local state, so they are never classified as pure reads.
+    // Any `provides`, non-HTTP tier, or non-GET method stays out of scope.
     const allPureRead = targets.every((s) => {
       const provides = (s as { provides?: unknown }).provides;
       const hasProvides = Array.isArray(provides) && provides.length > 0;

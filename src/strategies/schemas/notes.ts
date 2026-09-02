@@ -1,6 +1,18 @@
 import { z } from 'zod';
 import { PARAM_EXAMPLE_MAX, PARAM_FIELD_MAX, PARAM_KIND_VALUES } from '../validate/constants';
 
+const structuredExampleFits = (value: unknown): boolean =>
+  JSON.stringify(value).length <= PARAM_EXAMPLE_MAX;
+
+const paramExampleSchema = z.union([
+  z.string().max(PARAM_EXAMPLE_MAX, 'is too long'),
+  z.number(),
+  z.boolean(),
+  z.null(),
+  z.array(z.json()).refine(structuredExampleFits, { message: 'is too long' }),
+  z.record(z.string(), z.json()).refine(structuredExampleFits, { message: 'is too long' }),
+]);
+
 export const paramDocSchema = z
   .object({
     description: z.string().max(PARAM_FIELD_MAX, 'is too long').optional(),
@@ -8,10 +20,10 @@ export const paramDocSchema = z
       .enum(PARAM_KIND_VALUES)
       .optional()
       .describe(
-        'classifies what the caller TYPES, not the value\'s data type. Counts/limits/numbers/messages/dates/names are "text" (free-form caller input). "id" / "uuid" are for opaque server-issued identifiers (long hex blobs, UUIDs, base64 tokens). "slug" is for human-readable IDs. "email" / "url" are those formats. "enum" requires observed_values grounded in capture.',
+        'classifies caller-value semantics and structured container shape. Counts/limits/numbers/messages/dates/names are "text" (free-form scalar caller input). "array" and "object" are structured JSON caller inputs. "id" / "uuid" are for opaque server-issued identifiers (long hex blobs, UUIDs, base64 tokens). "slug" is for human-readable IDs. "email" / "url" are those formats. "enum" requires observed_values grounded in capture.',
       ),
     source: z.string().max(PARAM_FIELD_MAX, 'is too long').optional(),
-    example: z.string().max(PARAM_EXAMPLE_MAX, 'is too long').optional(),
+    example: paramExampleSchema.optional(),
     optional: z
       .boolean()
       .optional()
@@ -36,7 +48,27 @@ export const paramDocSchema = z
         'one-sentence justification when kind: "text" despite UI-click observations on this param — names at least one observed click label verbatim and describes the non-click traffic shape. Substance is validated separately at save-audit time; this field just declares the slot.',
       ),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.example === undefined) return;
+    if (value.kind === 'array' && !Array.isArray(value.example)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['example'],
+        message: 'must be an array when kind is "array"',
+      });
+    }
+    if (
+      value.kind === 'object' &&
+      (value.example === null || Array.isArray(value.example) || typeof value.example !== 'object')
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['example'],
+        message: 'must be an object when kind is "object"',
+      });
+    }
+  });
 
 export const notesParamsSchema = z
   .record(z.string(), z.union([z.string().max(PARAM_FIELD_MAX, 'is too long'), paramDocSchema]))

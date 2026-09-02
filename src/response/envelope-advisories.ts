@@ -93,9 +93,10 @@ interface DetectorInput {
     verified_ok: number;
   } | null;
   /**
-   * Approximate count of tool calls against this session — incremented on every
-   * getSession() lookup. Surfaced on the binary-WS evidence map so the agent
-   * can read its own round count alongside the envelope shape.
+   * Count of admitted non-universal tool calls against this session,
+   * registered once per call at the phase-middleware dispatch boundary
+   * (`pool.registerUserRound`). Surfaced on the binary-WS evidence map so
+   * the agent can read its own round count alongside the envelope shape.
    */
   sessionRoundCount?: number;
 }

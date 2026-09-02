@@ -92,3 +92,18 @@ test('flags a no-vars capability prereq whose target is a saved pure-read GET (n
   assert.match(warnings[0].message, /pure READ/);
   assert.equal(warnings[0].context.capability, 'list_products');
 });
+
+test('does not classify a recorded-path prerequisite as a pure-read GET', () => {
+  const loader = loaderFor({
+    prepare_browser: [
+      {
+        strategy: 'recorded-path',
+        steps: [
+          { id: 'open', action: 'navigate', url: 'https://x.test' },
+          { id: 'prepare', action: 'click', locators: { css: 'button' } },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(detectUselessCapabilityPrereq(noVarsPrereq('prepare_browser'), loader), []);
+});

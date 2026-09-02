@@ -5,7 +5,13 @@
 import { getIdentity } from '../identity/identities';
 import { resolveSecrets } from '../identity/secrets';
 import { extractFromHtml } from '../response/html-extract';
-import { lookupPlaceholderPath, replacePlaceholders } from '../execution/placeholders';
+import {
+  collectInlinePlaceholderRefs,
+  lookupPlaceholderPath,
+  normalizeUrlColonPlaceholders,
+  replacePlaceholders,
+} from '../execution/placeholders';
+import { FactoryExecutionStateError } from './result-classification';
 
 // Walk a dotted path into a nested object. Supports `response.items[0].node_id`
 // style. Returns undefined if the path doesn't resolve, or if the final value
@@ -76,7 +82,7 @@ export function interpolateVars(
 ): string {
   return replacePlaceholders(s, (path, match) => {
     const value = lookupPlaceholderPath(args, path);
-    if (value === undefined) return match;
+    if (isMissingTemplateValue(value)) return match;
     const str = typeof value === 'string' ? value : JSON.stringify(value);
     if (encode === 'path') return encodePathSegments(str);
     if (encode) return encodeURIComponent(str);
@@ -90,6 +96,106 @@ export function interpolateVars(
   });
 }
 
+function isMissingTemplateValue(value: unknown): boolean {
+  return value === undefined || value === null || value === '';
+}
+
+function isEmptyOptionalContainer(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length === 0;
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    Object.getPrototypeOf(value) === Object.prototype &&
+    Object.keys(value as Record<string, unknown>).length === 0
+  );
+}
+
+export function unresolvedPlaceholderNames(value: string): string[] {
+  return [...collectInlinePlaceholderRefs(value)].sort((a, b) => a.localeCompare(b));
+}
+
+export function assertNoUnresolvedPlaceholders(value: string, field: string): void {
+  const unresolved = unresolvedPlaceholderNames(value);
+  if (unresolved.length === 0) return;
+  throw new FactoryExecutionStateError(
+    'not_run',
+    'unresolved_placeholders',
+    `unresolved_placeholders: ${field} still contains ${unresolved
+      .map((name) => `{{${name}}}`)
+      .join(', ')} after argument and prerequisite resolution; request not sent`,
+    { field, unresolved },
+  );
+}
+
+export function omittedOptionalParamNames(
+  strategy: { notes?: unknown },
+  args: Record<string, unknown>,
+): ReadonlySet<string> {
+  const notes = strategy.notes;
+  if (!notes || typeof notes !== 'object' || Array.isArray(notes)) return new Set();
+  const params = (notes as { params?: unknown }).params;
+  if (!params || typeof params !== 'object' || Array.isArray(params)) return new Set();
+  const omitted = new Set<string>();
+  for (const [name, doc] of Object.entries(params as Record<string, unknown>)) {
+    if (!doc || typeof doc !== 'object' || Array.isArray(doc)) continue;
+    if ((doc as { optional?: unknown }).optional !== true) continue;
+    const value = lookupPlaceholderPath(args, name);
+    if (isMissingTemplateValue(value) || isEmptyOptionalContainer(value)) omitted.add(name);
+  }
+  return omitted;
+}
+
+const OMIT_OPTIONAL_VALUE = Symbol('omit_optional_value');
+
+function omittedOptionalRoot(
+  ref: string,
+  omittedOptionalParams: ReadonlySet<string>,
+): string | undefined {
+  if (omittedOptionalParams.has(ref)) return ref;
+  const dot = ref.indexOf('.');
+  if (dot <= 0) return undefined;
+  const root = ref.slice(0, dot);
+  return omittedOptionalParams.has(root) ? root : undefined;
+}
+
+function pruneOmittedOptionalValues(
+  value: unknown,
+  omittedOptionalParams: ReadonlySet<string>,
+  args: Record<string, unknown>,
+): unknown {
+  if (typeof value === 'string') {
+    const refs = [...collectInlinePlaceholderRefs(value)];
+    if (
+      refs.length === 1 &&
+      value === `{{${refs[0]}}}` &&
+      omittedOptionalRoot(refs[0] ?? '', omittedOptionalParams) !== undefined &&
+      isMissingTemplateValue(lookupPlaceholderPath(args, refs[0] ?? ''))
+    ) {
+      return OMIT_OPTIONAL_VALUE;
+    }
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const out: unknown[] = [];
+    for (const entry of value) {
+      const pruned = pruneOmittedOptionalValues(entry, omittedOptionalParams, args);
+      // Removing an array element shifts positional meaning. Keep the original
+      // unresolved token so the transport guard rejects it instead.
+      out.push(pruned === OMIT_OPTIONAL_VALUE ? entry : pruned);
+    }
+    return out;
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      const pruned = pruneOmittedOptionalValues(entry, omittedOptionalParams, args);
+      if (pruned !== OMIT_OPTIONAL_VALUE) out[key] = pruned;
+    }
+    return out;
+  }
+  return value;
+}
+
 export function mergeWithIdentity(
   args: Record<string, unknown>,
   platform: string,
@@ -101,69 +207,93 @@ export function mergeWithIdentity(
 
 export function resolveVariables<T>(step: T, args: Record<string, unknown>): T {
   const json = resolveSecrets(interpolateVars(JSON.stringify(step), args, false, true));
+  assertNoUnresolvedPlaceholders(json, 'recorded-path step');
   return JSON.parse(json) as T;
 }
 
-// Resolve the query-string portion of an endpoint (the `?...` tail), dropping
-// any `key={{placeholder}}` segment whose templated value resolves to empty or
-// unset. A query parameter is droppable by construction — unlike a path segment
-// — so an OPTIONAL param the caller omitted (or passed as ""), e.g. a
-// `?cuisine={{cuisine}}` filter, should disappear from the URL rather than be
-// left as a literal `{{cuisine}}` (broken) or an empty `cuisine=` the server may
-// reject as a missing-value. Segments with no placeholder (static `key=val`, or
-// an intentional empty `key=`) and path-position tokens are untouched — a
-// missing PATH param is a real error and stays loud.
-function resolveQueryString(queryPart: string, args: Record<string, unknown>): string {
+// Resolve the query-string portion of a URL template. Only an exact
+// `key={{ref}}` value declared optional may disappear. Required refs and
+// embedded optional refs stay unresolved so the final transport guard rejects
+// them instead of changing `after:{{cursor}}` into `after:`.
+function resolveQueryString(
+  queryPart: string,
+  args: Record<string, unknown>,
+  omittedOptionalParams: ReadonlySet<string>,
+): string {
   const leading = queryPart.startsWith('?') ? '?' : '';
   const raw = leading ? queryPart.slice(1) : queryPart;
   if (raw.length === 0) return queryPart;
-  const resolveSegmentPart = (template: string): { resolved: string; hadPlaceholder: boolean } => {
-    let hadPlaceholder = false;
-    const resolved = replacePlaceholders(template, (path) => {
-      hadPlaceholder = true;
-      const v = lookupPlaceholderPath(args, path);
-      if (v === undefined) return '';
-      return encodeURIComponent(typeof v === 'string' ? v : JSON.stringify(v));
-    });
-    return { resolved, hadPlaceholder };
-  };
+  const resolveSegmentPart = (template: string): string => interpolateVars(template, args, true);
   const kept: string[] = [];
   for (const segment of raw.split('&')) {
     if (segment.length === 0) continue;
     const eq = segment.indexOf('=');
     if (eq === -1) {
-      const { resolved, hadPlaceholder } = resolveSegmentPart(segment);
-      // A bare flag that was entirely an unset placeholder drops; a static flag
-      // or a non-empty resolution stays.
-      if (!hadPlaceholder || resolved.length > 0) kept.push(resolved);
+      kept.push(resolveSegmentPart(segment));
       continue;
     }
-    const { resolved: key } = resolveSegmentPart(segment.slice(0, eq));
-    const { resolved: value, hadPlaceholder } = resolveSegmentPart(segment.slice(eq + 1));
-    if (hadPlaceholder && value.length === 0) continue; // optional param omitted/empty → drop
+    const key = resolveSegmentPart(segment.slice(0, eq));
+    const valueTemplate = segment.slice(eq + 1);
+    const refs = [...collectInlinePlaceholderRefs(valueTemplate)];
+    const exactRef = refs.length === 1 && valueTemplate === `{{${refs[0]}}}` ? refs[0] : undefined;
+    if (
+      exactRef &&
+      omittedOptionalRoot(exactRef, omittedOptionalParams) !== undefined &&
+      isMissingTemplateValue(lookupPlaceholderPath(args, exactRef))
+    ) {
+      continue;
+    }
+    const value = resolveSegmentPart(valueTemplate);
     kept.push(`${key}=${value}`);
   }
   if (kept.length === 0) return '';
   return `${leading}${kept.join('&')}`;
 }
 
-function resolveEndpoint(baseUrl: string, template: string, args: Record<string, unknown>): string {
+export function renderUrlTemplate(
+  template: string,
+  args: Record<string, unknown>,
+  omittedOptionalParams: ReadonlySet<string> = new Set(),
+): string {
+  const normalizedTemplate = normalizeUrlColonPlaceholders(template);
+  const refs = [...collectInlinePlaceholderRefs(normalizedTemplate)];
+  if (refs.length === 1 && normalizedTemplate === `{{${refs[0]}}}`) {
+    const value = lookupPlaceholderPath(args, refs[0] ?? '');
+    if (!isMissingTemplateValue(value)) {
+      return resolveSecrets(typeof value === 'string' ? value : JSON.stringify(value));
+    }
+  }
   // Support both `:key` (REST style) and `{{key}}` (template style). Encode
   // position-aware: tokens in the PATH keep `/` separators (a value that is a
   // path, e.g. `/items` from a page-extract, must not become `%2Fitems`);
   // tokens in the QUERY use full encodeURIComponent (`&`/`=`/`/` are data there).
-  const qIdx = template.indexOf('?');
-  let pathPart = qIdx === -1 ? template : template.slice(0, qIdx);
-  let queryPart = qIdx === -1 ? '' : template.slice(qIdx); // keeps the leading '?'
-  for (const [key, value] of Object.entries(args)) {
-    if (typeof value === 'string' || typeof value === 'number') {
-      pathPart = pathPart.split(`:${key}`).join(encodePathSegments(String(value)));
-      queryPart = queryPart.split(`:${key}`).join(encodeURIComponent(String(value)));
-    }
-  }
-  const resolved = resolveSecrets(
-    interpolateVars(pathPart, args, 'path') + resolveQueryString(queryPart, args),
+  const qIdx = normalizedTemplate.indexOf('?');
+  const pathPart = qIdx === -1 ? normalizedTemplate : normalizedTemplate.slice(0, qIdx);
+  const queryPart = qIdx === -1 ? '' : normalizedTemplate.slice(qIdx); // keeps the leading '?'
+  return resolveSecrets(
+    interpolateVars(pathPart, args, 'path') +
+      resolveQueryString(queryPart, args, omittedOptionalParams),
   );
+}
+
+export function resolveUrlTemplate(
+  template: string,
+  args: Record<string, unknown>,
+  omittedOptionalParams: ReadonlySet<string>,
+  field: string,
+): string {
+  const resolved = renderUrlTemplate(template, args, omittedOptionalParams);
+  assertNoUnresolvedPlaceholders(resolved, field);
+  return resolved;
+}
+
+function resolveEndpoint(
+  baseUrl: string,
+  template: string,
+  args: Record<string, unknown>,
+  omittedOptionalParams: ReadonlySet<string>,
+): string {
+  const resolved = resolveUrlTemplate(template, args, omittedOptionalParams, 'request URL');
   // Also interpolate placeholders in baseUrl. Agents legitimately embed
   // per-caller slugs in the origin path (e.g. `https://host/@{{username}}`)
   // when a site's API uses the canonical user page URL as its "base." Per docs,
@@ -171,8 +301,10 @@ function resolveEndpoint(baseUrl: string, template: string, args: Record<string,
   // substituting here is the LLM-friendly fix — the alternative would require
   // agents to keep templates out of baseUrl, which isn't documented and isn't
   // obvious from the shape.
-  const resolvedBase = resolveSecrets(interpolateVars(baseUrl, args));
-  return joinBaseAndPath(resolvedBase, resolved);
+  const resolvedBase = resolveUrlTemplate(baseUrl, args, omittedOptionalParams, 'request base URL');
+  const url = joinBaseAndPath(resolvedBase, resolved);
+  assertNoUnresolvedPlaceholders(url, 'request URL');
+  return url;
 }
 
 // Combine a baseUrl and an endpoint template using WHATWG URL resolution
@@ -225,24 +357,61 @@ function strategyHeadersDeclareForm(headers: Record<string, string> | undefined)
 export function resolveBody(
   template: Record<string, unknown>,
   args: Record<string, unknown>,
+  omittedOptionalParams: ReadonlySet<string> = new Set(),
 ): Record<string, unknown> {
-  // jsonEscape=true: interpolated values go through a stringify → interpolate →
-  // parse round-trip, and raw values containing `"` or `\` would break
-  // JSON.parse. Same bug pattern as resolveVariables — concrete case: MediaWiki
-  // CSRF tokens end with a literal `\` and `"token":"{{csrf_token}}"` becomes
-  // `"token":"...+\"` without escape, which reads as unterminated-string.
-  const json = resolveSecrets(interpolateVars(JSON.stringify(template), args, false, true));
-  return JSON.parse(json) as Record<string, unknown>;
+  const pruned = pruneOmittedOptionalValues(template, omittedOptionalParams, args);
+  const resolveValue = (value: unknown): unknown => {
+    if (typeof value === 'string') {
+      const refs = [...collectInlinePlaceholderRefs(value)];
+      if (refs.length === 1 && value === `{{${refs[0]}}}`) {
+        const resolved = lookupPlaceholderPath(args, refs[0] ?? '');
+        if (resolved !== undefined && resolved !== '') return cloneResolvedValue(resolved);
+      }
+      return resolveSecrets(interpolateVars(value, args));
+    }
+    if (Array.isArray(value)) return value.map(resolveValue);
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).map(([key, child]) => [
+          key,
+          resolveValue(child),
+        ]),
+      );
+    }
+    return value;
+  };
+  const resolved = resolveValue(pruned) as Record<string, unknown>;
+  const json = JSON.stringify(resolved);
+  assertNoUnresolvedPlaceholders(json, 'request body');
+  return resolved;
+}
+
+function cloneResolvedValue(value: unknown): unknown {
+  if (typeof value === 'string') return resolveSecrets(value);
+  if (Array.isArray(value)) return value.map(cloneResolvedValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, child]) => [
+        key,
+        cloneResolvedValue(child),
+      ]),
+    );
+  }
+  return value;
 }
 
 export function resolveHeaders(
   template: Record<string, string> | undefined,
   args: Record<string, unknown>,
+  omittedOptionalParams: ReadonlySet<string> = new Set(),
 ): Record<string, string> {
   if (!template) return {};
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(template)) {
+    const pruned = pruneOmittedOptionalValues(v, omittedOptionalParams, args);
+    if (pruned === OMIT_OPTIONAL_VALUE) continue;
     out[k] = resolveSecrets(interpolateVars(v, args));
+    assertNoUnresolvedPlaceholders(out[k] ?? '', `request header ${JSON.stringify(k)}`);
   }
   return out;
 }
@@ -250,12 +419,27 @@ export function resolveHeaders(
 export function resolveBrowserPrereqStep<T extends Record<string, unknown>>(
   step: T,
   args: Record<string, unknown>,
+  omittedOptionalParams: ReadonlySet<string> = new Set(),
 ): T {
   const out: Record<string, unknown> = { ...step };
   for (const field of ['url', 'selector', 'attribute', 'value'] as const) {
     const raw = step[field];
     if (typeof raw !== 'string') continue;
+    if (field === 'url') {
+      out[field] = resolveUrlTemplate(
+        raw,
+        args,
+        omittedOptionalParams,
+        `browser prerequisite ${field}`,
+      );
+      continue;
+    }
+    if (pruneOmittedOptionalValues(raw, omittedOptionalParams, args) === OMIT_OPTIONAL_VALUE) {
+      Reflect.deleteProperty(out, field);
+      continue;
+    }
     out[field] = resolveSecrets(interpolateVars(raw, args));
+    assertNoUnresolvedPlaceholders(String(out[field]), `browser prerequisite ${field}`);
   }
   return out as T;
 }
@@ -280,6 +464,7 @@ export function prepareRequest(
     headers?: Record<string, string>;
     body?: Record<string, unknown>;
     params?: Record<string, unknown>;
+    notes?: unknown;
   },
   args: Record<string, unknown>,
 ): PreparedRequest {
@@ -287,9 +472,14 @@ export function prepareRequest(
   const endpointPath = strategy.endpoint.includes(' ')
     ? strategy.endpoint.split(' ').slice(1).join(' ')
     : strategy.endpoint;
-  const resolvedArgs = strategy.params ? { ...args, ...resolveBody(strategy.params, args) } : args;
-  const url = resolveEndpoint(strategy.baseUrl, endpointPath, resolvedArgs);
-  const bodyObj = strategy.body ? resolveBody(strategy.body, args) : undefined;
+  const omittedOptionalParams = omittedOptionalParamNames(strategy, args);
+  const resolvedArgs = strategy.params
+    ? { ...args, ...resolveBody(strategy.params, args, omittedOptionalParams) }
+    : args;
+  const url = resolveEndpoint(strategy.baseUrl, endpointPath, resolvedArgs, omittedOptionalParams);
+  const bodyObj = strategy.body
+    ? resolveBody(strategy.body, args, omittedOptionalParams)
+    : undefined;
   const isForm = strategy.contentType === 'form' || strategyHeadersDeclareForm(strategy.headers);
   let serializedBody: string | undefined;
   if (bodyObj && method !== 'GET') {

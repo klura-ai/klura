@@ -15,7 +15,7 @@ import {
   stringifyIfPresent,
 } from './helpers';
 import {
-  attachSaveWarningsToStrategy,
+  collectSaveEvidence,
   detectBlockingTypedTextDrift,
   detectSilentlyBakedArgs,
   detectTypedTextDrift,
@@ -23,8 +23,9 @@ import {
   wireEncodingVariants,
   type LiteralMatch,
 } from './literals';
-import { detectParameterizationDisclosureRequired } from '../../gate/save-warnings-parameterization';
-import { detectSensitiveActionShape } from '../../gate/save-warnings-sensitive-shape';
+import { persistWarningsOnRuntimeMeta } from '../../audit/lift/save-strategy';
+import { SavePolicyBlockedError } from '../../audit/lift/save-policy';
+import { AUDIT_KINDS, SAVE_ORIGINS } from '../../vocab';
 import { buildStepsFromHistory } from './recorded-path';
 import type { AutoSynthResult, SaveMarker, SynthDiagnosticEntry } from './types';
 import { templateRequestFromVEs, type EvaluatedVE } from './verified-expressions';
@@ -306,6 +307,11 @@ export function synthesizeFetchFromCaptures(
     diag.push({ pass: 'synth_fetch', phase: 'skip', outcome: 'no_perform_action_history' });
     return out;
   }
+
+  // Session evidence for the save policy — the same ground truth the
+  // explicit save path feeds the audit, so every detector row protects
+  // this producer too.
+  const saveEvidence = collectSaveEvidence(session);
 
   for (let i = 0; i < saves.length; i += 1) {
     const save = saves[i];
@@ -600,7 +606,10 @@ export function synthesizeFetchFromCaptures(
       notes: notesBlock,
       ...(Object.keys(runtimeMetaBlock).length > 0 ? { runtime_meta: runtimeMetaBlock } : {}),
     };
-    attachSaveWarningsToStrategy(strategy, detectTypedTextDrift(session, save.args));
+    persistWarningsOnRuntimeMeta(
+      strategy as unknown as skills.Strategy,
+      detectTypedTextDrift(session, save.args),
+    );
     // Hard-block on guaranteed-broken drifts: declared arg's literal never
     // surfaced in capture AND the synthesized strategy lacks any
     // `{{argName}}` placeholder. The saved strategy bakes whatever the
@@ -657,51 +666,22 @@ export function synthesizeFetchFromCaptures(
       });
       continue;
     }
-    // Parameterization disclosure: auto-synth bypasses saveStrategyAudit
-    // (no sessionId passed). Run the structural check here so paramless
-    // auto-saves carry the warning into runtime_meta.save_warnings; next
-    // session reading list_platform_skills sees the signal.
-    attachSaveWarningsToStrategy(
-      strategy,
-      detectParameterizationDisclosureRequired(strategy as never),
-    );
-
-    // Sensitive-shape gate: when the auto-synthesized strategy's body /
-    // notes.params surface payment-instrument, identity, banking, or
-    // credential-submit field names (card_number, cvv, ssn, etc.) the
-    // strategy must NOT be persisted as a runnable strategy — the
-    // canonical klura shape for those endpoints is record_observed_-
-    // capability, which captures the structural fact without producing a
-    // runtime that fires the real action on every warm execute. The
-    // saveStrategyAudit's sensitive_action_must_be_recorded_not_saved
-    // Detector covers explicit save_strategy calls; auto-synth bypasses
-    // that audit (no sessionId passed), so the same structural check
-    // must fire here. Repro: v11 llm-tests/platform-map/map-lift-safe
-    // — agent declared address/card_number/exp/cvv args, never typed
-    // them; end_drive name-affinity-matched the captured POST
-    // /api/checkout to place_order and synthesized a runnable strategy
-    // templating the four sensitive fields.
-    const sensitiveWarnings = detectSensitiveActionShape(strategy as never);
-    const firstSensitive = sensitiveWarnings[0];
-    if (firstSensitive) {
-      const ctx = firstSensitive.context as { matched_labels?: unknown } | undefined;
-      diag.push({
-        pass: 'synth_fetch',
-        capability: save.capability,
-        phase: 'skip',
-        outcome: 'sensitive_action_shape',
-        detail: {
-          baseUrl,
-          endpoint,
-          method: req.method,
-          matched_labels: Array.isArray(ctx?.matched_labels) ? ctx.matched_labels : [],
-        },
-      });
-      continue;
-    }
-
     try {
-      const path = skills.saveStrategy(platform, save.capability, strategy as never);
+      // The save policy runs the full unattended detector bank
+      // (saveStrategyAudit) against this producer: blocking invariants
+      // (sensitive_action_must_be_recorded_not_saved) refuse persistence
+      // via SavePolicyBlockedError; warn-tier issues (parameterization
+      // disclosure, unobserved URLs, ...) land on
+      // runtime_meta.save_warnings for the next session to read.
+      const path = skills.saveStrategy(
+        platform,
+        save.capability,
+        strategy as never,
+        undefined,
+        undefined,
+        undefined,
+        { origin: SAVE_ORIGINS.autoSynthFetch, evidence: saveEvidence },
+      );
       out.push({
         capability: save.capability,
         tier: strategyTier,
@@ -743,6 +723,41 @@ export function synthesizeFetchFromCaptures(
         });
       }
     } catch (err) {
+      if (err instanceof SavePolicyBlockedError) {
+        const sensitive = err.issues.find(
+          (i) => i.kind === AUDIT_KINDS.sensitiveActionMustBeRecordedNotSaved,
+        );
+        if (sensitive) {
+          const ctx = sensitive.context as { matched_labels?: unknown } | undefined;
+          diag.push({
+            pass: 'synth_fetch',
+            capability: save.capability,
+            phase: 'skip',
+            outcome: 'sensitive_action_shape',
+            detail: {
+              baseUrl,
+              endpoint,
+              method: req.method,
+              matched_labels: Array.isArray(ctx?.matched_labels) ? ctx.matched_labels : [],
+            },
+          });
+        } else {
+          diag.push({
+            pass: 'synth_fetch',
+            capability: save.capability,
+            phase: 'skip',
+            outcome: 'save_policy_blocked',
+            detail: {
+              baseUrl,
+              endpoint,
+              method: req.method,
+              blocking_kinds: [...new Set(err.issues.map((i) => i.kind))],
+              error: err.message,
+            },
+          });
+        }
+        continue;
+      }
       diag.push({
         pass: 'synth_fetch',
         capability: save.capability,

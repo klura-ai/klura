@@ -2,6 +2,7 @@ import { sign, type KeyObject } from 'node:crypto';
 import {
   parseExactRecord,
   parseHttpsOrigin,
+  parseRuntimeRange,
   sha256Digest,
   PublicContractError,
   type CapabilityIdV1,
@@ -32,12 +33,42 @@ import {
   parseSignedRegistryIndex,
   REGISTRY_KEY_ID_V1,
 } from '../../public/contracts/registry-index';
+import {
+  parseRegistryReleaseState,
+  REGISTRY_RELEASE_CATALOG_KEYS,
+  type RegistryReleaseCatalogV1,
+} from '../../public/contracts/registry-catalog';
 import type { PublicBrowserPageScriptStrategySourceV1 } from './page-script-export';
 
 export {
   exportReviewedLocalPageScriptStrategySource,
   type PublicBrowserPageScriptStrategySourceV1,
 } from './page-script-export';
+export {
+  PACKAGE_SOURCE_FILE_NAME,
+  parseRegistryCatalogManifest,
+  parseRegistryCatalogManifestBytes,
+  parseRegistryReleaseSourcePath,
+  parseRegistryReleaseState,
+  projectRegistryReleaseCatalog,
+  REGISTRY_CATALOG_LIMITS,
+  REGISTRY_CATALOG_MANIFEST_KEYS,
+  REGISTRY_CATALOG_RELEASE_KEYS,
+  REGISTRY_CATALOG_SCHEMA_VERSION,
+  REGISTRY_RELEASE_CATALOG_KEYS,
+  RELEASES_DIRECTORY_NAME,
+  type RegistryCatalogManifestV1,
+  type RegistryCatalogReleaseV1,
+  type RegistryReleaseCatalogV1,
+  type RegistryReleaseSourcePathV1,
+  type RegistryReleaseStateV1,
+} from '../../public/contracts/registry-catalog';
+export {
+  isAllowedToolsPackageFile,
+  isAllowedToolsRepositoryPath,
+  TOOLS_PACKAGE_LAYOUT_V1,
+  type ToolsPackageLayoutV1,
+} from './tools-layout';
 
 const PACKAGE_SOURCE_KEYS = [
   'package_schema_version',
@@ -82,15 +113,6 @@ export interface CompiledPublicPackageV1 {
   package: PublicToolPackageV1;
   manifest_digest: Sha256DigestV1;
   bytes: Buffer;
-}
-
-export interface RegistryReleaseCatalogV1 {
-  display_name: string;
-  description: string;
-  domains: string[];
-  tags: string[];
-  state: 'installable' | 'withdrawn';
-  runtime_range: RegistryPackageVersionV1['runtime_range'];
 }
 
 export interface CompiledRegistryReleaseEntryV1 {
@@ -216,29 +238,27 @@ export function compileRegistryReleaseEntry(value: unknown): CompiledRegistryRel
   ]);
   const compiled = compilePublicPackageSource(input.package_source);
   const origin = parseHttpsOrigin(input.registry_origin, 'registry_release.registry_origin');
-  const catalogRecord = parseExactRecord(input.catalog, 'registry_release.catalog', [
-    'display_name',
-    'description',
-    'domains',
-    'tags',
-    'state',
-    'runtime_range',
-  ]);
-  if (catalogRecord.state !== 'installable' && catalogRecord.state !== 'withdrawn') {
-    throw new PublicContractError(
-      'registry_release.catalog.state',
-      'must be installable or withdrawn',
-    );
-  }
+  const catalogRecord = parseExactRecord(
+    input.catalog,
+    'registry_release.catalog',
+    REGISTRY_RELEASE_CATALOG_KEYS,
+  );
+  const catalogState = parseRegistryReleaseState(
+    catalogRecord.state,
+    'registry_release.catalog.state',
+  );
   const packageDigest = sha256Digest(compiled.bytes);
   const registryVersion: RegistryPackageVersionV1 = {
     version: compiled.package.version,
-    state: catalogRecord.state,
+    state: catalogState,
     package_url: `${origin}/v1/packages/${packageDigest}.json`,
     package_bytes: compiled.bytes.byteLength,
     package_digest: packageDigest,
     manifest_digest: compiled.manifest_digest,
-    runtime_range: catalogRecord.runtime_range as RegistryPackageVersionV1['runtime_range'],
+    runtime_range: parseRuntimeRange(
+      catalogRecord.runtime_range,
+      'registry_release.catalog.runtime_range',
+    ),
     capabilities: Object.fromEntries(
       Object.entries(compiled.package.capabilities)
         .filter(([, capability]) => capability.visibility === 'public')
@@ -281,8 +301,8 @@ export function compileRegistryReleaseEntry(value: unknown): CompiledRegistryRel
   }
   return {
     package: compiled,
-    catalog: projectCatalog(validatedPackage, catalogRecord.state),
-    registry_version: { ...validatedVersion, state: catalogRecord.state },
+    catalog: projectCatalog(validatedPackage, catalogState),
+    registry_version: { ...validatedVersion, state: catalogState },
   };
 }
 

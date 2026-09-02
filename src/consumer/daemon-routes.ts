@@ -1,15 +1,6 @@
-import {
-  parseCapabilityId,
-  parseExactRecord,
-  parseInteger,
-  parsePackageId,
-  parseSessionName,
-  parseStableContractId,
-  PUBLIC_CONTRACT_LIMITS,
-  PublicContractError,
-  type SessionNameV1,
-} from '../public/contracts/common';
-import { assertJsonValue, type JsonValueV1 } from '../public/contracts/json';
+import { PublicContractError, type SessionNameV1 } from '../public/contracts/common';
+import { type JsonValueV1 } from '../public/contracts/json';
+import { CONSUMER_WIRE_CONTRACTS, parseConsumerWireBody } from './contracts/tool-contracts';
 import { ConsumerCallServiceV1, type CallInstalledCapabilityResultV1 } from './call-service';
 import { InstalledPackageError, isInstalledPackageErrorCode } from './installed-package';
 import {
@@ -19,15 +10,12 @@ import {
   type StartInstalledScrapeRunResultV1,
 } from './run-service';
 import {
-  parseRunId,
-  parseRunOperationId,
   type RunCancellationSourceV1,
   type RunIdV1,
   type RunOperationIdV1,
 } from './scrape/journal';
 import {
   DEFAULT_INLINE_OUTPUT_MAX_BYTES_V1,
-  parseRunOutput,
   RunOutputError,
   type RunOutputV1,
 } from './scrape/output';
@@ -317,16 +305,16 @@ export class ConsumerDaemonRoutesV1 {
     body: unknown,
     signal?: AbortSignal,
   ): AsyncIterable<ConsumerDaemonRunItemStreamEventV1> {
-    const record = parseExactRecord(body, 'consumer.runs.items.follow', [
-      'run_id',
-      'after_sequence',
-    ]);
-    const runId = parseRunId(record.run_id, 'consumer.runs.items.follow.run_id');
-    const afterSequence =
-      record.after_sequence === null
-        ? undefined
-        : parseInteger(record.after_sequence, 'consumer.runs.items.follow.after_sequence', 0, 1e9);
-    return this.streamRunItems(runId, afterSequence, signal);
+    const record = parseConsumerWireBody(
+      CONSUMER_WIRE_CONTRACTS['/consumer/runs/items/follow'],
+      body,
+      'consumer.runs.items.follow',
+    );
+    return this.streamRunItems(
+      record.run_id,
+      record.after_sequence === null ? undefined : record.after_sequence,
+      signal,
+    );
   }
 
   async invoke(
@@ -418,7 +406,11 @@ export class ConsumerDaemonRoutesV1 {
   }
 
   private async search(body: unknown): Promise<SearchPackagesResultV1> {
-    const record = parseExactRecord(body, 'consumer.search', ['query', 'cursor', 'limit']);
+    const record = parseConsumerWireBody(
+      CONSUMER_WIRE_CONTRACTS['/consumer/search'],
+      body,
+      'consumer.search',
+    );
     return this.registryService.search({
       ...(record.query === null ? {} : { query: record.query }),
       ...(record.cursor === null ? {} : { cursor: record.cursor }),
@@ -427,7 +419,11 @@ export class ConsumerDaemonRoutesV1 {
   }
 
   private async show(body: unknown): Promise<ShowPackageResultV1> {
-    const record = parseExactRecord(body, 'consumer.show', ['package_id', 'version', 'capability']);
+    const record = parseConsumerWireBody(
+      CONSUMER_WIRE_CONTRACTS['/consumer/show'],
+      body,
+      'consumer.show',
+    );
     return this.registryService.show({
       package_id: record.package_id,
       ...(record.version === null ? {} : { version: record.version }),
@@ -436,7 +432,11 @@ export class ConsumerDaemonRoutesV1 {
   }
 
   private async install(body: unknown): Promise<InstallPackageResultV1> {
-    const record = parseExactRecord(body, 'consumer.install', ['package_id', 'version']);
+    const record = parseConsumerWireBody(
+      CONSUMER_WIRE_CONTRACTS['/consumer/install'],
+      body,
+      'consumer.install',
+    );
     return this.registryService.install({
       package_id: record.package_id,
       ...(record.version === null ? {} : { version: record.version }),
@@ -444,79 +444,67 @@ export class ConsumerDaemonRoutesV1 {
   }
 
   private installed(body: unknown): ListInstalledPackagesResultV1 {
-    const record = parseExactRecord(body, 'consumer.installed', ['cursor', 'limit']);
+    const record = parseConsumerWireBody(
+      CONSUMER_WIRE_CONTRACTS['/consumer/installed'],
+      body,
+      'consumer.installed',
+    );
     return this.localListing.installed({
-      ...(record.cursor === null ? {} : { cursor: record.cursor as string }),
-      ...(record.limit === null ? {} : { limit: record.limit as number }),
+      ...(record.cursor === null ? {} : { cursor: record.cursor }),
+      ...(record.limit === null ? {} : { limit: record.limit }),
     });
   }
 
   private remove(body: unknown): RemovePackageResultV1 {
-    const record = parseExactRecord(body, 'consumer.remove', ['package_id']);
+    const record = parseConsumerWireBody(
+      CONSUMER_WIRE_CONTRACTS['/consumer/remove'],
+      body,
+      'consumer.remove',
+    );
     return this.localListing.remove({ package_id: record.package_id });
   }
 
   private doctor(body: unknown): ConsumerDoctorResultV1 {
-    parseExactRecord(body, 'consumer.doctor', []);
+    parseConsumerWireBody(CONSUMER_WIRE_CONTRACTS['/consumer/doctor'], body, 'consumer.doctor');
     return this.doctorService.inspect();
   }
 
   private clearSession(body: unknown): ClearPackageSessionResultV1 {
-    const record = parseExactRecord(body, 'consumer.session.clear', [
-      'package_id',
-      'authentication_contract_id',
-      'session_name',
-    ]);
+    const record = parseConsumerWireBody(
+      CONSUMER_WIRE_CONTRACTS['/consumer/session/clear'],
+      body,
+      'consumer.session.clear',
+    );
     return this.services.clearSession({
-      package_id: parsePackageId(record.package_id, 'consumer.session.clear.package_id'),
+      package_id: record.package_id,
       ...(record.authentication_contract_id === null
         ? {}
-        : {
-            authentication_contract_id: parseStableContractId(
-              record.authentication_contract_id,
-              'consumer.session.clear.authentication_contract_id',
-            ),
-          }),
-      ...(record.session_name === null
-        ? {}
-        : {
-            session_name: parseSessionName(
-              record.session_name,
-              'consumer.session.clear.session_name',
-            ),
-          }),
+        : { authentication_contract_id: record.authentication_contract_id }),
+      ...(record.session_name === null ? {} : { session_name: record.session_name }),
     });
   }
 
   private async openLogin(body: unknown): Promise<OpenPackageLoginResultV1> {
-    const record = parseExactRecord(body, 'consumer.login.open', [
-      'package_id',
-      'authentication_contract_id',
-      'session_name',
-    ]);
+    const record = parseConsumerWireBody(
+      CONSUMER_WIRE_CONTRACTS['/consumer/login/open'],
+      body,
+      'consumer.login.open',
+    );
     return await this.services.openLogin({
-      package_id: parsePackageId(record.package_id, 'consumer.login.open.package_id'),
+      package_id: record.package_id,
       ...(record.authentication_contract_id === null
         ? {}
-        : {
-            authentication_contract_id: parseStableContractId(
-              record.authentication_contract_id,
-              'consumer.login.open.authentication_contract_id',
-            ),
-          }),
-      ...(record.session_name === null
-        ? {}
-        : {
-            session_name: parseSessionName(record.session_name, 'consumer.login.open.session_name'),
-          }),
+        : { authentication_contract_id: record.authentication_contract_id }),
+      ...(record.session_name === null ? {} : { session_name: record.session_name }),
     });
   }
 
   private async completeLogin(body: unknown): Promise<CompletePackageLoginResultV1> {
-    const record = parseExactRecord(body, 'consumer.login.complete', ['interaction_id']);
-    if (typeof record.interaction_id !== 'string') {
-      throw new PublicContractError('consumer.login.complete.interaction_id', 'must be a string');
-    }
+    const record = parseConsumerWireBody(
+      CONSUMER_WIRE_CONTRACTS['/consumer/login/complete'],
+      body,
+      'consumer.login.complete',
+    );
     return await this.services.completeLogin({ interaction_id: record.interaction_id });
   }
 
@@ -524,81 +512,39 @@ export class ConsumerDaemonRoutesV1 {
     body: unknown,
     signal?: AbortSignal,
   ): Promise<CallInstalledCapabilityResultV1> {
-    const record = parseExactRecord(body, 'consumer.call', [
-      'package_id',
-      'capability',
-      'input',
-      'session_name',
-      'timeout_ms',
-    ]);
-    assertJsonValue(record.input, 'consumer.call.input', PUBLIC_CONTRACT_LIMITS.maxDepth);
-    const timeout =
-      record.timeout_ms === null
-        ? undefined
-        : parseInteger(record.timeout_ms, 'consumer.call.timeout_ms', 1, 300_000);
-    const sessionName =
-      record.session_name === null
-        ? undefined
-        : parseSessionName(record.session_name, 'consumer.call.session_name');
+    const record = parseConsumerWireBody(
+      CONSUMER_WIRE_CONTRACTS['/consumer/call'],
+      body,
+      'consumer.call',
+    );
     return this.services.call({
-      package_id: parsePackageId(record.package_id, 'consumer.call.package_id'),
-      capability: parseCapabilityId(record.capability, 'consumer.call.capability'),
+      package_id: record.package_id,
+      capability: record.capability,
       input: record.input,
       options: {
-        ...(sessionName === undefined ? {} : { session_name: sessionName }),
-        ...(timeout === undefined ? {} : { timeout_ms: timeout }),
+        ...(record.session_name === null ? {} : { session_name: record.session_name }),
+        ...(record.timeout_ms === null ? {} : { timeout_ms: record.timeout_ms }),
         signal,
       },
     });
   }
 
   private start(body: unknown): DetachedRunAcceptedV1 | ConsumerRunOutputFailureV1 {
-    const record = parseExactRecord(body, 'consumer.run', [
-      'package_id',
-      'capability',
-      'input',
-      'caller_bounds',
-      'input_mode_id',
-      'output',
-      'inline_output_max_bytes',
-      'detach',
-      'session_name',
-      'operation_id',
-    ]);
-    assertJsonValue(record.input, 'consumer.run.input', PUBLIC_CONTRACT_LIMITS.maxDepth);
-    assertJsonValue(
-      record.caller_bounds,
-      'consumer.run.caller_bounds',
-      PUBLIC_CONTRACT_LIMITS.maxDepth,
+    const record = parseConsumerWireBody(
+      CONSUMER_WIRE_CONTRACTS['/consumer/run'],
+      body,
+      'consumer.run',
     );
-    const inputMode =
-      record.input_mode_id === null
-        ? undefined
-        : parseStableContractId(record.input_mode_id, 'consumer.run.input_mode_id');
-    const output =
-      record.output === null ? undefined : parseRunOutput(record.output, 'consumer.run.output');
+    const inputMode = record.input_mode_id === null ? undefined : record.input_mode_id;
+    const output = record.output === null ? undefined : record.output;
     const inlineOutputMaxBytes =
-      record.inline_output_max_bytes === undefined || record.inline_output_max_bytes === null
+      record.inline_output_max_bytes === null
         ? DEFAULT_INLINE_OUTPUT_MAX_BYTES_V1
-        : parseInteger(
-            record.inline_output_max_bytes,
-            'consumer.run.inline_output_max_bytes',
-            1,
-            DEFAULT_INLINE_OUTPUT_MAX_BYTES_V1,
-          );
-    const sessionName =
-      record.session_name === null
-        ? undefined
-        : parseSessionName(record.session_name, 'consumer.run.session_name');
-    if (typeof record.detach !== 'boolean') {
-      throw new PublicContractError('consumer.run.detach', 'must be a boolean');
-    }
-    if (!record.detach) {
-      throw new PublicContractError('consumer.run.detach', 'must be true for a durable scrape run');
-    }
-    const operationId = parseRunOperationId(record.operation_id, 'consumer.run.operation_id');
-    const packageId = parsePackageId(record.package_id, 'consumer.run.package_id');
-    const capability = parseCapabilityId(record.capability, 'consumer.run.capability');
+        : record.inline_output_max_bytes;
+    const sessionName = record.session_name === null ? undefined : record.session_name;
+    const operationId = record.operation_id;
+    const packageId = record.package_id;
+    const capability = record.capability;
     const argumentsValue: JsonValueV1 = {
       package_id: packageId,
       capability,
@@ -664,12 +610,13 @@ export class ConsumerDaemonRoutesV1 {
   }
 
   private resume(body: unknown): ResumeRunAcceptedV1 {
-    const record = parseExactRecord(body, 'consumer.runs.resume', ['run_id', 'operation_id']);
-    const runId = parseRunId(record.run_id, 'consumer.runs.resume.run_id');
-    const operationId = parseRunOperationId(
-      record.operation_id,
-      'consumer.runs.resume.operation_id',
+    const record = parseConsumerWireBody(
+      CONSUMER_WIRE_CONTRACTS['/consumer/runs/resume'],
+      body,
+      'consumer.runs.resume',
     );
+    const runId = record.run_id;
+    const operationId = record.operation_id;
     if (this.operationStore.read(operationId) === null && this.activeRuns.has(runId)) {
       throw new RunOperationError('operation_conflict', 'run is already resuming');
     }
@@ -707,8 +654,12 @@ export class ConsumerDaemonRoutesV1 {
     body: unknown,
     signal?: AbortSignal,
   ): Promise<WaitRunResponseV1 | ConsumerRunFailureV1> {
-    const record = parseExactRecord(body, 'consumer.runs.wait', ['run_id']);
-    const runId = parseRunId(record.run_id, 'consumer.runs.wait.run_id');
+    const record = parseConsumerWireBody(
+      CONSUMER_WIRE_CONTRACTS['/consumer/runs/wait'],
+      body,
+      'consumer.runs.wait',
+    );
+    const runId = record.run_id;
     const active = this.activeRuns.get(runId);
     if (active !== undefined) return await awaitWithSignal(active.completion, signal);
     const completed = this.completedRuns.get(runId);
@@ -724,62 +675,32 @@ export class ConsumerDaemonRoutesV1 {
     body: unknown,
     signal?: AbortSignal,
   ): Promise<ConsumerDaemonRunStateWaitResponseV1> {
-    const record = parseExactRecord(body, 'consumer.runs.wait_state', [
-      'run_id',
-      'after_state_version',
-      'wait_timeout_ms',
-    ]);
     try {
-      return await this.runInspection.waitState(
-        parseRunId(record.run_id, 'consumer.runs.wait_state.run_id'),
-        {
-          ...(record.after_state_version === null
-            ? {}
-            : {
-                after_state_version: parseInteger(
-                  record.after_state_version,
-                  'consumer.runs.wait_state.after_state_version',
-                  0,
-                  Number.MAX_SAFE_INTEGER,
-                ),
-              }),
-          ...(record.wait_timeout_ms === null
-            ? {}
-            : {
-                wait_timeout_ms: parseInteger(
-                  record.wait_timeout_ms,
-                  'consumer.runs.wait_state.wait_timeout_ms',
-                  0,
-                  25_000,
-                ),
-              }),
-          signal,
-        },
+      const record = parseConsumerWireBody(
+        CONSUMER_WIRE_CONTRACTS['/consumer/runs/wait-state'],
+        body,
+        'consumer.runs.wait_state',
       );
+      return await this.runInspection.waitState(record.run_id, {
+        ...(record.after_state_version === null
+          ? {}
+          : { after_state_version: record.after_state_version }),
+        ...(record.wait_timeout_ms === null ? {} : { wait_timeout_ms: record.wait_timeout_ms }),
+        signal,
+      });
     } catch (error) {
       return runFailure('wait_run', error);
     }
   }
 
   private cancel(body: unknown): CancelRunResponseV1 {
-    const record = parseExactRecord(body, 'consumer.runs.cancel', [
-      'run_id',
-      'source',
-      'operation_id',
-    ]);
-    const runId = parseRunId(record.run_id, 'consumer.runs.cancel.run_id');
-    const operationId = parseRunOperationId(
-      record.operation_id,
-      'consumer.runs.cancel.operation_id',
+    const record = parseConsumerWireBody(
+      CONSUMER_WIRE_CONTRACTS['/consumer/runs/cancel'],
+      body,
+      'consumer.runs.cancel',
     );
-    if (
-      record.source !== 'foreground_sigint' &&
-      record.source !== 'sdk_cancel' &&
-      record.source !== 'mcp_cancel' &&
-      record.source !== 'cli_cancel'
-    ) {
-      throw new PublicContractError('consumer.runs.cancel.source', 'is invalid');
-    }
+    const runId = record.run_id;
+    const operationId = record.operation_id;
     const reservation = this.operationStore.reserve({
       operation_id: operationId,
       command: 'cancel',
@@ -799,16 +720,24 @@ export class ConsumerDaemonRoutesV1 {
   }
 
   private showRun(body: unknown): StoredRunInspectionV1 | ConsumerRunFailureV1 {
-    const record = parseExactRecord(body, 'consumer.runs.show', ['run_id']);
     try {
-      return this.runInspection.show(parseRunId(record.run_id, 'consumer.runs.show.run_id'));
+      const record = parseConsumerWireBody(
+        CONSUMER_WIRE_CONTRACTS['/consumer/runs/show'],
+        body,
+        'consumer.runs.show',
+      );
+      return this.runInspection.show(record.run_id);
     } catch (error) {
       return runFailure('get_run', error);
     }
   }
 
   private listRuns(body: unknown): ConsumerDaemonListRunsResponseV1 {
-    const record = parseExactRecord(body, 'consumer.runs.list', ['cursor', 'limit']);
+    const record = parseConsumerWireBody(
+      CONSUMER_WIRE_CONTRACTS['/consumer/runs/list'],
+      body,
+      'consumer.runs.list',
+    );
     try {
       return this.runInspection.listPage({
         ...(record.cursor === null ? {} : { cursor: record.cursor }),
@@ -828,29 +757,17 @@ export class ConsumerDaemonRoutesV1 {
   }
 
   private listRunItems(body: unknown): CommittedRunItemsPageV1 | ConsumerRunFailureV1 {
-    const record = parseExactRecord(body, 'consumer.runs.items', [
-      'run_id',
-      'after_sequence',
-      'limit',
-    ]);
-    const runId = parseRunId(record.run_id, 'consumer.runs.items.run_id');
+    const record = parseConsumerWireBody(
+      CONSUMER_WIRE_CONTRACTS['/consumer/runs/items'],
+      body,
+      'consumer.runs.items',
+    );
     const options = {
-      ...(record.after_sequence === null
-        ? {}
-        : {
-            after_sequence: parseInteger(
-              record.after_sequence,
-              'consumer.runs.items.after_sequence',
-              0,
-              1e9,
-            ),
-          }),
-      ...(record.limit === null
-        ? {}
-        : { limit: parseInteger(record.limit, 'consumer.runs.items.limit', 1, 100) }),
+      ...(record.after_sequence === null ? {} : { after_sequence: record.after_sequence }),
+      ...(record.limit === null ? {} : { limit: record.limit }),
     };
     try {
-      return this.runInspection.items(runId, options);
+      return this.runInspection.items(record.run_id, options);
     } catch (error) {
       return runFailure('list_run_items', error);
     }
@@ -876,12 +793,13 @@ export class ConsumerDaemonRoutesV1 {
   }
 
   private discardRun(body: unknown): DiscardRunResponseV1 | ConsumerRunFailureV1 {
-    const record = parseExactRecord(body, 'consumer.runs.discard', ['run_id', 'operation_id']);
-    const runId = parseRunId(record.run_id, 'consumer.runs.discard.run_id');
-    const operationId = parseRunOperationId(
-      record.operation_id,
-      'consumer.runs.discard.operation_id',
+    const record = parseConsumerWireBody(
+      CONSUMER_WIRE_CONTRACTS['/consumer/runs/discard'],
+      body,
+      'consumer.runs.discard',
     );
+    const runId = record.run_id;
+    const operationId = record.operation_id;
     try {
       const reservation = this.operationStore.reserve({
         operation_id: operationId,

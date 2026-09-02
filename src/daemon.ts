@@ -8,8 +8,13 @@ import { KLURA_DIR } from './paths';
 import { markStandaloneDaemon } from './runtime-state/process-role';
 import { errorText } from './utils/error-text';
 import { canonicalJson, type JsonValueV1 } from './public/contracts/json';
+import { releaseOwnerFileLock, tryAcquireOwnerFileLock } from './utils/owner-file-lock';
 const PID_FILE = path.join(KLURA_DIR, 'daemon.pid');
 const SOCKET_PATH = path.join(KLURA_DIR, 'klura.sock');
+const DAEMON_LOCK = path.join(KLURA_DIR, 'daemon.lock');
+/** IPC message kind a freshly-forked daemon sends its parent once its server
+ *  is listening. `ensureDaemon` resolves on this message. */
+const DAEMON_READY_MESSAGE_KIND = 'ready';
 
 interface KluraModule {
   startSession: (
@@ -72,7 +77,14 @@ interface KluraModule {
   stopListener: (listenerId: string) => Promise<unknown>;
   getEvents: (since?: number) => unknown;
   status: () => { activeSessions: number };
-  _pool: { activeSessions: number; shutdown: () => Promise<void> };
+  _pool: {
+    activeSessions: number;
+    busy: () => boolean;
+    shutdown: () => Promise<void>;
+    /** Busy→idle notification for edges with no accompanying RPC (warm-
+     *  sweeper eviction). Optional so stub factories stay minimal. */
+    onBecameIdle?: (cb: () => void) => () => void;
+  };
 }
 
 interface ConsumerDaemonRoutes {
@@ -162,6 +174,19 @@ export function startDaemon(): void {
   markStandaloneDaemon();
   const config = loadConfig();
   fs.mkdirSync(KLURA_DIR, { recursive: true });
+
+  // Singleton exclusion for this KLURA_HOME. Held for the daemon's lifetime so
+  // a second daemon can never run startup recovery against journals a live
+  // daemon is appending to, or unlink the live daemon's socket. A lock left by
+  // a crashed daemon is recovered through the owner-file staleness policy.
+  const acquiredDaemonLock = tryAcquireOwnerFileLock(DAEMON_LOCK);
+  if (acquiredDaemonLock === null) {
+    throw new Error(
+      `another klura daemon already owns ${KLURA_DIR} — refusing to start a second instance`,
+    );
+  }
+  const daemonLock = acquiredDaemonLock;
+
   recoverConsumerRunsBeforeIpc();
 
   const useUnix = config.runtime.listen === 'unix';
@@ -179,9 +204,21 @@ export function startDaemon(): void {
     if (factory !== null) return factory;
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     factory = require('./index') as KluraModule;
+    // The pool's busy→idle edge from a warm-sweeper eviction arrives with no
+    // RPC, so no `touch()` re-arms an idle-shutdown timer that fired while
+    // warm slots kept `busy()` true. Re-arm from the pool's own notification;
+    // the timer still measures from `lastActivity`, so a genuinely idle
+    // daemon shuts down immediately after the eviction.
+    factory._pool.onBecameIdle?.(armIdleShutdown);
     return factory;
   };
   const activeFactorySessions = (): number => factory?._pool.activeSessions ?? 0;
+  // Pool.busy() is the single idle/teardown authority — it covers live
+  // sessions AND warm slots, which activeSessions alone does not. A daemon
+  // idle shutdown while the warm pool is live would kill warm contexts the
+  // pool is deliberately keeping. A never-loaded factory owns no browser
+  // state, so it reads as not busy.
+  const factoryPoolBusy = (): boolean => factory?._pool.busy() ?? false;
   const activeConsumerRuns = (): number => consumer?.activeRunCount?.() ?? 0;
   const getConsumer = (): ConsumerDaemonRoutes => {
     if (consumer !== null) return consumer;
@@ -216,7 +253,7 @@ export function startDaemon(): void {
     idleTimer = setTimeout(() => {
       idleTimer = null;
       if (
-        activeFactorySessions() > 0 ||
+        factoryPoolBusy() ||
         activeConsumerRequests > 0 ||
         activeConsumerStreams > 0 ||
         activeConsumerRuns() > 0
@@ -326,6 +363,7 @@ export function startDaemon(): void {
     } catch {
       /* ignore */
     }
+    releaseOwnerFileLock(daemonLock);
     // Short tick so any in-flight responses flush, then exit.
     setTimeout(() => process.exit(0), 50).unref();
   }
@@ -346,7 +384,7 @@ export function startDaemon(): void {
 }
 
 function announceDaemonReady(): void {
-  if (typeof process.send === 'function') process.send({ kind: 'ready' });
+  if (typeof process.send === 'function') process.send({ kind: DAEMON_READY_MESSAGE_KIND });
 }
 
 function recoverConsumerRunsBeforeIpc(): void {
@@ -558,10 +596,10 @@ async function handleConsumerRequest(
   if (!CONSUMER_ROUTES.has(`${request.method ?? 'UNKNOWN'} ${pathname}`)) return false;
   const abort = createRequestAbortSignal(request, response);
   try {
+    const result = await invokeConsumer(request.method, pathname, body, abort.signal);
+    const payload = JSON.stringify(result);
     response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(
-      JSON.stringify(await invokeConsumer(request.method, pathname, body, abort.signal)),
-    );
+    response.end(payload);
   } finally {
     abort.dispose();
   }
@@ -621,16 +659,28 @@ function createRequestAbortSignal(
 export function isDaemonRunning(): boolean {
   if (!fs.existsSync(PID_FILE)) return false;
   const pid = parseInt(fs.readFileSync(PID_FILE, 'utf-8').trim());
+  if (!Number.isInteger(pid) || pid < 1) {
+    removeStalePidFile();
+    return false;
+  }
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    try {
-      fs.unlinkSync(PID_FILE);
-    } catch {
-      /* ignore */
-    }
+  } catch (error) {
+    // Only ESRCH proves the pid is gone. EPERM (and any other probe failure)
+    // means a process exists — treat the daemon as running rather than
+    // clobbering a live instance's pid file.
+    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return true;
+    removeStalePidFile();
     return false;
+  }
+}
+
+function removeStalePidFile(): void {
+  try {
+    fs.unlinkSync(PID_FILE);
+  } catch {
+    /* ignore */
   }
 }
 
@@ -644,31 +694,67 @@ function getDaemonAddr(): string {
   }
 }
 
-export function ensureDaemon(): void {
-  if (isDaemonRunning()) return;
+export function ensureDaemon(): Promise<void> {
+  if (isDaemonRunning()) return Promise.resolve();
 
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const cp = require('child_process') as typeof import('child_process');
   const daemonScript = path.join(__dirname, '..', 'bin', 'klura-daemon.js');
+  // cp.fork always attaches an IPC channel to the parent — the daemon uses it
+  // to announce readiness (see announceDaemonReady) the moment its server is
+  // listening, so the wait below subscribes to that lifecycle edge instead of
+  // sampling the filesystem.
   const child = cp.fork(daemonScript, [], { detached: true, stdio: 'ignore' });
   child.unref();
-  // cp.fork always attaches an IPC channel to the parent; unref()'ing the child
-  // is not enough — the IPC channel's handle keeps the parent's event loop
-  // alive until the child exits. Disconnect it so a short-lived CLI can exit
-  // cleanly after the spawned daemon is confirmed up.
-  try {
-    child.disconnect();
-  } catch {
-    /* ignore — already disconnected or no channel */
-  }
 
-  const deadline = Date.now() + 10000;
-  while (Date.now() < deadline) {
-    // Check for either socket (unix mode) or addr file (TCP mode)
-    if (fs.existsSync(SOCKET_PATH) || fs.existsSync(path.join(KLURA_DIR, 'daemon.addr'))) return;
-    cp.execSync('sleep 0.2');
-  }
-  throw new Error('Daemon failed to start within 10s');
+  return new Promise((resolve, reject) => {
+    const onMessage = (message: unknown): void => {
+      const kind = (message as { kind?: unknown } | null)?.kind;
+      if (kind === DAEMON_READY_MESSAGE_KIND) settle();
+    };
+    const onExit = (): void => {
+      // The child exits without a ready message when it loses the KLURA_HOME
+      // singleton race — a concurrently-started daemon owns the home and may
+      // already be serving. Accept that daemon if it is; otherwise the spawn
+      // genuinely failed.
+      if (isDaemonRunning()) settle();
+      else settle(new Error('Daemon process exited before becoming ready'));
+    };
+    const onError = (err: Error): void => {
+      settle(new Error(`Daemon process failed to spawn: ${err.message}`));
+    };
+    // Bounded fallback: if the ready message never arrives, check once at the
+    // deadline whether a daemon is up anyway (socket in unix mode, addr file
+    // in TCP mode) before giving up.
+    const timer = setTimeout(() => {
+      if (fs.existsSync(SOCKET_PATH) || fs.existsSync(path.join(KLURA_DIR, 'daemon.addr'))) {
+        settle();
+      } else {
+        settle(new Error('Daemon failed to start within 10s'));
+      }
+    }, 10_000);
+
+    function settle(err?: Error): void {
+      clearTimeout(timer);
+      child.off('message', onMessage);
+      child.off('exit', onExit);
+      child.off('error', onError);
+      // The IPC channel's handle keeps the parent's event loop alive even
+      // after unref(). Disconnect it so a short-lived CLI can exit cleanly
+      // once the spawned daemon is confirmed up (or the spawn has failed).
+      try {
+        child.disconnect();
+      } catch {
+        /* already disconnected or no channel */
+      }
+      if (err) reject(err);
+      else resolve();
+    }
+
+    child.on('message', onMessage);
+    child.on('exit', onExit);
+    child.on('error', onError);
+  });
 }
 
 export function sendToDaemon(method: string, urlPath: string, body?: unknown): Promise<unknown> {

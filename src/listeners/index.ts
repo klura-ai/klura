@@ -23,7 +23,7 @@ type PrereqRunner = (args: {
   strategy: { prerequisites?: unknown[]; baseUrl?: string };
   args: Record<string, unknown>;
   platform: string;
-}) => Promise<{ tokens: Record<string, string> }>;
+}) => Promise<{ tokens: Record<string, unknown> }>;
 
 /**
  * How often the proactive-refresh watcher checks whether any of a listener's

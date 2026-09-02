@@ -33,18 +33,20 @@ function makeFakeDriver() {
   let currentUrl = 'https://site.example/';
   let pendingNavs = [];
   let formsToReturn = [];
+  let storageStateSaves = 0;
   return {
     state: {
       get currentUrl() { return currentUrl; },
       set currentUrl(v) { currentUrl = v; },
       pushPendingNav(url) { pendingNavs.push({ at: Date.now(), url }); },
       setForms(forms) { formsToReturn = forms; },
+      get storageStateSaves() { return storageStateSaves; },
     },
     getDebuggerPauseState: () => null,
     cleanupDebuggerState: async () => {},
     getInterceptedRequests: async () => [],
     getInterceptedWebSocketFrames: async () => [],
-    saveStorageState: async () => {},
+    saveStorageState: async () => { storageStateSaves += 1; },
     delay: async () => {},
     getUrl: async () => currentUrl,
     getAccessibilityTree: async () => '<root />',
@@ -149,6 +151,7 @@ test('click that triggers SPA nav → dom_navigation tagged via:click', async ()
     assert.equal(session.domNavigations.length, 1, 'one click-driven nav landed');
     assert.equal(session.domNavigations[0].via, 'click');
     assert.equal(session.domNavigations[0].url, 'https://site.example/restaurants/r1');
+    assert.equal(driver.state.storageStateSaves, 1);
   } finally {
     restore();
   }

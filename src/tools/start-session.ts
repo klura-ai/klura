@@ -10,8 +10,12 @@ import {
 } from '../execution/result-classification';
 import { pickProbeUrl, probeAuthState } from '../auth/probe';
 import { classifyAutoExecDiagnosis, applyDiagnosisToBody } from '../execution';
-import { invokeCheckpointAndGate } from '../checkpoints';
-import { loadLogbook as loadLogbookForPlatform, readRecentAborts } from '../working-dir/logbook';
+import { checkpointEvent, invokeCheckpointAndGate } from '../checkpoints';
+import {
+  loadLogbook as loadLogbookForPlatform,
+  readRecentAborts,
+  type AbortEventRead,
+} from '../working-dir/logbook';
 import {
   loadCapabilityPolicy as loadCapabilityPolicyFull,
   loadPolicy,
@@ -23,7 +27,8 @@ import {
 import { buildPlatformMapSummary, type PlatformMapSummary } from '../response/platform-map-summary';
 import { harvestLinkUrlObservations } from '../response/session-observations';
 import { detectOriginBlocked, isResolvableChallengeShape } from '../phases/origin-blocked-detector';
-import { ESCALATION_ABORT_KINDS, type AbortKind } from './abort_session';
+import { ESCALATION_ABORT_KINDS } from './abort_session';
+import { loadConfig } from '../config/handler';
 import type { VisibilityAnomaly } from '../phases/visibility';
 import { snapVisibilityAnomalies } from '../phases/visibility';
 
@@ -43,6 +48,7 @@ import {
   trimA11yTree,
   trimOversizedObjectBody,
   sliceLargeString,
+  enforceFinalBudget,
   DEFAULT_A11Y_BUDGET,
   MAX_TOOL_OUTPUT_CHARS,
 } from '../response/response-size';
@@ -65,6 +71,7 @@ export const GRAPH_MODES = ['discover', 'map', 'execute'] as const;
  *  design — the field is a teaser pointing at the platform_logbook for
  *  full detail, not a primary surface. */
 const RECENT_ABORTS_BUDGET = 5;
+const EXECUTE_RESULT_BODY_INLINE_BUDGET = 3_000;
 
 /** Populate the platform-keyed response fields (artifacts, platform_map,
  *  recent_aborts) from the on-disk logbook. Inlined into start_session so
@@ -93,68 +100,143 @@ function populatePlatformResponseFields(result: StartSessionResult, platform: st
   if (map) result.platform_map = map;
   const aborts = readRecentAborts(platform, RECENT_ABORTS_BUDGET);
   if (aborts.length > 0) result.recent_aborts = aborts;
-  // Escalation pattern: ≥3 aborts within 24h sharing root cause (kind + host).
-  // The "try the same approach harder" reflex burned full sessions on
-  // identical bot-management walls — this surfaces the same-cause count so
-  // the agent has to consciously choose to escalate or acknowledge the
-  // pattern.
+  // Escalation pattern: aborts within 24h sharing root cause (kind + host),
+  // scored by how much each one is actually worth as evidence. The signal is
+  // there so a repeated wall reaches the operator, not so replayed agent prose
+  // can talk the next session out of trying.
   const escalation = computeAbortEscalation(readRecentAborts(platform, 50));
   if (escalation) result.must_escalate = escalation;
 }
 
+/** Weighted-score floor for `must_escalate`. Three runtime-observed aborts on
+ *  one root cause reach it exactly; agent-asserted entries carry a fraction of
+ *  the weight and cannot reach it on their own at the default weighting. */
 const ESCALATION_THRESHOLD = 3;
 const ESCALATION_WINDOW_HOURS = 24;
 
-export function computeAbortEscalation(
-  aborts: ReadonlyArray<{
-    kind?: string;
-    host?: string;
-    hours_since: number;
-  }>,
-): NonNullable<StartSessionResult['must_escalate']> | undefined {
-  if (aborts.length < ESCALATION_THRESHOLD) return undefined;
-  const groups = new Map<string, { kind: string; host?: string; count: number }>();
+/** One abort event as the escalation scorer reads it. Every field except
+ *  `hours_since` is optional so historical entries — which predate `kind`,
+ *  `host`, and `provenance` — score without special-casing. */
+type ScorableAbort = Pick<Partial<AbortEventRead>, 'kind' | 'host' | 'session_id' | 'provenance'> &
+  Pick<AbortEventRead, 'hours_since'>;
+
+interface EscalationGroup {
+  kind: string;
+  host?: string;
+  count: number;
+  score: number;
+  runtimeObserved: number;
+  agentAsserted: number;
+}
+
+/**
+ * One entry per session. A session that aborted twice recorded one experience,
+ * not two — stacking them is how a single stuck session manufactures a
+ * "pattern". Freshest entry per session wins; entries with no session_id can't
+ * be attributed and each stand alone.
+ */
+function dedupeBySession(aborts: ReadonlyArray<ScorableAbort>): ScorableAbort[] {
+  const bySession = new Map<string, ScorableAbort>();
+  const unattributed: ScorableAbort[] = [];
   for (const a of aborts) {
+    if (typeof a.session_id !== 'string' || a.session_id.length === 0) {
+      unattributed.push(a);
+      continue;
+    }
+    const prior = bySession.get(a.session_id);
+    if (!prior || a.hours_since < prior.hours_since) bySession.set(a.session_id, a);
+  }
+  return [...bySession.values(), ...unattributed];
+}
+
+/** Weight one abort event: provenance factor × whole-half-life recency decay.
+ *  Both factors are ≤ 1, so a group's score can never exceed its event count. */
+function scoreAbort(
+  abort: ScorableAbort,
+  weights: { agentAssertedWeight: number; halfLifeHours: number },
+): number {
+  const provenanceFactor =
+    abort.provenance === 'runtime_observed' ? 1 : weights.agentAssertedWeight;
+  const ageHours = Math.max(0, abort.hours_since);
+  const decay = 0.5 ** Math.floor(ageHours / weights.halfLifeHours);
+  return provenanceFactor * decay;
+}
+
+export function computeAbortEscalation(
+  aborts: ReadonlyArray<ScorableAbort>,
+  overrides?: { agentAssertedWeight?: number; halfLifeHours?: number },
+): NonNullable<StartSessionResult['must_escalate']> | undefined {
+  const configured = loadConfig().drive.abort_escalation;
+  const weights = {
+    agentAssertedWeight: overrides?.agentAssertedWeight ?? configured.agent_asserted_weight,
+    halfLifeHours: overrides?.halfLifeHours ?? configured.half_life_hours,
+  };
+  const groups = new Map<string, EscalationGroup>();
+  for (const a of dedupeBySession(aborts)) {
     if (a.hours_since > ESCALATION_WINDOW_HOURS) continue;
     const kind = a.kind ?? 'other';
     // Only genuine persistent blocks escalate; benign exits (a saved capability
     // covered the task, user stopped, site dead) are not "try harder" patterns.
-    if (!ESCALATION_ABORT_KINDS.has(kind as AbortKind)) continue;
+    if (!ESCALATION_ABORT_KINDS.has(kind)) continue;
     const host = a.host;
     const key = `${kind}|${host ?? ''}`;
-    const entry = groups.get(key);
-    if (entry) entry.count += 1;
-    else groups.set(key, { kind, host, count: 1 });
+    const entry = groups.get(key) ?? {
+      kind,
+      host,
+      count: 0,
+      score: 0,
+      runtimeObserved: 0,
+      agentAsserted: 0,
+    };
+    entry.count += 1;
+    entry.score += scoreAbort(a, weights);
+    if (a.provenance === 'runtime_observed') entry.runtimeObserved += 1;
+    else entry.agentAsserted += 1;
+    groups.set(key, entry);
   }
-  let worst: { kind: string; host?: string; count: number } | null = null;
+  let worst: EscalationGroup | null = null;
   for (const entry of groups.values()) {
-    if (entry.count < ESCALATION_THRESHOLD) continue;
-    if (!worst || entry.count > worst.count) worst = entry;
+    if (entry.score < ESCALATION_THRESHOLD) continue;
+    if (!worst || entry.score > worst.score) worst = entry;
   }
   if (!worst) return undefined;
-  const hostFragment = worst.host ? ` on host ${JSON.stringify(worst.host)}` : '';
   return {
     same_root_cause_count: worst.count,
     kind: worst.kind,
     ...(worst.host !== undefined ? { host: worst.host } : {}),
-    advisory:
-      `${worst.count} prior aborts in the last ${ESCALATION_WINDOW_HOURS}h share root cause ` +
-      `kind=${JSON.stringify(worst.kind)}${hostFragment}. The "try the same approach harder" ` +
-      `reflex will not work — the underlying gate has not changed since the prior sessions, and ` +
-      `the levers that COULD flip it (egress / proxy / driver / human-in-the-loop) are not in ` +
-      `the agent's control. What you CAN do: ` +
-      `(a) abort_session immediately with a reason that names the structural condition that has ` +
-      `NOT changed since the prior aborts (e.g. "same egress IP, no proxy rotation since session ` +
-      `<prior_session_id>") — do NOT restate this advisory verbatim, that's circular and inflates ` +
-      `the abort ledger; ` +
-      `(b) if you have hard evidence the condition HAS changed (site lifted block, new cookies ` +
-      `primed, observed different network) document that in your abort_session.reason so future ` +
-      `readers can distinguish a real retry from a duplicate. ` +
-      `Note: the runtime surfaces this count so the human operator who reads the abort ledger ` +
-      `sees the pattern. Operator-level moves (residential / mobile proxy, manual remote-viewer ` +
-      `session, driver swap) are out of scope for an unattended session — the agent suggesting ` +
-      `them is theater. Document the condition; let the operator decide.`,
+    score: Math.round(worst.score * 100) / 100,
+    runtime_observed_count: worst.runtimeObserved,
+    agent_asserted_count: worst.agentAsserted,
+    advisory: composeEscalationAdvisory(worst),
   };
+}
+
+/** The advisory text. It reports what the ledger contains and how much of it
+ *  is evidence — it does not claim the site is still blocking, because a
+ *  ledger of prior sessions cannot know that. */
+function composeEscalationAdvisory(group: EscalationGroup): string {
+  const hostFragment = group.host ? ` on host ${JSON.stringify(group.host)}` : '';
+  return (
+    `${group.count} prior aborts in the last ${ESCALATION_WINDOW_HOURS}h share root cause ` +
+    `kind=${JSON.stringify(group.kind)}${hostFragment} — ${group.runtimeObserved} corroborated ` +
+    `by the runtime's own origin-blocked detector on that host, ${group.agentAsserted} ` +
+    `agent-asserted. Read the mix before you act on the count: an agent-asserted entry is a ` +
+    `CLAIM a prior session recorded, not an observation, and nothing in the ledger shows what ` +
+    `the site is doing right now. Runtime-observed entries cite the structural signals that ` +
+    `fired (\`signals\` on the ledger entry).\n` +
+    `  (a) Work the try-first list on \`origin_blocked.recommended_action\` — start_session and ` +
+    `perform_action({action: "navigate"}) return it, it owns the remedies, and this counter does ` +
+    `not replace it. If this session's landing carried no origin_blocked advisory at all, the ` +
+    `runtime is not seeing what the prior aborts claimed.\n` +
+    `  (b) If you do abort, name what YOU observed this session (nav status, final host, the ` +
+    `signals that fired) instead of restating this advisory — a restated advisory adds a ledger ` +
+    `entry with no new evidence, which is how a claim becomes three claims.\n` +
+    `  (c) If what you observed differs from the prior aborts, say so in abort_session.reason so ` +
+    `the next reader can tell a real retry from a duplicate.\n` +
+    `The count is surfaced so the human operator reading the ledger sees the pattern. ` +
+    `Operator-level moves (proxy / egress change, manual remote-viewer session, driver swap) are ` +
+    `theirs to make, not an unattended session's.`
+  );
 }
 
 /**
@@ -289,26 +371,25 @@ export interface StartSessionResult {
    * because existing capability X covers this — run the saved strategy"). Omitted when
    * no abort_events have been logged for the platform.
    */
-  recent_aborts?: Array<{
-    at: string;
-    session_id: string;
-    reason: string;
-    captured_actions_count: number;
-    phase_at_abort: string;
-  }>;
+  recent_aborts?: AbortEventRead[];
   /**
-   * Fires when ≥3 prior aborts in the last 24h share the same root cause
-   * (same `kind` and `host`). Cross-session signal that the agent's natural
-   * "try the same approach harder" reflex won't work — N prior sessions
-   * already proved it. Agent must escalate (stealth driver, start_remote_session,
-   * different egress) or explicitly acknowledge that the underlying condition
-   * has changed before driving the UI further. Absent when no escalation
-   * pattern is detected.
+   * Fires when prior aborts in the last 24h sharing one root cause (same
+   * `kind` and `host`) reach the weighted escalation threshold. Weight per
+   * entry is provenance (a claim the runtime's own detector corroborated
+   * counts fully; an agent's classification counts a fraction) times a
+   * recency decay — so three real observations escalate while three replayed
+   * claims do not. `runtime_observed_count` / `agent_asserted_count` carry the
+   * mix and `score` the total, because the count alone doesn't say how much of
+   * it is evidence. Absent when no group reaches the threshold.
    */
   must_escalate?: {
     same_root_cause_count: number;
     kind: string;
     host?: string;
+    /** Weighted total for the group that fired, rounded to 2 decimals. */
+    score: number;
+    runtime_observed_count: number;
+    agent_asserted_count: number;
     advisory: string;
   };
   /**
@@ -495,10 +576,14 @@ type StartSessionPolicyInput = PlatformPolicy & {
   >;
 };
 
-const POLICY_TIERS = ['recorded-path', 'page-script', 'fetch'] as const;
+// Policy caps present the ladder most-restrictive-first (recorded-path first)
+// — the reverse of the vocabulary's optimality order. The order is a
+// deliberate presentation choice, so it stays explicit; the element type
+// keeps membership vocab-checked.
+const POLICY_TIERS: readonly StrategyTier[] = ['recorded-path', 'page-script', 'fetch'];
 
 function normalizePolicyTier(value: unknown, field: string): StrategyTier {
-  if (typeof value !== 'string' || !POLICY_TIERS.includes(value as StrategyTier)) {
+  if (typeof value !== 'string' || !(POLICY_TIERS as readonly string[]).includes(value)) {
     const suggestion =
       typeof value === 'string' ? didYouMeanSuffix(value, POLICY_TIERS as readonly string[]) : '';
     throw new Error(
@@ -940,7 +1025,7 @@ function collectWarmPathAvailable(
  * parameterless `logout` capability, or a recorded-path with no declared
  * placeholders).
  */
-function expectedAgentArgNames(strategy: unknown): Set<string> {
+export function expectedAgentArgNames(strategy: unknown): Set<string> {
   const out = new Set<string>();
   if (!strategy || typeof strategy !== 'object') return out;
   const notes = (strategy as { notes?: unknown }).notes;
@@ -951,6 +1036,7 @@ function expectedAgentArgNames(strategy: unknown): Set<string> {
     if (info && typeof info === 'object') {
       const source = (info as { source?: unknown }).source;
       if (typeof source === 'string' && source.length > 0) continue;
+      if ((info as { optional?: unknown }).optional === true) continue;
     }
     out.add(name);
   }
@@ -1032,8 +1118,8 @@ async function maybeAutoExecuteOnStart(
     // computeReverseEngineerHandoff and end_drive closes the session
     // without ever offering a save surface — the agent loses the only
     // path to override the stale shape.
-    const execStatus = (execResult as { status?: number }).status;
-    if (typeof execStatus === 'number' && execStatus >= 400) {
+    const execClassification = classifyFactoryExecutionResult(execResult);
+    if (execClassification === 'explicit_failure' || execClassification === 'transport_failure') {
       if (!session.staleStrategyCapabilities) {
         session.staleStrategyCapabilities = new Set();
       }
@@ -1094,18 +1180,19 @@ async function maybeAutoExecuteOnStart(
         const diagnosisKind = (body.diagnosis as { kind?: string }).kind;
         if (diagnosisKind === 'auth_failed') {
           try {
-            const { envelope } = await invokeCheckpointAndGate('session_expired', {
-              session_id: session.id,
-              context: {
-                kind: 'session_expired',
-                platform,
-                capability,
-                attempted_tier: (body.diagnosis as { attempted_tier?: string }).attempted_tier,
-                attempted_endpoint: (body.diagnosis as { attempted_endpoint?: string })
-                  .attempted_endpoint,
-                status,
-              },
-            });
+            const { envelope } = await invokeCheckpointAndGate(
+              checkpointEvent.session_expired({
+                session_id: session.id,
+                context: {
+                  platform,
+                  capability,
+                  attempted_tier: (body.diagnosis as { attempted_tier?: string }).attempted_tier,
+                  attempted_endpoint: (body.diagnosis as { attempted_endpoint?: string })
+                    .attempted_endpoint,
+                  status,
+                },
+              }),
+            );
             if (envelope) {
               (result as unknown as Record<string, unknown>)._checkpoint = envelope;
             }
@@ -1238,7 +1325,9 @@ async function executeOnlyFastPath(
     url,
     graph: 'execute',
   };
-  if (opts.platform) populatePlatformResponseFields(result, opts.platform);
+  if (opts.platform && opts.graph !== 'execute') {
+    populatePlatformResponseFields(result, opts.platform);
+  }
 
   await maybeAutoExecuteOnStart(session, opts, result);
 
@@ -1374,26 +1463,24 @@ export function dispatchExecuteGraphOutcome(
 }
 
 /**
- * Cap the `body` field of an in-flight `execute_result` to the agent-runtime
- * output budget. Three body shapes are handled, each preserving the agent's
- * primary decision signals (the surrounding `status`, top-level
- * `body.ok` as a `body_ok` sibling for object bodies, and `_hint` siblings):
+ * Cap the `body` field of an in-flight `execute_result` to a small share of the
+ * agent-runtime output budget. Structured bodies stay structured whenever
+ * leaf-level compaction can make them fit, preserving fields such as IDs,
+ * shortcodes, counts, outcomes, and item shape while clipping bulky text and
+ * media URLs.
  *
- *  - object body: JSON.stringify into a preview slice + sibling
- *    `body_preview` / `body_total_chars` / `body_truncated`; the original
- *    `body` value becomes a marker string.
- *  - string body: route through `sliceLargeString` for the preview slice; same
- *    sibling metadata pattern.
- *  - array body: keep the first N entries + sibling `body_total_entries` /
- *    `body_truncated_entries`; the original `body` value becomes a marker.
+ * If structural compaction cannot reach the bound, the body falls back to a
+ * bounded JSON preview. Metadata distinguishes either representation from a
+ * complete body.
  *
  * Runs regardless of whether the strategy succeeded — a failed auto-exec may
  * still attach a huge `body.original_body` (raw response captured for
  * diagnosis) that needs the same cap.
  */
 export function compactExecuteResultBody(er: Record<string, unknown>): void {
-  const body = er.body;
+  const body = escapeExecuteResultLineSeparators(er.body);
   if (body === null || body === undefined) return;
+  if (body !== er.body) er.body = body;
 
   // Hoist _checkpoint to a sibling of body so it survives body truncation —
   // a mid-execute checkpoint (e.g. recorded_step_failed) must reach the agent
@@ -1408,8 +1495,10 @@ export function compactExecuteResultBody(er: Record<string, unknown>): void {
   }
 
   if (typeof body === 'string') {
-    if (body.length <= MAX_TOOL_OUTPUT_CHARS / 2) return;
-    const sliced = sliceLargeString(body, { defaultMaxLength: MAX_TOOL_OUTPUT_CHARS / 2 });
+    if (body.length <= EXECUTE_RESULT_BODY_INLINE_BUDGET) return;
+    const sliced = sliceLargeString(body, {
+      defaultMaxLength: EXECUTE_RESULT_BODY_INLINE_BUDGET,
+    });
     er.body_preview = sliced.slice;
     er.body_total_chars = sliced.total_chars;
     er.body_truncated = true;
@@ -1419,31 +1508,31 @@ export function compactExecuteResultBody(er: Record<string, unknown>): void {
     return;
   }
 
-  if (Array.isArray(body)) {
-    const KEEP = 50;
-    if (body.length <= KEEP) {
-      // Small array — only worth compacting if its JSON cost is over budget
-      // anyway (each entry could be a giant object).
-      const bodyStr = JSON.stringify(body);
-      if (bodyStr.length <= MAX_TOOL_OUTPUT_CHARS / 2) return;
-      const previewBudget = Math.floor(MAX_TOOL_OUTPUT_CHARS / 2);
-      er.body_preview = bodyStr.slice(0, previewBudget);
+  if (Array.isArray(body) || typeof body === 'object') {
+    const bodyStr = JSON.stringify(body);
+    if (bodyStr.length <= EXECUTE_RESULT_BODY_INLINE_BUDGET) return;
+
+    const compacted = enforceFinalBudget(
+      { body },
+      {
+        ceiling: EXECUTE_RESULT_BODY_INLINE_BUDGET,
+        toolName: 'start_session.execute_result.body',
+      },
+    );
+    const compactedBody = compacted.value.body;
+    const compactedSize = JSON.stringify(compactedBody).length;
+    if (compacted.truncations.length > 0 && compactedSize <= EXECUTE_RESULT_BODY_INLINE_BUDGET) {
+      er.body = compactedBody;
       er.body_total_chars = bodyStr.length;
       er.body_truncated = true;
-      er.body = `<truncated array body: ${body.length} entries, ${bodyStr.length} chars; first ${previewBudget} in body_preview.>`;
+      er.body_truncated_paths = compacted.truncations.map((entry) =>
+        entry.path.startsWith('body.') ? entry.path.slice('body.'.length) : entry.path,
+      );
+      if (Array.isArray(body)) er.body_total_entries = body.length;
       return;
     }
-    const kept = body.slice(0, KEEP);
-    er.body = kept;
-    er.body_total_entries = body.length;
-    er.body_truncated_entries = true;
-    return;
-  }
 
-  if (typeof body === 'object') {
-    const bodyStr = JSON.stringify(body);
-    if (bodyStr.length <= MAX_TOOL_OUTPUT_CHARS / 2) return;
-    const previewBudget = Math.floor(MAX_TOOL_OUTPUT_CHARS / 2);
+    const previewBudget = EXECUTE_RESULT_BODY_INLINE_BUDGET;
     er.body_preview = bodyStr.slice(0, previewBudget);
     er.body_total_chars = bodyStr.length;
     er.body_truncated = true;
@@ -1451,6 +1540,39 @@ export function compactExecuteResultBody(er: Record<string, unknown>): void {
       `<truncated: ${bodyStr.length} chars; first ${previewBudget} in body_preview. ` +
       `For a structured view of subsets, re-run via start_session(graph: "execute") and shape the body in the strategy itself.>`;
   }
+}
+
+function escapeExecuteResultLineSeparators(value: unknown): unknown {
+  if (typeof value === 'string') {
+    const escaped = value
+      .replace(/\r/g, '\\r')
+      .replace(/\n/g, '\\n')
+      .replace(/\u2028/g, '\\u2028')
+      .replace(/\u2029/g, '\\u2029');
+    return escaped === value ? value : escaped;
+  }
+  if (Array.isArray(value)) {
+    let changed = false;
+    const items: unknown[] = [];
+    for (const item of value) {
+      const escaped = escapeExecuteResultLineSeparators(item);
+      if (escaped !== item) changed = true;
+      items.push(escaped);
+    }
+    return changed ? items : value;
+  }
+  if (value && typeof value === 'object') {
+    let changed = false;
+    const object = value as Record<string, unknown>;
+    const escaped: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(object)) {
+      const next = escapeExecuteResultLineSeparators(item);
+      escaped[key] = next;
+      if (next !== item) changed = true;
+    }
+    return changed ? escaped : value;
+  }
+  return value;
 }
 
 function describeFactoryExecutionResult(
@@ -1468,8 +1590,14 @@ function describeFactoryExecutionResult(
     case 'explicit_failure':
       return `execute_result.body.ok === false — the local strategy explicitly reports failure.`;
     case 'transport_failure':
-    case 'not_run':
       return `execute_result.status === ${status} — transport did not complete successfully.`;
+    case 'not_run':
+      return `execute_result.executionState === "not_run" — no request or action was sent.`;
+    case 'delivery_unknown':
+      return (
+        `execute_result.executionState === "sent_unconfirmed" — the request was sent, but ` +
+        `the remote outcome is unknown.`
+      );
   }
 }
 
@@ -1524,6 +1652,19 @@ export function applyAutoExecuteHint(
     result._hint =
       `${head} ${resultNote}${firedNote}` +
       ` Inspect the body before deciding whether to end or repair; do not infer semantic success from HTTP status.`;
+    return;
+  }
+  if (classification === 'delivery_unknown') {
+    result._hint =
+      `${head} ${resultNote}${firedNote}` +
+      ` Do NOT retry or cascade automatically: the remote write may already have happened. ` +
+      `Use a read-only capability or the live page to reconcile remote state first.`;
+    return;
+  }
+  if (classification === 'not_run') {
+    result._hint =
+      `${head} ${resultNote}${firedNote}` +
+      ` Supply the missing caller or generator input shown in execute_result and retry only after resolving it.`;
     return;
   }
   if (session.graph === 'execute' && session.phase === 'triage' && session.status !== 'failed') {
@@ -1626,8 +1767,13 @@ function compactAutoExecuteA11y(result: StartSessionResult, session: Session): v
       break;
     case 'explicit_failure':
     case 'transport_failure':
-    case 'not_run':
       result.a11yTree = `<dropped: auto-exec ran but failed — read execute_result for the outcome. Page UI dropped for budget. ${fetchHint}>`;
+      break;
+    case 'not_run':
+      result.a11yTree = `<dropped: auto-exec did not send a request; read execute_result for the required input. Page UI dropped for budget. ${fetchHint}>`;
+      break;
+    case 'delivery_unknown':
+      result.a11yTree = `<dropped: auto-exec sent a request without confirmation; reconcile remote state before retrying. Page UI dropped for budget. ${fetchHint}>`;
       break;
   }
   result.a11y_truncated = true;
@@ -1643,37 +1789,6 @@ export async function startSession(
   // end_drive (max_turns, crash, SIGTERM). Event-driven: folding happens when
   // the next session opens, not on a timer.
   recoverOrphanedCaptureJournals();
-
-  // Earliest possible slug-vs-args check: when the agent declares a
-  // capability slug AND args together, the slug must not contain any of
-  // the args' values as tokens. The slug names what the capability does
-  // in the abstract; values are parameters. Catching this at
-  // start_session means zero rounds wasted — the agent re-declares with
-  // a clean slug before any drive begins. Same structural signal the
-  // save-time `enum_value_baked_into_slug` detector runs, just earlier
-  // in the lifecycle.
-  if (opts.capability && opts.args && typeof opts.args === 'object') {
-    const slugTokens = new Set(
-      opts.capability
-        .toLowerCase()
-        .split(/[_\-/]/)
-        .filter((t) => t.length > 0),
-    );
-    for (const [argName, argValue] of Object.entries(opts.args)) {
-      if (typeof argValue !== 'string' || argValue.length < 3) continue;
-      const valueLower = argValue.toLowerCase();
-      if (slugTokens.has(valueLower)) {
-        throw new Error(
-          `invalid_start_session: capability slug "${opts.capability}" contains the token "${argValue}", ` +
-            `which is also the value of arg "${argName}". The slug names what the capability does in the abstract — ` +
-            `it must not bake one of its own parameter values. Saving this shape implies a parallel slug per value ` +
-            `(e.g. one capability per ${argName}) when the right shape is a single capability that takes "${argName}" ` +
-            `as a parameter. Re-call start_session with a slug that does not contain "${argValue}" — slugs are ` +
-            `verb + noun in the abstract; parameter values live in args + notes.params, never in the slug itself.`,
-        );
-      }
-    }
-  }
 
   // Platform-slug shape validation. Without this, `start_session({platform:
   // "some_store_uk"})` succeeds at boot but the slug doesn't match
@@ -1878,7 +1993,9 @@ export async function startSession(
   };
   attachAccessibilitySnapshotDiagnostic(result, session);
   if (originBlocked) result.origin_blocked = originBlocked;
-  if (opts.platform) populatePlatformResponseFields(result, opts.platform);
+  if (opts.platform && opts.graph !== 'execute') {
+    populatePlatformResponseFields(result, opts.platform);
+  }
   result.graph = session.graph;
   // Mid-flow interruption behavior is plugin-orchestrated. Headless / CI
   // environments register priority-5 handlers (see
@@ -2069,6 +2186,9 @@ const startSessionDescription = `Start a klura session: open a browser and navig
 
 export const TOOL_DEF: ToolDef = {
   name: TOOL_NAMES.startSession,
+  // drive_active for completeness — the middleware skips admissibility for
+  // tools called without a live session, and start_session creates one.
+  phasePolicy: { category: 'drive_active' },
   description: startSessionDescription,
   inputSchema: {
     type: 'object',
@@ -2096,24 +2216,24 @@ export const TOOL_DEF: ToolDef = {
         properties: {
           max_tier: {
             type: 'string',
-            enum: ['recorded-path', 'page-script', 'fetch'],
+            enum: [...POLICY_TIERS],
             description:
               'Alias for max_strategy_tier. With `capability`, caps that capability; without it, sets the platform default.',
           },
           max_strategy_tier: {
             type: 'string',
-            enum: ['recorded-path', 'page-script', 'fetch'],
+            enum: [...POLICY_TIERS],
             description:
               'With `capability`, caps that capability; without it, sets the platform default.',
           },
           default_max_tier: {
             type: 'string',
-            enum: ['recorded-path', 'page-script', 'fetch'],
+            enum: [...POLICY_TIERS],
             description: 'Alias for default_max_strategy_tier.',
           },
           default_max_strategy_tier: {
             type: 'string',
-            enum: ['recorded-path', 'page-script', 'fetch'],
+            enum: [...POLICY_TIERS],
           },
           reason: {
             type: 'string',

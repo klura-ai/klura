@@ -1,10 +1,10 @@
 // Unit tests for `triagePlanAudit` and `findObservedMatch`.
 //
-// `triagePlanAudit` composes two ackReason:'none' detectors:
-//   - request_pattern_url_extractable: each entry must contain a URL or
-//     absolute-path token.
-//   - request_pattern_url_observed: each extracted URL must either match
-//     a captured URL this session OR sit on an observed_origin.
+// `triagePlanAudit` composes four ackReason:'none' detectors
+// (request_pattern_url_extractable, request_pattern_url_observed,
+// capability_not_declared, tier_justification_unciteable) and two
+// ackReason:'required' detectors (enum_value_baked_into_slug,
+// recorded_path_navigate_url_unbound).
 //
 // `findObservedMatch` is the shared URL-vs-captured-URL primitive. Both
 // detectors and the save-time `unobservedUrlDetector` use the same shape;
@@ -466,4 +466,99 @@ test('audit: enum_value_baked_into_slug commits when acked', () => {
   assert.equal(second.status, 'committed');
   const warningKinds = second.warnings.map((w) => w.kind);
   assert.ok(warningKinds.includes('enum_value_baked_into_slug'));
+});
+
+// ---------- recorded_path_navigate_url_unbound ----------
+
+test('audit: recorded-path verdict without a captured nav URL in patterns rejects (ackable)', () => {
+  const navCtx = ctx([{ url: 'http://x.com/api/send' }], {
+    session: {
+      id: 'sess',
+      platform: 'p',
+      intercepted: [{ url: 'http://x.com/api/send' }],
+      declaredCapabilities: [{ capability: 'send_message', args: {}, declared_at: 0 }],
+      domNavigations: [{ url: 'http://x.com/compose', at: 1 }],
+    },
+  });
+  const rpPayload = payload({
+    expected_tier: 'recorded-path',
+    defense_surface: {
+      observed_origins: ['http://x.com'],
+      observed_scripts: [],
+      cookies_set: [],
+      request_patterns: ['POST /api/send'],
+      mechanism_hypothesis: 'no auth',
+    },
+  });
+  const first = triagePlanAudit.process(rpPayload, navCtx, {});
+  assert.equal(first.status, 'rejected');
+  const kinds = first.rejection.warnings.map((w) => w.kind);
+  assert.ok(
+    kinds.includes('recorded_path_navigate_url_unbound'),
+    `expected recorded_path_navigate_url_unbound, got: ${kinds.join(', ')}`,
+  );
+  const warning = first.rejection.warnings.find(
+    (w) => w.kind === 'recorded_path_navigate_url_unbound',
+  );
+  // The hint names the concrete nav urlKey to add.
+  assert.match(warning.hint, /GET http:\/\/x\.com\/compose/);
+  // Ack path clears it.
+  const second = triagePlanAudit.process(rpPayload, navCtx, {
+    acks: {
+      recorded_path_navigate_url_unbound:
+        'this surface triages only the XHR side; the navigation surface is re-triaged separately',
+    },
+  });
+  assert.equal(second.status, 'committed');
+});
+
+test('audit: recorded-path verdict passes when a captured nav URL is in patterns', () => {
+  const navCtx = ctx([{ url: 'http://x.com/compose' }], {
+    session: {
+      id: 'sess',
+      platform: 'p',
+      intercepted: [{ url: 'http://x.com/compose' }],
+      declaredCapabilities: [{ capability: 'send_message', args: {}, declared_at: 0 }],
+      domNavigations: [{ url: 'http://x.com/compose', at: 1 }],
+    },
+  });
+  const rpPayload = payload({
+    expected_tier: 'recorded-path',
+    defense_surface: {
+      observed_origins: ['http://x.com'],
+      observed_scripts: [],
+      cookies_set: [],
+      request_patterns: ['GET http://x.com/compose'],
+      mechanism_hypothesis: 'no auth',
+    },
+  });
+  const result = triagePlanAudit.process(rpPayload, navCtx, {});
+  assert.equal(result.status, 'committed');
+});
+
+test('audit: non-recorded-path verdicts never fire recorded_path_navigate_url_unbound', () => {
+  const navCtx = ctx([{ url: 'http://x.com/api/send' }], {
+    session: {
+      id: 'sess',
+      platform: 'p',
+      intercepted: [{ url: 'http://x.com/api/send' }],
+      declaredCapabilities: [{ capability: 'send_message', args: {}, declared_at: 0 }],
+      domNavigations: [{ url: 'http://x.com/compose', at: 1 }],
+    },
+  });
+  const result = triagePlanAudit.process(
+    payload({
+      expected_tier: 'fetch',
+      defense_surface: {
+        observed_origins: ['http://x.com'],
+        observed_scripts: [],
+        cookies_set: [],
+        request_patterns: ['POST /api/send'],
+        mechanism_hypothesis: 'no auth',
+      },
+    }),
+    navCtx,
+    {},
+  );
+  assert.equal(result.status, 'committed');
 });

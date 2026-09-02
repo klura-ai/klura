@@ -3,6 +3,7 @@
 // without pulling values.
 
 import type { BrowserPool } from '../drivers/types/session';
+import type { PrereqKind, StrategyTier } from '../vocab';
 import type { StrategyNotes } from '../strategies/skills';
 import type { GeneratorEntry } from '../strategies/generators';
 import type { JsEvalReturnShape } from '../strategies/js-eval-validators';
@@ -77,7 +78,7 @@ export interface Prerequisite {
    * Field is `kind` (not `method`) — `method` is reserved for the HTTP verb on
    * fetch-extract prereqs and on top-level fetch/page-script strategies.
    */
-  kind: 'browser' | 'cached' | 'page-extract' | 'fetch-extract' | 'js-eval' | 'capability' | 'tag';
+  kind: PrereqKind;
   value?: string;
   // browser-kind:
   steps?: Array<{
@@ -224,11 +225,25 @@ export type RequestStrategy = {
   params?: Record<string, unknown>;
   generated?: Record<string, GeneratorEntry>;
   response?: ResponseSpec;
+  notes?: StrategyNotes;
 };
 
 export interface ExecuteResult {
   status: number;
   body: unknown;
+  /**
+   * Exact URL evidence collected only when an internal diagnostic caller asks
+   * for it. Entries come from transport dispatches and browser resource
+   * events; response prose and page text never contribute.
+   */
+  diagnosticEvidence?: {
+    urls: Array<{ kind: 'request' | 'script'; url: string }>;
+  };
+  // Runtime-owned state for calls whose transport status cannot express what
+  // happened. `not_run` proves no request/action was sent. `sent_unconfirmed`
+  // proves a write was dispatched but no acknowledgement arrived; callers
+  // must not retry or cascade it automatically.
+  executionState?: 'not_run' | 'sent_unconfirmed';
   // Final URL after fetch redirects (fetch only). Used to detect auth failures
   // that show up as 200 OK on a /login page rather than 401.
   finalUrl?: string;
@@ -237,7 +252,7 @@ export interface ExecuteResult {
   // telemetry) read this to show warm-run latency.
   elapsedMs?: number;
   // Which strategy tier actually produced the successful result.
-  tier?: 'fetch' | 'page-script' | 'recorded-path';
+  tier?: StrategyTier;
   // Which transport fired the final request — `'node'` for pure-Node fetch,
   // `'browser'` for in-browser fetch. The (tier, transport) pair is the honest
   // "run 1 → run 2 cliff" unit: fetch/node is the ~100ms cell on the race

@@ -4,7 +4,7 @@ import { checkCapabilityArgs } from '../tools/well-known-capabilities';
 export interface DeclareCapabilityArgs {
   session_id: string;
   capability: string;
-  args?: Record<string, string>;
+  args?: Record<string, unknown>;
 }
 
 /**
@@ -21,17 +21,7 @@ export function declareCapability(args: DeclareCapabilityArgs): { ok: true; _hin
   if (typeof args.capability !== 'string' || args.capability.length === 0) {
     throw new Error('capability is required (slug)');
   }
-  const argMap = (args.args && typeof args.args === 'object' ? args.args : {}) as Record<
-    string,
-    unknown
-  >;
-  for (const [k, v] of Object.entries(argMap)) {
-    if (typeof v !== 'string') {
-      throw new Error(
-        `args.${k} must be a string (got ${typeof v}) — pass the literal values the agent will type`,
-      );
-    }
-  }
+  const argMap = args.args && typeof args.args === 'object' ? args.args : {};
   const session = pool.getSession(args.session_id);
 
   // If start_session already declared this capability with more args, the
@@ -53,7 +43,7 @@ export function declareCapability(args: DeclareCapabilityArgs): { ok: true; _hin
   if (!session.declaredCapabilities) session.declaredCapabilities = [];
   session.declaredCapabilities.push({
     capability: args.capability,
-    args: argMap as Record<string, string>,
+    args: argMap,
     declared_at: Date.now(),
   });
 
@@ -72,8 +62,9 @@ import type { ToolDef } from '../tools/types';
 
 export const TOOL_DEF: ToolDef = {
   name: TOOL_NAMES.declareCapability,
+  phasePolicy: { category: 'capability_declaration' },
   description:
-    'Declare a capability the agent is about to discover on this session. Call once per capability the user asked for (e.g. "send_message", "search_contact"). `args` is a map `{paramName: literalValue}` of user-supplied values the agent will type (e.g. `{text: "hello", recipient: "Bob"}`). The runtime uses this to partition perform_action history per capability at end_drive, and to template captured request bodies into reusable strategies (substituting each arg value with `{{paramName}}`). For single-capability sessions, pass `{capability, args}` to start_session and skip this tool.',
+    'Declare a capability the agent is about to discover on this session. Call once per capability the user asked for (e.g. "send_message", "search_contact"). `args` is a map `{paramName: value}` of user-supplied inputs; values may be strings, numbers, booleans, arrays, objects, or null. Scalar strings can template captured request bodies, and structured values remain available through nested placeholders. For single-capability sessions, pass `{capability, args}` to start_session and skip this tool.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -82,7 +73,7 @@ export const TOOL_DEF: ToolDef = {
         type: 'string',
         description: 'Capability slug the agent is about to discover.',
       },
-      args: { type: 'object', description: 'Map of user-supplied literals the agent will type.' },
+      args: { type: 'object', description: 'Map of user-supplied input values.' },
     },
     required: ['session_id', 'capability'],
   },

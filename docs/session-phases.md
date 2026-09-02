@@ -65,7 +65,7 @@ lift   ──[resolved_via_save]────────────────
 ```
 execute ──[execute_succeeded]──→ terminal{closed}
 execute ──[execute_failed]─────→ triage              (explicit body.ok:false, typed stale shape, or degraded health)
-execute ──[execute_failed]─────→ terminal{failed}    (otherwise — arg/auth/structural failures)
+execute ──[execute_failed]─────→ terminal{failed}    (otherwise — arg/auth/not-run/unconfirmed/structural failures)
 triage  ──[plan_submitted]──────→ triage              (same as discover from here)
 triage  ──[plan_handoff]────────→ lift
 triage  ──[surface_changed]─────→ triage
@@ -77,7 +77,7 @@ lift    ──[resolved_via_save]───→ terminal{closed}
 
 **No `plan_rejected` event.** The runtime never classifies the user's ack reply as approve / reject — that's the agent's job. The agent reads `user_response` from `ack_checkpoint`, decides, and either calls `submit_triage_plan` again (`plan_submitted` re-enters triage) or proceeds with RE moves (the original `plan_handoff` already transitioned to LIFT).
 
-**Guarded transitions.** A single `(from, on)` pair can declare multiple destinations with a `when(session, payload)` predicate. The first matching entry wins; an unguarded entry serves as the fallback. This is how `execute_failed` routes between triage and `terminal{failed}` in the execute graph. The guard in `runtime/src/graphs/guards/rediscover.ts` first reads typed structural signals: stale-shape diagnoses enter triage, while `auth_failed` stays terminal. A local factory result classified as `explicit_failure` from boolean `body.ok:false` also enters triage on the first failure; its application-defined `code` and prose remain uninterpreted for the LLM to assess. Results without either signal use the saved strategy's rolling success rate against `pool.rediscoverThreshold`. Wrong args, expired auth, and non-repairable structural calls terminate `failed`.
+**Guarded transitions.** A single `(from, on)` pair can declare multiple destinations with a `when(session, payload)` predicate. The first matching entry wins; an unguarded entry serves as the fallback. This is how `execute_failed` routes between triage and `terminal{failed}` in the execute graph. The guard in `runtime/src/graphs/guards/rediscover.ts` first reads typed structural signals: stale-shape diagnoses enter triage, while `auth_failed` stays terminal. A local factory result classified as `explicit_failure` from boolean `body.ok:false` also enters triage on the first failure; its application-defined `code` and prose remain uninterpreted for the LLM to assess. `not_run` and `delivery_unknown` stay terminal and do not consult rolling health: one needs missing data, while rediscovery or retry of the other could duplicate an already-applied write. Results without a stronger structural signal use the saved strategy's rolling success rate against `pool.rediscoverThreshold`. Wrong args, expired auth, and non-repairable structural calls terminate `failed`.
 
 Anything not in any graph's transition table is illegal for that graph — `dispatch` throws `SessionPhaseTransitionError`. Programmer bugs surface loudly.
 
@@ -86,29 +86,41 @@ Anything not in any graph's transition table is illegal for that graph — `disp
 Every MCP tool dispatch goes through `assertToolAdmissibleBySessionId` (`runtime/src/phases/middleware.ts`). The middleware:
 
 1. Looks up the session (skips check if no live session — e.g. `start_session` itself).
-2. Checks **universal tools** first (`UNIVERSAL_TOOLS` in `tool-catalog.ts`). These are admissible in every non-terminal phase: `ack_checkpoint`, `resolve_interruption`, `list_platform_skills`, `get_platform_logbook`, `start_remote_session`, plus admin / read-only-config tools.
+2. Checks **universal tools** first (`UNIVERSAL_TOOLS`, derived in `tool-catalog.ts` from every `ToolDef` whose `phasePolicy.category` is `'universal'`). These are admissible in every phase and on finalized sessions: `ack_checkpoint`, `resolve_interruption`, `list_platform_skills`, `get_platform_logbook`, `start_remote_session`, plus admin / read-only-config tools.
 3. Otherwise consults `currentSpec(session).checkAdmissibility(toolName, session)`:
    - Tool not in `phase.allowedTools` → reject with `tool '<name>' is not available in phase '<phase>'. ...`
    - Tool in `allowedTools` but `softBlockEngaged === true` AND tool not in `allowedToolsWhenExhausted` → reject with the phase's exhausted-prefix message.
 4. Increments the per-phase counter on admitted calls (rejected calls don't burn budget).
 
-Per-phase tool sets (composed from shared catalogs in `tool-catalog.ts`):
+**Per-phase tool sets are derived from the registry.** Every `ToolDef` declares a `phasePolicy` — `{category, extraPhases?, allowedWhenExhaustedIn?}` (`ToolPhasePolicy` in `runtime/src/public/tool-phase-policy.ts`, re-exported via `phases/types.ts`). `tool-catalog.ts` projects those declarations over `TOOL_REGISTRY` into the per-phase allowed / exhausted sets and `UNIVERSAL_TOOLS`; the phase specs consume the projection via `phaseAllowedTools(phase)` / `phaseExhaustedTools(phase)`. A name can only appear in a phase set by being a registered tool, so catalog entries without a backing tool are impossible by construction (`runtime/test/registry-parity.test.js` locks this down, including a snapshot of the full composition). Derivation is lazy — computed on the first admissibility check, never at module init — because tool modules import `phases/*` at module scope.
 
-| Phase | Composes |
-| --- | --- |
-| **drive** | `DRIVE_ACTIVE` (start_session, perform_action, end_drive, declare_capability, resume_execution) ∪ `READ_ONLY_DIAGNOSTIC` |
-| **triage** | `READ_ONLY_DIAGNOSTIC` (get_network_log, inspect_ws_frame, get_js_source, search_js_source, read_js_function, list_loaded_scripts, js_eval, find_in_page, get_attribute, get_screenshot, get_action_history) ∪ `TRIAGE_AND_LIFT_WRITE` (save_strategy, add_discovery_note, add_resume_pointer, record_observed_capability, save_verified_expression, submit_triage_plan) |
-| **lift** | triage's set ∪ `LIFT_RE_ACTIVE` (try_generator, set_breakpoint family, evaluate_on_frame, install_page_init_script, trigger_reference_send, patch_step, start_listener / stop_listener / get_events) |
-| **execute** | narrow: `end_drive`, `get_screenshot`, `start_remote_session`, `stop_remote_session`, `wait_for_remote`, `get_secret`. The strategy runs as one logical operation; the agent surface is auth-recovery + screenshots only. |
+Each category maps to a fixed phase list (`CATEGORY_PHASES`):
+
+| Category | Phases | Members |
+| --- | --- | --- |
+| `universal` | every phase + finalized sessions (middleware short-circuit) | control plane (ack_checkpoint, resolve_interruption, list_interruption_resolvers), memory reads (list_platform_skills, get_platform_logbook, get_strategy, get_strategy_events, get_discovery_artifact_field), escape-to-human (start_remote_session, stop_remote_session, wait_for_remote), config (describe_config, get_config, get_secret, configure, restart_runtime) |
+| `read_only_diagnostic` | drive, triage, lift | get_network_log, get_action_history, get_a11y_tree, find_in_page, get_attribute, get_screenshot (+execute via extraPhases), get_js_source, search_js_source, read_js_function, list_loaded_scripts, ws-frame tools, js_eval, evaluate_in_iframe / \_chain / \_worker |
+| `discovery_artifact` | drive, triage, lift | save_verified_expression, add_discovery_note, add_resume_pointer |
+| `logbook_write` | drive, triage, lift | record_observed_capability |
+| `triage_and_lift_write` | triage, lift | save_strategy, submit_triage_plan |
+| `strategy_amend` | drive, lift, execute | update_strategy |
+| `map_lift_initiator` | drive, lift | lift_observed_capability |
+| `drive_active` | drive | start_session, perform_action (+lift via extraPhases), end_drive (+lift, +execute via extraPhases), resume_execution (+execute via extraPhases) |
+| `capability_declaration` | drive, triage, lift | declare_capability |
+| `escape_valve` | drive, triage, lift | abort_session |
+| `lift_re_active` | lift | try_generator(\_in_page), get_send_encoder, debugger family, install/remove_page_init_script, trigger_reference_send, patch_step (+execute via extraPhases), start/stop_listener, get_events |
+| `none` | never session-gated | consumer / package tools, get_strategy_health, review_strategy_candidate, export_platform_package |
+
+The execute phase's derived set is deliberately narrow — `end_drive`, `get_screenshot`, `patch_step`, `resume_execution`, `update_strategy`; auth recovery (`start_remote_session`, `wait_for_remote`, `get_secret`, ...) is universal and bypasses the spec.
 
 When the FSM hits a terminal node (`session.status` becomes `'closed'` or `'failed'`), only universal tools admit — phase-scoped tools reject.
 
-When budget is exhausted (`session.<phase>.softBlockEngaged === true`), the admissible set narrows:
+When budget is exhausted (`session.<phase>.softBlockEngaged === true`), the admissible set narrows to the tools declaring `allowedWhenExhaustedIn` for that phase:
 
-- **drive** exhausted: `{end_drive}` only.
-- **triage** exhausted: `{submit_triage_plan}`.
-- **lift** exhausted: `{save_strategy, submit_triage_plan}`.
-- **execute** has no rounds budget by design (the strategy is one operation), so the exhausted state never engages.
+- **drive** exhausted: `{end_drive, abort_session}`.
+- **triage** exhausted: `{submit_triage_plan, abort_session}`.
+- **lift** exhausted: `{save_strategy, submit_triage_plan, end_drive, abort_session}`.
+- **execute** has no rounds budget by design (the strategy is one operation), so the exhausted state never engages; `end_drive` is declared for it regardless.
 
 The narrowing is the **only** soft enforcement — the agent isn't told the budget exists up front; they discover it when an out-of-set tool gets rejected. The rejection prose names the budget so the agent can route correctly without prior knowledge.
 
@@ -126,13 +138,15 @@ Each non-terminal phase carries a `budget` and `roundsSinceEntry` counter (or `r
 
 `max_rounds: 0` short-circuits the soft-block check entirely — no exhausted state can engage.
 
-Counter resets on every transition INTO the phase (including self-loops on `plan_submitted`). The state machine's `enterX` handler is the single point that does the reset; callers don't reset directly. Stamping the budget at entry means the middleware doesn't re-read config on every tool call — a config change between sessions takes effect on the next `enterX`.
+Counter resets on every transition INTO the phase (including self-loops on `plan_submitted`). The state machine's `enterX` handler is the single point that does the reset AND the single initializer of the per-phase bookkeeping struct — `session.lift` does not exist until the session actually enters lift, so triage-phase activity cannot pre-burn the lift budget and the budget is always sourced from config at entry. Callers don't reset directly. Stamping the budget at entry means the middleware doesn't re-read config on every tool call — a config change between sessions takes effect on the next `enterX`.
+
+**One increment point.** The phase middleware's dispatch boundary (`assertToolAdmissibleBySessionId`) is the only place a round is counted: one admitted non-universal tool call ticks the current phase's counter exactly once and registers exactly one pool-level user round (`pool.registerUserRound`). Session lookups (`pool.getSession`) are pure — a handler may look the session up any number of times without burning budget, and universal tools burn nothing. The pool-level count also feeds end_drive's repeat-close detector: the orchestrator snapshots it when the LIFT handoff fires (`session.roundCountAtLastCloseAttempt`), and a later close attempt whose count moved by at most one round (the repeat end_drive itself) surfaces the stronger REPEAT-CLOSE message.
 
 ## What `submit_triage_plan` does
 
 `submit_triage_plan(args)` is a per-surface defense-fingerprinting commit:
 
-1. Validate args (shape check via `parseArgs` — capability declared, surface_label non-empty, defense_surface fields present, expected_tier in the closed enum).
+1. Validate args (shape check via `parseArgs` — capability declared, surface_label non-empty, structural defense_surface arrays present, expected_tier in the closed enum). `mechanism_hypothesis` is optional context and never blocks entry to LIFT.
 2. Look up session, assert phase is `triage` or `lift`.
 3. **Cite-validate `tier_justification`** — must reference at least one verbatim artifact actually present in `session.intercepted` / `session.domNavigations` (origin, script URL, script filename, cookie name, or observed nav URL). Empty or uncited justifications reject with the candidate list. The agent's verdict has to be grounded.
 4. **Server-derive `observed_at_urls`** from the runtime-observed current URL plus `session.domNavigations` between triage entry and submission — the agent doesn't supply visit lists; the runtime knows. Including the current URL binds the navigation that triggered `surface_changed`, which necessarily occurred immediately before triage entry.
@@ -152,7 +166,7 @@ Tier suggestion is **informational, not gating** — the agent still aims T0 (fe
     observed_scripts: string[],
     cookies_set: string[],
     request_patterns: string[],          // free-text observations
-    mechanism_hypothesis: string,        // free-text; agent draws on its own knowledge of vendors
+    mechanism_hypothesis?: string,       // optional free-text context when evidence supports it
   },
   expected_tier: 'fetch' | 'page-script' | 'recorded-path',
   tier_justification: string,            // cite-validated against session traffic
@@ -233,13 +247,13 @@ interface Graph {
 }
 ```
 
-Each phase exports its `PhaseSpec` from `runtime/src/phases/{drive,triage,lift,execute}.ts`. Each graph exports its `Graph` literal from `runtime/src/graphs/{discover,map,execute}.ts`. Adding or modifying a tool's phase membership = a one-line edit to that phase's `allowedTools` set (or to the shared catalogs in `tool-catalog.ts`). No cross-cutting concerns.
+Each phase exports its `PhaseSpec` from `runtime/src/phases/{drive,triage,lift,execute}.ts`; the spec's `allowedTools` / `allowedToolsWhenExhausted` are lazy views over the derived catalog. Each graph exports its `Graph` literal from `runtime/src/graphs/{discover,map,execute}.ts`. Adding or modifying a tool's phase membership = editing the `phasePolicy` on that tool's `TOOL_DEF`. No cross-cutting concerns.
 
 The **graphs index** (`graphs/index.ts`) maps `GraphName` → `Graph`. The **registry** (`registry.ts`) resolves the active graph from `session.graph`, exposes `currentPhase`, `currentSpec`, `currentGraph`, `graphConfig`, and `checkAdmissibility`. The **state machine** (`state-machine.ts`) is a tiny dispatcher that looks up the active graph's transition table, runs guards, applies the destination (phase + onEnter, or terminal + `session.status`), and mutates `session.phase` — the single writer.
 
 ## Adding a new phase, graph, or tool
 
-To add a new tool to an existing phase: edit `tool-catalog.ts`, drop the tool name into the appropriate set (`DRIVE_ACTIVE`, `READ_ONLY_DIAGNOSTIC`, `TRIAGE_AND_LIFT_WRITE`, `LIFT_RE_ACTIVE`, or `UNIVERSAL_TOOLS`). The phase modules pick it up automatically via the `unionSets` calls.
+To add a new tool to an existing phase (or change a tool's membership): set `phasePolicy` on the tool's `TOOL_DEF` — pick a `category` (`ToolPhaseCategory` in `phases/types.ts`), add `extraPhases` for per-tool exceptions, and `allowedWhenExhaustedIn` if the tool must survive a budget soft-block. The catalog, phase specs, and `UNIVERSAL_TOOLS` all derive from the registry, and `registry-parity.test.js` fails on a policy-less tool, an unknown category, or composition drift from its snapshot.
 
 To add a new phase: create `phases/<name>.ts` exporting a `PhaseSpec`, register it in `registry.ts`'s `PHASES` table, add `<name>` to the `SessionPhase` union in `types.ts`, add transition entries in any graph that should reach the new phase, add a `PhaseEventKind` to `types.ts` if a new event drives the transition. Document the new phase in this file and (briefly) in `runtime/SKILL.md`.
 
@@ -253,7 +267,7 @@ To add a new graph: create `graphs/<name>.ts` exporting a `Graph` literal, add i
 - `runtime/src/phases/registry.ts` — `currentGraph`, `currentPhase`, `graphConfig`, accessor + admissibility helpers
 - `runtime/src/phases/state-machine.ts` — `dispatch`, `forceTransition`; the only writers of `session.phase` and `session.status`
 - `runtime/src/phases/middleware.ts` — `assertToolAdmissibleBySessionId`, `tickPhaseCounter`
-- `runtime/src/phases/tool-catalog.ts` — single source of truth for tool categories
+- `runtime/src/phases/tool-catalog.ts` — derived projection over `TOOL_REGISTRY`: per-phase allowed / exhausted sets + `UNIVERSAL_TOOLS`, computed from each `ToolDef.phasePolicy`
 - `runtime/src/phases/{drive,triage,lift,execute}.ts` — per-phase `PhaseSpec` modules
 - `runtime/src/graphs/dump.ts` — Mermaid renderer for any Graph
 - `runtime/src/tools/submit-triage-plan.ts` — the triage-exit tool

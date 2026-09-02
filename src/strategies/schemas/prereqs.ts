@@ -6,7 +6,8 @@
 
 import { z } from 'zod';
 import { ValidationError, asPlatformSlug, asIdentifierSlug } from '../../validators';
-import { asBoundedScript, asReturnShape } from '../js-eval-validators';
+import { PREREQ_KIND_VALUES, REF_LINKS, type PrereqKind, type RefLink } from '../../vocab';
+import { asBoundedScript, asReturnShape, JS_EVAL_SHAPE_KINDS } from '../js-eval-validators';
 import { JS_EVAL_TIMEOUT_DEFAULT_MS, JS_EVAL_TIMEOUT_HARD_CAP_MS } from '../validate/constants';
 
 // Wrap a klura-domain validator (asPlatformSlug / asIdentifierSlug / etc.)
@@ -84,9 +85,10 @@ const jsEvalSchema = z
       .describe('placeholder name; becomes {{<binds>}} in body/headers/endpoint'),
     return_shape: z
       .object({
-        kind: z.enum(['string', 'number', 'boolean', 'object']),
+        kind: z.enum(JS_EVAL_SHAPE_KINDS),
         min_length: z.number().int().nonnegative().optional(),
         max_length: z.number().int().nonnegative().optional(),
+        min_items: z.number().int().nonnegative().optional(),
         required_keys: z.array(z.string()).optional(),
       })
       .superRefine((v, ctx) => {
@@ -283,17 +285,24 @@ const tagSchema = z
   })
   .strict();
 
-// ---------- cached (no validation; runtime checks at execute time) ----------
+// ---------- cached ----------
 
+// `name` is required: execution uses it as BOTH the token-cache key and the
+// binding name (`tokens[prereq.name] = tokenCache.get(platform, prereq.name)`),
+// so a cached prereq without one can never resolve. Loose object — callers
+// may carry extra bookkeeping fields (`key`, `value`); the runtime reads only
+// `name` at execute time.
 const cachedSchema = z
   .looseObject({
-    name: z.string().min(1).optional(),
+    name: z.string().min(1).describe('token-cache key AND binding name'),
     kind: z.literal('cached'),
   })
-  .describe('runtime-cached value; checked at execute time');
+  .describe('runtime-cached value; cache hit checked at execute time');
 
 // ---------- registry ----------
 
+// Keyed by the prereq-kind vocabulary — `satisfies` makes tsc reject a
+// registry that misses a kind or invents a key outside `PREREQ_KIND_VALUES`.
 export const prereqSchemas = {
   'js-eval': jsEvalSchema,
   'page-extract': pageExtractSchema,
@@ -302,25 +311,28 @@ export const prereqSchemas = {
   capability: capabilitySchema,
   tag: tagSchema,
   cached: cachedSchema,
-} as const;
+} as const satisfies Record<PrereqKind, z.ZodType>;
 
-export type PrereqKind = keyof typeof prereqSchemas;
+export type { PrereqKind };
 
-export const PREREQ_KINDS: readonly PrereqKind[] = Object.keys(prereqSchemas) as PrereqKind[];
+export const PREREQ_KINDS: readonly PrereqKind[] = PREREQ_KIND_VALUES;
 
 export function getPrereqSchema(kind: string): z.ZodType | null {
   return (prereqSchemas as Record<string, z.ZodType>)[kind] ?? null;
 }
 
-const PREREQ_REFERENCE_SLUGS: Record<string, string> = {
-  'js-eval': 'js-eval-prereq',
-  'page-extract': 'page-extract-prereq',
-  browser: 'browser-prereq',
-  'fetch-extract': 'fetch-extract-prereq',
-  capability: 'capability-prereq',
-  tag: 'tag-prereq',
+/** REFERENCE.md section per kind. Kinds without a dedicated section point at
+ *  the generic prereq walkthrough. */
+const PREREQ_REFERENCE_SLUGS: Record<PrereqKind, RefLink> = {
+  'js-eval': REF_LINKS.jsEval,
+  'page-extract': REF_LINKS.capabilityPrereq,
+  browser: REF_LINKS.capabilityPrereq,
+  'fetch-extract': REF_LINKS.capabilityPrereq,
+  capability: REF_LINKS.capabilityPrereq,
+  tag: REF_LINKS.tagPrereq,
+  cached: REF_LINKS.capabilityPrereq,
 };
 
 export function prereqReferenceSlug(kind: string): string {
-  return PREREQ_REFERENCE_SLUGS[kind] ?? 'capability-prereq';
+  return (PREREQ_REFERENCE_SLUGS as Record<string, string>)[kind] ?? REF_LINKS.capabilityPrereq;
 }

@@ -14,6 +14,37 @@
 
 const path = require('path');
 const { version: runtimePackageVersion } = require('./package.json');
+const {
+  RuntimeBuildIntegrityError,
+  assertLoadedRuntimeBuildCurrent,
+  assertRuntimeBuildFresh,
+  readRuntimeBuildInfo,
+} = require('./scripts/write-build-info.js');
+
+function formatRuntimeBuildFailure(error, toolName) {
+  const isBuildError = error instanceof RuntimeBuildIntegrityError;
+  const code = isBuildError ? error.code : 'runtime_build_invalid';
+  const payload = {
+    ok: false,
+    kind: 'runtime_failure',
+    operation: 'tool_call',
+    code,
+    retryable: false,
+    tool: toolName,
+    loaded_build_id:
+      isBuildError && typeof error.loaded_build_id === 'string' ? error.loaded_build_id : null,
+    current_build_id:
+      isBuildError && typeof error.current_build_id === 'string' ? error.current_build_id : null,
+    action:
+      code === 'runtime_process_stale' ? 'restart_mcp_host' : 'run_build_and_restart_mcp_host',
+    message: error instanceof Error ? error.message : String(error),
+  };
+  return {
+    content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
+    structuredContent: payload,
+    isError: true,
+  };
+}
 
 // Resolve the compiled runtime barrel. mcp-server.js ships inside the
 // @klura/runtime package, so `dist/` is a sibling.
@@ -22,6 +53,8 @@ function loadRuntime() {
 }
 
 async function createKluraMcpServer(options = {}) {
+  const loadedBuildInfo = assertRuntimeBuildFresh();
+  const assertCurrentBuild = () => assertLoadedRuntimeBuildCurrent(loadedBuildInfo, __dirname);
   const { Server } = await import('@modelcontextprotocol/sdk/server/index.js');
   const {
     ListToolsRequestSchema,
@@ -30,6 +63,22 @@ async function createKluraMcpServer(options = {}) {
     ReadResourceRequestSchema,
   } = await import('@modelcontextprotocol/sdk/types.js');
   const klura = loadRuntime();
+
+  class BuildGuardedServer extends Server {
+    setRequestHandler(requestSchema, handler) {
+      return super.setRequestHandler(requestSchema, async (request, extra) => {
+        try {
+          assertCurrentBuild();
+        } catch (error) {
+          if (request.method === 'tools/call') {
+            return formatRuntimeBuildFailure(error, request.params?.name);
+          }
+          throw error;
+        }
+        return handler(request, extra);
+      });
+    }
+  }
 
   // SKILL.md (compact) is the always-loaded orientation. REFERENCE.md
   // (detailed schemas, examples) is served as an on-demand resource via
@@ -42,10 +91,31 @@ async function createKluraMcpServer(options = {}) {
   // discovery remains an explicit authoring transition.
   const instructions = skillMd;
 
-  const server = new Server(
-    { name: '@klura/mcp', version: runtimePackageVersion },
+  const server = new BuildGuardedServer(
+    {
+      name: '@klura/mcp',
+      version: runtimePackageVersion,
+      description: `klura runtime build ${loadedBuildInfo.build_id}`,
+    },
     { capabilities: { tools: {}, resources: {} }, instructions },
   );
+  let terminalToolResult = null;
+  server.takeTerminalToolResult = () => {
+    const result = terminalToolResult;
+    terminalToolResult = null;
+    return result;
+  };
+  const observeToolCallResult = async (observationInput) => {
+    if (typeof options.toolCallResultObserver !== 'function') return;
+    const observation = await options.toolCallResultObserver(observationInput);
+    if (
+      observation &&
+      typeof observation === 'object' &&
+      observation.terminate === true
+    ) {
+      terminalToolResult = observation;
+    }
+  };
 
   // -- Resources (on-demand reference docs) --
   //
@@ -108,14 +178,16 @@ async function createKluraMcpServer(options = {}) {
   ];
   const toolByName = new Map(tools.map((t) => [t.name, t]));
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: tools.map(({ name, description, inputSchema, annotations }) => ({
-      name,
-      description,
-      inputSchema,
-      ...(annotations ? { annotations } : {}),
-    })),
-  }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    return {
+      tools: tools.map(({ name, description, inputSchema, annotations }) => ({
+        name,
+        description,
+        inputSchema,
+        ...(annotations ? { annotations } : {}),
+      })),
+    };
+  });
 
   // OpenAI-style tool_calls deliver `arguments` as a JSON string parsed once
   // by the client. Many non-Anthropic models then JSON-encode nested
@@ -167,6 +239,16 @@ async function createKluraMcpServer(options = {}) {
       };
     }
     const args = coerceArgs(name, rawArgs);
+    if (typeof options.toolCallPolicy === 'function') {
+      const rejection = await options.toolCallPolicy({ name, args });
+      if (rejection) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify(rejection, null, 2) }],
+          structuredContent: rejection,
+          isError: true,
+        };
+      }
+    }
 
     // Progress notifications. When the client request carried
     // `_meta.progressToken`, the SDK exposes it on `extra._meta` and gives us
@@ -278,6 +360,7 @@ async function createKluraMcpServer(options = {}) {
       }
 
       let result = await tool.handler(args, { progress });
+      await observeToolCallResult({ name, args, result });
 
       if (tool.responseSurface === 'consumer') {
         const kind =
@@ -323,6 +406,11 @@ async function createKluraMcpServer(options = {}) {
         ),
       };
     } catch (err) {
+      try {
+        await observeToolCallResult({ name, args, error: err });
+      } catch {
+        /* result-observer failures do not replace the tool failure */
+      }
       // Attach the LIFT obligation to error responses too. Without this, every
       // perform_action / read rejection drops the "save still owed" anchor
       // exactly when the agent might otherwise end the turn after the
@@ -372,4 +460,9 @@ async function createKluraMcpServer(options = {}) {
   return server;
 }
 
-module.exports = { createKluraMcpServer };
+module.exports = {
+  createKluraMcpServer,
+  readRuntimeBuildInfo,
+  assertRuntimeBuildFresh,
+  assertLoadedRuntimeBuildCurrent,
+};

@@ -1,6 +1,7 @@
 import { invokeInterruptionHandler } from '../interruptions';
 import type { InterruptionEvent, InterruptionResolution } from '../interruptions';
 import { buildTokenGate } from '../gate';
+import { onSessionDispose, removeSessionDisposeHook } from '../pool/session-scope';
 import type { Session } from '../drivers/types/session';
 
 /**
@@ -88,12 +89,21 @@ const interruptionGate = buildTokenGate<InterruptionGatePayload, InterruptionAck
 
 const pending = new Map<string, PendingInterruption>();
 
+// Session-scope hook name — see runtime/src/pool/session-scope.ts. A session
+// that dies with an unacked interruption drops its pending entry via scope
+// disposal instead of leaking it for the daemon's lifetime.
+const PENDING_INTERRUPTION_HOOK = 'pending-interruption';
+
 function rememberPending(sessionId: string, payload: InterruptionGatePayload, token: string): void {
   pending.set(sessionId, { token, payload });
+  onSessionDispose(sessionId, PENDING_INTERRUPTION_HOOK, () => {
+    pending.delete(sessionId);
+  });
 }
 
 function clearPending(sessionId: string): void {
   pending.delete(sessionId);
+  removeSessionDisposeHook(sessionId, PENDING_INTERRUPTION_HOOK);
 }
 
 /** Mint a pending-interruption token for a handover resolution. Returns

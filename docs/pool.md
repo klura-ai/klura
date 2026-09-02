@@ -4,11 +4,23 @@ Where the browser driver abstraction is about _how_ we talk to a browser ([drive
 
 ## Warm sessions
 
-A "warm" session is one whose Chromium process survives `closeSession` and gets checked out again on the next `createSession({platform: X})` for the same platform. Enabled via `pool.warm.enabled: true`. Every `execute()` call site passes `platform` through `SessionOptions` so the warm-slot lookup at `pool.ts` fires; without that, warm reuse silently no-ops.
+A "warm" slot is a per-`(platform, identity)` stash whose Chromium context survives `closeSession` and gets checked out again on the next `createSession({platform: X})` for the same platform. Enabled via `pool.warm.enabled: true`. Every `execute()` call site passes `platform` through `SessionOptions` so the warm-slot lookup at `pool.ts` fires; without that, warm reuse silently no-ops.
+
+**What the slot holds is a `BrowserLease`, never a `Session`.** At release, the pool calls `driver.detachLease(session)` — the driver bundles its private per-session state (BrowserContext, page map, capture plumbing) behind an opaque handle and the Session object dies. At checkout, the pool mints a **fresh** Session (blank logical state, fresh `origin`/`startedAt`), calls `driver.attachLease(newSession, lease)`, then `driver.resetSession`. Because no Session object ever crosses the stash, no logical field — phase bookkeeping, consent acks, action history, save records, byte counters — can leak from one klura session into the next; the guarantee is structural, not a field-by-field reset list. Drivers whose `detachLease` returns `null` (the abstract-class default, i.e. BYO drivers without lease support) get destroy-on-close instead of stashing.
+
+**Device-fingerprint gate.** The slot remembers the device profile (UA, viewport, touch, mobile emulation) its context was created with — all context-creation-time settings a reset cannot change. A checkout requesting a different profile evicts the lease (`destroyLease`) and cold-spawns, so a desktop-warmed context never serves a mobile-emulated request and the session never self-describes as a device it is not. `deviceScaleFactor` is deliberately excluded from the fingerprint: it only affects rendering density, and not every checkout path threads it.
 
 Side-effect-oriented capability and tag prereqs (e.g. an auth-providing capability — saved with `provides: ["auth"]` and chained via `{kind: "tag", tag: "auth"}` or by-slug — that leaves an auth cookie) also require warm-pool mode. Cookie propagation between the sub-execute and the caller relies on sharing the same `BrowserContext`; cold-pool creates a fresh context per execute and the cookies don't carry across. See `klura://reference#tag-prereq` and `klura://reference#capability-prereq` §"Requires warm-pool mode".
 
 With warm enabled, Chromium reuse saves the process spin-up (~300–500 ms), but `driver.resetSession` (`runtime/src/drivers/playwright.ts`) navigates the reused page to `about:blank` — wiping the DOM and tearing any persistent WebSocket connection. That's load-bearing for isolation (the next session must not see the previous one's interceptor state or DOM), but it means the expensive part for single-page-app workloads (page navigation + JS bundle execution + WebSocket handshake) is still paid on every call. For a site like a realtime chat app where the MQTT send itself is ~10 ms, the ~2 s navigate-and-open-WS tax dominates the end-to-end execute time.
+
+## Fresh verification contexts
+
+`SessionOptions.freshContext:true` is the pool-level isolation primitive for runtime-owned verification. `Pool.createSession` skips warm checkout and calls `driver.createSession`, whose contract creates a new browser context. The session is not registered as a warm slot, so `endDrive` destroys that context even when warm pooling is enabled.
+
+The post-save verifier adds a stricter facade around this primitive: ready-page checkout and the shared js-eval cache are absent, and any storage-state option assembled by the ordinary executor is removed before session creation. A browser candidate therefore starts anonymous on a new context and sees only navigation and state established by its declared browser prerequisites. The discovery page, its DOM, transient cookies/local storage, and idle warm contexts remain outside the verifier's execution graph. This is an internal correctness boundary, not a user setting; ordinary execution keeps its configured warm behavior.
+
+`withFreshVerificationPool(base, fn)` scopes that facade to one verification run and guarantees teardown in `finally`, so there is no separate disposer for a caller to forget. Contexts are keyed by `(platform, identity)` — the same key shape as the warm pool — so a prerequisite's side effect persists across the steps that depend on it while a cross-platform prerequisite or a second identity gets its own context and its own cookie jar. Within the run, `endDrive` is a no-op for run-owned sessions: the run owns their lifetime, not the individual executor whose `finally` calls it. Disposal closes each context once, sequentially, isolating exceptions so one wedged context cannot strand the others, and is idempotent.
 
 ## Ready-page checkout protocol
 
@@ -34,10 +46,10 @@ Semantics: iterate every session the pool knows about for this platform — warm
 - **WebSocket (`executeWebSocket`)** — `probePageReady(session, baseUrl, wsUrlPrefix)` returning `page_on_url: true AND ws_open: true`. Live sockets are enumerated over CDP (`Runtime.queryObjects` on `WebSocket.prototype`, no page-side registry) and checked for an OPEN one matching `wsUrlPrefix`. If the site's WebSocket ever disconnected (server-side timeout, page crash, navigation), the probe returns false and the caller cold-spawns.
 - **Recorded-path** opts out entirely. Step replay depends on a fresh DOM — no leftover dialogs, scroll offsets, hover state.
 
-**Borrow and release.** A borrowed session has `Session.borrowed = true` set. `pool.closeSession` on a borrowed session does NOT tear it down:
+**Borrow and release.** A borrowed session has `Session.borrowed = true` set. The warm-slot borrow mints a fresh Session and binds the slot's lease onto it before the probe runs — **no resetSession call**, so the page URL and any live WebSocket survive verbatim; a failed probe detaches the lease straight back into the slot. `pool.closeSession` on a borrowed session does NOT tear it down:
 
-- If the pool owns the slot (warm-pool reuse), `closeSession` flips `warm.inUse = false` and leaves the page verbatim for the next borrower — **no resetSession call**. The BrowserContext, the page URL, the live WebSocket all survive.
-- If a listener owns the slot (via `registerSharedSession`), `closeSession` is a no-op for the underlying session; the listener still owns lifetime. The `Session` object is removed from `_sessions` but not destroyed.
+- If the pool owns the slot (warm-pool reuse), `closeSession` detaches the lease back into the slot and the borrow-generation Session dies — the next borrower gets a fresh one.
+- If a listener owns the slot (via `registerSharedSession`), `closeSession` is a no-op for the underlying session; the listener still owns lifetime. The `Session` object is removed from `_sessions` but not destroyed. Listener-shared sessions are the one deliberate exception to fresh-Session minting: the owner holds live references, so the protocol shares the object itself.
 
 Cold-spawned sessions (checkout returned null → `createSession`) follow today's behavior: `closeSession` either returns to warm (with `resetSession`) or tears down the Chromium context.
 
@@ -47,6 +59,21 @@ Cold-spawned sessions (checkout returned null → `createSession`) follow today'
 - WebSocket dropped mid-idle → `ws_open: false`.
 - Page navigated away unexpectedly (user clicked a link in a listener session, say) → `page_on_url: false`.
 - Cookie session expired → not the probe's job today; the execute call fails on the underlying auth error and classifies normally.
+
+## Session scope — the single teardown path
+
+Per-session state does not live only on the `Session` object: checkpoints, interruptions, paused recorded-path executions, auto-execute aliases, WS-starter caches, session observations, logbook dedupe sets, capture journals, and remote viewers all hold session-keyed entries in their own modules. The **session scope** (`runtime/src/pool/session-scope.ts`) is the single owner of tearing that state down:
+
+- **Write-site registration.** The module that writes session-keyed state registers a named disposer at the moment of the write (`onSessionDispose(sessionId, name, hook)` — idempotent per name). No close path maintains a list of "things to clear"; the list assembles itself from the writes that actually happened.
+- **One disposal point.** `Pool.endDrive` calls `disposeSessionScope(id)` on every branch where the session id dies: cold destroy, warm lease release, borrowed-warm release, borrowed-shared owner-gone. Clean close (`end_drive`), abort (`abort_session`), pool eviction, `pool.shutdown()`, and every error-path `finally` all converge on `pool.endDrive`, so they share the disposal for free. The **borrowed-shared keep-alive** branch (owner listener still holds the registration; the id stays valid) deliberately does not dispose.
+- **Child topology.** A recorded-path pause that outlives its executor registers the inner (auto-execute) session as a child of the outer session via `adoptChildSession(outerId, innerId, closer)`. Disposing the parent runs child closers first — closing the outer session can never leak a paused inner browser context, its `pausedExecutions` entry, or the outer→inner alias.
+- **Dispose semantics.** Idempotent, reentrancy-guarded (a child closer re-enters via `pool.endDrive`), LIFO over the session's own hooks, and exception-isolated: one failing hook never skips the rest; failures are aggregated and reported.
+
+## Idle hibernation
+
+The pool hibernates the shared browser (`driver.closeBrowser`) after `pool.idleTimeout` seconds without activity. The timer is **edge-armed, never polled**: every public entry point re-arms a `setTimeout` via `_touch()`, and the warm sweeper re-arms it when a TTL eviction may have just made the pool non-busy. When the timer fires while the pool is still busy it simply does not re-arm — the next lifecycle edge does.
+
+"Busy" is one predicate, `Pool.busy()`: live sessions OR live warm slots. Warm entries count as in-use from the browser's perspective — hibernating the shared browser would kill the very contexts the warm pool exists to keep. Any layer deciding whether klura is idle enough to tear browser state down must consult `busy()` rather than re-deriving its own predicate — the daemon's `runtime.idleTimeout` shutdown does exactly this, so a live warm pool keeps the daemon process alive even with zero active sessions. The interface member (`BrowserPool.busy`, `runtime/src/drivers/types/session.ts`) is optional only for facades and test stubs that own no browser state beyond their delegated sessions; callers treat absence as `activeSessions > 0`.
 
 ## Future pool work
 
@@ -88,6 +115,8 @@ Set `KLURA_VERBOSE=1` on the daemon process to surface `[pool]` trace lines for 
 - `[pool] warm-reused context for platform=X` — slower path: warm reuse via `resetSession` (about:blank nav), not the ready-page fast path.
 
 For programmatic inspection (benchmarks, assertions), item 4 in the future-work list above (`pool.getWarmState()`) is the right next surface.
+
+Execution diagnostics that must survive session release use the executor's scoped evidence collector rather than pool state. When explicitly enabled by an embedding, it snapshots the driver's compact request ledger and passive external-script ledger before release and returns exact absolute URLs in one transport-neutral envelope. A driver read failure is ignored so diagnostics never alter the execution result or exception.
 
 ---
 

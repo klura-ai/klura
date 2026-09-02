@@ -23,9 +23,11 @@ import type { ConnectConfig } from '../config/handler';
 import { getKluraHome } from '../paths';
 import { BrowserDriver, Capability, PageOpts } from './interface';
 import { readProfileLockHolder } from './profile-lock';
+import { writeTextUnderFileLock } from '../utils/owner-file-lock';
 import type { InterceptedRequest, LoadedScript } from './types/network';
 import type { WebSocketFrame, WebSocketFrameStream } from './types/websocket';
 import type {
+  BrowserLease,
   FocusListener,
   FocusState,
   Session,
@@ -714,6 +716,28 @@ const sessionContexts = new WeakMap<Session, BrowserContext>();
 // `removeInitScript`.
 const sessionRemovedInitScripts = new WeakMap<Session, Set<string>>();
 
+/**
+ * Everything the playwright driver keys by Session identity, bundled so a
+ * warm-stashed lease can move it between Session objects. Covers all four
+ * Session-keyed WeakMaps (extras, pages, context, removed-init-scripts) —
+ * missing any one would orphan a BrowserContext or make `_context()` throw
+ * on the re-attached session — plus the capture arrays whose IDENTITY the
+ * attached page/CDP listeners bind (network sink, WS ring, sub-page list).
+ * Transferring the arrays keeps live listeners feeding the new Session on
+ * the ready-page borrow path, where no `resetSession` re-instrumentation
+ * runs.
+ */
+interface LeaseRecord {
+  context: BrowserContext;
+  pageMap: Map<string, Page>;
+  extras?: SessionExtras;
+  removedInitScripts?: Set<string>;
+  intercepted: InterceptedRequest[];
+  intercepting: boolean;
+  wsFrames: WebSocketFrame[];
+  subPages: SubPage[];
+}
+
 export interface PlaywrightDriverOptions {
   /** Optional custom chromium instance (used by the stealth variant). */
   chromium?: BrowserType;
@@ -1123,8 +1147,13 @@ export class PlaywrightDriver extends BrowserDriver {
       // send frame exposes no readable `this`/args, so we correlate by order
       // rather than by (url, len, head_hex). A normal session leaves the ring
       // empty → no js_callstack on the frame (graceful absence).
+      // Resolve extras once at attach time. The listener may outlive the
+      // Session object it was attached under (a lease moves the extras to a
+      // successor Session on warm reuse), so the closure binds the extras
+      // object itself rather than re-resolving through the session key.
+      const extras = getExtras(session);
       const popMatchingCallstack = (): { raw_stack: string } | null => {
-        const buf = getExtras(session).sendCaptures;
+        const buf = extras.sendCaptures;
         if (!buf || buf.length === 0) return null;
         const e = buf.shift();
         return e && e.raw_stack.length > 0 ? { raw_stack: e.raw_stack } : null;
@@ -1169,7 +1198,6 @@ export class PlaywrightDriver extends BrowserDriver {
       page.on('websocket', wsListener);
       // Stash the listener reference so resetSession can clean it up on
       // warm-pool recycling without double-attaching after a reset.
-      const extras = getExtras(session);
       extras.wsCaptureListener = wsListener;
     } catch {
       // Page already gone or driver in weird state — capture just won't fire,
@@ -1786,6 +1814,12 @@ export class PlaywrightDriver extends BrowserDriver {
   }
 
   async resetSession(session: Session, options: SessionOptions = {}): Promise<void> {
+    // Debugger teardown runs first: a lease can arrive with breakpoints still
+    // armed (a session stashed via a teardown path that skips the end-drive
+    // debugger cleanup), and an inherited pause would freeze the recycled
+    // page at a stop no consumer is waiting on. Idempotent no-op when the
+    // Debugger domain was never enabled.
+    await this.cleanupDebuggerState(session);
     const context = this._context(session);
     const page = this._page(session);
 
@@ -1879,6 +1913,14 @@ export class PlaywrightDriver extends BrowserDriver {
       resetExtras.sendCaptures = [];
       resetExtras.sendCaptureRefCount = 0;
       resetExtras.loadedScripts = [];
+      // Nav bookkeeping and the JS source cache are logical per-session
+      // state riding the extras bundle — they belong to the released
+      // session's flow, not the next one. `pendingNavs` truncates in place:
+      // the attached framenavigated / navigatedWithinDocument listeners hold
+      // the array by identity.
+      if (resetExtras.pendingNavs) resetExtras.pendingNavs.length = 0;
+      resetExtras.lastObservedNavUrl = undefined;
+      resetExtras.jsSourceCache = undefined;
     }
 
     if (options.storageState) {
@@ -1955,6 +1997,79 @@ export class PlaywrightDriver extends BrowserDriver {
     sessionExtras.delete(session);
     sessionPages.delete(session);
     sessionContexts.delete(session);
+  }
+
+  /** Detached warm-slot resource bundles, keyed by leaseId. Entries are
+   *  consumed by `attachLease` and removed by `destroyLease`. */
+  private readonly _leases = new Map<string, LeaseRecord>();
+
+  override detachLease(session: Session): BrowserLease | null {
+    const context = sessionContexts.get(session);
+    const pageMap = sessionPages.get(session);
+    if (!context || !pageMap) return null;
+    const record: LeaseRecord = {
+      context,
+      pageMap,
+      extras: sessionExtras.get(session),
+      removedInitScripts: sessionRemovedInitScripts.get(session),
+      intercepted: session.intercepted,
+      intercepting: session.intercepting,
+      wsFrames: session.wsFrames ?? [],
+      subPages: session.subPages ?? [],
+    };
+    sessionContexts.delete(session);
+    sessionPages.delete(session);
+    sessionExtras.delete(session);
+    sessionRemovedInitScripts.delete(session);
+    const leaseId = 'lease_' + crypto.randomBytes(6).toString('hex');
+    this._leases.set(leaseId, record);
+    return { leaseId };
+  }
+
+  override attachLease(session: Session, lease: BrowserLease): void {
+    const record = this._leases.get(lease.leaseId);
+    if (!record) {
+      throw new Error(`attachLease: lease ${lease.leaseId} is not held by this driver`);
+    }
+    this._leases.delete(lease.leaseId);
+    sessionContexts.set(session, record.context);
+    sessionPages.set(session, record.pageMap);
+    if (record.extras) sessionExtras.set(session, record.extras);
+    if (record.removedInitScripts) {
+      sessionRemovedInitScripts.set(session, record.removedInitScripts);
+    }
+    // Rebind the capture arrays by identity: the page/CDP listeners attached
+    // while the lease's previous session was live hold references to these
+    // exact arrays, so the fresh Session must adopt them (not fresh empties)
+    // for capture continuity on the borrow path. `resetSession` truncates
+    // them in place when the checkout wants a clean slate.
+    session.intercepted = record.intercepted;
+    session.intercepting = record.intercepting;
+    session.wsFrames = record.wsFrames;
+    session.subPages = record.subPages;
+  }
+
+  override async destroyLease(lease: BrowserLease): Promise<void> {
+    const record = this._leases.get(lease.leaseId);
+    if (!record) return;
+    this._leases.delete(lease.leaseId);
+    // Bind the record onto a throwaway Session shell and run the ordinary
+    // destroySession teardown — one teardown path, no drift between "close a
+    // live session" and "evict an idle lease".
+    const shell: Session = {
+      id: 'lease_teardown_' + lease.leaseId,
+      intercepted: record.intercepted,
+      intercepting: record.intercepting,
+      wsFrames: record.wsFrames,
+      subPages: record.subPages,
+    };
+    sessionContexts.set(shell, record.context);
+    sessionPages.set(shell, record.pageMap);
+    if (record.extras) sessionExtras.set(shell, record.extras);
+    if (record.removedInitScripts) {
+      sessionRemovedInitScripts.set(shell, record.removedInitScripts);
+    }
+    await this.destroySession(shell);
   }
 
   async navigate(
@@ -2683,7 +2798,27 @@ export class PlaywrightDriver extends BrowserDriver {
       timeout_ms?: number;
     },
   ): Promise<
-    { ok: true; status: number; body: unknown; finalUrl: string } | { ok: false; error: string }
+    | {
+        ok: true;
+        status: number;
+        body: unknown;
+        finalUrl: string;
+        delivery_state: 'response_received';
+      }
+    | {
+        ok: false;
+        error: string;
+        timed_out: boolean;
+        delivery_state: 'not_sent' | 'sent_unconfirmed';
+        diagnostics: {
+          page_origin: string;
+          page_url: string;
+          target_url: string;
+          target_origin: string | null;
+          cross_origin: boolean;
+          credentials_mode: string;
+        };
+      }
   > {
     // page.evaluate runs the closure inside the page context so cookies, sec-*
     // headers, and JS-set origin are applied by the browser. This is the only
@@ -2709,14 +2844,17 @@ export class PlaywrightDriver extends BrowserDriver {
         const timer = setTimeout(() => {
           controller.abort();
         }, timeoutMs);
+        let deliveryState: 'not_sent' | 'sent_unconfirmed' = 'not_sent';
         try {
-          const res = await fetch(url, {
+          const pendingResponse = fetch(url, {
             method,
             headers,
             body: body ?? null,
             credentials,
             signal: controller.signal,
           });
+          deliveryState = 'sent_unconfirmed';
+          const res = await pendingResponse;
           const text = await res.text();
           let parsed: unknown = text;
           try {
@@ -2724,7 +2862,13 @@ export class PlaywrightDriver extends BrowserDriver {
           } catch {
             /* not JSON — keep as text */
           }
-          return { ok: true as const, status: res.status, body: parsed, finalUrl: res.url };
+          return {
+            ok: true as const,
+            status: res.status,
+            body: parsed,
+            finalUrl: res.url,
+            delivery_state: 'response_received' as const,
+          };
         } catch (err) {
           // "Failed to fetch" is the browser's generic rejection for network
           // error / CORS violation / aborted request. Surface the page origin +
@@ -2749,6 +2893,7 @@ export class PlaywrightDriver extends BrowserDriver {
             ok: false as const,
             error: `${errName}: ${errMsg}`,
             timed_out: controller.signal.aborted,
+            delivery_state: deliveryState,
             diagnostics: {
               page_origin: w.location.origin,
               page_url: w.location.href,
@@ -3497,7 +3642,13 @@ export class PlaywrightDriver extends BrowserDriver {
   }
 
   async saveStorageState(session: Session, path: string): Promise<void> {
-    await this._context(session).storageState({ path });
+    // The state is fetched as a value and persisted under the same
+    // `<file>.lock` every other writer of this file takes (fetch-tier
+    // Set-Cookie merges, whole-file jar saves), so a concurrent
+    // read-modify-write can neither read a torn write of this snapshot nor
+    // rename a stale jar over it.
+    const state = await this._context(session).storageState();
+    writeTextUnderFileLock(path, JSON.stringify(state, null, 2));
   }
 
   // ---------------------------------------------------------------------

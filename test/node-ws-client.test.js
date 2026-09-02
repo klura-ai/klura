@@ -35,12 +35,10 @@ async function startEchoServer(opts = {}) {
 test('sendNodeWebSocketFrame: success with ack match', async () => {
   const srv = await startEchoServer();
   try {
-    const r = await sendNodeWebSocketFrame(
-      srv.url,
-      {},
-      'klura-node-ws-smoke',
-      { ackMatch: 'echo: klura-node-ws-smoke', ackTimeoutMs: 2000 },
-    );
+    const r = await sendNodeWebSocketFrame(srv.url, {}, 'klura-node-ws-smoke', {
+      ackMatch: 'echo: klura-node-ws-smoke',
+      ackTimeoutMs: 2000,
+    });
     assert.strictEqual(r.ok, true);
     assert.match(r.ackPayload, /echo: klura-node-ws-smoke/);
   } finally {
@@ -63,13 +61,12 @@ test('sendNodeWebSocketFrame: ack-timeout when server never sends matching ack',
   // Server sends a non-matching echo; our ackMatch looks for something else.
   const srv = await startEchoServer({ ackMatchPayload: 'unrelated-chatter' });
   try {
-    const r = await sendNodeWebSocketFrame(
-      srv.url,
-      {},
-      'whatever',
-      { ackMatch: 'expected-match-not-here', ackTimeoutMs: 300 },
-    );
+    const r = await sendNodeWebSocketFrame(srv.url, {}, 'whatever', {
+      ackMatch: 'expected-match-not-here',
+      ackTimeoutMs: 300,
+    });
     assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.sent, true);
     assert.match(r.error, /ack_timeout/);
   } finally {
     await srv.close();
@@ -79,14 +76,14 @@ test('sendNodeWebSocketFrame: ack-timeout when server never sends matching ack',
 test('sendNodeWebSocketFrame: total deadline closes an otherwise-open ack wait', async () => {
   const srv = await startEchoServer({ delayMs: 500 });
   try {
-    const r = await sendNodeWebSocketFrame(
-      srv.url,
-      {},
-      'deadline',
-      { ackMatch: 'echo: deadline', ackTimeoutMs: 1_000, timeoutMs: 25 },
-    );
+    const r = await sendNodeWebSocketFrame(srv.url, {}, 'deadline', {
+      ackMatch: 'echo: deadline',
+      ackTimeoutMs: 1_000,
+      timeoutMs: 25,
+    });
     assert.strictEqual(r.ok, false);
     assert.strictEqual(r.code, 'request_timeout');
+    assert.strictEqual(r.sent, true);
     assert.match(r.error, /ws_request_timeout: 25ms/);
   } finally {
     await srv.close();
@@ -97,13 +94,9 @@ test('sendNodeWebSocketFrame: open-timeout when server unreachable', async () =>
   // No server listening on 127.0.0.1:1 — the low reserved port is a quick
   // reject. We expect either an error event or an open_timeout; both
   // surface as ok:false with a distinguishable error string.
-  const r = await sendNodeWebSocketFrame(
-    'ws://127.0.0.1:1/',
-    {},
-    'x',
-    { openTimeoutMs: 500 },
-  );
+  const r = await sendNodeWebSocketFrame('ws://127.0.0.1:1/', {}, 'x', { openTimeoutMs: 500 });
   assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.sent, false);
   assert.match(r.error, /ws_(error|open_timeout|closed_before_ack)/);
 });
 
@@ -113,12 +106,10 @@ test('sendNodeWebSocketFrame: binary payload sends bytes', async () => {
   const srv = await startEchoServer();
   try {
     const buf = new Uint8Array([0x68, 0x69, 0x21]); // "hi!"
-    const r = await sendNodeWebSocketFrame(
-      srv.url,
-      {},
-      buf,
-      { ackMatch: 'echo: hi!', ackTimeoutMs: 2000 },
-    );
+    const r = await sendNodeWebSocketFrame(srv.url, {}, buf, {
+      ackMatch: 'echo: hi!',
+      ackTimeoutMs: 2000,
+    });
     assert.strictEqual(r.ok, true);
   } finally {
     await srv.close();

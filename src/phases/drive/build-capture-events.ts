@@ -9,8 +9,11 @@
 
 import { pool } from '../../runtime-state';
 import { graphConfig } from '../registry';
+import { SAVED_OUTCOME_BY_TIER, STRATEGY_TIERS, type StrategyTier } from '../../vocab';
+import { tierRank as canonicalTierRank } from '../../audit/concerns/tier-rank';
 import { sha256 as sha256Bytes } from '../../working-dir/bundle-archive';
-import { writeJournalSnapshot } from '../../working-dir/capture-journal';
+import { writeJournalSnapshot, deleteJournal } from '../../working-dir/capture-journal';
+import { onSessionDispose } from '../../pool/session-scope';
 import type { AutoSynthResult as SynthLedgerEntry } from '../../strategies/synthesize-on-close';
 import type { Session } from '../../drivers/types/session';
 import type { InterceptedRequest } from '../../drivers/types/network';
@@ -26,10 +29,8 @@ import type {
 } from '../../working-dir/schema';
 
 function outcomeForTier(tier: string): SessionMetaPayload['outcome'] {
-  if (tier === 'page-script') return 'page_script_saved';
-  if (tier === 'fetch') return 'fetch_saved';
-  if (tier === 'recorded-path') return 'recorded_path_saved';
-  return 'no_save';
+  const known = STRATEGY_TIERS.find((t) => t === tier);
+  return known ? SAVED_OUTCOME_BY_TIER[known] : 'no_save';
 }
 
 function serializePostData(postData: unknown): string | null {
@@ -42,21 +43,14 @@ function serializePostData(postData: unknown): string | null {
   }
 }
 
+// Outcome rank for lift-attempt dedup. Saved outcomes derive from the
+// canonical tier speed ordering (audit/concerns/tier-rank.ts — fetch
+// best) inverted so the best tier sorts highest; `user_deferred` sits
+// below any save; `error` / `no_save` rank 0.
 function tierRank(o: LiftAttemptPayload['outcome']): number {
-  switch (o) {
-    case 'fetch_saved':
-      return 4;
-    case 'page_script_saved':
-      return 3;
-    case 'recorded_path_saved':
-      return 2;
-    case 'user_deferred':
-      return 1;
-    case 'error':
-    case 'no_save':
-    default:
-      return 0;
-  }
+  const savedTier = STRATEGY_TIERS.find((tier) => SAVED_OUTCOME_BY_TIER[tier] === o);
+  if (savedTier !== undefined) return STRATEGY_TIERS.length + 1 - canonicalTierRank(savedTier);
+  return o === 'user_deferred' ? 1 : 0;
 }
 
 function digestEntry(e: unknown): string {
@@ -89,19 +83,23 @@ export function buildCaptureEvents(
   const primaryCapability = declared[0]?.capability;
   const primaryArgs = declared[0]?.args;
 
-  // Determine session outcome from the mix of explicit saves + auto-synth.
-  // Precedence: page-script > fetch > recorded-path > no_save. Takes the best
-  // tier that landed, matching how execute() cascades.
+  // Determine session outcome from the mix of explicit saves + auto-synth:
+  // the BEST saved tier by the canonical speed ordering
+  // (audit/concerns/tier-rank.ts — fetch best). Lift-attempt dedup ranks by
+  // the same ordering via `tierRank` above, so the session_meta outcome and
+  // the winning lift attempt cannot disagree about which tier won.
+  const SESSION_OUTCOME_PRECEDENCE: readonly StrategyTier[] = [...STRATEGY_TIERS].sort(
+    (a, b) => canonicalTierRank(a) - canonicalTierRank(b),
+  );
   const savedTiers = new Set<string>();
   for (const s of session.savedCapabilities ?? []) savedTiers.add(s.tier);
   for (const a of autoSynthesized) savedTiers.add(a.tier);
   let outcome: SessionMetaPayload['outcome'] = 'no_save';
-  if (savedTiers.has('page-script')) {
-    outcome = 'page_script_saved';
-  } else if (savedTiers.has('fetch')) {
-    outcome = 'fetch_saved';
-  } else if (savedTiers.has('recorded-path')) {
-    outcome = 'recorded_path_saved';
+  for (const tier of SESSION_OUTCOME_PRECEDENCE) {
+    if (savedTiers.has(tier)) {
+      outcome = SAVED_OUTCOME_BY_TIER[tier];
+      break;
+    }
   }
 
   const events: CaptureEvent[] = [];
@@ -313,6 +311,16 @@ export async function checkpointCaptureJournal(session: Session): Promise<void> 
       platform,
       startedAt,
       events,
+    });
+    // Session-scope disposer: the journal is a durability net for sessions
+    // that never reach a clean close — once the session id dies through any
+    // close path (clean close folds the events first; abort discards them),
+    // the journal is redundant and must not be re-folded by orphan recovery.
+    // Crash paths never dispose, so the journal survives for
+    // `recoverOrphanedJournals`.
+    const sessionId = session.id;
+    onSessionDispose(sessionId, 'capture-journal', () => {
+      deleteJournal(sessionId);
     });
   } catch {
     /* best-effort durability — swallow */

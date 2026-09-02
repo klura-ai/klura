@@ -122,10 +122,9 @@ test('obligation + render-verbatim coexist as two leading blocks', () => {
 
 // ---- Transport-cap enforcement (last-resort backstop in formatToolResult) ----
 
-const { MAX_TOOL_OUTPUT_CHARS, enforceFinalBudget } = await import(
-  '../dist/response/response-size.js'
-);
-const FORMAT_CEILING = MAX_TOOL_OUTPUT_CHARS * 2; // matches FORMAT_TOOL_RESULT_CEILING
+const { MAX_TOOL_OUTPUT_CHARS, enforceFinalBudget } =
+  await import('../dist/response/response-size.js');
+const FORMAT_CEILING = MAX_TOOL_OUTPUT_CHARS;
 
 test('transport-cap: 1.5MB synthetic result is clipped under ceiling', () => {
   // Mimic the 2026-05-15 amazon failure: saved strategy returns a huge

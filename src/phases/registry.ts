@@ -8,6 +8,7 @@
 
 import type { Session } from '../drivers/types/session';
 import type { Graph, PhaseSpec, GraphConfig, SessionPhase, AdmissibilityResult } from './types';
+import { SESSION_PHASES } from './types';
 import { DRIVE_SPEC } from './drive';
 import { TRIAGE_SPEC } from './triage';
 import { LIFT_SPEC } from './lift';
@@ -43,7 +44,7 @@ export function currentPhase(session: Session): SessionPhase {
   // dispatch, clobbering state. Loud failure beats silent corruption.
   if (session.phase === undefined) {
     const entry = currentGraph(session).entryPhase;
-    const stale = (['drive', 'triage', 'lift', 'execute'] as SessionPhase[]).find((p) => {
+    const stale = SESSION_PHASES.find((p) => {
       if (p === entry) return false;
       return (session as unknown as Record<SessionPhase, unknown>)[p] !== undefined;
     });

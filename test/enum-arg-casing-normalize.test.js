@@ -5,7 +5,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { normalizeEnumArgCasing } = await import('../dist/execution/index.js');
+const { findUnobservedEnumArgs, normalizeEnumArgCasing } = await import(
+  '../dist/execution/index.js'
+);
 
 function strat(observed) {
   return {
@@ -49,4 +51,19 @@ test('non-enum params are ignored', () => {
     args,
   );
   assert.equal(args.q, 'Hello');
+});
+
+test('an omitted optional label defaults to the enum value during grounding', () => {
+  const strategy = strat([{ value: 'posts' }, { value: 'details' }]);
+  assert.deepEqual(findUnobservedEnumArgs(strategy, { category: 'posts' }), []);
+  assert.deepEqual(findUnobservedEnumArgs(strategy, { category: 'comments' }), [
+    {
+      param: 'category',
+      value: 'comments',
+      observed_values: [
+        { value: 'posts', label: 'posts' },
+        { value: 'details', label: 'details' },
+      ],
+    },
+  ]);
 });

@@ -61,6 +61,9 @@ function fakeSessionShell({ sessionId, platform, capability, lift }) {
     domFormsObserved: [],
     intercepted: [],
     lift,
+    // A session with lift bookkeeping is in the lift phase — the state
+    // machine is the only writer of both fields, so they travel together.
+    ...(lift ? { phase: 'lift', liftHandoffAt: Date.now() } : {}),
   };
 }
 
@@ -143,8 +146,9 @@ test('silent_no_save: closes clean when the declared capability is already saved
 
 test('silent_no_save: still fires when a declared capability is genuinely unresolved', async () => {
   // No strategy on disk → the capability is unresolved → triageWouldFire is
-  // true. The session is on the abandon-from-lift path (session.lift set), so
-  // the orchestrator skips the LIFT handoff and reaches the guard. With
+  // true. The session is on the abandon-from-lift path (in lift phase, prior
+  // handoff fired), so the orchestrator skips the LIFT handoff and reaches
+  // the guard. With
   // nothing saved and nothing auto-synthesized, the guard must still reject:
   // closing here genuinely would leave nothing on disk.
   const session = fakeSessionShell({

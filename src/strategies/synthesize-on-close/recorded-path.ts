@@ -7,13 +7,101 @@ import { assignAutoStepIds } from '../auto-step-id';
 import type { Session, PerformActionRecord } from '../../drivers/types/session';
 import { findLastIndex, pickDiscoveredFromUrl } from './helpers';
 import {
-  attachSaveWarningsToStrategy,
+  collectSaveEvidence,
   detectBlockingTypedTextDrift,
   detectTypedTextDrift,
 } from './literals';
-import { detectParameterizationDisclosureRequired } from '../../gate/save-warnings-parameterization';
+import { persistWarningsOnRuntimeMeta } from '../../audit/lift/save-strategy';
+import { SavePolicyBlockedError } from '../../audit/lift/save-policy';
+import { AUDIT_KINDS, SAVE_ORIGINS } from '../../vocab';
 import { parseSnapshotSelector } from '../../execution/snapshot-selector';
 import type { AutoSynthResult, SaveMarker, SynthDiagnosticEntry } from './types';
+
+interface FlowShape {
+  hasType: boolean;
+  hasConfirmAfterType: boolean;
+  navLiteralMatch: { name: string; value: string } | null;
+  isWriteFlow: boolean;
+  isReadNavFlow: boolean;
+}
+
+/** Classify a history window as WRITE-shaped (type/fill followed by a
+ *  click/key_press confirm — the classic form-submit, send-message,
+ *  post-comment pattern) or READ-shaped navigation (no typing, but a visited
+ *  URL embeds a ≥ 4-char declared arg literal — e.g. start_session at
+ *  https://x.com/emmawatson with args.username="emmawatson"). The 4-char
+ *  floor matches detectEntityPinnedPrereqUrls's sensitivity — short literals
+ *  false-positive too easily. Anything else (pure click-chains with no typing
+ *  and no templatable nav, or type steps with no confirm) is too ambiguous to
+ *  synthesize. */
+function classifyFlowShape(
+  slice: PerformActionRecord[],
+  declaredArgs: Record<string, unknown>,
+  lastVisitedForScan: string | undefined,
+): FlowShape {
+  const isTypeAction = (a: PerformActionRecord): boolean =>
+    a.action === 'type' || a.action === 'fill_editor';
+  const hasType = slice.some(isTypeAction);
+  const lastTypeIdx = findLastIndex(slice, isTypeAction);
+  const hasConfirmAfterType =
+    lastTypeIdx >= 0 &&
+    slice.slice(lastTypeIdx + 1).some((a) => a.action === 'click' || a.action === 'key_press');
+  let navLiteralMatch: { name: string; value: string } | null = null;
+  if (lastVisitedForScan) {
+    for (const [name, value] of Object.entries(declaredArgs)) {
+      if (typeof value !== 'string' || value.length < 4) continue;
+      if (lastVisitedForScan.includes(value)) {
+        navLiteralMatch = { name, value };
+        break;
+      }
+    }
+  }
+  return {
+    hasType,
+    hasConfirmAfterType,
+    navLiteralMatch,
+    isWriteFlow: hasType && hasConfirmAfterType,
+    isReadNavFlow: !hasType && navLiteralMatch !== null,
+  };
+}
+
+/** Push the synth-diag entry for a saveStrategy throw: save-policy blocks
+ *  name their blocking kinds (plus matched labels for the sensitive-action
+ *  shape); anything else is a validation rejection. */
+function diagnoseSaveFailure(
+  err: unknown,
+  capability: string,
+  sliceLen: number,
+  diag: SynthDiagnosticEntry[],
+): void {
+  if (err instanceof SavePolicyBlockedError) {
+    const sensitive = err.issues.find(
+      (i) => i.kind === AUDIT_KINDS.sensitiveActionMustBeRecordedNotSaved,
+    );
+    const ctx = sensitive?.context as { matched_labels?: unknown } | undefined;
+    diag.push({
+      pass: 'synth_recorded',
+      capability,
+      phase: 'skip',
+      outcome: sensitive ? 'sensitive_action_shape' : 'save_policy_blocked',
+      detail: {
+        slice_len: sliceLen,
+        blocking_kinds: [...new Set(err.issues.map((i) => i.kind))],
+        ...(sensitive
+          ? { matched_labels: Array.isArray(ctx?.matched_labels) ? ctx.matched_labels : [] }
+          : { error: err.message }),
+      },
+    });
+    return;
+  }
+  diag.push({
+    pass: 'synth_recorded',
+    capability,
+    phase: 'skip',
+    outcome: 'validation_rejected',
+    detail: { error: err instanceof Error ? err.message : String(err) },
+  });
+}
 
 export function synthesizeRecordedPaths(
   session: Session,
@@ -25,6 +113,9 @@ export function synthesizeRecordedPaths(
   if (history.length === 0) return [];
 
   const out: AutoSynthResult[] = [];
+  // Session evidence for the save policy — same ground truth the explicit
+  // save path feeds the audit.
+  const saveEvidence = collectSaveEvidence(session);
 
   // Partition the history by save timestamp: a capability's flow is the actions
   // between the previous save and the current save. For the first save, the
@@ -75,48 +166,17 @@ export function synthesizeRecordedPaths(
       continue;
     }
 
-    // Two shapes of flow are worth synthesizing as recorded-path:
-    //
-    //   (a) WRITE-shaped — type/fill followed by a click/key_press confirm.
-    //       The classic form-submit, send-message, post-comment pattern.
-    //       Needs the type step to template the caller's literal and the
-    //       confirm to commit the action.
-    //
-    //   (b) READ-shaped navigation — no typing, but the session visited a
-    //       URL that contains one of the caller's declared arg literals
-    //       (e.g. start_session at https://x.com/emmawatson with
-    //       args.username="emmawatson"). Warm execute needs only a
-    //       templated navigate step; the agent's "read the page" is
-    //       implicit in execute's a11y/DOM return.
-    //
-    // Anything else (pure click-chains with no typing and no templatable nav,
-    // or type steps with no confirm) is too ambiguous to synthesize.
-    const hasType = slice.some((a) => a.action === 'type' || a.action === 'fill_editor');
-    const lastTypeIdx = findLastIndex(
-      slice,
-      (a) => a.action === 'type' || a.action === 'fill_editor',
-    );
-    const hasConfirmAfterType =
-      lastTypeIdx >= 0 &&
-      slice.slice(lastTypeIdx + 1).some((a) => a.action === 'click' || a.action === 'key_press');
-
+    // Warm execute needs only a templated navigate step for read-nav flows;
+    // the agent's "read the page" is implicit in execute's a11y/DOM return.
+    // Write flows need the type step to template the caller's literal and
+    // the confirm to commit the action. See classifyFlowShape for the two
+    // qualifying shapes.
     const declaredArgs = save.args ?? {};
     const lastVisitedForScan = (session.visitedUrls ?? [])
       .filter((u) => u && u !== 'about:blank')
       .at(-1);
-    // Read-shape qualifies when a visited URL contains ≥ 4-char arg literal.
-    // The 4-char floor matches detectEntityPinnedPrereqUrls's sensitivity —
-    // short literals false-positive too easily.
-    const navLiteralMatch = (() => {
-      if (!lastVisitedForScan) return null;
-      for (const [name, value] of Object.entries(declaredArgs)) {
-        if (typeof value !== 'string' || value.length < 4) continue;
-        if (lastVisitedForScan.includes(value)) return { name, value };
-      }
-      return null;
-    })();
-    const isWriteFlow = hasType && hasConfirmAfterType;
-    const isReadNavFlow = !hasType && !!navLiteralMatch;
+    const { hasType, hasConfirmAfterType, navLiteralMatch, isWriteFlow, isReadNavFlow } =
+      classifyFlowShape(slice, declaredArgs, lastVisitedForScan);
     if (!isWriteFlow && !isReadNavFlow) {
       diag.push({
         pass: 'synth_recorded',
@@ -224,7 +284,10 @@ export function synthesizeRecordedPaths(
       }
       (strategy.notes as Record<string, unknown>).params = params;
     }
-    attachSaveWarningsToStrategy(strategy, detectTypedTextDrift(session, save.args));
+    persistWarningsOnRuntimeMeta(
+      strategy as unknown as skills.Strategy,
+      detectTypedTextDrift(session, save.args),
+    );
     // Hard-block on guaranteed-broken drifts: recorded-path step values bake
     // the literal the agent typed during discovery. When a declared arg never
     // appeared in typed text AND no `{{argName}}` placeholder lands anywhere
@@ -250,16 +313,6 @@ export function synthesizeRecordedPaths(
       });
       continue;
     }
-    // Parameterization disclosure: auto-synth doesn't go through the
-    // saveStrategy audit pipeline (no sessionId passed below), so the new
-    // parameterization_disclosure_required Detector wouldn't fire on
-    // paramless auto-saves. Run the structural check here and attach the
-    // warning to runtime_meta.save_warnings so next session reading
-    // list_platform_skills sees the under-parameterization signal.
-    attachSaveWarningsToStrategy(
-      strategy,
-      detectParameterizationDisclosureRequired(strategy as unknown as skills.Strategy),
-    );
     // Read-nav fallback: this branch fired because no XHR carried the data AND
     // the agent didn't save explicitly. recorded-path is the honest auto-synth
     // outcome, but for SSR HTML reads (the typical shape: profile page loaded
@@ -268,7 +321,7 @@ export function synthesizeRecordedPaths(
     // extract — ~100ms warm vs ~5s browser replay. Attach a SaveWarning naming
     // the upgrade target so the next session sees it on list_platform_skills.
     if (navLiteralMatch && isReadNavFlow) {
-      attachSaveWarningsToStrategy(strategy, [
+      persistWarningsOnRuntimeMeta(strategy as unknown as skills.Strategy, [
         {
           kind: 'read_nav_fallback',
           message: `Auto-synth saved this as recorded-path because no XHR carried the data and the capability wasn't explicitly saved before end_drive. For server-rendered HTML reads (data in the initial document response at navigate-time), fetch + response.format:"html" + extract is ~100ms warm vs ~5s browser replay.`,
@@ -278,11 +331,17 @@ export function synthesizeRecordedPaths(
     }
 
     try {
+      // Full unattended detector bank via the save policy — blocking
+      // invariants (sensitive shapes) refuse persistence; warn-tier issues
+      // decorate runtime_meta.save_warnings.
       const savedPath = skills.saveStrategy(
         platform,
         save.capability,
         strategy as unknown as skills.Strategy,
         'auto-synth: recorded-path from perform_action history',
+        undefined,
+        undefined,
+        { origin: SAVE_ORIGINS.autoSynthRecorded, evidence: saveEvidence },
       );
       out.push({
         capability: save.capability,
@@ -298,13 +357,7 @@ export function synthesizeRecordedPaths(
         detail: { slice_len: slice.length, path: savedPath },
       });
     } catch (err) {
-      diag.push({
-        pass: 'synth_recorded',
-        capability: save.capability,
-        phase: 'skip',
-        outcome: 'validation_rejected',
-        detail: { error: err instanceof Error ? err.message : String(err) },
-      });
+      diagnoseSaveFailure(err, save.capability, slice.length, diag);
     }
   }
   return out;

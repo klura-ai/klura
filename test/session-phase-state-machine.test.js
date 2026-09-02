@@ -111,6 +111,10 @@ test('admissibility: universal tools always admit, even after the graph terminat
   dispatch(session, { kind: 'end_drive_unresolved' });
   dispatch(session, { kind: 'resolved_via_save' });
   assert.equal(session.status, 'closed', 'session.status set when terminal node reached');
+  // UNIVERSAL_TOOLS is derived from TOOL_REGISTRY (phasePolicy.category ===
+  // 'universal'), so every name here is a registered tool by construction —
+  // registry-parity.test.js locks that down.
+  assert.ok(UNIVERSAL_TOOLS.size > 0, 'derived UNIVERSAL_TOOLS must not be empty');
   for (const tool of UNIVERSAL_TOOLS) {
     const r = checkAdmissibility(session, tool);
     assert.ok(r.ok, `universal tool '${tool}' should admit on a closed session`);
@@ -148,6 +152,15 @@ test('admissibility: end_drive admitted in lift as the abandon path', () => {
   assert.equal(currentPhase(session), 'lift');
   const r = currentSpec(session).checkAdmissibility('end_drive', session);
   assert.ok(r.ok, 'end_drive admitted in lift');
+});
+
+test('admissibility: perform_action admitted in lift to generate target observations', () => {
+  const session = fresh();
+  dispatch(session, { kind: 'end_drive_unresolved' });
+  dispatch(session, { kind: 'plan_handoff' });
+  assert.equal(currentPhase(session), 'lift');
+  const r = currentSpec(session).checkAdmissibility('perform_action', session);
+  assert.ok(r.ok, 'perform_action admitted while lifting the bound surface');
 });
 
 test('admissibility: end_drive remains admissible when lift budget is exhausted', () => {

@@ -28,6 +28,23 @@ The local daemon owns active execution, browser-login interactions, and durable 
 
 Public packages are read-only contracts. The sole source-bearing profile is `browser_page_script`: exact source bytes reviewed by a maintainer, covered by the signed manifest, and executed only in a fresh sandboxed browser page under signed same-origin egress, request, byte, and structural-result limits. Packages cannot install or run Node modules, execute unreviewed source, choose arbitrary network destinations, bypass the browser/security boundary, or turn a scrape into hosted execution. The registry is signed static metadata; target-site execution and output stay local.
 
+## package export
+
+`export_platform_package` turns the explicitly reviewed subset of active, verified read capabilities for one saved platform into one create-only, PR-ready directory under an existing tools repository. Unreviewed local primitives remain internal. The CLI equivalent is `klura factory export <platform> --review <review.json> --tools-repo <absolute-path>`.
+
+The exporter reads the saved strategies itself. The review input supplies only the public contract that discovery cannot safely infer: package/catalog metadata, typed structural outcomes, exact browser egress and traffic budgets, reviewed page-script settings, and one to eight grounded fixtures per capability. An installable release's `catalog.runtime_range` must include the runtime performing the export, because that runtime is the one that smoke-verifies the fixtures. Each fixture entry is discriminated by `kind`: a `call` fixture is `{fixture_id, kind: "call", input}`; a `run` fixture is `{fixture_id, kind: "run", input, caller_bounds, input_mode_id}`. Every capability needs at least one call fixture, and a capability that declares a `collection` also needs at least one run fixture; run fixtures on capabilities without a collection are rejected. Every reviewed capability must be one of the platform's active saved capabilities — active capabilities left out of the review stay local — and each reviewed capability must have a `page-script` whose post-save semantic verification passed.
+
+Before writing files, the exporter compiles the package, calls every call fixture through the ordinary public consumer boundary, and executes every run fixture as one bounded local collection run under its reviewed `caller_bounds`. Each call fixture must produce a declared success outcome and each run fixture a completed scrape outcome. A structural failure returns one batched `export_audit_failed` result; an egress rejection includes its phase, origin, path, query-key set, method, and resource type without query values. Failed audits leave the tools repository untouched.
+
+A successful export writes only:
+
+- `tools/<package_id>/package.source.json`
+- `tools/<package_id>/registry.json`
+- `tools/<package_id>/fixtures/*.call.json`
+- `tools/<package_id>/fixtures/*.run.json`
+
+Fixture responses, expected typed results, and expected run items come from the successful smoke executions rather than hand-authored examples, and every captured fixture file is validated against the public fixture contract before it is written. The export never signs, installs, publishes, stages Git changes, creates a branch, or opens a pull request. An existing target directory is rejected instead of overwritten; updates require a separately reviewed version-update workflow.
+
 ## graphs
 
 A klura session belongs to one of three named graphs. The `graph` parameter on `start_session` selects the FSM topology the session walks; per-graph behavior (mutating-action consent gates, auto-synth at close, re-persistence threshold) is data-driven from the graph's `GraphConfig`, not from session-level flags. Adding a new graph is one new file in `runtime/src/graphs/`.
@@ -267,6 +284,8 @@ Tags are snake_case identifiers; one capability can advertise multiple tags. Val
 Every mutating-shaped strategy must verify its side effect before returning `ok:true`. `status:200` proves the network call succeeded — not that the right entity was mutated. The save-time `mutating_verification_required` classifier rejection enumerates every trigger condition, the valid ack shape, and the recognized shape tags (`transaction-shape`, `chat-shape`, `dom-poll`, `intrinsic-to-caller`, `rpc-read`, `fire-and-forget`) inline.
 
 For local factory execution, an object body's boolean `ok` is authoritative: `ok:false` fails even on HTTP 2xx. A 2xx body without boolean `ok` is transport-only and requires LLM inspection; published tools use their signed manifest outcome contracts instead of this local convention.
+
+Safe-read saves are inactive candidates until that judgment is complete. `body.ok:true` promotes immediately. Otherwise the save response returns `candidate_id`, `evidence_digest`, and `semantic_review_required:true`. Call `review_strategy_candidate({platform, capability, candidate_id, evidence_digest})` to read the exact bound evidence and receive `review_token`; page with `evidence_offset` when needed. Then call it again with the token, unchanged digest, `verdict:"verified_success"|"verified_failure"|"inconclusive"`, and a concrete `rationale`. Runtime checks only the closed values, token, digests, and active-baseline CAS. It stores the rationale but never matches its words. Only `verified_success` activates the candidate. If evidence is too large to retain exactly, narrow the sample result or add structural extraction and re-save.
 
 **Verification verifies the SEND, not the recipient's reply.** For chat: confirm OUR outbound message landed in the thread — not "wait for them to reply." The reply is its own capability (`read_messages`).
 
@@ -1800,6 +1819,8 @@ A dry-run + byte-diff harness for `generated.<name>.code` snippets. Runs a candi
 ## triage
 
 Triage is a defense-surface fingerprinting pass. The agent inspects what third-party origins, scripts, and cookies a page loads; characterizes the bot-detection posture using its own knowledge (the runtime never names vendors); and submits one plan per surface via `submit_triage_plan`. The verdict (an `expected_tier` of `fetch` (T0) / `page-script` (T1) / `recorded-path` (T2) plus a strongly-cited `tier_justification`) is **informational** — the agent still aims T0 (fetch) → T1 (page-script) → T2 (recorded-path) in lift, in order. The verdict shapes user expectation and escalation hygiene: on aggressive surfaces, T0 / T1 attempts may burn the session, and the agent should plan to retry from a fresh ephemeral context.
+
+`mechanism_hypothesis` is optional context. Surface binding, tier citation, and runtime safety depend on observed structural evidence, so omitting a hypothesis never blocks LIFT.
 
 ### Surface keying
 

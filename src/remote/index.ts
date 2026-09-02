@@ -5,6 +5,7 @@ import type { BrowserDriver } from '../drivers/interface';
 import type { Session } from '../drivers/types/session';
 import { startViewer, stopViewer } from './viewer';
 import { registerRemoteBackend } from './backend';
+import { onSessionDispose, removeSessionDisposeHook } from '../pool/session-scope';
 import { loadConfig, type RemoteConfig } from '../config/handler';
 
 export type { RemoteConfig };
@@ -107,6 +108,12 @@ function shouldAutoOpen(mode: RemoteConfig['auto_open'], exposure: ViewerExposur
 
 const activeSessions = new Map<string, RemoteSession>();
 
+// Session-scope hook name — a viewer left open when its session dies (agent
+// aborts mid-handover, pool shutdown) is stopped by scope disposal, so the
+// tunnel / ws server / screencast never outlive the session. See
+// runtime/src/pool/session-scope.ts.
+const REMOTE_SESSION_HOOK = 'remote-session';
+
 function loadRemoteConfig(): RemoteConfig {
   return loadConfig().remote;
 }
@@ -207,6 +214,7 @@ export async function startRemoteSession(
   };
 
   activeSessions.set(sessionId, remote);
+  onSessionDispose(sessionId, REMOTE_SESSION_HOOK, () => stopRemoteSession(sessionId));
   const shortNote = shortUrl ? ` (short: ${shortUrl})` : '';
   const openedNote = autoOpened ? ' [auto-opened]' : '';
   console.error(`[remote] Session started: ${viewerUrl}${shortNote}${openedNote}`);
@@ -228,6 +236,7 @@ export async function stopRemoteSession(sessionId: string): Promise<void> {
 
   if (remote.tunnel) remote.tunnel.kill();
   activeSessions.delete(sessionId);
+  removeSessionDisposeHook(sessionId, REMOTE_SESSION_HOOK);
   console.error(`[remote] Session stopped: ${sessionId}`);
 }
 

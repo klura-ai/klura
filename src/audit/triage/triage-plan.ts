@@ -3,40 +3,42 @@
 // reads one error format across both lifecycle gates.
 //
 // Detectors here cover (a) request_pattern URL ground-truthing, (b)
-// capability declaration, (c) tier_justification citation, and (d)
-// slug-baked query values. (a) and (d) are the "agent emitted plan
-// content the runtime can ground-check" detectors; (b) and (c) are
-// structural prerequisites that used to live as hand-rolled throws in
-// `submit-triage-plan.ts` and were lifted in here so triage matches the
-// 1:1-with-save-audit shape principle.
+// capability declaration, (c) tier_justification citation, (d) slug-baked
+// query values, and (e) recorded-path navigate-URL coverage. (a), (d) and
+// (e) ground-check agent-emitted plan content; (b) and (c) are structural
+// prerequisites of the triage flow itself.
 //
 // Severity:
 //  - `request_pattern_url_extractable`, `request_pattern_url_observed`,
 //    `capability_not_declared`, `tier_justification_unciteable`:
 //    `ackReason: 'none'` — these are structural prereqs the agent must
 //    fix, no exception path.
-//  - `enum_value_baked_into_slug`: `ackReason: 'required'` — mirrors the
-//    save-time Detector severity (see audit/lift/save-strategy.ts:367). The
-//    canonical noun-overlap case (`create_issue` whose param `context`
-//    enumerates `issue` among other labels) is a legitimate ack-with-reason
-//    path.
+//  - `enum_value_baked_into_slug`, `recorded_path_navigate_url_unbound`:
+//    `ackReason: 'required'` — legitimate ack-with-reason paths exist
+//    (canonical noun-overlap; deliberately XHR-scoped surface).
 //
-// Helper: `findObservedMatch` (`runtime/src/strategies/verify-observed.ts`)
-// is the shared URL-vs-captured-URL primitive. Both this audit and the
-// save audit's `unobservedUrlDetector` consume it.
+// Shared primitives: `findObservedMatch`
+// (`runtime/src/strategies/verify-observed.ts`) for URL-vs-captured-URL
+// checks, and the concern modules under `runtime/src/audit/concerns/`
+// (citeable-artifacts, slug-collision) whose facts also project into the
+// triage authoring contract — parity locked by
+// runtime/test/authoring-contract-parity.test.js.
 
 import { Audit, type Detector, type Issue } from '../index';
+import { AUDIT_KINDS, WARNING_KINDS, type StrategyTier } from '../../vocab';
 import { escapeRegExp } from '../../utils/regex';
 import type { Session } from '../../drivers/types/session';
 import type { DefenseSurface } from '../../working-dir/schema';
 import { findObservedMatch } from '../../strategies/verify-observed';
 import { urlKey } from '../../phases/surface-binding';
+import { collectCiteableArtifacts } from '../concerns/citeable-artifacts';
+import { findSlugQueryValueCollisions } from '../concerns/slug-collision';
 
 export interface TriagePlanPayload {
   surface_label: string;
   defense_surface: DefenseSurface;
   tier_justification: string;
-  expected_tier: 'fetch' | 'page-script' | 'recorded-path';
+  expected_tier: StrategyTier;
 }
 
 export interface TriagePlanCtx {
@@ -91,14 +93,14 @@ function originOf(rawUrl: string): string | null {
  *  with JSON body...") that would otherwise silently fail downstream URL
  *  parsing and skip surface binding. */
 const requestPatternUrlExtractable: Detector<TriagePlanPayload, TriagePlanCtx> = {
-  kind: 'request_pattern_url_extractable',
+  kind: AUDIT_KINDS.requestPatternUrlExtractable,
   ackReason: 'none',
   detect: (payload) => {
     const issues: Issue[] = [];
     payload.defense_surface.request_patterns.forEach((pattern, i) => {
       if (extractUrlToken(pattern) === null) {
         issues.push({
-          kind: 'request_pattern_url_extractable',
+          kind: AUDIT_KINDS.requestPatternUrlExtractable,
           message: `request_patterns[${i}] = ${JSON.stringify(pattern)}: no URL or absolute path token found.`,
           hint: `Use "<METHOD> <URL>" or just "<URL>". Examples: "POST /api/send", "GET https://api.example.com/v1/list". Describe headers / body shape in mechanism_hypothesis instead.`,
           context: { index: i, pattern },
@@ -116,7 +118,7 @@ const requestPatternUrlExtractable: Detector<TriagePlanPayload, TriagePlanCtx> =
  *  against the runtime's actual capture log. Skips entries that already
  *  failed `request_pattern_url_extractable` to avoid duplicate noise. */
 const requestPatternUrlObserved: Detector<TriagePlanPayload, TriagePlanCtx> = {
-  kind: 'request_pattern_url_observed',
+  kind: AUDIT_KINDS.requestPatternUrlObserved,
   ackReason: 'none',
   detect: (payload, ctx) => {
     const observedUrls = ctx.session.intercepted
@@ -134,7 +136,7 @@ const requestPatternUrlObserved: Detector<TriagePlanPayload, TriagePlanCtx> = {
       const resolved = resolveAgainstOrigin(token, payload.defense_surface.observed_origins);
       if (resolved === null) {
         issues.push({
-          kind: 'request_pattern_url_observed',
+          kind: AUDIT_KINDS.requestPatternUrlObserved,
           message: `request_patterns[${i}] = ${JSON.stringify(pattern)}: relative path ${JSON.stringify(token)} could not be resolved (observed_origins is empty).`,
           hint: `Add the page origin to observed_origins, or use an absolute URL in the pattern.`,
           context: { index: i, pattern, token },
@@ -147,7 +149,7 @@ const requestPatternUrlObserved: Detector<TriagePlanPayload, TriagePlanCtx> = {
       if (!onObservedOrigin && !match) {
         const captureSample = observedUrls.slice(0, 5);
         issues.push({
-          kind: 'request_pattern_url_observed',
+          kind: AUDIT_KINDS.requestPatternUrlObserved,
           message: `request_patterns[${i}] = ${JSON.stringify(pattern)}: URL ${JSON.stringify(resolved)} is neither on an observed_origin (${[...observedOriginSet].join(', ') || '<none>'}) nor matches a captured URL this session.`,
           hint: `Captured URLs (sample): ${captureSample.length > 0 ? captureSample.join(', ') : '<none>'}. Pick one that the runtime actually captured, or add the origin to observed_origins.`,
           context: { index: i, pattern, resolved },
@@ -162,7 +164,7 @@ const requestPatternUrlObserved: Detector<TriagePlanPayload, TriagePlanCtx> = {
  *  capabilities. Hard structural prereq — the plan can't bind to a
  *  capability the session doesn't know about. */
 const capabilityNotDeclared: Detector<TriagePlanPayload, TriagePlanCtx> = {
-  kind: 'capability_not_declared',
+  kind: AUDIT_KINDS.capabilityNotDeclared,
   ackReason: 'none',
   detect: (_payload, ctx) => {
     const declared = (ctx.session.declaredCapabilities ?? []).map((c) => c.capability);
@@ -170,7 +172,7 @@ const capabilityNotDeclared: Detector<TriagePlanPayload, TriagePlanCtx> = {
     if (declared.includes(ctx.capability)) return [];
     return [
       {
-        kind: 'capability_not_declared',
+        kind: AUDIT_KINDS.capabilityNotDeclared,
         message: `capability '${ctx.capability}' is not in this session's declared capabilities (${declared.join(', ')}).`,
         hint: `Declare it via start_session or declare_capability first, then re-submit the triage plan.`,
         context: { declared },
@@ -178,73 +180,6 @@ const capabilityNotDeclared: Detector<TriagePlanPayload, TriagePlanCtx> = {
     ];
   },
 };
-
-/** Walk the session's captured traffic + nav log and the plan's declared
- *  observed_origins to collect every cite-able artifact: origins, script
- *  URLs, script filenames, cookie names, observed navigation URLs. Returned
- *  as a Set of verbatim substrings the justification can reference.
- *  `request_pattern_url_observed` already ground-truth-checks the declared
- *  origins against captured URLs, so allowing them as citeable here doesn't
- *  open a hallucination escape hatch — it covers the forward-claim case
- *  where the agent declares an origin they walked but no XHR fired yet. */
-function collectCiteableArtifacts(
-  session: TriagePlanCtx['session'],
-  defenseSurface: DefenseSurface,
-): Set<string> {
-  const set = new Set<string>();
-  for (const o of defenseSurface.observed_origins) {
-    const origin = originOf(o);
-    if (origin) {
-      set.add(origin);
-      try {
-        set.add(new URL(origin).host.toLowerCase());
-      } catch {
-        /* unreachable when originOf returned non-null */
-      }
-    }
-  }
-  for (const name of defenseSurface.cookies_set) {
-    if (typeof name === 'string' && name.length > 0) set.add(name);
-  }
-  for (const script of defenseSurface.observed_scripts) {
-    if (typeof script !== 'string' || script.length === 0) continue;
-    set.add(script);
-    try {
-      const u = new URL(script);
-      const filename = u.pathname.split('/').filter(Boolean).pop();
-      if (filename) set.add(filename);
-    } catch {
-      /* not a URL — pass through as-is */
-    }
-  }
-  for (const entry of session.intercepted) {
-    if (!entry.url) continue;
-    let parsed: URL;
-    try {
-      parsed = new URL(entry.url);
-    } catch {
-      continue;
-    }
-    set.add(parsed.host.toLowerCase());
-    set.add(`${parsed.protocol}//${parsed.host.toLowerCase()}`);
-    const ct = (entry as { contentType?: string }).contentType ?? '';
-    if (/javascript|ecmascript/i.test(ct) || /\.m?js(\?|$)/.test(parsed.pathname)) {
-      set.add(entry.url);
-      const filename = parsed.pathname.split('/').filter(Boolean).pop();
-      if (filename) set.add(filename);
-    }
-    if (entry.setCookieNames && Array.isArray(entry.setCookieNames)) {
-      for (const name of entry.setCookieNames) if (typeof name === 'string') set.add(name);
-    }
-  }
-  for (const nav of session.domNavigations ?? []) {
-    if (!nav.url) continue;
-    set.add(nav.url);
-    const key = urlKey(nav.url);
-    if (key) set.add(key);
-  }
-  return set;
-}
 
 function citeableCandidatesPreview(set: Set<string>, max = 10): string {
   const items = [...set].slice(0, max);
@@ -266,9 +201,11 @@ function justificationCitesArtifact(justification: string, artifacts: Set<string
  *  artifact actually present in the session's captured traffic — an origin
  *  from `intercepted[].url`, a script URL, a cookie name from
  *  `setCookieNames`, or a URL from `domNavigations`. Empty justification
- *  or zero matches → reject with the candidate list. */
+ *  or zero matches → reject with the candidate list. Artifact universe
+ *  comes from the shared extractor (`audit/concerns/citeable-artifacts`),
+ *  the same one the triage authoring contract samples from. */
 const tierJustificationUnciteable: Detector<TriagePlanPayload, TriagePlanCtx> = {
-  kind: 'tier_justification_unciteable',
+  kind: AUDIT_KINDS.tierJustificationUnciteable,
   ackReason: 'none',
   detect: (payload, ctx) => {
     const artifacts = collectCiteableArtifacts(ctx.session, payload.defense_surface);
@@ -278,7 +215,7 @@ const tierJustificationUnciteable: Detector<TriagePlanPayload, TriagePlanCtx> = 
       artifacts.size === 0 ? 'no artifacts have been captured yet' : `must cite one of: ${preview}`;
     return [
       {
-        kind: 'tier_justification_unciteable',
+        kind: AUDIT_KINDS.tierJustificationUnciteable,
         message:
           `tier_justification must reference at least one verbatim artifact from the session — ` +
           `an origin / host, script URL or filename, cookie name, or observed navigation URL. ` +
@@ -304,39 +241,21 @@ const tierJustificationUnciteable: Detector<TriagePlanPayload, TriagePlanCtx> = 
  *  (e.g. `?context=issue` on a settings page colliding with
  *  `create_issue`).
  *
- *  Returns the offending token / param / pattern, or `null` when the slug
- *  is clean. */
+ *  Matching rides the shared slug-collision concern
+ *  (`audit/concerns/slug-collision`) — the same tokenizer + query-value
+ *  matcher the triage authoring contract projects into its would-fire
+ *  hint. Returns the offending token / param / pattern, or `null` when
+ *  the slug is clean. */
 function detectSlugBakesQueryValue(
   capability: string,
   requestPatterns: readonly string[],
 ): { token: string; paramName: string; pattern: string } | null {
-  const slugTokens = new Set(
-    capability
-      .toLowerCase()
-      .split(/[_\-/]/)
-      .filter((t) => t.length > 0),
-  );
   for (const candidate of requestPatterns) {
     const trimmed = candidate.trim();
     const idx = trimmed.indexOf(' ');
     const urlStr = idx === -1 ? trimmed : trimmed.slice(idx + 1).trim();
-    let parsed: URL;
-    try {
-      parsed = new URL(urlStr);
-    } catch {
-      try {
-        parsed = new URL(urlStr, 'https://__placeholder__/');
-      } catch {
-        continue;
-      }
-    }
-    for (const [paramName, value] of parsed.searchParams) {
-      if (typeof value !== 'string' || value.length === 0) continue;
-      const valueLower = value.toLowerCase();
-      if (slugTokens.has(valueLower)) {
-        return { token: value, paramName, pattern: candidate };
-      }
-    }
+    const hit = findSlugQueryValueCollisions(capability, [urlStr])[0];
+    if (hit) return { token: hit.token, paramName: hit.param_name, pattern: candidate };
   }
   return null;
 }
@@ -346,14 +265,14 @@ function detectSlugBakesQueryValue(
  *  error vocabulary. Legitimate noun-overlap (`create_issue` vs
  *  `?context=issue`) is the canonical ack-with-reason case. */
 const enumValueBakedIntoSlug: Detector<TriagePlanPayload, TriagePlanCtx> = {
-  kind: 'enum_value_baked_into_slug',
+  kind: WARNING_KINDS.enumValueBakedIntoSlug,
   ackReason: 'required',
   detect: (payload, ctx) => {
     const hit = detectSlugBakesQueryValue(ctx.capability, payload.defense_surface.request_patterns);
     if (!hit) return [];
     return [
       {
-        kind: 'enum_value_baked_into_slug',
+        kind: WARNING_KINDS.enumValueBakedIntoSlug,
         message:
           `capability slug "${ctx.capability}" contains the token "${hit.token}", ` +
           `which is also a value of query param "${hit.paramName}" in your declared request_pattern ` +
@@ -386,7 +305,7 @@ const enumValueBakedIntoSlug: Detector<TriagePlanPayload, TriagePlanCtx> = {
  *  the recorded-path will navigate to a URL not yet captured. Reason
  *  required. */
 const recordedPathNavigateUrlUnbound: Detector<TriagePlanPayload, TriagePlanCtx> = {
-  kind: 'recorded_path_navigate_url_unbound',
+  kind: AUDIT_KINDS.recordedPathNavigateUrlUnbound,
   ackReason: 'required',
   detect: (payload, ctx) => {
     if (payload.expected_tier !== 'recorded-path') return [];
@@ -421,7 +340,7 @@ const recordedPathNavigateUrlUnbound: Detector<TriagePlanPayload, TriagePlanCtx>
     const suggested = navKeysArr[0];
     return [
       {
-        kind: 'recorded_path_navigate_url_unbound',
+        kind: AUDIT_KINDS.recordedPathNavigateUrlUnbound,
         message:
           `expected_tier="recorded-path" but request_patterns doesn't include any captured navigation URL. ` +
           `Recorded-path strategies anchor on the first navigate step's URL, which must match an entry in this ` +

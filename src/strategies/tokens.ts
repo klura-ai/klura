@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { KLURA_DIR } from '../paths';
+import { looseJsonCodec, updateJsonFile } from '../utils/owner-file-lock';
 
 const USER_DATA_DIR = path.join(KLURA_DIR, 'user-data');
 const SKILLS_DIR = path.join(KLURA_DIR, 'skills');
@@ -22,6 +23,8 @@ interface TokenMeta {
 function ensureDir(dir: string): void {
   fs.mkdirSync(dir, { recursive: true });
 }
+
+const tokenFileCodec = looseJsonCodec<Record<string, unknown>>(() => ({}));
 
 export class TokenCache {
   private cache = new Map<string, TokenEntry>();
@@ -214,36 +217,22 @@ export class TokenCache {
     const dir = path.join(USER_DATA_DIR, platform);
     ensureDir(dir);
     const cachePath = path.join(dir, 'token-cache.json');
-
-    let existing: Record<string, unknown> = {};
-    try {
-      existing = JSON.parse(fs.readFileSync(cachePath, 'utf-8')) as Record<string, unknown>;
-    } catch {
-      // Fresh file
-    }
-
-    const entry = this.cache.get(this.key(platform, tokenName));
-    if (entry) {
+    updateJsonFile(cachePath, tokenFileCodec, (existing) => {
+      const entry = this.cache.get(this.key(platform, tokenName));
+      if (!entry) return null;
       existing[tokenName] = { value, obtainedAt: entry.obtainedAt, ttl: entry.ttl };
-    }
-
-    fs.writeFileSync(cachePath, JSON.stringify(existing, null, 2));
+      return existing;
+    });
   }
 
   private persistMeta(platform: string, tokenName: string, m: TokenMeta): void {
     const dir = path.join(SKILLS_DIR, platform);
     ensureDir(dir);
     const metaPath = path.join(dir, 'tokens.json');
-
-    let existing: Record<string, unknown> = {};
-    try {
-      existing = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as Record<string, unknown>;
-    } catch {
-      // Fresh file
-    }
-
-    existing[tokenName] = m;
-    fs.writeFileSync(metaPath, JSON.stringify(existing, null, 2));
+    updateJsonFile(metaPath, tokenFileCodec, (existing) => {
+      existing[tokenName] = m;
+      return existing;
+    });
   }
 
   // --- Proactive refresh loop ---

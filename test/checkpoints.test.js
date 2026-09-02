@@ -31,17 +31,26 @@ const {
   unregisterCheckpointHandler,
   listCheckpointHandlers,
   invokeCheckpoint,
+  checkpointEvent,
 } = await import('../dist/checkpoints/index.js');
 
 const FAKE_SESSION = /** @type {any} */ ({ id: 'sess-fake' });
 
-function makeEvent(context, overrides = {}) {
+function makeEvent(kind, context = {}, overrides = {}) {
   return {
+    kind,
     session_id: 'sess-fake',
     context,
     ...overrides,
   };
 }
+
+test('checkpointEvent builders: stamped kind wins over a kind key from an untyped caller', () => {
+  const event = checkpointEvent.triage_plan(
+    /** @type {any} */ ({ kind: 'surface_changed', session_id: 'sess-fake', context: {} }),
+  );
+  assert.equal(event.kind, 'triage_plan');
+});
 
 test('registerCheckpointHandler: rejects missing name', () => {
   assert.throws(
@@ -98,10 +107,9 @@ test('listCheckpointHandlers: includes registered defaults', () => {
   );
 });
 
-test('invokeCheckpoint: dispatches by kind (default-ask-user-checkpoint for triage_plan)', async () => {
+test('invokeCheckpoint: dispatches by event.kind (default-ask-user-checkpoint for triage_plan)', async () => {
   const res = await invokeCheckpoint(
-    'triage_plan',
-    makeEvent({ kind: 'triage_plan', rounds_since_handoff: 20 }),
+    makeEvent('triage_plan', { rounds_since_handoff: 20 }),
     FAKE_SESSION,
   );
   assert.equal(res.status, 'handover');
@@ -115,11 +123,7 @@ test('invokeCheckpoint: last-registered wins for claimed kind', async () => {
     handle: async () => ({ status: 'continue', hint: 'auto-continue' }),
   });
   try {
-    const res = await invokeCheckpoint(
-      'triage_plan',
-      makeEvent({ kind: 'triage_plan' }),
-      FAKE_SESSION,
-    );
+    const res = await invokeCheckpoint(makeEvent('triage_plan'), FAKE_SESSION);
     assert.equal(res.status, 'continue');
     assert.equal(res.hint, 'auto-continue');
   } finally {
@@ -134,11 +138,7 @@ test('invokeCheckpoint: unregister reverts to default', async () => {
     handle: async () => ({ status: 'continue' }),
   });
   unregisterCheckpointHandler('test-transient');
-  const res = await invokeCheckpoint(
-    'triage_plan',
-    makeEvent({ kind: 'triage_plan' }),
-    FAKE_SESSION,
-  );
+  const res = await invokeCheckpoint(makeEvent('triage_plan'), FAKE_SESSION);
   // Default is default-ask-user-checkpoint → handover.
   assert.equal(res.status, 'handover');
 });
@@ -151,12 +151,7 @@ test('invokeCheckpoint: throws when no handler claims kind', async () => {
   unregisterCheckpointHandler('default-handover-viewer-checkpoint');
   try {
     await assert.rejects(
-      () =>
-        invokeCheckpoint(
-          'recorded_step_failed',
-          makeEvent({ kind: 'recorded_step_failed' }),
-          FAKE_SESSION,
-        ),
+      () => invokeCheckpoint(makeEvent('recorded_step_failed'), FAKE_SESSION),
       /no checkpoint handler claims kind="recorded_step_failed"/,
     );
   } finally {
@@ -180,11 +175,7 @@ test('same-name registration replaces prior handler', async () => {
     handle: async () => ({ status: 'resolved', value: 'second' }),
   });
   try {
-    const res = await invokeCheckpoint(
-      'triage_plan',
-      makeEvent({ kind: 'triage_plan' }),
-      FAKE_SESSION,
-    );
+    const res = await invokeCheckpoint(makeEvent('triage_plan'), FAKE_SESSION);
     assert.equal(res.value, 'second');
   } finally {
     unregisterCheckpointHandler('test-replace');
@@ -216,8 +207,10 @@ function withFakeSession(fn) {
 
 test('mintCheckpointToken: attaches pending state to session', () =>
   withFakeSession((sid) => {
-    const token = mintCheckpointToken(sid, 'recorded_step_failed', {
+    const token = mintCheckpointToken({
       kind: 'recorded_step_failed',
+      session_id: sid,
+      context: {},
     });
     assert.ok(typeof token === 'string' && token.length > 0);
     assert.throws(
@@ -228,7 +221,7 @@ test('mintCheckpointToken: attaches pending state to session', () =>
 
 test('assertNoPendingCheckpoint: accepts matching token + user_response', () =>
   withFakeSession((sid) => {
-    const token = mintCheckpointToken(sid, 'triage_plan', { kind: 'triage_plan' });
+    const token = mintCheckpointToken({ kind: 'triage_plan', session_id: sid, context: {} });
     assertNoPendingCheckpoint(sid, {
       checkpoint_token: token,
       user_response: 'continue please',
@@ -239,7 +232,7 @@ test('assertNoPendingCheckpoint: accepts matching token + user_response', () =>
 
 test('assertNoPendingCheckpoint: accepts cancelled with reason', () =>
   withFakeSession((sid) => {
-    const token = mintCheckpointToken(sid, 'triage_plan', { kind: 'triage_plan' });
+    const token = mintCheckpointToken({ kind: 'triage_plan', session_id: sid, context: {} });
     assertNoPendingCheckpoint(sid, {
       checkpoint_token: token,
       cancelled: true,
@@ -249,7 +242,7 @@ test('assertNoPendingCheckpoint: accepts cancelled with reason', () =>
 
 test('assertNoPendingCheckpoint: rejects cancel without reason', () =>
   withFakeSession((sid) => {
-    const token = mintCheckpointToken(sid, 'triage_plan', { kind: 'triage_plan' });
+    const token = mintCheckpointToken({ kind: 'triage_plan', session_id: sid, context: {} });
     assert.throws(
       () =>
         assertNoPendingCheckpoint(sid, {
@@ -262,7 +255,7 @@ test('assertNoPendingCheckpoint: rejects cancel without reason', () =>
 
 test('assertNoPendingCheckpoint: rejects ack without user_response / viewer_result', () =>
   withFakeSession((sid) => {
-    const token = mintCheckpointToken(sid, 'triage_plan', { kind: 'triage_plan' });
+    const token = mintCheckpointToken({ kind: 'triage_plan', session_id: sid, context: {} });
     assert.throws(
       () =>
         assertNoPendingCheckpoint(sid, {
@@ -274,7 +267,7 @@ test('assertNoPendingCheckpoint: rejects ack without user_response / viewer_resu
 
 test('assertNoPendingCheckpoint: rejects wrong token', () =>
   withFakeSession((sid) => {
-    mintCheckpointToken(sid, 'triage_plan', { kind: 'triage_plan' });
+    mintCheckpointToken({ kind: 'triage_plan', session_id: sid, context: {} });
     assert.throws(
       () =>
         assertNoPendingCheckpoint(sid, {

@@ -8,10 +8,11 @@
 import fs from 'fs';
 import path from 'path';
 import { STORAGE_DIR } from '../paths';
-
-function ensureDir(dir: string): void {
-  fs.mkdirSync(dir, { recursive: true });
-}
+import {
+  OwnerFileLockError,
+  updateJsonFile,
+  writeTextUnderFileLock,
+} from '../utils/owner-file-lock';
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -38,18 +39,19 @@ export function storageStatePath(platform: string, identity?: string): string {
   return path.join(STORAGE_DIR, `${platform}--${identity}.json`);
 }
 
+/**
+ * Whole-file storage-state replace. Serialized on the jar's `<file>.lock`
+ * with the Set-Cookie merge below and with the driver's session-close save,
+ * so a concurrent merge cannot rename a stale jar over this snapshot. Throws
+ * `OwnerFileLockError` when a live owner holds the lock.
+ */
 export function saveStorageState(
   platform: string,
   data: string | object,
   identity?: string,
 ): string {
-  ensureDir(STORAGE_DIR);
   const filePath = storageStatePath(platform, identity);
-  if (typeof data === 'string') {
-    fs.writeFileSync(filePath, data);
-  } else {
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
-  }
+  writeTextUnderFileLock(filePath, typeof data === 'string' ? data : JSON.stringify(data, null, 2));
   return filePath;
 }
 
@@ -207,36 +209,60 @@ export function writeStorageStateCookies(
     return;
   }
 
-  const state = readStorageStateRaw(platform, identity);
-  const jar: StoredCookie[] = [];
-  if (Array.isArray(state.cookies)) {
-    for (const raw of state.cookies) {
-      if (!isPlainObject(raw)) continue;
-      if (typeof raw.name !== 'string' || typeof raw.value !== 'string') continue;
-      if (typeof raw.domain !== 'string') continue;
-      jar.push(raw as unknown as StoredCookie);
-    }
-  }
+  // Serialized read-merge-write: the jar lock keeps a concurrent merge (or a
+  // whole-file save at session close) from losing this response's cookies.
+  // Contention drops the merge — cookie persistence is best-effort and must
+  // not fail the request that produced the Set-Cookie.
+  try {
+    updateJsonFile<StoredStorageState>(
+      storageStatePath(platform, identity),
+      {
+        read: (raw) => {
+          if (raw === null || !raw.trim()) return { cookies: [], origins: [] };
+          try {
+            const parsed = JSON.parse(raw) as StoredStorageState;
+            return isPlainObject(parsed) ? parsed : { cookies: [], origins: [] };
+          } catch {
+            // Malformed / not JSON — treat as empty jar; this write repairs it.
+            return { cookies: [], origins: [] };
+          }
+        },
+        write: (state) => JSON.stringify(state, null, 2),
+      },
+      (state) => {
+        const jar: StoredCookie[] = [];
+        if (Array.isArray(state.cookies)) {
+          for (const raw of state.cookies) {
+            if (!isPlainObject(raw)) continue;
+            if (typeof raw.name !== 'string' || typeof raw.value !== 'string') continue;
+            if (typeof raw.domain !== 'string') continue;
+            jar.push(raw as unknown as StoredCookie);
+          }
+        }
 
-  for (const value of values) {
-    const parsed = parseSetCookie(value, target);
-    if (!parsed) continue;
-    // Replace any existing entry with the same (name, domain, path) tuple —
-    // matching browser behavior. Additions append.
-    const existingIdx = jar.findIndex(
-      (c) => c.name === parsed.name && c.domain === parsed.domain && c.path === parsed.path,
+        for (const value of values) {
+          const parsed = parseSetCookie(value, target);
+          if (!parsed) continue;
+          // Replace any existing entry with the same (name, domain, path) tuple —
+          // matching browser behavior. Additions append.
+          const existingIdx = jar.findIndex(
+            (c) => c.name === parsed.name && c.domain === parsed.domain && c.path === parsed.path,
+          );
+          if (existingIdx >= 0) {
+            jar[existingIdx] = parsed;
+          } else {
+            jar.push(parsed);
+          }
+        }
+
+        state.cookies = jar;
+        if (!Array.isArray(state.origins)) state.origins = [];
+        return state;
+      },
     );
-    if (existingIdx >= 0) {
-      jar[existingIdx] = parsed;
-    } else {
-      jar.push(parsed);
-    }
+  } catch (error) {
+    if (!(error instanceof OwnerFileLockError)) throw error;
   }
-
-  state.cookies = jar;
-  if (!Array.isArray(state.origins)) state.origins = [];
-  ensureDir(STORAGE_DIR);
-  fs.writeFileSync(storageStatePath(platform, identity), JSON.stringify(state, null, 2));
 }
 
 // Older Node fallback — splits a joined Set-Cookie header on commas that are

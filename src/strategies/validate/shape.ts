@@ -5,11 +5,11 @@
 // sequential save attempts.
 
 import type { Strategy } from '../skills';
-import { describeEnum, didYouMeanSuffix } from '../../validators';
-import { describeStrategyTiers, ARRAY_ITEM_REQUIRES, ARRAY_ITEM_ENUMS } from './constants';
+import { STRATEGY_TIERS, type StrategyTier } from '../../vocab';
+import { describeStrategyTiers } from './constants';
 import { isPlainObject } from './helpers';
 import { parseOrThrow } from '../schemas/zod-helpers';
-import { strategySchemas } from '../schemas/strategy';
+import { strategySchemas, TIER_REFERENCE_SLUGS } from '../schemas/strategy';
 import { validatePrereqShape } from './prereqs';
 import {
   validateRecordedPathStepShape,
@@ -70,6 +70,10 @@ function validateExpressionNotTemplated(
   );
 }
 
+function isStrategyTier(value: string): value is StrategyTier {
+  return (STRATEGY_TIERS as readonly string[]).includes(value);
+}
+
 export function validateStrategyShape(data: unknown): asserts data is Strategy {
   if (!isPlainObject(data)) {
     throw new Error('invalid_strategy: expected an object');
@@ -85,7 +89,7 @@ export function validateStrategyShape(data: unknown): asserts data is Strategy {
   //
   // See principles.md §"Priming agents: close to execution" — error responses
   // are a documented re-priming surface.
-  if (tier !== 'fetch' && tier !== 'page-script' && tier !== 'recorded-path') {
+  if (!isStrategyTier(tier)) {
     const submitted = tier === '' ? '(missing)' : JSON.stringify(tier);
     throw new Error(
       `invalid_strategy: "strategy" = ${submitted} is not one of klura's tiers. The three tiers, in optimality order:\n${describeStrategyTiers()}\n\n` +
@@ -97,7 +101,7 @@ export function validateStrategyShape(data: unknown): asserts data is Strategy {
   parseOrThrow(tierSchema, data, {
     where: 'strategy',
     kindLabel: `tier:"${tier}"`,
-    referenceSlug: `${tier}-schema`,
+    referenceSlug: TIER_REFERENCE_SLUGS[tier],
   });
 
   if (tier === 'recorded-path' && Array.isArray(data.steps)) {
@@ -141,33 +145,9 @@ export function validateStrategyShape(data: unknown): asserts data is Strategy {
       // validation doesn't flag it as an unknown key after the alias above
       // has already copied any usable value into `kind`.
       if ('type' in rawPrereq) delete rawPrereq.type;
-      const missing: string[] = [];
-      for (const key of ARRAY_ITEM_REQUIRES.prerequisites ?? []) {
-        const v = rawPrereq[key];
-        if (typeof v !== 'string' || v.length === 0) missing.push(key);
-      }
-      if (missing.length > 0) {
-        const keyLabel = missing.length === 1 ? 'key' : 'keys';
-        const missingList = missing.map((k) => `"${k}"`).join(', ');
-        throw new Error(
-          `invalid_strategy: ${tier}.prerequisites[${i}] missing required ${keyLabel}: ${missingList} (each must be a non-empty string). ` +
-            `Each prereq needs a unique "name" (used in errors and resume-pointer references) and a "kind" ` +
-            `(one of: ${describeEnum(ARRAY_ITEM_ENUMS.prerequisites?.kind ?? [])}).\n\n` +
-            `Expected shape:\n  { "name": "<unique id>", "kind": "<one of the kinds above>", ... }\n\n` +
-            `See klura://reference#capability-prereq.`,
-        );
-      }
-      const enums = ARRAY_ITEM_ENUMS.prerequisites ?? {};
-      for (const [enumKey, allowed] of Object.entries(enums)) {
-        const v = rawPrereq[enumKey];
-        if (typeof v === 'string' && !allowed.includes(v)) {
-          throw new Error(
-            `invalid_strategy: ${tier}.prerequisites[${i}].${enumKey} = "${v}" is not allowed; must be one of: ${describeEnum(allowed)}${didYouMeanSuffix(v, allowed)}.\n\n` +
-              `Expected shape:\n  { "name": "<unique id>", "kind": "<one of the kinds above>", ... }\n\n` +
-              `See klura://reference#capability-prereq.`,
-          );
-        }
-      }
+      // Required fields, kind membership (with did-you-mean), and per-kind
+      // structure are all enforced by the per-kind Zod dispatch — one batched
+      // rejection carrying the kind's rendered skeleton.
       validatePrereqShape(tier, i, rawPrereq);
       validateExpressionNotTemplated(tier, i, rawPrereq, data);
     });

@@ -70,6 +70,7 @@ import type { ToolDef } from '../tools/types';
 export const TOOL_DEFS: ToolDef[] = [
   {
     name: TOOL_NAMES.listInterruptionResolvers,
+    phasePolicy: { category: 'universal' },
     description:
       'List registered interruption-handlers as `{name, description}` — the menu for agent-detected ambient page state (CAPTCHA, auth wall, 2FA prompt). Scope: AGENT-DETECTED only. Runtime-emitted events arrive as `_checkpoint` (ack via `ack_checkpoint`), NOT through this menu. Do not route dismissable UI noise (cookie banners, popups) through this surface — click those away yourself. See klura://reference#interruptions.',
     inputSchema: {
@@ -87,6 +88,7 @@ export const TOOL_DEFS: ToolDef[] = [
 
   {
     name: TOOL_NAMES.resolveInterruption,
+    phasePolicy: { category: 'universal' },
     description:
       'Invoke a registered interruption handler by name. Scope: AGENT-DETECTED ambient page state (CAPTCHA / 2FA / auth-wall / login-form). Build context including a `reason` string matching handler-description phrasing (e.g. `{reason: "captcha_challenge", sitekey: "..."}`). Runtime-emitted checkpoints route via `_checkpoint` + `ack_checkpoint`, NOT this tool. Response: `{resolution: {status: "resolved"|"handover"|"continue", ...}, interruption_token?}`. On `handover` the next tool call must echo `interruption_token` + an ack (`user_response` / `viewer_result`) or `{cancelled: true, reason}`; otherwise subsequent calls reject with `invalid_strategy: pending_interruption`. Unknown resolver names throw `invalid_strategy: unknown resolver "<name>"`. See klura://reference#interruptions.',
     inputSchema: {

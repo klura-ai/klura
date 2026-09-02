@@ -61,6 +61,18 @@ interface PlatformLogbook {
       prior_sha: string;
       new_sha: string;
     }>;
+    abort_events: Array<{
+      at: string;
+      session_id: string;
+      reason: string;
+      kind?: AbortKind; // absent on historical entries → 'other'
+      host?: string;
+      provenance?: 'agent_asserted' | 'runtime_observed'; // absent → agent_asserted
+      signals?: string[]; // only on runtime_observed entries
+      captured_actions_count: number;
+      phase_at_abort: string;
+    }>;
+    acked_noise_endpoints?: string[];
   };
   observed_capabilities: Array<{
     name: string;
@@ -182,6 +194,23 @@ The map graph's `GraphConfig` turns these knobs on:
 The `re_persistence_gate` blocks `end_drive` when the threshold fires AND the session persisted nothing — no `record_observed_capability`, no `save_verified_expression`, no `add_discovery_note`, no `add_resume_pointer`. Escape: persist at least one record, or retry with the server-minted `acknowledge_no_progress` token from the rejection.
 
 For the full schema, the `platform_map` teaser shape on `start_session`, and worked examples, see [klura://reference#platform-surface-map](../REFERENCE.md#platform-surface-map). For the FSM topology and per-graph `GraphConfig` reference, see [session-phases.md](session-phases.md).
+
+## Abort ledger
+
+`platform_wide.abort_events` records every `abort_session` on the platform. It is a **replay surface**: `start_session` inlines the newest few as `recent_aborts` and scores the last 24 hours into `must_escalate`, so a prior session's exit reaches the next agent's context automatically.
+
+That makes provenance load-bearing. `kind` is whatever the agent passed to `abort_session` — `origin_blocked` on the ledger is never a runtime detection, it is a conclusion an agent reached and the runtime wrote down. Replayed as a bare count, three such conclusions are indistinguishable from three measurements, and the escalation advisory they trigger reads as fact.
+
+So each entry carries where its classification came from:
+
+- **`runtime_observed`** — the runtime's own origin-blocked detector (`runtime/src/phases/origin-blocked-detector.ts`) fired during that session on the host the abort names. Its advisories are recorded on the session as they happen (`Session.originBlockedObservations`) and the abort teardown matches by host; the entry then also carries the structural `signals` that fired.
+- **`agent_asserted`** — everything else, including every entry written before the field existed. An unstamped historical entry reads as a claim, which is exactly what it is.
+
+`computeAbortEscalation` scores rather than counts. Events are first deduped by `session_id` (one stuck session that aborted four times had one experience, not four), then weighted by provenance (`runtime_observed` 1.0, `agent_asserted` `drive.abort_escalation.agent_asserted_weight`, default 0.4) times a whole-half-life recency decay over `drive.abort_escalation.half_life_hours`. The threshold stays at 3, so three fresh runtime-observed aborts on one root cause escalate at full strength while three agent-asserted ones score 1.2 and do not.
+
+The advisory reports the mix (`runtime_observed_count`, `agent_asserted_count`, `score`) and says plainly that agent-asserted entries are claims. It does not tell the agent the site is still blocking — a ledger of prior sessions cannot know that — and it points at `origin_blocked.recommended_action`, which owns the remedy list.
+
+Growth is bounded at write time, with no background job: entries older than 30 days are pruned on the next append, an append that repeats the newest entry's `session_id` + `kind` + `host` is dropped, and the list is trimmed to the newest 200.
 
 ## Hard validation on read
 

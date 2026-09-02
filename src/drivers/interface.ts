@@ -1,6 +1,12 @@
 import type { InterceptedRequest, LoadedScript } from './types/network';
 import type { WebSocketFrame, WebSocketFrameStream } from './types/websocket';
-import type { Session, SessionOptions, FocusListener, SubPagesListener } from './types/session';
+import type {
+  BrowserLease,
+  Session,
+  SessionOptions,
+  FocusListener,
+  SubPagesListener,
+} from './types/session';
 import type { DebuggerLocation, DebuggerPause } from './types/debugger';
 
 /**
@@ -47,6 +53,11 @@ export abstract class BrowserDriver {
     this.initScripts.push({ name, source });
   }
 
+  /**
+   * Create a driver session. `options.freshContext` requires a newly-created
+   * isolated browser context; it must never attach the session to an existing
+   * context owned by another call.
+   */
   abstract createSession(options?: SessionOptions): Promise<Session>;
   abstract destroySession(session: Session): Promise<void>;
 
@@ -70,6 +81,44 @@ export abstract class BrowserDriver {
    */
   async resetSession(_session: Session, _options: SessionOptions = {}): Promise<void> {
     // no-op by default
+  }
+
+  /**
+   * Detach the session's browser-resource bundle (context, pages, capture
+   * plumbing) as an opaque `BrowserLease` the pool can stash in a warm slot.
+   * After a successful detach the Session object is dead — driver methods
+   * must not be called on it, and the pool drops it from its lookup table.
+   * The next checkout binds the lease onto a freshly-minted Session via
+   * `attachLease`, which is what guarantees no logical Session field
+   * survives across klura sessions.
+   *
+   * Returns `null` when the driver holds no detachable resources for this
+   * session. The default returns `null`, which makes the pool destroy
+   * instead of stash — BYO and test-stub drivers without lease support keep
+   * working, they just never serve warm reuse.
+   */
+  detachLease(_session: Session): BrowserLease | null {
+    return null;
+  }
+
+  /**
+   * Bind a previously-detached lease's browser resources onto a freshly-
+   * minted Session. Consumes the lease — a second attach of the same handle
+   * throws. Throws when the lease is not held by this driver (the default,
+   * for drivers that never mint leases).
+   */
+  attachLease(_session: Session, lease: BrowserLease): void {
+    throw new Error(`attachLease: lease ${lease.leaseId} is not held by this driver`);
+  }
+
+  /**
+   * Tear down the browser resources behind an idle lease (warm-slot
+   * eviction, TTL sweep, pool shutdown). Must tolerate a lease that was
+   * already consumed or destroyed. Default is a no-op — a driver whose
+   * `detachLease` returns `null` never has anything to destroy.
+   */
+  destroyLease(_lease: BrowserLease): Promise<void> {
+    return Promise.resolve();
   }
 
   /**
@@ -262,11 +311,18 @@ export abstract class BrowserDriver {
       timeout_ms?: number;
     },
   ): Promise<
-    | { ok: true; status: number; body: unknown; finalUrl: string }
+    | {
+        ok: true;
+        status: number;
+        body: unknown;
+        finalUrl: string;
+        delivery_state?: 'response_received';
+      }
     | {
         ok: false;
         error: string;
         timed_out?: boolean;
+        delivery_state?: 'not_sent' | 'sent_unconfirmed';
         /** Browser-side context captured on fetch failure. Surfaces
          *  same-origin vs cross-origin mismatches and credentials-mode
          *  decisions to the caller when "Failed to fetch" fires. */

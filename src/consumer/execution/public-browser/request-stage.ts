@@ -59,6 +59,9 @@ export async function handleBrowserRequestStage(
       new PublicHttpExecutionError(
         'request_blocked',
         'browser request is outside its signed egress policy',
+        0,
+        null,
+        egressDiagnostic(paused, phase),
       ),
     );
     return;
@@ -147,6 +150,38 @@ export async function handleBrowserRequestStage(
       new PublicHttpExecutionError('transport_failure', asError(error).message),
     );
   }
+}
+
+function egressDiagnostic(
+  paused: BrowserFetchPausedV1,
+  phase: 'navigation' | 'resource' | 'interaction' | 'runtime_request' | 'page_script',
+): import('../node-http').PublicExecutionDiagnosticV1 {
+  let origin: string | null = null;
+  let path: string | null = null;
+  let queryKeys: string[] = [];
+  try {
+    const url = new URL(paused.url);
+    origin = url.origin;
+    path = url.pathname;
+    queryKeys = [...new Set(url.searchParams.keys())].sort(compareText);
+  } catch {
+    // The rejected URL remains represented structurally without echoing raw bytes.
+  }
+  return {
+    kind: 'egress_rejected',
+    phase,
+    origin,
+    path,
+    query_keys: queryKeys,
+    method: paused.method,
+    resource_type: paused.resource_type,
+    requested_method: paused.preflight_method,
+  };
+}
+
+function compareText(left: string, right: string): number {
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
 }
 
 function validatePostAcquireState(

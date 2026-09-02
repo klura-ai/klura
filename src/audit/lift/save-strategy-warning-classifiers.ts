@@ -115,6 +115,12 @@ export const parameterizationDisclosureClassifier: Classifier<Strategy, SaveStra
       reason:
         'declare notes.params with the caller-varying axes you observed during discovery, OR provide a one-sentence reason naming a real structural anchor of the saved strategy that proves no axis applies.',
     }),
+    // Unattended saves (auto-synth) can't answer a classifier, but the
+    // under-parameterization signal still belongs on the artifact — the
+    // next attended session reads it off runtime_meta.save_warnings via
+    // list_platform_skills.
+    unattendedWarnings: (data) =>
+      detectParameterizationDisclosureRequired(data) as unknown as Issue[],
   };
 
 // ---------- mutating_verification_required ----------

@@ -2,14 +2,21 @@
 // entry so they can author save_strategy correctly on the first attempt
 // instead of cycling through audit rejections.
 //
-// Composed structurally from session state. Every constraint maps 1:1 to
-// a detector in `audit/lift/save-strategy.ts` — the contract surfaces *what
-// would fire* before the agent commits a shape. The audit stays as the
-// safety net for what the agent missed.
+// Composed structurally from session state. Every constraint's
+// `detector_kind` names a concern on the save-strategy audit — a Detector
+// on `saveStrategyAudit` (audit/lift/save-strategy.ts) or a token-gated
+// Classifier (audit/lift/save-strategy-classifiers.ts, e.g.
+// `literal_provenance`) — and the contract surfaces *what would fire*
+// before the agent commits a shape. The audit stays as the safety net for
+// what the agent missed. Concerns whose facts both sides need (tier rank,
+// triage verdict, slug collision) live as shared extractors under
+// `runtime/src/audit/concerns/`; the projection parity is enforced by
+// runtime/test/authoring-contract-parity.test.js.
 //
 // The contract is computed once when the agent transitions from triage
 // to lift (`submit_triage_plan`) or directly from drive to close
-// (`end_drive`). Re-reads via `get_save_authoring_contract`.
+// (`end_drive`), cached on `session.saveAuthoringContract`, and echoed on
+// the submit_triage_plan response + the end_drive triage handoff.
 
 import type { Session } from '../../drivers/types/session';
 import type { InterceptedRequest } from '../../drivers/types/network';
@@ -21,8 +28,14 @@ import {
 } from '../../strategies/synthesize-on-close';
 import { getAllParamObservations } from '../../response/session-observations';
 import { observedValuesAreIntegerRange } from '../../gate/observation-shape';
+import { AUTH_GATE_MUTATING_METHODS } from '../../gate/save-warnings-collision';
 import * as skills from '../../strategies/skills';
-import { loadLogbook } from '../../working-dir/logbook';
+import { AUDIT_KINDS, WARNING_KINDS } from '../../vocab';
+import { tierRank } from '../../audit/concerns/tier-rank';
+import { findFirstTriageVerdict, findTriageVerdict } from '../../audit/concerns/triage-verdict';
+import { lookupSurface } from '../surface-binding';
+
+export { tierRank };
 
 export interface SaveAuthoringContract {
   capability: string;
@@ -72,7 +85,7 @@ export type SaveConstraint =
       rule: string;
       reject_tokens: string[];
       arg_names: string[];
-      detector_kind: 'enum_value_baked_into_slug';
+      detector_kind: typeof WARNING_KINDS.enumValueBakedIntoSlug;
     }
   | {
       kind: 'enum_param_grounded';
@@ -90,7 +103,7 @@ export type SaveConstraint =
        *  rejection round-trip. Empty when observations are url_variance
        *  only (no UI labels). */
       ui_label_examples?: ReadonlyArray<{ label: string; value: string }>;
-      detector_kind: 'ungrounded_enum_placeholder';
+      detector_kind: typeof WARNING_KINDS.ungroundedEnumPlaceholder;
     }
   | {
       kind: 'listing_must_be_saved_separately';
@@ -99,7 +112,7 @@ export type SaveConstraint =
       enumerated_value_count: number;
       url_param_consumed_in: string;
       link_via_shape: string;
-      detector_kind: 'enum_param_listing_unfactored';
+      detector_kind: typeof WARNING_KINDS.enumParamListingUnfactored;
     }
   | {
       kind: 'required_query_params_in_template';
@@ -110,33 +123,33 @@ export type SaveConstraint =
       data_load_index: number;
       data_load_url: string;
       params: ReadonlyArray<{ name: string; observed_value: string }>;
-      detector_kind: 'captured_query_param_missing_from_strategy';
+      detector_kind: typeof AUDIT_KINDS.capturedQueryParamMissingFromStrategy;
     }
   | {
       kind: 'auth_gated_chain_auth_prereq';
       rule: string;
       cookie_setter_origins: string[];
       auth_capability_slug: string;
-      detector_kind: 'auth_gated_without_auth_prereq';
+      detector_kind: typeof AUDIT_KINDS.authGatedWithoutAuthPrereq;
     }
   | {
       kind: 'literal_provenance_default_suspicious';
       rule: string;
       auto_classifiable: Array<{ path: string; classification: string }>;
-      detector_kind: 'literal_provenance';
+      detector_kind: typeof AUDIT_KINDS.literalProvenance;
     }
   | {
       kind: 'tier_floor_from_triage';
       rule: string;
       verdict_tier: 'fetch' | 'page-script' | 'recorded-path';
       surface_label: string;
-      detector_kind: 'tier_below_triage_verdict';
+      detector_kind: typeof AUDIT_KINDS.tierBelowTriageVerdict;
     }
   | {
       kind: 'surface_already_bound';
       rule: string;
       surface_label: string;
-      detector_kind: 'surface_triage_missing';
+      detector_kind: typeof AUDIT_KINDS.surfaceTriageMissing;
     };
 
 /**
@@ -165,47 +178,51 @@ export function composeSaveAuthoringContract(
   const constraints: SaveConstraint[] = [];
 
   // 1. Slug-no-arg-value: agent's `args` must not be tokenized in the slug.
+  // The declared arg VALUES are the compose-time proxy for what the save-
+  // time detector checks (`notes.params.*.observed_values` — which don't
+  // exist yet); the rule text states the prediction explicitly.
   const slugTokenRejects = collectArgValuesAsRejectTokens(args);
   if (slugTokenRejects.tokens.length > 0) {
     constraints.push({
       kind: 'slug_no_arg_value',
-      rule: 'Capability slug must not contain any value the user passed via args. Slug names what the capability does in the abstract; values are parameters.',
+      rule: 'Capability slug must not contain any value the user passed via args. Slug names what the capability does in the abstract; values are parameters. The save-time detector fires when a slug token matches an observed_values entry under notes.params — your declared arg values are the values most likely to end up observed, so a slug containing one predicts that rejection.',
       reject_tokens: slugTokenRejects.tokens,
       arg_names: slugTokenRejects.argNames,
-      detector_kind: 'enum_value_baked_into_slug',
+      detector_kind: WARNING_KINDS.enumValueBakedIntoSlug,
     });
   }
 
   // 2. Surface-already-bound (informational): if the data load's URL is
   // already bound to a triaged surface, the agent doesn't need to
-  // re-triage. Surface the label so they reference it.
-  const surfaceMap = session.surfaceMap;
-  if (surfaceMap && dataLoads.length > 0) {
-    const primaryUrl = dataLoads[0]?.url;
-    if (primaryUrl) {
-      const bound = surfaceLabelFor(surfaceMap, primaryUrl);
-      if (bound) {
-        constraints.push({
-          kind: 'surface_already_bound',
-          rule: `The primary data load's URL is already bound to surface "${bound}" by a prior triage plan. Save uses this surface; no re-triage needed.`,
-          surface_label: bound,
-          detector_kind: 'surface_triage_missing',
-        });
-      }
-    }
+  // re-triage. Resolution rides the same `lookupSurface` the
+  // surface_triage_missing detector uses — templated `{id}` pattern keys
+  // unify here exactly as they will at save time.
+  const primaryUrl = dataLoads[0]?.url;
+  const boundSurface = primaryUrl ? lookupSurface(session, primaryUrl) : undefined;
+  if (boundSurface) {
+    constraints.push({
+      kind: 'surface_already_bound',
+      rule: `The primary data load's URL is already bound to surface "${boundSurface}" by a prior triage plan. Save uses this surface; no re-triage needed.`,
+      surface_label: boundSurface,
+      detector_kind: AUDIT_KINDS.surfaceTriageMissing,
+    });
   }
 
   // 3. Tier-floor: if the agent's own triage_plan declared `expected_tier`,
-  // saves below that tier trip `tier_below_triage_verdict`. Surface the
-  // floor.
-  const tierVerdict = readTriageVerdictTier(platform, capability);
+  // saves below that tier trip `tier_below_triage_verdict`. Resolve the
+  // verdict for the surface the primary data load is bound to (the same
+  // surface the detector will resolve at save time); fall back to the
+  // first planned surface only when the URL is unbound.
+  const tierVerdict = boundSurface
+    ? findTriageVerdict(platform, capability, boundSurface)
+    : findFirstTriageVerdict(platform, capability);
   if (tierVerdict) {
     constraints.push({
       kind: 'tier_floor_from_triage',
       rule: `Your triage plan for surface "${tierVerdict.surface}" declared expected_tier="${tierVerdict.tier}". Saving a strictly worse tier trips the tier_below_triage_verdict detector — it's not ack-bypassable. If reality contradicts the verdict, re-submit triage with a revised expected_tier first.`,
       verdict_tier: tierVerdict.tier,
       surface_label: tierVerdict.surface,
-      detector_kind: 'tier_below_triage_verdict',
+      detector_kind: AUDIT_KINDS.tierBelowTriageVerdict,
     });
   }
 
@@ -236,7 +253,7 @@ export function composeSaveAuthoringContract(
       enumerated_value_count: listing.enumerated_values.length,
       url_param_consumed_in: listing.used_as.url_param,
       link_via_shape: `notes.params.<placeholder>.source = "capability:<your-listing-slug>"`,
-      detector_kind: 'enum_param_listing_unfactored',
+      detector_kind: WARNING_KINDS.enumParamListingUnfactored,
     });
   }
 
@@ -271,33 +288,42 @@ export function composeSaveAuthoringContract(
       data_load_index: i,
       data_load_url: dl.url,
       params,
-      detector_kind: 'captured_query_param_missing_from_strategy',
+      detector_kind: AUDIT_KINDS.capturedQueryParamMissingFromStrategy,
     });
   }
 
   // 6. Auth-gated chain: if cookies are set on a saved capability's
   // origin AND there's a saved capability advertising `provides:["auth"]`
   // (or with the canonical `login` slug per legacy), the data-load save
-  // must declare an auth prereq.
+  // must declare an auth prereq. The rule states the detector's actual
+  // scope (mutating fetch/page-script saves on a cookie-setter origin) so
+  // the prediction matches what fires.
   const firstAuthCap = savedAuthCaps[0];
   if (cookieSetterOrigins.length > 0 && firstAuthCap !== undefined) {
+    const mutatingScope = [...AUTH_GATE_MUTATING_METHODS].join('/');
     constraints.push({
       kind: 'auth_gated_chain_auth_prereq',
-      rule: `Captures set session cookies on ${cookieSetterOrigins.join(', ')}, and platform has saved auth capability "${firstAuthCap}". Your save must declare a prerequisite chained to it (the runtime auto-injects when missing, but declaring upfront avoids the rejection cycle).`,
+      rule:
+        `Captures set session cookies on ${cookieSetterOrigins.join(', ')}, and platform has saved auth capability "${firstAuthCap}". ` +
+        `A mutating (${mutatingScope}) fetch / page-script save targeting one of these origins must declare a prerequisite chained to it ` +
+        `(the runtime auto-injects when missing, but declaring upfront avoids the rejection cycle). ` +
+        `Reads (GET) and recorded-path saves don't trip this detector — cookies auto-ride same-origin requests, so the signal is only load-bearing on mutations.`,
       cookie_setter_origins: cookieSetterOrigins,
       auth_capability_slug: firstAuthCap,
-      detector_kind: 'auth_gated_without_auth_prereq',
+      detector_kind: AUDIT_KINDS.authGatedWithoutAuthPrereq,
     });
   }
 
   // 7. Literal-provenance default-suspicious: standing teaching, applies
   // to every save. Surfaced once in the contract so the agent reads the
-  // policy upfront instead of discovering it via rejections.
+  // policy upfront instead of discovering it via rejections. The concern
+  // is a token-gated Classifier (audit/lift/save-strategy-classifiers.ts),
+  // not a Detector — the agent answers it via audit_answers, not acks.
   constraints.push({
     kind: 'literal_provenance_default_suspicious',
     rule: 'Every literal in the strategy is classified at save time. DEFAULT SUSPICIOUS: only "static" for tokens that won\'t rotate across callers (API paths, query-param KEYS like ?foo=, hostnames, HTTP methods). Anything from observed traffic, anything you typed, any value that could rotate → caller_input or prereq_output.',
     auto_classifiable: [],
-    detector_kind: 'literal_provenance',
+    detector_kind: AUDIT_KINDS.literalProvenance,
   });
 
   return {
@@ -347,13 +373,6 @@ export function inferTier(intercepted: ReadonlyArray<InterceptedRequest>): 'fetc
   return 'fetch';
 }
 
-const TIER_RANK: Record<string, number> = { fetch: 0, 'page-script': 1, 'recorded-path': 2 };
-
-/** Speed-ordered rank of a strategy tier (fetch fastest = 0). Unknown → 0. */
-export function tierRank(tier: string): number {
-  return TIER_RANK[tier] ?? 0;
-}
-
 function collectArgValuesAsRejectTokens(args: Record<string, unknown>): {
   tokens: string[];
   argNames: string[];
@@ -401,41 +420,6 @@ function collectSavedAuthCapabilities(platform: string): string[] {
     if (cap.name === 'login' && !out.includes('login')) out.push('login');
   }
   return out;
-}
-
-function surfaceLabelFor(surfaceMap: ReadonlyMap<string, string>, rawUrl: string): string | null {
-  try {
-    const u = new URL(rawUrl);
-    let pathname = u.pathname || '/';
-    if (pathname.length > 1 && pathname.endsWith('/')) pathname = pathname.slice(0, -1);
-    const key = `${u.protocol}//${u.host.toLowerCase()}${pathname}`;
-    return surfaceMap.get(key) ?? null;
-  } catch {
-    return null;
-  }
-}
-
-function readTriageVerdictTier(
-  platform: string,
-  capability: string,
-): { tier: 'fetch' | 'page-script' | 'recorded-path'; surface: string } | null {
-  let logbook: ReturnType<typeof loadLogbook>;
-  try {
-    logbook = loadLogbook(platform);
-  } catch {
-    return null;
-  }
-  const entry = logbook.per_capability[capability];
-  const plansBySurface = entry?.triage_plans_by_surface;
-  if (!plansBySurface || typeof plansBySurface !== 'object') return null;
-  for (const [surface, plan] of Object.entries(plansBySurface)) {
-    if (typeof plan !== 'object') continue;
-    const t = (plan as { expected_tier?: unknown }).expected_tier;
-    if (t === 'fetch' || t === 'page-script' || t === 'recorded-path') {
-      return { tier: t, surface };
-    }
-  }
-  return null;
 }
 
 function composeEnumParamConstraints(
@@ -520,7 +504,7 @@ function composeEnumParamConstraints(
         observed_via: observedVia,
         listing_capture_index: listingCaptureIndex,
         ui_label_examples: labelPairs.length > 0 ? labelPairs : undefined,
-        detector_kind: 'ungrounded_enum_placeholder',
+        detector_kind: WARNING_KINDS.ungroundedEnumPlaceholder,
       });
     }
   }
