@@ -62,6 +62,16 @@ export type {
   StartUrlTemplateV1,
 } from '../public/contracts/start-url-template';
 export {
+  JOURNAL_EMERGENCY_BYTE_RESERVE_V1,
+  JOURNAL_FRAMES_FIXED_V1,
+  JOURNAL_FRAMES_PER_ITEM_V1,
+  JOURNAL_FRAMES_PER_TASK_V1,
+  JOURNAL_ORDINARY_FRAME_BYTES_V1,
+  minimumJournalBytes,
+  minimumJournalFrames,
+} from '../public/contracts/journal-budget';
+export {
+  parseCollectionRunPolicy,
   parseScrapeLimit,
   parseScrapeRunPolicy,
   resolveEffectiveRunBounds,
@@ -118,7 +128,6 @@ export {
   createRunOperationId,
   createRunId,
   encodeJournalFrame,
-  JOURNAL_EMERGENCY_BYTE_RESERVE_V1,
   parseJournalEvent,
   parseRunId,
   parseRunOperationId,
@@ -303,7 +312,13 @@ export type {
   ReadLocalSessionV1,
   SessionStorePathsV1,
 } from './sessions/store';
-export { executeNodeHttpStrategy, PublicHttpExecutionError } from './execution/node-http';
+export {
+  buildPublicHttpRequest,
+  consumerUserAgent,
+  executeNodeHttpStrategy,
+  outgoingRequestHeaders,
+  PublicHttpExecutionError,
+} from './execution/node-http';
 export type { PublicHttpExecutionOptionsV1, PublicHttpResponseV1 } from './execution/node-http';
 export { executeBrowserNavigationStrategy } from './execution/public-browser/executor';
 export type { PublicBrowserExecutionOptionsV1 } from './execution/public-browser/executor';

@@ -319,12 +319,7 @@ function sendConsumerRequest<Result>(
             return;
           }
           if (response.statusCode !== 200) {
-            finish(
-              new ConsumerDaemonClientError(
-                'daemon_rejected',
-                'daemon rejected the consumer request',
-              ),
-            );
+            finish(new ConsumerDaemonClientError('daemon_rejected', rejectionMessage(parsed)));
             return;
           }
           finish(undefined, parsed as Result);
@@ -340,6 +335,14 @@ function sendConsumerRequest<Result>(
     signal?.addEventListener('abort', onAbort, { once: true });
     request.end(payload);
   });
+}
+
+/** The daemon's own explanation for a non-200 reply, when it sent one. */
+function rejectionMessage(body: unknown): string {
+  const fallback = 'daemon rejected the consumer request';
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return fallback;
+  const text = (body as { error?: unknown }).error;
+  return typeof text === 'string' && text.length > 0 ? `${fallback}: ${text}` : fallback;
 }
 
 function openConsumerStream(

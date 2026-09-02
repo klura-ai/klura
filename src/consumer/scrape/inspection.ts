@@ -1,10 +1,12 @@
-import { PublicContractError } from '../../public/contracts/common';
+import { PublicContractError, type StableContractIdV1 } from '../../public/contracts/common';
 import {
   recoverJournalFile,
   RunJournalError,
   type RunCancellationSourceV1,
-  type TerminalRunStopV1,
   type RunIdV1,
+  type RunNodeIdV1,
+  type RunStopV1,
+  type TerminalRunStopV1,
 } from './journal';
 import { RunStoreV1, type RunMetaEnvelopeV1 } from './run-store';
 
@@ -30,6 +32,16 @@ export interface StoredRunInspectionV1 {
   state_version: number;
   lifecycle: StoredRunLifecycleV1;
   committed_item_count: number;
+  /** The last recorded cause behind a stop, when the run wrote one. */
+  stop_reason: StoredStopReasonV1 | null;
+}
+
+export interface StoredStopReasonV1 {
+  stop: RunStopV1;
+  message: string;
+  node_id: RunNodeIdV1 | null;
+  task_kind_id: StableContractIdV1 | null;
+  sequence: number;
 }
 
 export class RunInspectionError extends PublicContractError {
@@ -59,9 +71,19 @@ export function inspectStoredRun(store: RunStoreV1, runId: RunIdV1): StoredRunIn
     let interrupted: Extract<StoredRunLifecycleV1, { kind: 'interrupted' }> | null = null;
     let cancelling: Extract<StoredRunLifecycleV1, { kind: 'cancelling' }> | null = null;
     let committedItems = 0;
+    let stopReason: StoredStopReasonV1 | null = null;
     for (const frame of frames) {
       const event = frame.body.event;
       if (event.kind === 'item_committed') committedItems += 1;
+      if (event.kind === 'stop_reason') {
+        stopReason = {
+          stop: event.stop,
+          message: event.message,
+          node_id: event.node_id,
+          task_kind_id: event.task_kind_id,
+          sequence: frame.body.sequence,
+        };
+      }
       if (event.kind !== 'terminal') {
         if (terminal !== null) {
           throw new PublicContractError('run.journal', 'contains work after its terminal frame');
@@ -104,6 +126,7 @@ export function inspectStoredRun(store: RunStoreV1, runId: RunIdV1): StoredRunIn
           last_sequence: frames.at(-1)?.body.sequence ?? 0,
         },
       committed_item_count: committedItems,
+      stop_reason: stopReason,
     };
   } catch (error) {
     if (error instanceof RunJournalError || error instanceof PublicContractError) {

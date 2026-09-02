@@ -110,6 +110,16 @@ export default tseslint.config(
     },
   },
   {
+    // Durable run orchestrator: frontier scheduling, task-chain execution,
+    // ceiling checks, and stop classification all mutate one execution state
+    // and one journal. Splitting threads the same state refs through new
+    // module boundaries; the pure guards already live in chain-guards.ts.
+    files: ['src/consumer/scrape/run-service.ts'],
+    rules: {
+      'max-lines': 'off',
+    },
+  },
+  {
     // Top-level execute() orchestrator + cascade-failure helpers live as
     // one cohesive module. Splitting bounces the reader between files for
     // very tightly-coupled error-classification logic. Ignore for now.

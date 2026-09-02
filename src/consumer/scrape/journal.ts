@@ -1,3 +1,4 @@
+import { parseRunNodeId, parseRunStop, parseStopReasonEvent } from './stop-reason';
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -11,11 +12,17 @@ import {
   type Sha256DigestV1,
   type StableContractIdV1,
 } from '../../public/contracts/common';
+import {
+  JOURNAL_EMERGENCY_FRAME_RESERVE_V1,
+  JOURNAL_FRAME_HEADER_BYTES_V1,
+  JOURNAL_FRAME_TRAILER_BYTES_V1,
+} from '../../public/contracts/journal-budget';
 import { canonicalJson, parseStrictJson, type JsonValueV1 } from '../../public/contracts/json';
 import { parseBlobRef, type BlobRefV1 } from './data-spool';
 
 export type RunIdV1 = `run_v1_${string}`;
 export type RunNodeIdV1 = `node_v1_${string}`;
+export { parseRunNodeId, parseRunStop } from './stop-reason';
 export type RunOperationIdV1 = `op_v1_${string}`;
 
 /** A stable hierarchy position assigned before a collection node is enqueued. */
@@ -155,6 +162,15 @@ export type JournalEventV1 =
       stop: RunStopV1;
     }
   | {
+      /** Why a stop was chosen, in the words of the check that chose it. Written
+       *  beside the stop so an operator reads the cause, not only the class. */
+      kind: 'stop_reason';
+      node_id: RunNodeIdV1 | null;
+      task_kind_id: StableContractIdV1 | null;
+      stop: RunStopV1;
+      message: string;
+    }
+  | {
       kind: 'interrupted';
       reason: 'daemon_stopped' | 'daemon_crash' | 'process_crash' | 'browser_crash';
     }
@@ -197,15 +213,7 @@ export class RunJournalError extends PublicContractError {
 }
 
 const MAX_FRAME_BODY_BYTES_V1 = 1024 * 1024;
-export const JOURNAL_FRAME_HEADER_BYTES_V1 = 4;
-export const JOURNAL_FRAME_TRAILER_BYTES_V1 = 32;
-export const JOURNAL_EMERGENCY_FRAME_BODY_BYTES_V1 = 65_536;
-export const JOURNAL_EMERGENCY_FRAME_RESERVE_V1 = 5;
-export const JOURNAL_EMERGENCY_BYTE_RESERVE_V1 =
-  JOURNAL_EMERGENCY_FRAME_RESERVE_V1 *
-  (JOURNAL_FRAME_HEADER_BYTES_V1 +
-    JOURNAL_EMERGENCY_FRAME_BODY_BYTES_V1 +
-    JOURNAL_FRAME_TRAILER_BYTES_V1);
+
 const MAX_TERMINAL_DESCRIPTOR_BYTES_V1 = 16 * 1024;
 
 /** Keeps the terminal frame allowance available before ordinary journal work. */
@@ -256,13 +264,6 @@ export function parseRunOperationId(value: unknown, field: string): RunOperation
     throw new PublicContractError(field, 'must be a canonical run operation id');
   }
   return value as RunOperationIdV1;
-}
-
-export function parseRunNodeId(value: unknown, field: string): RunNodeIdV1 {
-  if (typeof value !== 'string' || !/^node_v1_[0-9a-f]{32}$/.test(value)) {
-    throw new PublicContractError(field, 'must be a canonical run node id');
-  }
-  return value as RunNodeIdV1;
 }
 
 export function encodeJournalFrame(body: JournalFrameBodyV1): Buffer {
@@ -715,6 +716,7 @@ export function parseJournalEvent(value: unknown, field: string): JournalEventV1
       stop: parseRunStop(record.stop, `${field}.stop`),
     };
   }
+  if (kind === 'stop_reason') return parseStopReasonEvent(value, field);
   if (kind === 'node_completed') {
     const record = parseExactRecord(value, field, ['kind', 'node_id']);
     return { kind, node_id: parseRunNodeId(record.node_id, `${field}.node_id`) };
@@ -895,20 +897,6 @@ function parseJournalState(
   };
 }
 
-function parseRunStop(value: unknown, field: string): RunStopV1 {
-  if (
-    value === 'cancelled' ||
-    value === 'deadline_exhausted' ||
-    value === 'task_failed' ||
-    value === 'run_budget_exhausted' ||
-    value === 'item_invalid' ||
-    value === 'output_sink_failure'
-  ) {
-    return value;
-  }
-  throw new PublicContractError(field, 'is invalid');
-}
-
 // Completion and incomplete terminals intentionally use distinct closed unions.
 function parseItemLogicalOrder(value: unknown, field: string): ItemLogicalOrderV1 {
   const record = parseExactRecord(value, field, ['node_ordinal', 'page_ordinal', 'item_ordinal']);
@@ -967,6 +955,7 @@ function readEventKind(value: unknown, field: string): string {
     kind !== 'output_committed' &&
     kind !== 'node_completed' &&
     kind !== 'task_skipped' &&
+    kind !== 'stop_reason' &&
     kind !== 'interrupted' &&
     kind !== 'cancel_requested' &&
     kind !== 'terminal'

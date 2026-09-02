@@ -1,3 +1,13 @@
+import { JOURNAL_EMERGENCY_BYTE_RESERVE_V1 } from '../../public/contracts/journal-budget';
+import {
+  ceilingReachedAfterPage,
+  chainStopForError,
+  describeResult,
+  missingTaskCause,
+  paginationInputIssue,
+  stopReasonEvent,
+  type StopReasonInputV1,
+} from './chain-guards';
 import { OriginSchedulerV1 } from '../execution/origin-scheduler';
 import { PublicCallerV1 } from '../call';
 import { appendDataBlob, DataSpoolError } from './data-spool';
@@ -7,7 +17,6 @@ import {
   createRunId,
   createRunOperationId,
   hasOrdinaryJournalCapacity,
-  JOURNAL_EMERGENCY_BYTE_RESERVE_V1,
   parseRunId,
   parseRunOperationId,
   type JournalEventV1,
@@ -34,7 +43,7 @@ import {
   resolveBoundedAttemptConcurrency,
 } from './attempt-order';
 import { enqueueDurableNode, persistDurableNodeProgress } from './durable-frontier';
-import { ItemValidationError, RunBudgetExceededError } from './task-chain-errors';
+import { RunBudgetExceededError } from './task-chain-errors';
 import { failedTaskChain } from './task-chain-result';
 import { createRunExecutionControl } from './run-execution-control';
 import { appendEmergencyJournalEvent } from './journal-emergency';
@@ -45,7 +54,7 @@ import {
   finalizeSuccessfulRun,
 } from './output-finalization';
 import { nextPaginationInput } from './pagination';
-import { SemanticStopItemError, SemanticStopTrackerV1 } from './semantic-stops';
+import { SemanticStopTrackerV1 } from './semantic-stops';
 import {
   bufferRunItems,
   commitBufferedRunItems,
@@ -63,13 +72,12 @@ import type { LocalScrapeRunResultV1, StartedScrapeRunV1 } from './run-result';
 import { isAcceptedPageResult } from './task-result';
 import { calculateCollectionContractDigest } from '../../public/contracts/collection';
 import {
-  PublicContractError,
   parseRfc3339Instant,
+  PublicContractError,
   sha256Digest,
   type CapabilityIdV1,
 } from '../../public/contracts/common';
 import { canonicalJson, type JsonValueV1 } from '../../public/contracts/json';
-import { validateJsonSchema } from '../../public/contracts/json-schema';
 import type { PublicReadCapabilityV1 } from '../../public/contracts/package';
 import type { ScrapeRunPolicyV1 } from '../../public/contracts/scrape-policy';
 
@@ -465,6 +473,17 @@ export class ScrapeRunServiceV1 {
           const task = taskKinds.get(node.task_kind_id);
           const capability = input.capabilities[node.capability];
           if (!task || !capability) {
+            this.recordStopReason(
+              input.run_id,
+              input.policy.durable.max_journal_bytes,
+              input.state,
+              {
+                node_id: node.node_id,
+                task_kind_id: node.task_kind_id,
+                stop: 'task_failed',
+                cause: missingTaskCause(node, task),
+              },
+            );
             return this.finish(input.run_id, input.state, 'task_failed', input.sink);
           }
           batch.push({ node, task, capability });
@@ -571,6 +590,17 @@ export class ScrapeRunServiceV1 {
             } catch (error) {
               if (!(error instanceof PublicContractError)) throw error;
               if (task.on_failure === 'stop_run') {
+                this.recordStopReason(
+                  input.run_id,
+                  input.policy.durable.max_journal_bytes,
+                  input.state,
+                  {
+                    node_id: node.node_id,
+                    task_kind_id: task.id,
+                    stop: 'task_failed',
+                    cause: error,
+                  },
+                );
                 return this.finish(input.run_id, input.state, 'task_failed', input.sink);
               }
               input.state.had_independent_failure = true;
@@ -649,8 +679,21 @@ export class ScrapeRunServiceV1 {
         : input.named_limits[input.task.pagination.max_pages_per_chain.id];
     const fail = (
       stop: Extract<TaskChainExecutionResultV1, { kind: 'failed' }>['stop'],
-    ): Extract<TaskChainExecutionResultV1, { kind: 'failed' }> => failedTaskChain(input, stop);
-    if (maximumPagesInChain === undefined) return fail('task_failed');
+      cause?: unknown,
+    ): Extract<TaskChainExecutionResultV1, { kind: 'failed' }> => {
+      if (cause !== undefined) {
+        this.recordStopReason(input.run_id, input.policy.durable.max_journal_bytes, input.state, {
+          node_id: input.node.node_id,
+          task_kind_id: input.task.id,
+          stop,
+          cause,
+        });
+      }
+      return failedTaskChain(input, stop);
+    };
+    if (maximumPagesInChain === undefined) {
+      return fail('task_failed', 'the pagination page limit is not among the run limits');
+    }
     let taskInput = input.node.input;
     const seenInputs = new Set<string>(input.node.seen_input_digests);
     const emittedItems =
@@ -771,7 +814,7 @@ export class ScrapeRunServiceV1 {
             if (result.kind === 'failure' && result.code === 'cancelled') {
               return fail('cancelled');
             }
-            return fail('task_failed');
+            return fail('task_failed', `page attempt returned ${describeResult(result)}`);
           }
           const bufferedPage = input.task.terminal_outcome_ids.includes(result.outcome_id)
             ? { items: [] }
@@ -842,10 +885,20 @@ export class ScrapeRunServiceV1 {
             chainActive = false;
             continue;
           }
+          // The page just committed may have reached a ceiling; a continuation
+          // the budgets forbid is a budget stop, decided before the next page is
+          // validated, so it is never reported as an item or task problem.
+          const stopAfterCommit =
+            input.stop() ??
+            ceilingReachedAfterPage(input, pagesStartedInChain, maximumPagesInChain);
+          if (stopAfterCommit !== null) return fail(stopAfterCommit);
           const digest = sha256Digest(canonicalJson(continuation));
-          if (seenInputs.has(digest)) return fail('task_failed');
+          if (seenInputs.has(digest)) {
+            return fail('task_failed', 'pagination produced an input this chain already used');
+          }
           seenInputs.add(digest);
-          validateJsonSchema(continuation, input.capability.input_schema, 'run.pagination.input');
+          const continuationIssue = paginationInputIssue(continuation, input.capability);
+          if (continuationIssue !== null) return fail('task_failed', continuationIssue);
           taskInput = continuation;
           input.node.input = continuation;
           input.node.seen_input_digests = [...seenInputs];
@@ -868,28 +921,13 @@ export class ScrapeRunServiceV1 {
             return fail('run_budget_exhausted');
           }
         } catch (error) {
-          if (error instanceof RunBudgetExceededError) {
-            await claimCommitTurn();
-            return fail('run_budget_exhausted');
+          const stop = chainStopForError(error);
+          if (stop === null) {
+            input.attempt_order.abort(error);
+            throw error;
           }
-          if (error instanceof DataSpoolError && error.code === 'durable_budget_exhausted') {
-            await claimCommitTurn();
-            return fail('run_budget_exhausted');
-          }
-          if (error instanceof RunOutputSinkError) {
-            await claimCommitTurn();
-            return fail('output_sink_failure');
-          }
-          if (
-            error instanceof ItemValidationError ||
-            error instanceof SemanticStopItemError ||
-            error instanceof PublicContractError
-          ) {
-            await claimCommitTurn();
-            return fail('item_invalid');
-          }
-          input.attempt_order.abort(error);
-          throw error;
+          await claimCommitTurn();
+          return fail(stop, error);
         } finally {
           if (reservationHeld) {
             input.state.reserved_target_requests -= input.capability.max_target_requests_per_call;
@@ -957,6 +995,17 @@ export class ScrapeRunServiceV1 {
     state.sequence = appended.body.sequence;
     state.previous_digest = appended.digest;
     return true;
+  }
+
+  /** Writes the cause behind a stop beside the frames that chose it, on the
+   *  emergency path: a cause matters most when the ordinary budget ran out. */
+  private recordStopReason(
+    runId: RunIdV1,
+    maximumJournalBytes: number,
+    state: ExecutionStateV1,
+    reason: StopReasonInputV1,
+  ): void {
+    this.appendEmergency(runId, maximumJournalBytes, state, stopReasonEvent(reason));
   }
 
   private appendEmergency(

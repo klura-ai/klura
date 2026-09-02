@@ -75,6 +75,14 @@ import {
   recoverRunState,
   recoverJournalFile,
   RunStoreV1,
+  readJournal,
+  JOURNAL_FRAMES_FIXED_V1,
+  JOURNAL_FRAMES_PER_ITEM_V1,
+  JOURNAL_FRAMES_PER_TASK_V1,
+  minimumJournalFrames,
+  minimumJournalBytes,
+  JOURNAL_EMERGENCY_BYTE_RESERVE_V1,
+  JOURNAL_ORDINARY_FRAME_BYTES_V1,
   SessionStoreError,
   SessionStoreV1,
   ScrapeRunServiceV1,
@@ -89,6 +97,7 @@ const require = createRequire(import.meta.url);
 const ts = require('typescript');
 const {
   executeNodeHttpStrategy,
+  outgoingRequestHeaders,
   PublicHttpExecutionError,
 } = require('../dist/consumer/execution/node-http.js');
 const { OriginSchedulerV1 } = require('../dist/consumer/execution/origin-scheduler.js');
@@ -3556,6 +3565,27 @@ test('public packages bind a finite read collection to reviewed capabilities and
         target_requests: 3,
       },
     });
+    // The declared frame floor must hold for what a run actually appends,
+    // or a package could pass the parser and still exhaust its own journal.
+    const appendedJournal = readJournal(
+      readFileSync(new RunStoreV1(runHome).journalPath(run.run_id)),
+      run.run_id,
+    );
+    const appendedFrames = appendedJournal.frames.length;
+    for (const frame of appendedJournal.frames) {
+      const bytes = frame.end_offset - frame.offset;
+      assert.ok(
+        bytes <= JOURNAL_ORDINARY_FRAME_BYTES_V1,
+        `${frame.body.event.kind} frame encodes to ${bytes} bytes, above the per-frame allowance`,
+      );
+    }
+    assert.ok(
+      appendedFrames <=
+        JOURNAL_FRAMES_FIXED_V1 +
+          JOURNAL_FRAMES_PER_TASK_V1 * run.summary.tasks_completed +
+          JOURNAL_FRAMES_PER_ITEM_V1 * (run.summary.items_emitted + run.summary.items_duplicate),
+      `run appended ${appendedFrames} journal frames, above the declared per-task and per-item accounting`,
+    );
     const storedRunMeta = new RunStoreV1(runHome).read(run.run_id).payload;
     assert.deepEqual(storedRunMeta.output, {
       kind: 'file',
@@ -4414,10 +4444,10 @@ test('public packages bind a finite read collection to reviewed capabilities and
     } finally {
       rmSync(budgetHome, { recursive: true, force: true });
     }
-    const journalValue = JSON.parse(JSON.stringify(value));
-    journalValue.capabilities.get_product.collection.run_policy.durable.max_journal_frames = 6;
-    journalValue.manifest_digest = calculatePublicToolPackageManifestDigest(journalValue);
-    const journalPackage = parsePublicToolPackage(journalValue);
+    // The parser refuses a frame budget below what the declared ceilings need,
+    // so the runtime's own reserve check is exercised on the parsed policy.
+    const journalPackage = parsePublicToolPackage(JSON.parse(JSON.stringify(value)));
+    journalPackage.capabilities.get_product.collection.run_policy.durable.max_journal_frames = 6;
     const journalHome = mkdtempSync(path.join(os.tmpdir(), 'klura-run-journal-budget-'));
     try {
       let dispatched = false;
@@ -6558,4 +6588,85 @@ test('package store rejects unverified or non-JSON bytes before activation', () 
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test('a package cannot place a non-string input in an endpoint, query, or header slot', () => {
+  const value = publicPackageValue();
+  const capability = value.capabilities.get_product;
+  capability.input_schema.properties.id = { type: 'integer', minimum: 1 };
+  value.manifest_digest = calculatePublicToolPackageManifestDigest(value);
+  assert.throws(
+    () => parsePublicToolPackage(value),
+    (error) =>
+      error instanceof PublicContractError &&
+      error.field === 'package.capabilities.get_product.strategies[0].request.query.id' &&
+      /declared integer/.test(error.message) &&
+      /to_string/.test(error.message),
+  );
+  capability.strategies[0].request.query.id = {
+    op: 'to_string',
+    value: { op: 'input', pointer: '/id' },
+  };
+  value.manifest_digest = calculatePublicToolPackageManifestDigest(value);
+  assert.equal(parsePublicToolPackage(value).capabilities.get_product.input_schema.properties.id.type, 'integer');
+  capability.strategies[0].request.headers['x-page'] = { op: 'literal', value: 2 };
+  value.manifest_digest = calculatePublicToolPackageManifestDigest(value);
+  assert.throws(
+    () => parsePublicToolPackage(value),
+    (error) =>
+      error instanceof PublicContractError &&
+      error.field === 'package.capabilities.get_product.strategies[0].request.headers.x-page',
+  );
+});
+
+test('outgoing target requests identify the runtime unless the package labels itself', () => {
+  const url = new URL('https://api.example.test/products?id=1');
+  const defaulted = outgoingRequestHeaders({ headers: { accept: 'application/json' }, url });
+  assert.match(defaulted['user-agent'], /^klura\/\d+\.\d+\.\d+$/);
+  assert.equal(defaulted.accept, 'application/json');
+  assert.equal(defaulted.host, 'api.example.test');
+  const declared = outgoingRequestHeaders({ headers: { 'user-agent': 'acme-tool/2' }, url });
+  assert.equal(declared['user-agent'], 'acme-tool/2');
+});
+
+test('a collection cannot declare a journal frame budget its own ceilings would exhaust', () => {
+  const value = authenticatedCollectionPackageValue();
+  const policy = value.capabilities.get_product.collection.run_policy;
+  policy.max_items = 10;
+  value.manifest_digest = calculatePublicToolPackageManifestDigest(value);
+  assert.throws(
+    () => parsePublicToolPackage(value),
+    (error) =>
+      error instanceof PublicContractError &&
+      error.field ===
+        'package.capabilities.get_product.collection.run_policy.durable.max_journal_frames' &&
+      /need at least 44/.test(error.message),
+  );
+  assert.equal(minimumJournalFrames({ max_tasks: policy.max_tasks, max_items: 10 }), 44);
+  policy.durable.max_journal_frames = 44;
+  value.manifest_digest = calculatePublicToolPackageManifestDigest(value);
+  assert.equal(
+    parsePublicToolPackage(value).capabilities.get_product.collection.run_policy.durable
+      .max_journal_frames,
+    44,
+  );
+  policy.max_items = 100;
+  policy.durable.max_journal_frames = minimumJournalFrames({ max_tasks: policy.max_tasks, max_items: 100 });
+  policy.durable.max_journal_bytes = 393_432;
+  value.manifest_digest = calculatePublicToolPackageManifestDigest(value);
+  assert.throws(
+    () => parsePublicToolPackage(value),
+    (error) =>
+      error instanceof PublicContractError &&
+      error.field ===
+        'package.capabilities.get_product.collection.run_policy.durable.max_journal_bytes' &&
+      /reserved for emergency frames/.test(error.message),
+  );
+  policy.durable.max_journal_bytes = minimumJournalBytes({ max_tasks: policy.max_tasks, max_items: 100 });
+  value.manifest_digest = calculatePublicToolPackageManifestDigest(value);
+  assert.equal(
+    parsePublicToolPackage(value).capabilities.get_product.collection.run_policy.durable
+      .max_journal_bytes,
+    JOURNAL_EMERGENCY_BYTE_RESERVE_V1 + JOURNAL_ORDINARY_FRAME_BYTES_V1 * (9 + 5 * policy.max_tasks + 300),
+  );
 });

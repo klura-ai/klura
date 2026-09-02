@@ -12,7 +12,7 @@ import { parseScrapeTaskKinds, type ScrapeTaskKindV1 } from './collection-topolo
 import { parseJsonSchema, type JsonSchemaV1 } from './json-schema';
 import { parseInlineOutputBound, type InlineOutputBoundV1 } from './inline-output-bound';
 import { canonicalJson, type JsonValueV1 } from './json';
-import { parseScrapeRunPolicy, type ScrapeRunPolicyV1 } from './scrape-policy';
+import { parseCollectionRunPolicy, type ScrapeRunPolicyV1 } from './scrape-policy';
 import { parseSemanticStops, type SemanticStopV1 } from './semantic-stop';
 import { parseStartUrlTemplate, type StartUrlTemplateV1 } from './start-url-template';
 
@@ -92,7 +92,7 @@ export function parseCollectionRunContract(value: unknown, field: string): Colle
     csv_columns: parseCsvColumns(record.csv_columns, `${field}.csv_columns`),
     task_kinds: taskKinds,
     max_fanout_depth: parseInteger(record.max_fanout_depth, `${field}.max_fanout_depth`, 0, 3),
-    run_policy: parseScrapeRunPolicy(record.run_policy, `${field}.run_policy`),
+    run_policy: parseCollectionRunPolicy(record.run_policy, `${field}.run_policy`),
   };
   validateTemplateReferences(contract, field);
   validateCollectionLimitIds(contract, field);

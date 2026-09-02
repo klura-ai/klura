@@ -1,9 +1,11 @@
 import {
-  appendJournalFrame,
-  encodeJournalFrame,
   JOURNAL_EMERGENCY_FRAME_BODY_BYTES_V1,
   JOURNAL_FRAME_HEADER_BYTES_V1,
   JOURNAL_FRAME_TRAILER_BYTES_V1,
+} from '../../public/contracts/journal-budget';
+import {
+  appendJournalFrame,
+  encodeJournalFrame,
   type JournalEventV1,
   type JournalFrameV1,
   type RunIdV1,

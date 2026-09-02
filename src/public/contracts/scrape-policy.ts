@@ -11,6 +11,15 @@ import {
   CONSUMER_LIMITS_MAX_ENTRIES_V1,
   type CallerBoundKeyV1,
 } from './consumer-bounds';
+import {
+  JOURNAL_EMERGENCY_BYTE_RESERVE_V1,
+  JOURNAL_FRAMES_FIXED_V1,
+  JOURNAL_FRAMES_PER_ITEM_V1,
+  JOURNAL_FRAMES_PER_TASK_V1,
+  JOURNAL_ORDINARY_FRAME_BYTES_V1,
+  minimumJournalBytes,
+  minimumJournalFrames,
+} from './journal-budget';
 import { parseCallRetryPolicy, type CallRetryPolicyV1 } from './outcome';
 
 export interface DurableRunBoundsV1 {
@@ -104,6 +113,29 @@ export function parseScrapeRunPolicy(value: unknown, field: string): ScrapeRunPo
     retry: parseCallRetryPolicy(record.retry, `${field}.retry`),
     durable: parseDurableBounds(record.durable, `${field}.durable`),
   };
+}
+
+/** Parses a collection's declared run policy and refuses one whose journal
+ *  frame budget cannot hold its own task and item ceilings. A stored run meta
+ *  is parsed without this gate: its bounds were accepted at package parse time
+ *  and may since have been lowered by the caller. */
+export function parseCollectionRunPolicy(value: unknown, field: string): ScrapeRunPolicyV1 {
+  const policy = parseScrapeRunPolicy(value, field);
+  const frameFloor = minimumJournalFrames(policy);
+  if (policy.durable.max_journal_frames < frameFloor) {
+    throw new PublicContractError(
+      `${field}.durable.max_journal_frames`,
+      `is ${policy.durable.max_journal_frames} but ${policy.max_items} items across ${policy.max_tasks} tasks need at least ${frameFloor} (${JOURNAL_FRAMES_FIXED_V1} fixed + ${JOURNAL_FRAMES_PER_TASK_V1} per task + ${JOURNAL_FRAMES_PER_ITEM_V1} per item); the run would exhaust its journal before reaching its own ceilings`,
+    );
+  }
+  const byteFloor = minimumJournalBytes(policy);
+  if (policy.durable.max_journal_bytes < byteFloor) {
+    throw new PublicContractError(
+      `${field}.durable.max_journal_bytes`,
+      `is ${policy.durable.max_journal_bytes} but ${frameFloor} frames need at least ${byteFloor} (${JOURNAL_EMERGENCY_BYTE_RESERVE_V1} reserved for emergency frames + ${JOURNAL_ORDINARY_FRAME_BYTES_V1} per ordinary frame); the run would exhaust its journal before reaching its own ceilings`,
+    );
+  }
+  return policy;
 }
 
 export function parseScrapeLimit(value: unknown, field: string): ScrapeLimitV1 {
