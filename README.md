@@ -5,9 +5,9 @@
   </picture>
 </p>
 
-<p align="center"><strong>Maintained web-data tools that run entirely on your machine.</strong></p>
+<p align="center"><strong>Get data out of a website without writing a scraper.</strong></p>
 
-<p align="center"><sub>Search a GitHub-hosted catalog, install one signed tool, then call it or run a bounded scrape locally.</sub></p>
+<p align="center"><sub>Install a tool someone already built for that site, call it, get clean data back. It all runs on your machine.</sub></p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@klura/runtime"><img alt="npm version" src="https://img.shields.io/npm/v/@klura/runtime?style=flat-square&logo=npm&color=cb3837"></a>
@@ -20,15 +20,36 @@
 
 ---
 
-# Local web data tools, maintained on GitHub
+# What klura does
 
-Klura is a local execution runtime and public catalog for maintained web-data tools. The catalog is static and signed; package bytes, browser sessions, scrape output, and target-site traffic stay on your machine. No account, LLM key, or hosted execution is required to use an installed tool.
+You want the top GitHub repositories matching "web scraping". Or every product on a search page. Normally that means writing a scraper, then rewriting it the next time the site changes.
 
-```text
-search → inspect → install → call once or run a bounded scrape
+klura skips that. Someone has already built and maintained a tool for the site, and you install it:
+
+```bash
+npm install -g @klura/runtime
+
+klura install github
+klura call github.search_repositories --input '{"query":"web scraping"}'
 ```
 
-Each package declares its input/output schema, exact network permissions, outcome verification, request limits, and—where applicable—a finite collection graph. The runtime treats a `200` response or an empty result as untrusted until the package's structural contract verifies it.
+You get back structured data, checked against the shape the tool promised. Not HTML to parse.
+
+```text
+search → inspect → install → call once, or run a bounded scrape
+```
+
+**Two ways to use a tool.** `call` does one read and hands you one verified result. `run` collects a bounded set into a file — it has hard limits on items, pages, requests, and time, and you can leave it running, check on it, cancel it, or resume it.
+
+**It runs on your machine.** The tool, the browser, the traffic to the site, and the output all stay local. No account, no LLM key, nothing executing on someone else's server. Inside a company that counts twice: what you look up and what comes back never pass through a third-party scraping vendor, and there is no external service to put through procurement or a data-processing review.
+
+**Tools say what they will do before they do it.** Every tool declares which domains it may reach, how many requests it may make, and what its output looks like. You can read all of that with `klura show` before installing. The runtime holds it to that declaration.
+
+**Nothing counts as success just because it returned.** A `200` response, or an empty list, means nothing on its own — sites serve error pages and empty shells with a `200` all the time. The runtime only reports success when the data matches what the tool said it would return.
+
+**You pick the version.** The catalog is a signed index hosted on GitHub. You choose what to install, and an installed tool never changes underneath you.
+
+**Companies can use it internally for free.** klura is source-available under BUSL-1.1. Running it on your own machines and inside your company — including for ordinary commercial work — is covered by the Additional Use Grant at no cost, so a team can put it into production without a purchase. The line it draws is reselling: you may not offer klura to third parties as a hosted service or API, or build a competing service on it. Full terms in [LICENSE](LICENSE); for a commercial license that lifts those limits, [hello@klura.ai](mailto:hello@klura.ai).
 
 ---
 
