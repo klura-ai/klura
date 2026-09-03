@@ -6670,3 +6670,76 @@ test('a collection cannot declare a journal frame budget its own ceilings would 
     JOURNAL_EMERGENCY_BYTE_RESERVE_V1 + JOURNAL_ORDINARY_FRAME_BYTES_V1 * (9 + 5 * policy.max_tasks + 300),
   );
 });
+
+test('a json_array_map projection caps the rows a call returns when it declares a limit', () => {
+  const contract = (limit) =>
+    parseOutcomeContract(
+      {
+        outcome_id: 'rows',
+        class: 'success',
+        output_schema: {
+          type: 'array',
+          minItems: 0,
+          maxItems: 10,
+          items: {
+            type: 'object',
+            properties: { id: { type: 'string', minLength: 1, maxLength: 8 } },
+            required: ['id'],
+            additionalProperties: false,
+          },
+        },
+        cases: [
+          {
+            case_id: 'rows_read',
+            strategy_ids: ['request'],
+            matcher: { op: 'all', items: [{ op: 'status_in', values: [200] }] },
+            projection: {
+              kind: 'json_array_map',
+              items_pointer: '/entries',
+              include_when: {
+                op: 'equals',
+                left: { kind: 'ref', ref: { from: 'raw_item', pointer: '/keep' } },
+                right: { kind: 'literal', value: true },
+              },
+              projection: {
+                op: 'object',
+                entries: { id: { op: 'get', from: 'raw_item', pointer: '/id' } },
+              },
+              ...(limit === undefined ? {} : { limit }),
+            },
+            assertions: [],
+            retry_after: null,
+          },
+        ],
+      },
+      'outcome',
+      ['request'],
+    );
+  const response = {
+    status: 200,
+    headers: {},
+    media_type: 'application/json',
+    body_kind: 'json_object',
+    body: {
+      entries: [
+        { id: 'a', keep: true },
+        { id: 'b', keep: false },
+        { id: 'c', keep: true },
+        { id: 'd', keep: true },
+      ],
+    },
+  };
+  assert.equal(contract().cases[0].projection.limit, null);
+  assert.deepEqual(
+    evaluateOutcomeContracts([contract()], 'request', response, { input: {} }).data,
+    [{ id: 'a' }, { id: 'c' }, { id: 'd' }],
+  );
+  assert.deepEqual(
+    evaluateOutcomeContracts([contract(2)], 'request', response, { input: {} }).data,
+    [{ id: 'a' }, { id: 'c' }],
+  );
+  assert.throws(
+    () => contract(0),
+    (error) => error instanceof PublicContractError && /limit/.test(error.field),
+  );
+});

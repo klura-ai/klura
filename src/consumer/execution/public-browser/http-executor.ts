@@ -6,7 +6,7 @@ import type {
 } from '../../../public/contracts/package';
 import {
   buildPublicHttpRequest,
-  parsePublicJsonResponse,
+  projectPublicResponse,
   PublicHttpExecutionError,
   type PublicHttpResponseV1,
 } from '../node-http';
@@ -154,7 +154,11 @@ export async function executeBrowserHttpStrategy(
       pageGuard.assertHealthy();
       boundary.assertHealthy();
       return {
-        ...parsePublicJsonResponse({ status: fetched.status, headers: fetched.headers, bytes }),
+        ...projectPublicResponse(strategy.projection, {
+          status: fetched.status,
+          headers: fetched.headers,
+          bytes,
+        }),
         target_requests: boundary.target_requests(),
       };
     } finally {
@@ -294,7 +298,11 @@ export async function executeBrowserHttpStrategyInBoundedPage(
       );
     }
     return {
-      ...parsePublicJsonResponse({ status: fetched.status, headers: fetched.headers, bytes }),
+      ...projectPublicResponse(strategy.projection, {
+        status: fetched.status,
+        headers: fetched.headers,
+        bytes,
+      }),
       target_requests: boundary.target_requests(),
     };
   } catch (error) {

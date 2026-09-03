@@ -8,6 +8,7 @@
 // the public profile cannot is rejected by name here rather than silently
 // dropped — a strategy that exports minus its dynamic parts is not the strategy
 // that was verified.
+import { parseHtmlProjection } from '../../public/contracts/html-projection';
 import {
   parseBoundedRecord,
   parseExactRecord,
@@ -86,6 +87,21 @@ export function compileTemplateExpression(
   if (only === undefined) return { op: 'literal', value: '' };
   if (parts.length === 1) return only;
   return { op: 'concat', values: parts };
+}
+
+/** HTTP field names are case-insensitive on the wire; the public request
+ *  declares them in their canonical lowercase form, so a saved header keeps
+ *  its verified value under the name the parser accepts. */
+function lowercaseFieldNames(value: unknown): unknown {
+  if (value === undefined || value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([name, entry]) => [
+      name.toLowerCase(),
+      entry,
+    ]),
+  );
 }
 
 function compileMap(
@@ -222,13 +238,95 @@ export function exportReviewedLocalFetchStrategySource(value: unknown): PublicHt
         properties,
         'http_export.local_strategy.endpoint',
       ),
-      headers: compileMap(local.headers, properties, 'http_export.local_strategy.headers'),
+      headers: compileMap(
+        lowercaseFieldNames(local.headers),
+        properties,
+        'http_export.local_strategy.headers',
+      ),
       query: compileMap(local.params, properties, 'http_export.local_strategy.params'),
       body,
       response_body_limit_bytes: input.response_body_limit_bytes,
     },
-    projection: { kind: 'json' },
+    projection: compileResponseProjection(local.response),
     prerequisites: [],
     replay: input.replay,
   };
+}
+
+/** The public projection a local `response` declares. A JSON response projects
+ *  as-is; an HTML response carries its extraction spec over unchanged, because
+ *  the strategy exported must be the strategy that was verified. Two local
+ *  constructs have no public equivalent and are refused by name: a `from`
+ *  binding (the result comes from a prerequisite, not the request) and a
+ *  `json` leaf (a dot-path read of script text). */
+export function compileResponseProjection(value: unknown): PublicHttpStrategyV1['projection'] {
+  const field = 'http_export.local_strategy.response';
+  if (value === undefined || value === null) return { kind: 'json' };
+  const response = parseBoundedRecord(value, field, 8);
+  if (response.from !== undefined && response.from !== null) {
+    throw new PublicContractError(
+      `${field}.from`,
+      'must be absent in the public http profile: the result is bound from a prerequisite, ' +
+        'not read from the request. Export this capability at the page-script tier.',
+    );
+  }
+  const format = response.format ?? 'json';
+  if (format === 'json') {
+    if (response.extract !== undefined && response.extract !== null) {
+      throw new PublicContractError(
+        `${field}.extract`,
+        'must be absent for a JSON response: declare what to read as the outcome projection ' +
+          '(a json_pointer or json_object over the response body) instead.',
+      );
+    }
+    return { kind: 'json' };
+  }
+  if (format !== 'html') throw new PublicContractError(`${field}.format`, 'must be json or html');
+  const entries = parseBoundedRecord(response.extract, `${field}.extract`, 32);
+  const extract: Record<string, unknown> = {};
+  for (const [name, entry] of Object.entries(entries)) {
+    const spec = parseBoundedRecord(entry, `${field}.extract.${name}`, 8);
+    refuseJsonLeaf(spec, `${field}.extract.${name}`);
+    const fields =
+      spec.fields === undefined || spec.fields === null
+        ? null
+        : Object.fromEntries(
+            Object.entries(
+              parseBoundedRecord(spec.fields, `${field}.extract.${name}.fields`, 32),
+            ).map(([leafName, leaf]) => {
+              const leafSpec = parseBoundedRecord(
+                leaf,
+                `${field}.extract.${name}.fields.${leafName}`,
+                8,
+              );
+              refuseJsonLeaf(leafSpec, `${field}.extract.${name}.fields.${leafName}`);
+              return [
+                leafName,
+                {
+                  selector: leafSpec.selector === '' ? null : leafSpec.selector,
+                  attr: leafSpec.attr ?? null,
+                  multiple: leafSpec.multiple === true,
+                },
+              ];
+            }),
+          );
+    extract[name] = {
+      selector: spec.selector,
+      attr: spec.attr ?? null,
+      multiple: spec.multiple === true,
+      fields,
+    };
+  }
+  return parseHtmlProjection({ kind: 'html', extract }, `${field}.extract`);
+}
+
+function refuseJsonLeaf(spec: Record<string, unknown>, field: string): void {
+  if (spec.json !== undefined && spec.json !== null) {
+    throw new PublicContractError(
+      `${field}.json`,
+      'must be absent in the public http profile: a dot-path read of script text has no ' +
+        'public equivalent. Declare the JSON leaf the outcome projection should read, or ' +
+        'export at the page-script tier.',
+    );
+  }
 }

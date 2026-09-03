@@ -11,7 +11,9 @@ import {
   evaluateValueExpression,
   type ValueExpressionContextV1,
 } from '../../public/contracts/value-expression';
+import type { HtmlProjectionV1 } from '../../public/contracts/html-projection';
 import { readConsumerRuntimeVersion } from '../runtime-version';
+import { decodeHtmlBody, projectHtml } from './html-projection';
 import { OriginSchedulerV1 } from './origin-scheduler';
 import type { BrowserInteractionFailureV1 } from './public-browser/interaction-executor';
 
@@ -214,7 +216,10 @@ async function executeRedirectSequence(
   }
   if (!isRedirectStatus(received.status)) {
     try {
-      return { ...parsePublicJsonResponse(received), target_requests: nextTargetRequests };
+      return {
+        ...projectPublicResponse(capability, received),
+        target_requests: nextTargetRequests,
+      };
     } catch (error) {
       throw withTargetRequestCount(error, nextTargetRequests);
     }
@@ -458,6 +463,50 @@ async function awaitWithSignal<Value>(value: Promise<Value>, signal?: AbortSigna
       },
     );
   });
+}
+
+/** Projects a received response by the strategy the capability selected for it:
+ *  JSON bodies parse strictly; documents go through the declared HTML
+ *  projection and arrive at the outcome contracts as one extracted object. */
+export function projectPublicResponse(
+  projection: PublicHttpStrategyV1['projection'] | PublicReadCapabilityV1,
+  response: ReceivedResponseV1,
+): Omit<PublicHttpResponseV1, 'target_requests'> {
+  const selected = 'kind' in projection ? projection : httpProjectionOf(projection);
+  if (selected.kind === 'html') return parsePublicHtmlResponse(response, selected);
+  return parsePublicJsonResponse(response);
+}
+
+function httpProjectionOf(capability: PublicReadCapabilityV1): PublicHttpStrategyV1['projection'] {
+  const strategy = capability.strategies.find(
+    (candidate): candidate is PublicHttpStrategyV1 => candidate.kind === 'http_request',
+  );
+  return strategy?.projection ?? { kind: 'json' };
+}
+
+export function parsePublicHtmlResponse(
+  response: ReceivedResponseV1,
+  projection: HtmlProjectionV1,
+): Omit<PublicHttpResponseV1, 'target_requests'> {
+  const contentType = response.headers['content-type'];
+  const mediaType = normalizeMediaType(contentType);
+  // An HTML document may be served as text/html, application/xhtml+xml, or a
+  // vendor partial such as text/vnd.reddit.partial+html; what matters is that
+  // the subtype is HTML.
+  if (mediaType === null || !/(^|\/|\+)x?html(\+xml)?$/.test(mediaType)) {
+    throw new PublicHttpExecutionError(
+      'response_contract_mismatch',
+      'response is not declared as an HTML document',
+    );
+  }
+  const body = projectHtml(decodeHtmlBody(response.bytes, contentType), projection);
+  return {
+    status: response.status,
+    headers: response.headers,
+    media_type: mediaType,
+    body_kind: 'json_object',
+    body,
+  };
 }
 
 export function parsePublicJsonResponse(

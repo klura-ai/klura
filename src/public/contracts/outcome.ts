@@ -73,6 +73,10 @@ export interface OutcomeJsonArrayMapProjectionV1 {
   items_pointer: JsonPointerV1;
   include_when: CollectionPredicateV1 | null;
   projection: ScrapeValueV1;
+  /** At most this many mapped items, counted after `include_when`; null maps
+   *  every item. A listing page a call cannot ask for fewer rows from stays
+   *  under the call's outcome ceiling by declaring the rows it returns. */
+  limit: number | null;
 }
 
 export type OutcomeJsonObjectEntryV1 =
@@ -653,11 +657,17 @@ function parseJsonArrayMapProjection(
   value: unknown,
   field: string,
 ): OutcomeJsonArrayMapProjectionV1 {
+  const declaresLimit =
+    value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.hasOwn(value, 'limit');
   const record = parseExactRecord(value, field, [
     'kind',
     'items_pointer',
     'include_when',
     'projection',
+    ...(declaresLimit ? ['limit'] : []),
   ]);
   return {
     kind: 'json_array_map',
@@ -667,6 +677,10 @@ function parseJsonArrayMapProjection(
         ? null
         : parseCollectionPredicate(record.include_when, `${field}.include_when`, RAW_ITEM_ONLY),
     projection: parseScrapeValue(record.projection, `${field}.projection`, RAW_ITEM_ONLY),
+    limit:
+      !declaresLimit || record.limit === null
+        ? null
+        : parseInteger(record.limit, `${field}.limit`, 1, 1_000),
   };
 }
 
@@ -893,6 +907,7 @@ function projectJsonArray(
   }
   const output: JsonValueV1[] = [];
   for (const rawItem of rawItems) {
+    if (projection.limit !== null && output.length >= projection.limit) break;
     const context = { raw_item: rawItem };
     if (
       projection.include_when !== null &&

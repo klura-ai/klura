@@ -212,3 +212,89 @@ test('a param that is neither scalar nor string is still refused', () => {
     /must be a string, number, boolean or null/,
   );
 });
+
+test('an html response exports its extraction as the public html projection', () => {
+  const out = exportReviewedLocalFetchStrategySource(
+    base({
+      response: {
+        format: 'html',
+        extract: {
+          title: { selector: '#productTitle' },
+          links: { selector: 'a[href^="/"]', attr: 'href', multiple: true },
+          results: {
+            selector: 'div[data-component-type="s-search-result"]',
+            multiple: true,
+            fields: {
+              asin: { selector: '', attr: 'data-asin' },
+              title: { selector: 'h2', attr: 'aria-label' },
+              tags: { selector: 'span.tag', multiple: true },
+            },
+          },
+        },
+      },
+    }),
+  );
+  assert.deepEqual(out.projection, {
+    kind: 'html',
+    extract: {
+      title: { selector: '#productTitle', attr: null, multiple: false, fields: null },
+      links: { selector: 'a[href^="/"]', attr: 'href', multiple: true, fields: null },
+      results: {
+        selector: 'div[data-component-type="s-search-result"]',
+        attr: null,
+        multiple: true,
+        fields: {
+          asin: { selector: null, attr: 'data-asin', multiple: false },
+          title: { selector: 'h2', attr: 'aria-label', multiple: false },
+          tags: { selector: 'span.tag', attr: null, multiple: true },
+        },
+      },
+    },
+  });
+});
+
+test('a json response stays a json projection and a json extract is refused', () => {
+  assert.deepEqual(
+    exportReviewedLocalFetchStrategySource(base({ response: { format: 'json' } })).projection,
+    { kind: 'json' },
+  );
+  assert.throws(
+    () =>
+      exportReviewedLocalFetchStrategySource(
+        base({ response: { format: 'json', extract: { id: { selector: 'x' } } } }),
+      ),
+    /declare what to read as the outcome projection/,
+  );
+});
+
+test('a script-text json leaf and a prerequisite-bound result are refused by name', () => {
+  assert.throws(
+    () =>
+      exportReviewedLocalFetchStrategySource(
+        base({
+          response: {
+            format: 'html',
+            extract: { data: { selector: 'script#__NEXT_DATA__', json: 'props.pageProps' } },
+          },
+        }),
+      ),
+    /dot-path read of script text/,
+  );
+  assert.throws(
+    () =>
+      exportReviewedLocalFetchStrategySource(
+        base({ response: { from: 'search_results', format: 'json' } }),
+      ),
+    /bound from a prerequisite/,
+  );
+});
+
+test('a saved header keeps its value under its canonical lowercase name', () => {
+  const out = exportReviewedLocalFetchStrategySource(
+    base({ headers: { Accept: 'application/json', 'X-Client': 'klura' } }),
+  );
+  assert.deepEqual(out.request.headers, {
+    accept: { op: 'literal', value: 'application/json' },
+    'x-client': { op: 'literal', value: 'klura' },
+  });
+});

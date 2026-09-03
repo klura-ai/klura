@@ -21,6 +21,7 @@ import {
   type StableContractIdV1,
 } from './common';
 import { canonicalJson, type JsonValueV1 } from './json';
+import { parseHtmlProjection, type HtmlProjectionV1 } from './html-projection';
 import { parseJsonSchema, type JsonSchemaV1 } from './json-schema';
 import { parseCollectionRunContract, type CollectionRunContractV1 } from './collection';
 import {
@@ -102,7 +103,7 @@ export interface PublicHttpStrategyV1 {
   kind: 'http_request';
   context: 'node' | 'browser';
   request: PublicHttpRequestV1;
-  projection: { kind: 'json' };
+  projection: { kind: 'json' } | HtmlProjectionV1;
   prerequisites: [];
   replay: 'safe_read' | 'indeterminate';
 }
@@ -659,13 +660,7 @@ function parseHttpStrategy(
       'must be a node- or browser-context data-only http_request strategy',
     );
   }
-  const projection = parseExactRecord(record.projection, `${field}.projection`, ['kind']);
-  if (projection.kind !== 'json') {
-    throw new PublicContractError(
-      `${field}.projection.kind`,
-      'must be json in the current profile',
-    );
-  }
+  const projection = parseHttpProjection(record.projection, `${field}.projection`);
   if (!Array.isArray(record.prerequisites) || record.prerequisites.length !== 0) {
     throw new PublicContractError(
       `${field}.prerequisites`,
@@ -679,10 +674,20 @@ function parseHttpStrategy(
     kind: 'http_request',
     context: record.context,
     request: parseHttpRequest(record.request, `${field}.request`, requestOrigins),
-    projection: { kind: 'json' },
+    projection,
     prerequisites: [],
     replay: record.replay,
   };
+}
+
+function parseHttpProjection(value: unknown, field: string): PublicHttpStrategyV1['projection'] {
+  const kind = parseBoundedRecord(value, field, 4).kind;
+  if (kind === 'json') {
+    parseExactRecord(value, field, ['kind']);
+    return { kind: 'json' };
+  }
+  if (kind === 'html') return parseHtmlProjection(value, field);
+  throw new PublicContractError(`${field}.kind`, 'must be json or html');
 }
 
 function parseBrowserNavigationStrategy(

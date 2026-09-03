@@ -40,6 +40,7 @@ import { collectStrategyOutcomeSelectors } from '../../consumer/execution/public
 import { executeBrowserPageScriptStrategy } from '../../consumer/execution/public-browser/page-script-executor';
 import { PublicCallerV1, type PublicCallResultV1 } from '../../consumer/call';
 import type {
+  PublicHttpStrategyV1,
   PublicBrowserPageScriptStrategyV1,
   PublicReadCapabilityV1,
   PublicToolPackageV1,
@@ -670,13 +671,42 @@ async function smokeCall(
     }
   };
   const caller = new PublicCallerV1(
-    executeNodeHttpStrategy,
+    recordingHttpExecutor(executeNodeHttpStrategy, responses, diagnostics),
     Math.random,
     executeBrowserNavigationStrategy,
-    executeBrowserHttpStrategy,
+    recordingHttpExecutor(executeBrowserHttpStrategy, responses, diagnostics),
     pageScriptExecutor,
   );
   return { result: await caller.call(capability, input), responses, diagnostics };
+}
+
+/** Wraps an http executor so every response it produces — projected exactly as
+ *  the outcome contracts will see it — is captured as fixture evidence. */
+function recordingHttpExecutor<Options>(
+  execute: (
+    target: PublicReadCapabilityV1,
+    strategy: PublicHttpStrategyV1,
+    options: Options,
+  ) => Promise<PublicHttpResponseV1>,
+  responses: Array<{ strategy_id: StableContractIdV1; response: PublicHttpResponseV1 }>,
+  diagnostics: PublicExecutionDiagnosticV1[],
+): (
+  target: PublicReadCapabilityV1,
+  strategy: PublicHttpStrategyV1,
+  options: Options,
+) => Promise<PublicHttpResponseV1> {
+  return async (target, strategy, options) => {
+    try {
+      const response = await execute(target, strategy, options);
+      responses.push({ strategy_id: strategy.request.strategy_id, response });
+      return response;
+    } catch (error) {
+      if (error instanceof PublicHttpExecutionError && error.diagnostic !== null) {
+        diagnostics.push(error.diagnostic);
+      }
+      throw error;
+    }
+  };
 }
 
 async function smokeRun(
@@ -714,11 +744,22 @@ async function smokeRun(
         throw error;
       }
     });
+  const serializedHttp = <Options>(
+    execute: (
+      target: PublicReadCapabilityV1,
+      strategy: PublicHttpStrategyV1,
+      options: Options,
+    ) => Promise<PublicHttpResponseV1>,
+  ) => {
+    const recording = recordingHttpExecutor(execute, responses, diagnostics);
+    return (target: PublicReadCapabilityV1, strategy: PublicHttpStrategyV1, options: Options) =>
+      serialize(() => recording(target, strategy, options));
+  };
   const caller = new PublicCallerV1(
-    executeNodeHttpStrategy,
+    serializedHttp(executeNodeHttpStrategy),
     Math.random,
     executeBrowserNavigationStrategy,
-    executeBrowserHttpStrategy,
+    serializedHttp(executeBrowserHttpStrategy),
     pageScriptExecutor,
   );
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'klura-export-run-smoke-'));
