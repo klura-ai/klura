@@ -1,4 +1,5 @@
 import type { Browser, Page } from 'playwright';
+import { boundaryVerdictOr } from './boundary-verdict';
 import { validateJsonSchema } from '../../../public/contracts/json-schema';
 import type {
   PublicHttpStrategyV1,
@@ -89,7 +90,9 @@ export async function executeBrowserHttpStrategy(
       throw new PublicHttpExecutionError('cancelled', 'caller cancelled before browser launch');
     }
     proxy = await startPinnedEgressProxy({
-      allowed_origins: capability.browser_resources.egress_rules.map((rule) => rule.origin),
+      allowed_origins: [
+        ...new Set(capability.browser_resources.egress_rules.map((rule) => rule.origin)),
+      ],
       max_wire_bytes: capability.browser_resources.max_proxy_wire_bytes_per_browser_task,
       connect_timeout_ms: Math.min(options.timeout_ms, 60_000),
       resolve_host: options.resolve_host,
@@ -160,6 +163,7 @@ export async function executeBrowserHttpStrategy(
           bytes,
         }),
         target_requests: boundary.target_requests(),
+        denied_resources: boundary.denied_resources(),
       };
     } finally {
       signal.removeEventListener('abort', abort);
@@ -182,6 +186,8 @@ export async function executeBrowserHttpStrategy(
       );
     }
     if (error instanceof PublicHttpExecutionError) throw error;
+    const verdict = boundaryVerdictOr(boundary, error, targetRequests);
+    if (verdict instanceof PublicHttpExecutionError) throw verdict;
     throw new PublicHttpExecutionError('transport_failure', asError(error).message, targetRequests);
   } finally {
     clearTimeout(timer);
@@ -304,6 +310,7 @@ export async function executeBrowserHttpStrategyInBoundedPage(
         bytes,
       }),
       target_requests: boundary.target_requests(),
+      denied_resources: boundary.denied_resources(),
     };
   } catch (error) {
     const targetRequests = boundary.target_requests();
@@ -322,6 +329,8 @@ export async function executeBrowserHttpStrategyInBoundedPage(
       );
     }
     if (error instanceof PublicHttpExecutionError) throw error;
+    const verdict = boundaryVerdictOr(boundary, error, targetRequests);
+    if (verdict instanceof PublicHttpExecutionError) throw verdict;
     throw new PublicHttpExecutionError('transport_failure', asError(error).message, targetRequests);
   } finally {
     clearTimeout(timer);

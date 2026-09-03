@@ -13,7 +13,7 @@ import {
 } from '../../public/contracts/value-expression';
 import type { HtmlProjectionV1 } from '../../public/contracts/html-projection';
 import { readConsumerRuntimeVersion } from '../runtime-version';
-import { decodeHtmlBody, projectHtml } from './html-projection';
+import { decodeHtmlBody, projectHtmlDocument } from './html-projection';
 import { OriginSchedulerV1 } from './origin-scheduler';
 import type { BrowserInteractionFailureV1 } from './public-browser/interaction-executor';
 
@@ -46,6 +46,9 @@ export interface PublicHttpResponseV1 {
   body: JsonValueV1;
   target_requests: number;
   html_selector_exists?: (selector: string) => boolean;
+  /** Page sub-resources a browser strategy's policy refused while producing
+   *  this response; what a page that rendered incompletely was missing. */
+  denied_resources?: Array<{ url: string; resource_type: string }>;
 }
 
 export interface PublicHttpExecutionOptionsV1 {
@@ -499,13 +502,14 @@ export function parsePublicHtmlResponse(
       'response is not declared as an HTML document',
     );
   }
-  const body = projectHtml(decodeHtmlBody(response.bytes, contentType), projection);
+  const document = projectHtmlDocument(decodeHtmlBody(response.bytes, contentType), projection);
   return {
     status: response.status,
     headers: response.headers,
     media_type: mediaType,
     body_kind: 'json_object',
-    body,
+    body: document.body,
+    html_selector_exists: document.selector_exists,
   };
 }
 

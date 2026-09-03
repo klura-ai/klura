@@ -8,6 +8,8 @@ export interface BrowserFetchPausedV1 {
   url: string;
   method: string;
   resource_type: string;
+  /** The frame that issued the request; null when Chromium reports none. */
+  frame_id: string | null;
   response_status: number | null;
   /** Chromium's network error for a response-stage pause that carries no status. */
   response_error: string | null;
@@ -53,6 +55,7 @@ export function parseBrowserFetchPaused(value: unknown): BrowserFetchPausedV1 | 
     url: requestRecord.url,
     method: requestRecord.method,
     resource_type: normalizeResourceType(record.resourceType),
+    frame_id: typeof record.frameId === 'string' ? record.frameId : null,
     response_status: status === undefined ? null : status,
     response_error:
       typeof record.responseErrorReason === 'string' ? record.responseErrorReason : null,

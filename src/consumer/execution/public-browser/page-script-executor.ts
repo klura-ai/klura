@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { boundaryVerdictOr } from './boundary-verdict';
 import type { Browser, BrowserContext, Page } from 'playwright';
 import { canonicalJson, parseStrictJson, type JsonValueV1 } from '../../../public/contracts/json';
 import { validateJsonSchema } from '../../../public/contracts/json-schema';
@@ -120,7 +121,9 @@ export async function executeBrowserPageScriptStrategy(
       throw new PublicHttpExecutionError('cancelled', 'caller cancelled before browser launch');
     }
     proxy = await startPinnedEgressProxy({
-      allowed_origins: capability.browser_resources.egress_rules.map((rule) => rule.origin),
+      allowed_origins: [
+        ...new Set(capability.browser_resources.egress_rules.map((rule) => rule.origin)),
+      ],
       max_wire_bytes: capability.browser_resources.max_proxy_wire_bytes_per_browser_task,
       connect_timeout_ms: Math.min(options.timeout_ms, 60_000),
       resolve_host: options.resolve_host,
@@ -207,6 +210,7 @@ export async function executeBrowserPageScriptStrategy(
         body_kind: Array.isArray(body) ? 'json_array' : 'json_object',
         body,
         target_requests: boundary.target_requests(),
+        denied_resources: boundary.denied_resources(),
         html_selector_exists: (selector: string) => selectorMatches.get(selector) ?? false,
       };
     } finally {
@@ -230,6 +234,8 @@ export async function executeBrowserPageScriptStrategy(
       );
     }
     if (error instanceof PublicHttpExecutionError) throw error;
+    const verdict = boundaryVerdictOr(boundary, error, targetRequests);
+    if (verdict instanceof PublicHttpExecutionError) throw verdict;
     if (error instanceof BrowserInteractionExecutionError) {
       throw new PublicHttpExecutionError(
         'browser_interaction_failed',

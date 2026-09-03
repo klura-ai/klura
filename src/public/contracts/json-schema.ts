@@ -10,23 +10,28 @@ export const JSON_SCHEMA_LIMITS_V1 = {
   maximumArrayItems: 10_000,
 } as const;
 
+/** A typed schema may also admit `null` when `nullable` is true: a field the
+ *  site sometimes leaves empty stays typed for the values it does carry. */
 export type JsonSchemaV1 =
   | { type: 'null'; enum: null[] | null }
-  | { type: 'boolean'; enum: boolean[] | null }
+  | { type: 'boolean'; nullable: boolean; enum: boolean[] | null }
   | {
       type: 'string';
+      nullable: boolean;
       minLength: number | null;
       maxLength: number | null;
       enum: string[] | null;
     }
   | {
       type: 'number' | 'integer';
+      nullable: boolean;
       minimum: number | null;
       maximum: number | null;
       enum: number[] | null;
     }
   | {
       type: 'array';
+      nullable: boolean;
       items: JsonSchemaV1;
       minItems: number | null;
       maxItems: number | null;
@@ -34,6 +39,7 @@ export type JsonSchemaV1 =
     }
   | {
       type: 'object';
+      nullable: boolean;
       properties: Record<string, JsonSchemaV1>;
       required: string[];
       additionalProperties: false | JsonSchemaV1;
@@ -115,9 +121,10 @@ function parseNullSchema(value: unknown, field: string): JsonSchemaV1 {
 }
 
 function parseBooleanSchema(value: unknown, field: string): JsonSchemaV1 {
-  const record = parseSchemaRecord(value, field, ['type', 'enum'], ['type']);
+  const record = parseSchemaRecord(value, field, ['type', 'nullable', 'enum'], ['type']);
   return {
     type: 'boolean',
+    nullable: parseNullable(record.nullable, `${field}.nullable`),
     enum: parseScalarEnum(record.enum, `${field}.enum`, 'boolean') as boolean[] | null,
   };
 }
@@ -126,12 +133,13 @@ function parseStringSchema(value: unknown, field: string): JsonSchemaV1 {
   const record = parseSchemaRecord(
     value,
     field,
-    ['type', 'minLength', 'maxLength', 'enum'],
+    ['type', 'nullable', 'minLength', 'maxLength', 'enum'],
     ['type'],
   );
   const bounds = parseLengthBounds(record.minLength, record.maxLength, field);
   return {
     type: 'string',
+    nullable: parseNullable(record.nullable, `${field}.nullable`),
     minLength: bounds.minimum,
     maxLength: bounds.maximum,
     enum: parseScalarEnum(record.enum, `${field}.enum`, 'string') as string[] | null,
@@ -143,13 +151,24 @@ function parseNumberSchema(
   field: string,
   type: 'number' | 'integer',
 ): JsonSchemaV1 {
-  const record = parseSchemaRecord(value, field, ['type', 'minimum', 'maximum', 'enum'], ['type']);
+  const record = parseSchemaRecord(
+    value,
+    field,
+    ['type', 'nullable', 'minimum', 'maximum', 'enum'],
+    ['type'],
+  );
   const bounds = parseNumberBounds(record.minimum, record.maximum, field);
   const enumValues = parseScalarEnum(record.enum, `${field}.enum`, 'number') as number[] | null;
   if (type === 'integer' && enumValues?.some((entry) => !Number.isSafeInteger(entry))) {
     throw new PublicContractError(`${field}.enum`, 'integer enums must contain safe integers only');
   }
-  return { type, minimum: bounds.minimum, maximum: bounds.maximum, enum: enumValues };
+  return {
+    type,
+    nullable: parseNullable(record.nullable, `${field}.nullable`),
+    minimum: bounds.minimum,
+    maximum: bounds.maximum,
+    enum: enumValues,
+  };
 }
 
 function parseArraySchema(
@@ -161,12 +180,13 @@ function parseArraySchema(
   const record = parseSchemaRecord(
     value,
     field,
-    ['type', 'items', 'minItems', 'maxItems', 'enum'],
+    ['type', 'nullable', 'items', 'minItems', 'maxItems', 'enum'],
     ['type', 'items'],
   );
   const bounds = parseItemBounds(record.minItems, record.maxItems, field, 'Items');
   return {
     type: 'array',
+    nullable: parseNullable(record.nullable, `${field}.nullable`),
     items: parseSchema(record.items, `${field}.items`, state, depth + 1),
     minItems: bounds.minimum,
     maxItems: bounds.maximum,
@@ -185,6 +205,7 @@ function parseObjectSchema(
     field,
     [
       'type',
+      'nullable',
       'properties',
       'required',
       'additionalProperties',
@@ -218,6 +239,7 @@ function parseObjectSchema(
   );
   return {
     type: 'object',
+    nullable: parseNullable(record.nullable, `${field}.nullable`),
     properties,
     required,
     additionalProperties,
@@ -225,6 +247,12 @@ function parseObjectSchema(
     maxProperties: bounds.maximum,
     enum: parseJsonEnum(record.enum, `${field}.enum`),
   };
+}
+
+function parseNullable(value: unknown, field: string): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== 'boolean') throw new PublicContractError(field, 'must be a boolean');
+  return value;
 }
 
 function parseScalarEnum(
@@ -427,6 +455,7 @@ function parseSchemaRecord(
 }
 
 function validateAgainstSchema(value: JsonValueV1, schema: JsonSchemaV1, field: string): void {
+  if (value === null && schema.type !== 'null' && schema.nullable) return;
   switch (schema.type) {
     case 'null':
       if (value !== null) throw new PublicContractError(field, 'must be null');

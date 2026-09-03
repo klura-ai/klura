@@ -20,12 +20,31 @@ export function projectHtml(
   html: string,
   projection: HtmlProjectionV1,
 ): Record<string, JsonValueV1> {
+  return projectHtmlDocument(html, projection).body;
+}
+
+/** Projects a document and keeps it loaded, so the outcome contracts can also
+ *  ask whether a declared selector matches anywhere in it: a page marker that
+ *  separates a real empty listing from an interstitial the site served instead. */
+export function projectHtmlDocument(
+  html: string,
+  projection: HtmlProjectionV1,
+): { body: Record<string, JsonValueV1>; selector_exists: (selector: string) => boolean } {
   const $ = cheerio.load(html);
-  const out: Record<string, JsonValueV1> = {};
+  const body: Record<string, JsonValueV1> = {};
   for (const [name, spec] of Object.entries(projection.extract)) {
-    out[name] = extractEntry($, $.root(), spec);
+    body[name] = extractEntry($, $.root(), spec);
   }
-  return out;
+  return {
+    body,
+    selector_exists: (selector: string) => {
+      try {
+        return $(selector).length > 0;
+      } catch {
+        return false;
+      }
+    },
+  };
 }
 
 function extractEntry($: CheerioAPI, scope: Scope, spec: HtmlExtractSpecV1): JsonValueV1 {

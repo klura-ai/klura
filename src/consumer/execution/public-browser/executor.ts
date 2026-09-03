@@ -73,6 +73,9 @@ export interface BrowserNetworkBoundaryV1 extends BrowserInteractionNetworkBound
   target_requests(): number;
   /** Page-initiated sub-resource requests refused because no rule admits them. */
   denied_requests(): number;
+  /** Sub-resources the page requested on its own and the policy refused, in
+   *  arrival order, capped so a busy page cannot grow it without bound. */
+  denied_resources(): BrowserDeniedResourceV1[];
   assertHealthy(): void;
   transition(
     capability: BrowserNetworkCapabilityV1,
@@ -179,7 +182,9 @@ export async function executeBrowserNavigationStrategy(
       throw new PublicHttpExecutionError('cancelled', 'caller cancelled before browser launch');
     }
     proxy = await startPinnedEgressProxy({
-      allowed_origins: capability.browser_resources.egress_rules.map((rule) => rule.origin),
+      allowed_origins: [
+        ...new Set(capability.browser_resources.egress_rules.map((rule) => rule.origin)),
+      ],
       max_wire_bytes: capability.browser_resources.max_proxy_wire_bytes_per_browser_task,
       connect_timeout_ms: Math.min(options.timeout_ms, 60_000),
       resolve_host: options.resolve_host,
@@ -241,6 +246,7 @@ export async function executeBrowserNavigationStrategy(
         body_kind: Array.isArray(body) ? 'json_array' : 'json_object',
         body,
         target_requests: boundary.target_requests(),
+        denied_resources: boundary.denied_resources(),
         html_selector_exists: (selector: string) => selectorMatches.get(selector) ?? false,
       };
     } finally {
@@ -301,6 +307,13 @@ export async function executeBrowserNavigationStrategy(
   }
 }
 
+export interface BrowserDeniedResourceV1 {
+  url: string;
+  resource_type: string;
+}
+
+export const MAX_RECORDED_DENIED_RESOURCES_V1 = 32;
+
 export interface BrowserProxyCredentialsV1 {
   username: string;
   password: string;
@@ -330,6 +343,18 @@ export async function installBrowserNetworkBoundary(input: {
     ],
     handleAuthRequests: true,
   });
+  // Only a document the main frame loads is a navigation; a document any other
+  // frame loads is a resource of the page, refused silently when undeclared.
+  let mainFrameId: string | null = null;
+  try {
+    const tree = (await cdp.send('Page.getFrameTree')) as {
+      frameTree?: { frame?: { id?: unknown } };
+    };
+    const id = tree.frameTree?.frame?.id;
+    mainFrameId = typeof id === 'string' ? id : null;
+  } catch {
+    mainFrameId = null;
+  }
   // Only the pinned proxy may challenge; a target site's own challenge is a
   // refusal the package must classify, never something answered on its behalf.
   cdp.on(
@@ -431,8 +456,10 @@ export async function installBrowserNetworkBoundary(input: {
   };
 
   let deniedRequests = 0;
-  const deny = async (requestId: string): Promise<void> => {
+  const deniedResources: BrowserDeniedResourceV1[] = [];
+  const deny = async (requestId: string, resource: BrowserDeniedResourceV1): Promise<void> => {
     deniedRequests += 1;
+    if (deniedResources.length < MAX_RECORDED_DENIED_RESOURCES_V1) deniedResources.push(resource);
     try {
       await cdp.send('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' });
     } catch {
@@ -500,6 +527,7 @@ export async function installBrowserNetworkBoundary(input: {
       responseBodyQueue,
       fail,
       deny,
+      mainFrameId: () => mainFrameId,
       fatal: () => fatal,
       closed: () => closed,
       activityChanged: notifyActivity,
@@ -525,6 +553,7 @@ export async function installBrowserNetworkBoundary(input: {
     cdp,
     target_requests: () => targetRequests,
     denied_requests: () => deniedRequests,
+    denied_resources: () => [...deniedResources],
     assertHealthy: () => {
       if (fatal !== null) throw fatal;
     },
@@ -774,7 +803,9 @@ export interface FetchHandlerStateV1 {
   responseBodyQueue: AsyncSerialQueueV1;
   fail(requestId: string, error: PublicHttpExecutionError): Promise<void>;
   /** Refuses a request the page tried on its own without failing the task. */
-  deny(requestId: string): Promise<void>;
+  deny(requestId: string, resource: BrowserDeniedResourceV1): Promise<void>;
+  /** The main frame's id, or null when the browser did not report one. */
+  mainFrameId(): string | null;
   fatal(): PublicHttpExecutionError | null;
   closed(): boolean;
   activityChanged(): void;

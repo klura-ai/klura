@@ -13,6 +13,12 @@ import {
 } from './resource-policy';
 import { validateBrowserRequestBodiesForRule } from './request-body-policy';
 
+type BrowserRequestPhaseV1 =
+  | 'navigation'
+  | 'resource'
+  | 'interaction'
+  | 'runtime_request'
+  | 'page_script';
 export async function handleBrowserRequestStage(
   paused: BrowserFetchPausedV1,
   state: FetchHandlerStateV1,
@@ -31,26 +37,29 @@ export async function handleBrowserRequestStage(
     return;
   }
   const operation = pageScript ?? action;
-  let phase: 'navigation' | 'resource' | 'interaction' | 'runtime_request' | 'page_script' =
-    operation?.phase ?? 'interaction';
+  let phase: BrowserRequestPhaseV1 = operation?.phase ?? 'interaction';
   if (operation === null && runtimeRequest === null) {
-    phase = paused.resource_type === 'document' ? 'navigation' : 'resource';
+    phase = isMainFrameDocument(paused, state.mainFrameId()) ? 'navigation' : 'resource';
   }
   if (runtimeRequest !== null) phase = 'runtime_request';
+  // A runtime request is the runtime's own fetch call; the label the browser
+  // attaches to it (fetch or xhr) carries no information about what was sent,
+  // so it is matched as the fetch its rule declares.
+  const resourceType = phase === 'runtime_request' ? 'fetch' : paused.resource_type;
   const isPreflight = paused.method === 'OPTIONS';
   const rule = isPreflight
     ? matchBrowserPreflightEgressRule(state.policy, {
         phase,
         url: paused.url,
         method: paused.method,
-        resource_type: paused.resource_type,
+        resource_type: resourceType,
         requested_method: paused.preflight_method,
       })
     : matchBrowserEgressRule(state.policy, {
         phase,
         url: paused.url,
         method: paused.method,
-        resource_type: paused.resource_type,
+        resource_type: resourceType,
       });
   const originPolicy = findOriginPolicy(state.capability.origin_traffic_policies, paused.url);
   if (!rule || !originPolicy) {
@@ -58,7 +67,10 @@ export async function handleBrowserRequestStage(
     // carries on without it; only the task's own traffic — navigation,
     // interaction, runtime and page-script requests — is bound to be declared.
     if (phase === 'resource') {
-      await state.deny(paused.request_id);
+      await state.deny(paused.request_id, {
+        url: paused.url,
+        resource_type: paused.resource_type,
+      });
       return;
     }
     await state.fail(
@@ -84,7 +96,7 @@ export async function handleBrowserRequestStage(
     return;
   }
   if (browserRequestBudgetExhausted(state, rule)) {
-    await failRequestBudget(paused.request_id, state);
+    await failRequestBudget(paused, phase, state);
     return;
   }
   const bodies = validateBrowserRequestBodiesForRule(
@@ -159,9 +171,30 @@ export async function handleBrowserRequestStage(
   }
 }
 
+/** A document request is a navigation only when the main frame issues it; a
+ *  document loaded into any other frame is a sub-resource of the page. When
+ *  either frame id is unknown the request is treated as a navigation, the
+ *  stricter reading. */
+function isMainFrameDocument(paused: BrowserFetchPausedV1, mainFrameId: string | null): boolean {
+  if (paused.resource_type !== 'document') return false;
+  if (paused.frame_id === null || mainFrameId === null) return true;
+  return paused.frame_id === mainFrameId;
+}
+
+/** Names a request structurally — method, origin, path, phase — without
+ *  echoing its query string or body. */
+function describeRequest(paused: BrowserFetchPausedV1, phase: BrowserRequestPhaseV1): string {
+  try {
+    const url = new URL(paused.url);
+    return `${paused.method} ${url.origin}${url.pathname} (${phase})`;
+  } catch {
+    return `${paused.method} request (${phase})`;
+  }
+}
+
 function egressDiagnostic(
   paused: BrowserFetchPausedV1,
-  phase: 'navigation' | 'resource' | 'interaction' | 'runtime_request' | 'page_script',
+  phase: BrowserRequestPhaseV1,
 ): import('../node-http').PublicExecutionDiagnosticV1 {
   let origin: string | null = null;
   let path: string | null = null;
@@ -213,7 +246,12 @@ function validatePostAcquireState(
   if (browserRequestBudgetExhausted(state, rule)) {
     return new PublicHttpExecutionError(
       'request_budget_exhausted',
-      'browser request budget is exhausted',
+      `browser request budget is exhausted: rule ${rule.rule_id} has used ${
+        state.ruleRequests.get(rule.rule_id) ?? 0
+      } of ${rule.max_requests} requests and the task ${state.targetRequests} of ${Math.min(
+        state.options.max_target_requests,
+        state.policy.max_requests_per_browser_task,
+      )}`,
     );
   }
   if (
@@ -268,10 +306,19 @@ function browserRequestBudgetExhausted(
   );
 }
 
-async function failRequestBudget(requestId: string, state: FetchHandlerStateV1): Promise<void> {
+async function failRequestBudget(
+  paused: BrowserFetchPausedV1,
+  phase: BrowserRequestPhaseV1,
+  state: FetchHandlerStateV1,
+): Promise<void> {
   await state.fail(
-    requestId,
-    new PublicHttpExecutionError('request_budget_exhausted', 'browser request budget is exhausted'),
+    paused.request_id,
+    new PublicHttpExecutionError(
+      'request_budget_exhausted',
+      `browser request budget is exhausted: ${describeRequest(paused, phase)} would be target request ${
+        state.targetRequests + 1
+      } of ${Math.min(state.options.max_target_requests, state.policy.max_requests_per_browser_task)}`,
+    ),
   );
 }
 

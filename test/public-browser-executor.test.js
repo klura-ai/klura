@@ -1321,3 +1321,148 @@ test('the boundary answers only the pinned proxy\'s authentication challenge', a
   );
   await boundary.close();
 });
+
+test('a runtime request is matched as fetch whatever label the browser gives it', async () => {
+  const sent = [];
+  class FakeCdp extends EventEmitter {
+    async send(method, payload) {
+      sent.push({ method, payload });
+      return {};
+    }
+
+    async detach() {}
+  }
+  const cdp = new FakeCdp();
+  const context = { newCDPSession: async () => cdp, close: async () => undefined };
+  const signal = new AbortController().signal;
+  const capability = runtimeRequestCapability();
+  const boundary = await installBrowserNetworkBoundary({
+    page: { context: () => context },
+    capability,
+    options: {
+      input: {},
+      bindings: {},
+      timeout_ms: 1000,
+      max_target_requests: 2,
+      scheduler: new OriginSchedulerV1(),
+      signal,
+    },
+  });
+  boundary.beginRuntimeRequest();
+  cdp.emit('Fetch.requestPaused', {
+    requestId: 'product',
+    request: { url: 'https://example.test/dp/B000', method: 'GET', hasPostData: false },
+    resourceType: 'XHR',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    sent.filter((call) => call.method === 'Fetch.failRequest'),
+    [],
+  );
+  assert.equal(
+    sent.some(
+      (call) => call.method === 'Fetch.continueRequest' && call.payload.requestId === 'product',
+    ),
+    true,
+  );
+  boundary.assertHealthy();
+  await boundary.close();
+});
+
+function runtimeRequestCapability() {
+  const base = navigationOnlyCapability();
+  const policy = parseBrowserResourcePolicy(
+    {
+      egress_rules: [
+        {
+          rule_id: 'bootstrap',
+          phase: 'navigation',
+          origin: 'https://example.test',
+          methods: ['GET'],
+          route: { path: { kind: 'exact', value: '/' }, query: { kind: 'none' } },
+          resource_types: ['document'],
+          max_requests: 1,
+          max_encoded_request_body_bytes: 0,
+          max_encoded_response_bytes: 1024,
+        },
+        {
+          rule_id: 'product',
+          phase: 'runtime_request',
+          origin: 'https://example.test',
+          methods: ['GET'],
+          route: { path: { kind: 'prefix', value: '/dp/' }, query: { kind: 'none' } },
+          resource_types: ['fetch'],
+          max_requests: 1,
+          max_encoded_request_body_bytes: 0,
+          max_encoded_response_bytes: 1024,
+        },
+      ],
+      max_requests_per_browser_task: 2,
+      max_encoded_request_body_bytes_per_browser_task: 0,
+      max_encoded_response_bytes_per_browser_task: 2048,
+      max_proxy_wire_bytes_per_browser_task: 4096,
+      max_single_request_body_bytes: 0,
+      max_single_response_bytes: 1024,
+      service_workers: 'block',
+      downloads: 'block',
+      popups: 'block',
+      websockets: 'block',
+      webtransport: 'block',
+      webrtc_direct_egress: 'block',
+      browser_cache: 'block',
+    },
+    'browser_resources',
+  );
+  return { ...base, browser_resources: policy };
+}
+
+test('a document loaded by a sub-frame is a page resource, not a navigation', async () => {
+  const sent = [];
+  class FakeCdp extends EventEmitter {
+    async send(method, payload) {
+      sent.push({ method, payload });
+      if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main' } } };
+      return {};
+    }
+
+    async detach() {}
+  }
+  const cdp = new FakeCdp();
+  const context = { newCDPSession: async () => cdp, close: async () => undefined };
+  const signal = new AbortController().signal;
+  const boundary = await installBrowserNetworkBoundary({
+    page: { context: () => context },
+    capability: navigationOnlyCapability(),
+    options: {
+      input: {},
+      bindings: {},
+      timeout_ms: 1000,
+      max_target_requests: 1,
+      scheduler: new OriginSchedulerV1(),
+      signal,
+    },
+  });
+  cdp.emit('Fetch.requestPaused', {
+    requestId: 'iframe',
+    frameId: 'child',
+    request: { url: 'https://ads.example.test/frame.html', method: 'GET', hasPostData: false },
+    resourceType: 'Document',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  boundary.assertHealthy();
+  assert.deepEqual(boundary.denied_resources(), [
+    { url: 'https://ads.example.test/frame.html', resource_type: 'document' },
+  ]);
+  cdp.emit('Fetch.requestPaused', {
+    requestId: 'top',
+    frameId: 'main',
+    request: { url: 'https://example.test/other', method: 'GET', hasPostData: false },
+    resourceType: 'Document',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.throws(
+    () => boundary.assertHealthy(),
+    (error) => error?.code === 'request_blocked' && error.diagnostic?.phase === 'navigation',
+  );
+  await boundary.close();
+});

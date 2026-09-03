@@ -1939,6 +1939,27 @@ test('JSON Schema subset is strict, bounded, and validates exact JSON shapes', (
   assert.deepEqual(validateJsonSchema({ id: 'item', count: 2 }, schema), { id: 'item', count: 2 });
   assert.throws(() => validateJsonSchema({ id: 'item', extra: true }, schema), PublicContractError);
   assert.throws(() => parseJsonSchema({ type: 'string', format: 'email' }), PublicContractError);
+  const nullable = parseJsonSchema({
+    type: 'object',
+    properties: {
+      rating: { type: 'number', nullable: true, minimum: 0 },
+      name: { type: 'string', minLength: 1 },
+    },
+    required: ['rating', 'name'],
+    additionalProperties: false,
+  });
+  assert.deepEqual(validateJsonSchema({ rating: null, name: 'a' }, nullable), {
+    rating: null,
+    name: 'a',
+  });
+  assert.deepEqual(validateJsonSchema({ rating: 4.5, name: 'a' }, nullable), {
+    rating: 4.5,
+    name: 'a',
+  });
+  assert.throws(() => validateJsonSchema({ rating: null, name: null }, nullable), PublicContractError);
+  assert.throws(() => validateJsonSchema({ rating: -1, name: 'a' }, nullable), PublicContractError);
+  assert.throws(() => parseJsonSchema({ type: 'string', nullable: 'yes' }), PublicContractError);
+  assert.throws(() => parseJsonSchema({ type: 'null', nullable: true }), PublicContractError);
   assert.throws(() => parseJsonSchema({ $ref: 'https://example.com/schema' }), PublicContractError);
 });
 
@@ -1993,30 +2014,39 @@ test('outcome contracts require structural success and verify the returned entit
     evaluateOutcomeContracts([success], 'request', response, { input: { id: '42' } }).kind,
     'outcome',
   );
-  assert.equal(
-    evaluateOutcomeContracts(
-      [success],
-      'request',
-      { ...response, body: { ok: false, item: { id: '42' } } },
-      { input: { id: '42' } },
-    ).kind,
-    'unclassified_response',
+  const unclassified = evaluateOutcomeContracts(
+    [success],
+    'request',
+    { ...response, body: { ok: false, item: { id: '42' } } },
+    { input: { id: '42' } },
   );
-  assert.equal(
-    evaluateOutcomeContracts(
-      [success],
-      'request',
-      { ...response, body: { ok: true, item: { id: 'other' } } },
-      { input: { id: '42' } },
-    ).kind,
-    'verification_failed',
+  assert.equal(unclassified.kind, 'unclassified_response');
+  assert.match(unclassified.reason, /200 json_object .* cases tried: success_case/);
+  const mismatched = evaluateOutcomeContracts(
+    [success],
+    'request',
+    { ...response, body: { ok: true, item: { id: 'other' } } },
+    { input: { id: '42' } },
   );
+  assert.equal(mismatched.kind, 'verification_failed');
+  assert.match(mismatched.reason, /assertion returned_id: output \/id is "other", expected "42"/);
+  const invalid = evaluateOutcomeContracts(
+    [success],
+    'request',
+    { ...response, body: { ok: true, item: { id: 7 } } },
+    { input: { id: '42' } },
+  );
+  assert.equal(invalid.kind, 'verification_failed');
+  assert.match(invalid.reason, /case success_case \(outcome success\): outcome\.data/);
+  const oversized = evaluateOutcomeContracts([success], 'request', response, {
+    input: { id: '42' },
+    maximum_output_bytes: 1,
+  });
+  assert.equal(oversized.kind, 'projection_failed');
+  assert.match(oversized.reason, /above the 1-byte output bound/);
   assert.equal(
-    evaluateOutcomeContracts([success], 'request', response, {
-      input: { id: '42' },
-      maximum_output_bytes: 1,
-    }).kind,
-    'projection_failed',
+    evaluateOutcomeContracts([success], 'other', response, { input: { id: '42' } }).reason,
+    'no outcome case is bound to strategy other',
   );
 });
 
@@ -2528,6 +2558,7 @@ test('public packages admit declarative browser navigation only with a complete 
     kind: 'failure',
     code: 'browser_unavailable',
     attempts: 0,
+    reason: 'public_http: browser executable is unavailable',
   });
   const browserCaller = new PublicCallerV1(undefined, undefined, async () => ({
     status: 200,

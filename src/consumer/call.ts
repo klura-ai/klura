@@ -44,6 +44,9 @@ export type PublicCallResultV1 =
         | 'invalid_input'
         | 'browser_unavailable';
       attempts: number;
+      /** What the executor reported when it gave up, for the author reading
+       *  a failed call; absent when the failure is a caller-side precondition. */
+      reason?: string;
     }
   | {
       kind: 'failure';
@@ -237,7 +240,7 @@ function mapExecutionError(
 ): Extract<PublicCallResultV1, { kind: 'failure' }> {
   if (error instanceof PublicHttpExecutionError) {
     if (error.code === 'invalid_request')
-      return { kind: 'failure', code: 'invalid_input', attempts };
+      return { kind: 'failure', code: 'invalid_input', attempts, reason: error.message };
     if (error.code === 'browser_interaction_failed') {
       if (error.interaction_failure !== null) {
         return {
@@ -247,13 +250,18 @@ function mapExecutionError(
           cause: error.interaction_failure,
         };
       }
-      return { kind: 'failure', code: 'transport_failure', attempts };
+      return { kind: 'failure', code: 'transport_failure', attempts, reason: error.message };
     }
-    return { kind: 'failure', code: error.code, attempts };
+    return { kind: 'failure', code: error.code, attempts, reason: error.message };
   }
   if (error instanceof PublicContractError)
-    return { kind: 'failure', code: 'invalid_input', attempts };
-  return { kind: 'failure', code: 'transport_failure', attempts };
+    return { kind: 'failure', code: 'invalid_input', attempts, reason: error.message };
+  return {
+    kind: 'failure',
+    code: 'transport_failure',
+    attempts,
+    reason: error instanceof Error ? error.message : String(error),
+  };
 }
 
 function parseConsumedTargetRequests(value: unknown, remaining: number): number {

@@ -123,6 +123,9 @@ test('an html response projects into one json object and refuses a non-document'
   assert.equal(response.body_kind, 'json_object');
   assert.equal(response.media_type, 'text/html');
   assert.deepEqual(response.body, { title: 'Bordslampa å' });
+  assert.equal(response.html_selector_exists('ul.results'), true);
+  assert.equal(response.html_selector_exists('#captcha'), false);
+  assert.equal(response.html_selector_exists('li::before('), false);
   assert.throws(
     () =>
       parsePublicHtmlResponse(

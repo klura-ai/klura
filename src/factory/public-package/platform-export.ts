@@ -11,7 +11,7 @@ import {
   type Sha256DigestV1,
   type StableContractIdV1,
 } from '../../public/contracts/common';
-import type { JsonValueV1 } from '../../public/contracts/json';
+import { canonicalJson, type JsonValueV1 } from '../../public/contracts/json';
 import {
   assessPackageFixtureCoverage,
   PACKAGE_FIXTURE_KINDS,
@@ -77,12 +77,47 @@ export const PACKAGE_EXPORT_AUDIT_CODES = {
 export type PackageExportAuditCodeV1 =
   (typeof PACKAGE_EXPORT_AUDIT_CODES)[keyof typeof PACKAGE_EXPORT_AUDIT_CODES];
 
+/** What one live response looked like to the outcome contracts, kept short
+ *  enough to read inside an audit rejection. */
+export interface ObservedSmokeResponseV1 {
+  strategy_id: StableContractIdV1;
+  status: number;
+  media_type: string | null;
+  body_kind: PublicHttpResponseV1['body_kind'];
+  body_preview: string;
+  denied_resources?: Array<{ url: string; resource_type: string }>;
+}
+
 export interface PackageExportAuditIssueV1 {
   code: PackageExportAuditCodeV1;
   path: string;
   message: string;
   remedy: string;
   diagnostic?: PublicExecutionDiagnosticV1;
+  observed?: ObservedSmokeResponseV1[];
+}
+
+const OBSERVED_BODY_PREVIEW_BYTES = 800;
+
+function observedSmokeResponses(
+  responses: ReadonlyArray<{ strategy_id: StableContractIdV1; response: PublicHttpResponseV1 }>,
+): ObservedSmokeResponseV1[] {
+  return responses.map(({ strategy_id, response }) => {
+    const body = canonicalJson(response.body);
+    return {
+      strategy_id,
+      status: response.status,
+      media_type: response.media_type,
+      body_kind: response.body_kind,
+      body_preview:
+        body.length > OBSERVED_BODY_PREVIEW_BYTES
+          ? `${body.slice(0, OBSERVED_BODY_PREVIEW_BYTES)}… (${body.length} chars)`
+          : body,
+      ...(response.denied_resources === undefined || response.denied_resources.length === 0
+        ? {}
+        : { denied_resources: response.denied_resources }),
+    };
+  });
 }
 
 export type PlatformPackageExportResultV1 =
@@ -499,6 +534,9 @@ async function proveCollectionCeilings(
     remedy:
       'Correct the item schema, pagination, or durable budgets this capability declares, then retry the export.',
     ...(execution.diagnostics[0] === undefined ? {} : { diagnostic: execution.diagnostics[0] }),
+    ...(execution.responses.length === 0
+      ? {}
+      : { observed: observedSmokeResponses(execution.responses) }),
   };
 }
 
@@ -512,7 +550,14 @@ async function captureCallFixtureEvidence(
 ): Promise<{ value: unknown } | { issue: PackageExportAuditIssueV1 }> {
   const execution = await call(capability, fixture.input);
   if (execution.result.kind !== 'outcome' || execution.result.outcome_class !== 'success') {
-    return { issue: smokeFailedIssue(fixturePath, execution.result, execution.diagnostics[0]) };
+    return {
+      issue: smokeFailedIssue(
+        fixturePath,
+        execution.result,
+        execution.diagnostics[0],
+        execution.responses,
+      ),
+    };
   }
   return {
     value: {
@@ -557,7 +602,14 @@ async function captureRunFixtureEvidence(
     },
   );
   if (execution.result.kind !== 'scrape_outcome') {
-    return { issue: smokeFailedIssue(fixturePath, execution.result, execution.diagnostics[0]) };
+    return {
+      issue: smokeFailedIssue(
+        fixturePath,
+        execution.result,
+        execution.diagnostics[0],
+        execution.responses,
+      ),
+    };
   }
   const expectedResult: Record<string, unknown> = { ...execution.result };
   delete expectedResult.run_id;
@@ -583,15 +635,18 @@ function smokeFailedIssue(
   fixturePath: string,
   result: unknown,
   diagnostic: PublicExecutionDiagnosticV1 | undefined,
+  responses: ReadonlyArray<{ strategy_id: StableContractIdV1; response: PublicHttpResponseV1 }>,
 ): PackageExportAuditIssueV1 {
+  const observed = observedSmokeResponses(responses);
   return {
     code: PACKAGE_EXPORT_AUDIT_CODES.smokeFailed,
     path: fixturePath,
     message: `Consumer smoke returned ${JSON.stringify(result)}.`,
     remedy: diagnostic
       ? 'Add or correct the exact reviewed egress rule described by diagnostic, then retry.'
-      : 'Correct the typed outcome, request budget, or saved strategy and retry.',
+      : 'Correct the typed outcome, request budget, or saved strategy so it accepts the observed response, then retry.',
     ...(diagnostic === undefined ? {} : { diagnostic }),
+    ...(observed.length === 0 ? {} : { observed }),
   };
 }
 
