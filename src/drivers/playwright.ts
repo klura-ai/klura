@@ -97,6 +97,18 @@ function isKluraOwnedProfile(profileDir: string): boolean {
   return resolved === home || resolved.startsWith(home + path.sep);
 }
 
+// macOS's application launcher, by its fixed system path.
+const MAC_OPEN = '/usr/bin/open';
+
+// The application bundle a Chrome binary belongs to on macOS, where an
+// application can be opened without being brought to the front. Null anywhere
+// else, and for a binary that is not inside a bundle.
+function macApplicationBundle(chromePath: string): string | null {
+  if (process.platform !== 'darwin') return null;
+  const match = /^(.+\.app)\/Contents\/MacOS\/[^/]+$/.exec(chromePath);
+  return match ? (match[1] ?? null) : null;
+}
+
 // How long a process waits for a Chrome another process is still launching to
 // open its DevTools port, before concluding there is none to share.
 const SHARED_CHROME_LAUNCH_WAIT_MS = 20_000;
@@ -790,6 +802,10 @@ export class PlaywrightDriver extends BrowserDriver {
   /** Child process for a spawned connect-mode Chrome. Killed on closeBrowser
    *  unless another process is still using it. */
   private _connectChild: ChildProcess | null = null;
+  /** Pid of the connect-mode Chrome this driver launched. On macOS the Chrome
+   *  is opened through the application launcher rather than as a child, so
+   *  the pid is what identifies it for teardown. */
+  private _connectChromePid: number | null = null;
   /** The klura-owned profile this driver holds a lease on, whether it spawned
    *  that profile's Chrome or attached to one another process spawned. */
   private _leasedProfileDir: string | null = null;
@@ -911,7 +927,7 @@ export class PlaywrightDriver extends BrowserDriver {
     // A Chrome another live process is leasing is in use, not left behind.
     if (otherProfileLeases(profileDir).length > 0) return;
     // A child this driver still tracks isn't an orphan — leave it be.
-    if (this._connectChild && this._connectChild.pid === holder.pid) return;
+    if (this._connectChromePid === holder.pid) return;
     try {
       process.kill(holder.pid, 'SIGKILL');
     } catch {
@@ -982,39 +998,54 @@ export class PlaywrightDriver extends BrowserDriver {
     // A normal Chrome launch: real profile, no --enable-automation, no
     // Playwright default-arg soup. Only the DevTools port + the flags a normal
     // first-run needs. This is what makes managed challenges treat it as human.
-    const child = spawn(
-      chromePath,
-      [
-        `--remote-debugging-port=${port}`,
-        `--user-data-dir=${profileDir}`,
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--restore-last-session=false',
-        'about:blank',
-      ],
-      { stdio: 'ignore' },
-    );
-    this._connectChild = child;
-    child.on('exit', () => {
-      if (this._connectChild === child) this._connectChild = null;
-    });
+    const endpoint = `http://127.0.0.1:${port}`;
+    const chromeArgs = [
+      `--remote-debugging-port=${port}`,
+      `--user-data-dir=${profileDir}`,
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--restore-last-session=false',
+      'about:blank',
+    ];
+    // On macOS the application is opened in the background as its own
+    // instance: its windows appear behind whatever the person is using and it
+    // is never made the active application, so a run that launches Chrome many
+    // times does not take the keyboard away each time. The page is unaffected —
+    // it is a visible window of a normally launched Chrome either way.
+    const bundle = macApplicationBundle(chromePath);
+    let child: ChildProcess | null = null;
+    if (bundle === null) {
+      child = spawn(chromePath, chromeArgs, { stdio: 'ignore' });
+      const direct = child;
+      this._connectChild = direct;
+      direct.on('exit', () => {
+        if (this._connectChild === direct) this._connectChild = null;
+      });
+    } else {
+      spawn(MAC_OPEN, ['-g', '-n', '-a', bundle, '--args', ...chromeArgs], { stdio: 'ignore' });
+    }
+    // The launch is known to have lost the profile when its own process has
+    // exited, or — opened through the launcher, with no process to watch — when
+    // another process's Chrome has published itself as the profile's holder.
+    const lostProfile = (): boolean => {
+      if (child !== null) return child.exitCode !== null || child.signalCode !== null;
+      const state = assessProfileChrome(profileDir);
+      return state.kind === 'shared' && state.endpoint !== null && state.endpoint !== endpoint;
+    };
 
     let browser: Browser;
     try {
-      browser = await connectOverCdpWithRetry(
-        `http://127.0.0.1:${port}`,
-        20000,
-        () => child.exitCode !== null || child.signalCode !== null,
-      );
+      browser = await connectOverCdpWithRetry(endpoint, 20000, lostProfile);
+      this._connectChromePid = child?.pid ?? readProfileLockHolder(profileDir)?.pid ?? null;
       // Published only once this Chrome is known to be the one on the profile:
       // a launch that lost the profile to another must not overwrite the
       // record of the Chrome that won it.
-      if (this._leasedProfileDir !== null && child.pid !== undefined) {
-        recordProfileChrome(profileDir, child.pid, `http://127.0.0.1:${port}`);
+      if (this._leasedProfileDir !== null && this._connectChromePid !== null) {
+        recordProfileChrome(profileDir, this._connectChromePid, endpoint);
       }
     } catch (err) {
       try {
-        child.kill('SIGKILL');
+        child?.kill('SIGKILL');
       } catch {
         /* already gone */
       }
@@ -1065,7 +1096,7 @@ export class PlaywrightDriver extends BrowserDriver {
       // to start it.
       const deadline =
         started + (state.pid === null ? SHARED_CHROME_START_WAIT_MS : SHARED_CHROME_LAUNCH_WAIT_MS);
-      if (state.pid !== null && this._connectChild?.pid === state.pid) return null;
+      if (state.pid !== null && this._connectChromePid === state.pid) return null;
       if (state.endpoint !== null) {
         try {
           const browser = await defaultChromium.connectOverCDP(state.endpoint);
@@ -4366,6 +4397,7 @@ export class PlaywrightDriver extends BrowserDriver {
   }
 
   async closeBrowser(): Promise<void> {
+    const chromePid = this._connectChromePid;
     if (this._browser) {
       await this._browser.close();
       this._browser = null;
@@ -4379,10 +4411,11 @@ export class PlaywrightDriver extends BrowserDriver {
     this._releaseProfileLease();
     const stillShared =
       leasedProfileDir !== null && otherProfileLeases(leasedProfileDir).length > 0;
+    this._connectChromePid = null;
     if (!stillShared) {
-      if (this._connectChild) {
+      if (chromePid !== null) {
         try {
-          this._connectChild.kill('SIGKILL');
+          process.kill(chromePid, 'SIGKILL');
         } catch {
           /* already exited */
         }
