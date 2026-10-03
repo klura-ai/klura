@@ -33,7 +33,10 @@ const BROWSER_RESOURCE_TYPES = [
 ] as const;
 
 export type BrowserResourceTypeV1 = (typeof BROWSER_RESOURCE_TYPES)[number];
+/** `login` is never declared by a package: it is the phase the login browser
+ *  gives a realm's rules, and such a rule admits a request in any phase. */
 type BrowserEgressPhaseV1 =
+  | 'login'
   | 'navigation'
   | 'resource'
   | 'interaction'
@@ -192,13 +195,17 @@ export function matchBrowserEgressRule(
   if (!BROWSER_RESOURCE_TYPES.includes(resourceType)) return null;
   const matching = policy.egress_rules.filter(
     (rule) =>
-      rule.phase === candidate.phase &&
+      rulePhaseAdmits(rule, candidate.phase) &&
       rule.origin === url.origin &&
       rule.methods.includes(method) &&
       rule.resource_types.includes(resourceType) &&
       browserRouteMatches(rule.route, url),
   );
   return matching.length === 1 ? (matching[0] ?? null) : null;
+}
+
+function rulePhaseAdmits(rule: BrowserEgressRuleV1, phase: BrowserEgressPhaseV1): boolean {
+  return rule.phase === 'login' || rule.phase === phase;
 }
 
 /**
@@ -222,7 +229,7 @@ export function matchBrowserPreflightEgressRule(
   if (url === null) return null;
   const matching = policy.egress_rules.filter(
     (rule) =>
-      rule.phase === candidate.phase &&
+      rulePhaseAdmits(rule, candidate.phase) &&
       rule.origin === url.origin &&
       rule.methods.includes(requestedMethod) &&
       rule.resource_types.some(

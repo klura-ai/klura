@@ -13,6 +13,12 @@ export interface BrowserFetchPausedV1 {
   cdp_resource_type: string;
   /** The frame that issued the request; null when Chromium reports none. */
   frame_id: string | null;
+  /** Chromium's network-level id, shared by every hop of a redirect chain;
+   *  null when Chromium reports none. */
+  network_id: string | null;
+  /** The interception this request was redirected from, when Chromium reports
+   *  a redirect as a new request rather than as a paused response. */
+  redirected_from: string | null;
   response_status: number | null;
   /** Chromium's network error for a response-stage pause that carries no status. */
   response_error: string | null;
@@ -60,6 +66,9 @@ export function parseBrowserFetchPaused(value: unknown): BrowserFetchPausedV1 | 
     resource_type: normalizeResourceType(record.resourceType),
     cdp_resource_type: record.resourceType,
     frame_id: typeof record.frameId === 'string' ? record.frameId : null,
+    network_id: typeof record.networkId === 'string' ? record.networkId : null,
+    redirected_from:
+      typeof record.redirectedRequestId === 'string' ? record.redirectedRequestId : null,
     response_status: status === undefined ? null : status,
     response_error:
       typeof record.responseErrorReason === 'string' ? record.responseErrorReason : null,

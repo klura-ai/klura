@@ -57,21 +57,40 @@ class ReviewedPageProgramExecutionError extends Error {
 }
 
 /** Executes signed, maintainer-reviewed source only inside an isolated browser page. */
-export async function executeBrowserPageScriptStrategy(
+interface PreparedPageScriptV1 {
+  argumentsValue: JsonValueV1;
+  url: string;
+}
+
+/** Everything a page-script execution needs to know before a browser exists:
+ *  the typed refusals, the program's arguments, and the page to open. */
+function preparePageScriptRequest(
   capability: PublicReadCapabilityV1,
   strategy: PublicBrowserPageScriptStrategyV1,
   options: PublicBrowserExecutionOptionsV1,
-): Promise<PublicHttpResponseV1> {
+): PreparedPageScriptV1 {
   if (!capability.strategies.includes(strategy)) {
     throw new PublicHttpExecutionError(
       'invalid_request',
       'strategy is absent from the selected capability',
     );
   }
-  if (capability.authentication.mode !== 'none' || options.storage_state !== undefined) {
+  if (capability.authentication.mode === 'none' && options.storage_state !== undefined) {
     throw new PublicHttpExecutionError(
       'invalid_request',
-      'browser page-script execution does not admit authenticated browser state',
+      'browser page-script execution admits browser state only under a declared authentication contract',
+    );
+  }
+  if (
+    options.storage_state !== undefined &&
+    (capability.browser_resources?.egress_rules.some((rule) =>
+      rule.methods.some((method) => method !== 'GET'),
+    ) ??
+      false)
+  ) {
+    throw new PublicHttpExecutionError(
+      'invalid_request',
+      'browser page-script execution under browser state requires GET-only egress rules',
     );
   }
   if (capability.browser_resources === null) {
@@ -109,9 +128,20 @@ export async function executeBrowserPageScriptStrategy(
     options.bindings,
     capability.navigation_origins,
   );
+  return { argumentsValue, url };
+}
+
+export async function executeBrowserPageScriptStrategy(
+  capability: PublicReadCapabilityV1,
+  strategy: PublicBrowserPageScriptStrategyV1,
+  options: PublicBrowserExecutionOptionsV1,
+): Promise<PublicHttpResponseV1> {
+  preparePageScriptRequest(capability, strategy, options);
+  const resources = capability.browser_resources as NonNullable<
+    PublicReadCapabilityV1['browser_resources']
+  >;
   const deadline = new AbortController();
   const deadlineState = { timed_out: false };
-  let stage: PublicExecutionStageV1 = 'navigation';
   const timer = setTimeout(() => {
     deadlineState.timed_out = true;
     deadline.abort();
@@ -127,17 +157,15 @@ export async function executeBrowserPageScriptStrategy(
       throw new PublicHttpExecutionError('cancelled', 'caller cancelled before browser launch');
     }
     proxy = await startPinnedEgressProxy({
-      allowed_origins: [
-        ...new Set(capability.browser_resources.egress_rules.map((rule) => rule.origin)),
-      ],
-      max_wire_bytes: capability.browser_resources.max_proxy_wire_bytes_per_browser_task,
+      allowed_origins: [...new Set(resources.egress_rules.map((rule) => rule.origin))],
+      max_wire_bytes: resources.max_proxy_wire_bytes_per_browser_task,
       connect_timeout_ms: Math.min(options.timeout_ms, 60_000),
       resolve_host: options.resolve_host,
     });
     const launched = await launchPublicBrowser(proxy);
     browser = launched.browser;
     const context = await browser.newContext(
-      createPublicBrowserContextOptions(undefined, launched.user_agent),
+      createPublicBrowserContextOptions(options.storage_state, launched.user_agent),
     );
     const pageProgramRunner = await installReviewedPageProgramRunner(context);
     await context.routeWebSocket('**/*', (webSocket) => webSocket.close());
@@ -154,82 +182,16 @@ export async function executeBrowserPageScriptStrategy(
     };
     signal.addEventListener('abort', abort, { once: true });
     try {
-      const response = await page.goto(url, {
-        waitUntil: 'domcontentloaded',
-        timeout: options.timeout_ms,
-      });
-      if (!response) {
-        throw new PublicHttpExecutionError(
-          'transport_failure',
-          'browser navigation did not produce a document response',
-          boundary.target_requests(),
-        );
-      }
-      stage = 'wait';
-      await waitForBrowserStrategy(page, boundary, strategy.wait, signal, options.timeout_ms);
-      if (strategy.interaction !== null) {
-        stage = 'interaction';
-        await executeBrowserInteractionProgram({
-          page,
-          program: strategy.interaction,
-          projection: PREPARATION_PROJECTION,
-          maximum_output_bytes: capability.max_encoded_outcome_bytes,
-          expression_context: { input: options.input, bindings: options.bindings },
-          strategy_id: strategy.strategy_id,
-          network: boundary,
-          signal,
-          timeout_ms: options.timeout_ms,
-        });
-      }
-      assertPageScriptOrigin(page.url(), capability.navigation_origins[0] as string);
-      stage = 'program';
-      const scriptScope = boundary.beginPageScript(
-        strategy.strategy_id,
-        strategy.program.expect,
-        strategy.program.request_body_limits,
-        capability.navigation_origins[0] as string,
+      const response = await executeBrowserPageScriptStrategyInBoundedPage(
+        page,
+        boundary,
+        pageProgramRunner,
+        capability,
+        strategy,
+        { ...options, signal },
       );
-      let body: JsonValueV1;
-      try {
-        body = await executeReviewedPageProgram(
-          page,
-          pageProgramRunner,
-          strategy.program.source,
-          argumentsValue,
-          strategy.program.result_shape,
-          capability.max_encoded_outcome_bytes,
-        );
-        if (strategy.program.expect.wait !== null) {
-          stage = 'wait';
-          await waitForBrowserStrategy(
-            page,
-            boundary,
-            strategy.program.expect.wait,
-            signal,
-            options.timeout_ms,
-          );
-        }
-        stage = 'program';
-        await boundary.finishPageScript(scriptScope, strategy.program.expect, signal);
-      } catch (error) {
-        boundary.abortPageScript(scriptScope);
-        throw error;
-      }
-      stage = 'projection';
-      const selectorMatches = await evaluateOutcomeSelectors(page, capability, strategy);
       pageGuard.assertHealthy();
-      boundary.assertHealthy();
-      return {
-        status: 200,
-        headers: {},
-        media_type: 'application/json',
-        body_kind: Array.isArray(body) ? 'json_array' : 'json_object',
-        body,
-        target_requests: boundary.target_requests(),
-        denied_resources: boundary.denied_resources(),
-        browser_identity: launched.identity,
-        html_selector_exists: (selector: string) => selectorMatches.get(selector) ?? false,
-      };
+      return { ...response, browser_identity: launched.identity };
     } finally {
       signal.removeEventListener('abort', abort);
       await context.close();
@@ -239,9 +201,147 @@ export async function executeBrowserPageScriptStrategy(
     if (deadlineState.timed_out) {
       throw deadlineExpired(
         'browser page-script',
-        stage,
+        'navigation',
         targetRequests,
         boundary?.denied_resources() ?? [],
+      );
+    }
+    if (signal.aborted) {
+      throw new PublicHttpExecutionError(
+        'cancelled',
+        'caller cancelled browser page-script execution',
+        targetRequests,
+      );
+    }
+    if (error instanceof PublicHttpExecutionError) throw error;
+    throw new PublicHttpExecutionError('transport_failure', errorMessage(error), targetRequests);
+  } finally {
+    clearTimeout(timer);
+    await boundary?.close();
+    await browser?.close();
+    await proxy?.close();
+  }
+}
+
+/**
+ * Runs one reviewed page script inside an already-isolated page whose
+ * boundary is handed over to this capability's policy. The login flow uses
+ * it to run a page-script check capability in the page the user just
+ * completed an interaction in, with the runner that context installed before
+ * any target script ran.
+ */
+export async function executeBrowserPageScriptStrategyInBoundedPage(
+  page: Page,
+  boundary: BrowserNetworkBoundaryV1,
+  pageProgramRunner: string,
+  capability: PublicReadCapabilityV1,
+  strategy: PublicBrowserPageScriptStrategyV1,
+  options: PublicBrowserExecutionOptionsV1,
+): Promise<PublicHttpResponseV1> {
+  const { argumentsValue, url } = preparePageScriptRequest(capability, strategy, options);
+  const deadline = new AbortController();
+  const deadlineState = { timed_out: false };
+  let stage: PublicExecutionStageV1 = 'navigation';
+  const timer = setTimeout(() => {
+    deadlineState.timed_out = true;
+    deadline.abort();
+  }, options.timeout_ms);
+  const signal = options.signal
+    ? AbortSignal.any([options.signal, deadline.signal])
+    : deadline.signal;
+  try {
+    if (signal.aborted) {
+      throw new PublicHttpExecutionError('cancelled', 'caller cancelled before browser navigation');
+    }
+    boundary.transition(
+      {
+        browser_resources: capability.browser_resources,
+        origin_traffic_policies: capability.origin_traffic_policies,
+      },
+      { ...options, signal },
+    );
+    const response = await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: options.timeout_ms,
+    });
+    if (!response) {
+      throw new PublicHttpExecutionError(
+        'transport_failure',
+        'browser navigation did not produce a document response',
+        boundary.target_requests(),
+      );
+    }
+    stage = 'wait';
+    await waitForBrowserStrategy(page, boundary, strategy.wait, signal, options.timeout_ms);
+    if (strategy.interaction !== null) {
+      stage = 'interaction';
+      await executeBrowserInteractionProgram({
+        page,
+        program: strategy.interaction,
+        projection: PREPARATION_PROJECTION,
+        maximum_output_bytes: capability.max_encoded_outcome_bytes,
+        expression_context: { input: options.input, bindings: options.bindings },
+        strategy_id: strategy.strategy_id,
+        network: boundary,
+        signal,
+        timeout_ms: options.timeout_ms,
+      });
+    }
+    assertPageScriptOrigin(page.url(), capability.navigation_origins[0] as string);
+    stage = 'program';
+    const scriptScope = boundary.beginPageScript(
+      strategy.strategy_id,
+      strategy.program.expect,
+      strategy.program.request_body_limits,
+      capability.navigation_origins[0] as string,
+    );
+    let body: JsonValueV1;
+    try {
+      body = await executeReviewedPageProgram(
+        page,
+        pageProgramRunner,
+        strategy.program.source,
+        argumentsValue,
+        strategy.program.result_shape,
+        capability.max_encoded_outcome_bytes,
+      );
+      if (strategy.program.expect.wait !== null) {
+        stage = 'wait';
+        await waitForBrowserStrategy(
+          page,
+          boundary,
+          strategy.program.expect.wait,
+          signal,
+          options.timeout_ms,
+        );
+      }
+      stage = 'program';
+      await boundary.finishPageScript(scriptScope, strategy.program.expect, signal);
+    } catch (error) {
+      boundary.abortPageScript(scriptScope);
+      throw error;
+    }
+    stage = 'projection';
+    const selectorMatches = await evaluateOutcomeSelectors(page, capability, strategy);
+    boundary.assertHealthy();
+    return {
+      status: 200,
+      headers: {},
+      media_type: 'application/json',
+      body_kind: Array.isArray(body) ? 'json_array' : 'json_object',
+      body,
+      target_requests: boundary.target_requests(),
+      denied_resources: boundary.denied_resources(),
+      html_selector_exists: (selector: string) => selectorMatches.get(selector) ?? false,
+    };
+  } catch (error) {
+    const targetRequests = boundary.target_requests();
+    if (deadlineState.timed_out) {
+      throw deadlineExpired(
+        'browser page-script',
+        stage,
+        targetRequests,
+        boundary.denied_resources(),
       );
     }
     if (signal.aborted) {
@@ -268,9 +368,6 @@ export async function executeBrowserPageScriptStrategy(
     throw new PublicHttpExecutionError('transport_failure', errorMessage(error), targetRequests);
   } finally {
     clearTimeout(timer);
-    await boundary?.close();
-    await browser?.close();
-    await proxy?.close();
   }
 }
 

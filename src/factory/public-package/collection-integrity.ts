@@ -1,4 +1,6 @@
 import type { JsonValueV1 } from '../../public/contracts/json';
+import type { JsonSchemaV1 } from '../../public/contracts/json-schema';
+import type { OutcomeContractV1 } from '../../public/contracts/outcome';
 
 export interface UniformlyNullFieldV1 {
   collection: string;
@@ -40,4 +42,25 @@ export function uniformlyNullCollectionFields(data: JsonValueV1 | null): Uniform
     }
   }
   return found;
+}
+
+/** Whether the outcome named by `outcomeId` declares `field` nullable inside the
+ *  collection named by `collection` (or at the top level when the outcome's
+ *  data is itself the array). */
+export function isNullableCollectionField(
+  outcomes: readonly OutcomeContractV1[],
+  outcomeId: string,
+  collection: string,
+  field: string,
+): boolean {
+  const schema = outcomes.find((outcome) => outcome.outcome_id === outcomeId)?.output_schema;
+  if (!schema) return false;
+  let collectionSchema: JsonSchemaV1 | undefined;
+  if (schema.type === 'array') collectionSchema = schema;
+  else if (schema.type === 'object') collectionSchema = schema.properties[collection];
+  if (collectionSchema === undefined || collectionSchema.type !== 'array') return false;
+  const item = collectionSchema.items;
+  if (item.type !== 'object') return false;
+  const leaf = item.properties[field];
+  return leaf !== undefined && leaf.type !== 'null' && leaf.nullable;
 }

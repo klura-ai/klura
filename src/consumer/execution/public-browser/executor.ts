@@ -33,11 +33,12 @@ import {
 import { evaluateOutcomeSelectors } from './outcome-selectors';
 import { type BrowserEgressRuleV1, type BrowserResourcePolicyV1 } from './resource-policy';
 import { type BrowserRequestBodyPolicyV1 } from './request-body-policy';
-import { parseBrowserFetchPaused, type BrowserFetchPausedV1 } from './fetch-paused';
+import { parseBrowserFetchPaused } from './fetch-paused';
 import { resolveNavigationUrl, waitForBrowserStrategy } from './navigation-helpers';
 import { waitForOperationSettled, type OperationSettledWaiterV1 } from './operation-settled';
 import { handleBrowserRequestStage } from './request-stage';
-import { readPausedResponseBody, rewriteResponseHeaders } from './response-boundary';
+import { handleResponseStage, loadingFailedNetworkId } from './response-stage';
+import { releaseVanishedRequest } from './request-stage';
 
 export interface BrowserNetworkCapabilityV1 {
   browser_resources: BrowserResourcePolicyV1 | null;
@@ -60,6 +61,16 @@ export interface AdmittedBrowserRequestV1 {
   request_id: string;
   permit: OriginSchedulerPermitV1;
   rule: BrowserEgressRuleV1;
+  /** Chromium's network-level id, by which a cancelled load is matched back
+   *  to its admission; null when Chromium reported none. */
+  network_id: string | null;
+  /** The request named structurally — method, origin, path, phase. */
+  description: string;
+  /** Whether the response has arrived and its body is being read. */
+  reading_response: boolean;
+  /** The traffic policy of the origin the request was admitted against; it
+   *  bounds how many redirect hops the response may start. */
+  origin_policy: BrowserNetworkCapabilityV1['origin_traffic_policies'][number];
   operation: ActiveBrowserOperationV1 | null;
 }
 
@@ -80,6 +91,9 @@ export interface BrowserNetworkBoundaryV1 extends BrowserInteractionNetworkBound
   /** Sub-resources the page requested on its own and the policy refused, in
    *  arrival order, capped so a busy page cannot grow it without bound. */
   denied_resources(): BrowserDeniedResourceV1[];
+  /** Admitted requests whose responses have not yet arrived, named
+   *  structurally — method, origin, path. */
+  in_flight(): string[];
   assertHealthy(): void;
   transition(
     capability: BrowserNetworkCapabilityV1,
@@ -126,6 +140,9 @@ export interface ActiveBrowserOperationV1 {
   waiters: Set<OperationSettledWaiterV1>;
   request_body_bytes: number;
   request_body_policy?: BrowserRequestBodyPolicyV1;
+  /** The operation ended with its declared wait satisfied; traffic it still
+   *  had in flight is the page's own from here on. */
+  released: boolean;
 }
 
 export interface ActiveBrowserRuntimeRequestV1 {
@@ -382,6 +399,7 @@ export async function installBrowserNetworkBoundary(input: {
   );
   const admitted = new Map<string, AdmittedBrowserRequestV1>();
   const ruleRequests = new Map<string, number>();
+  const redirectHops = new Map<string, number>();
   let targetRequests = 0;
   let responseBytes = 0;
   let requestBodyBytes = 0;
@@ -491,58 +509,60 @@ export async function installBrowserNetworkBoundary(input: {
     }
   };
 
+  const handlerState: FetchHandlerStateV1 = {
+    capability,
+    policy,
+    options,
+    cdp,
+    admitted,
+    ruleRequests,
+    redirectHops,
+    get targetRequests() {
+      return targetRequests;
+    },
+    set targetRequests(value: number) {
+      targetRequests = value;
+    },
+    get responseBytes() {
+      return responseBytes;
+    },
+    set responseBytes(value: number) {
+      responseBytes = value;
+    },
+    get requestBodyBytes() {
+      return requestBodyBytes;
+    },
+    set requestBodyBytes(value: number) {
+      requestBodyBytes = value;
+    },
+    get activeRequests() {
+      return activeRequests;
+    },
+    set activeRequests(value: number) {
+      activeRequests = value;
+    },
+    get pendingAdmissions() {
+      return pendingAdmissions;
+    },
+    set pendingAdmissions(value: number) {
+      pendingAdmissions = value;
+    },
+    responseBodyQueue,
+    fail,
+    deny,
+    mainFrameId: () => mainFrameId,
+    fatal: () => fatal,
+    closed: () => closed,
+    activityChanged: notifyActivity,
+    activeAction: () => activeAction,
+    activePageScript: () => activePageScript,
+    pageScriptNetworkSealed: () => pageScriptNetworkSealed,
+    programOrigin: () => programOrigin,
+    activeRuntimeRequest: () => activeRuntimeRequest,
+    operationActivityChanged: notifyOperationSettled,
+  };
   const onPaused = (raw: unknown): void => {
-    void handleFetchPaused(raw, {
-      capability,
-      policy,
-      options,
-      cdp,
-      admitted,
-      ruleRequests,
-      get targetRequests() {
-        return targetRequests;
-      },
-      set targetRequests(value: number) {
-        targetRequests = value;
-      },
-      get responseBytes() {
-        return responseBytes;
-      },
-      set responseBytes(value: number) {
-        responseBytes = value;
-      },
-      get requestBodyBytes() {
-        return requestBodyBytes;
-      },
-      set requestBodyBytes(value: number) {
-        requestBodyBytes = value;
-      },
-      get activeRequests() {
-        return activeRequests;
-      },
-      set activeRequests(value: number) {
-        activeRequests = value;
-      },
-      get pendingAdmissions() {
-        return pendingAdmissions;
-      },
-      set pendingAdmissions(value: number) {
-        pendingAdmissions = value;
-      },
-      responseBodyQueue,
-      fail,
-      deny,
-      mainFrameId: () => mainFrameId,
-      fatal: () => fatal,
-      closed: () => closed,
-      activityChanged: notifyActivity,
-      activeAction: () => activeAction,
-      activePageScript: () => activePageScript,
-      pageScriptNetworkSealed: () => pageScriptNetworkSealed,
-      programOrigin: () => programOrigin,
-      activeRuntimeRequest: () => activeRuntimeRequest,
-      operationActivityChanged: notifyOperationSettled,
-    }).catch((error: unknown) => {
+    void handleFetchPaused(raw, handlerState).catch((error: unknown) => {
       const failure =
         error instanceof PublicHttpExecutionError
           ? error
@@ -555,11 +575,30 @@ export async function installBrowserNetworkBoundary(input: {
     });
   };
   cdp.on('Fetch.requestPaused', onPaused);
+  // A load that Chromium reports finished or failed without a response-stage
+  // pause — cancelled by a navigation, or completed outside interception —
+  // leaves nothing else to settle its admission.
+  const onLoadingFailed = (raw: unknown): void => {
+    const networkId = loadingFailedNetworkId(raw);
+    if (networkId === null) return;
+    for (const admission of admitted.values()) {
+      if (admission.network_id === networkId) {
+        releaseVanishedRequest(admission.request_id, handlerState);
+      }
+    }
+  };
+  cdp.on('Network.loadingFailed', onLoadingFailed);
+  cdp.on('Network.loadingFinished', onLoadingFailed);
   return {
     cdp,
     target_requests: () => targetRequests,
     denied_requests: () => deniedRequests,
     denied_resources: () => [...deniedResources],
+    in_flight: () =>
+      [...admitted.values()].map(
+        (admission) =>
+          `${admission.description}${admission.reading_response ? ' [reading response]' : ' [awaiting response]'}${admission.network_id === null ? ' [no network id]' : ''}`,
+      ),
     assertHealthy: () => {
       if (fatal !== null) throw fatal;
     },
@@ -633,6 +672,7 @@ export async function installBrowserNetworkBoundary(input: {
         pending_request_ids: new Set(),
         waiters: new Set(),
         request_body_bytes: 0,
+        released: false,
       };
       return scope;
     },
@@ -646,7 +686,14 @@ export async function installBrowserNetworkBoundary(input: {
       }
       const currentFatal = fatal;
       if (currentFatal !== null) throw currentFatal;
-      await waitForOperationSettled(action, signal, finishOperationWaiter, rejectOperationWaiter);
+      // A declared wait is the action's completion: once it holds, whatever
+      // the page still has in flight is its own loading, not the action's.
+      // Without one, the action is complete when its traffic has settled.
+      if (expect.wait === null) {
+        await waitForOperationSettled(action, signal, finishOperationWaiter, rejectOperationWaiter);
+      } else {
+        action.released = true;
+      }
       const settledFatal = fatal;
       if (settledFatal !== null) throw settledFatal;
       const matchingRequests = [...action.matching_requests.values()].reduce(
@@ -694,6 +741,7 @@ export async function installBrowserNetworkBoundary(input: {
         pending_request_ids: new Set(),
         waiters: new Set(),
         request_body_bytes: 0,
+        released: false,
         request_body_policy: {
           max_encoded_request_body_bytes_per_browser_task:
             requestBodyLimits.max_encoded_request_body_bytes_per_script,
@@ -791,6 +839,8 @@ export async function installBrowserNetworkBoundary(input: {
       for (const admission of admitted.values()) admission.permit.release('neutral');
       admitted.clear();
       cdp.off('Fetch.requestPaused', onPaused);
+      cdp.off('Network.loadingFailed', onLoadingFailed);
+      cdp.off('Network.loadingFinished', onLoadingFailed);
       await cdp.detach().catch(() => undefined);
     },
   };
@@ -803,6 +853,8 @@ export interface FetchHandlerStateV1 {
   cdp: CDPSession;
   admitted: Map<string, AdmittedBrowserRequestV1>;
   ruleRequests: Map<string, number>;
+  /** Redirect hops taken so far, by redirect chain. */
+  redirectHops: Map<string, number>;
   targetRequests: number;
   responseBytes: number;
   requestBodyBytes: number;
@@ -863,64 +915,6 @@ async function handleFetchPaused(raw: unknown, state: FetchHandlerStateV1): Prom
     return;
   }
   await handleResponseStage(paused, state);
-}
-
-async function handleResponseStage(
-  paused: BrowserFetchPausedV1,
-  state: FetchHandlerStateV1,
-): Promise<void> {
-  const responseStatus = paused.response_status;
-  if (responseStatus === null) {
-    await state.fail(
-      paused.request_id,
-      new PublicHttpExecutionError('transport_failure', 'browser response has no status code'),
-    );
-    return;
-  }
-  const admission = state.admitted.get(paused.request_id);
-  if (!admission) {
-    await state.fail(
-      paused.request_id,
-      new PublicHttpExecutionError('request_blocked', 'browser response has no admitted request'),
-    );
-    return;
-  }
-  try {
-    const body = await state.responseBodyQueue.run(async () => {
-      const result = await readPausedResponseBody(
-        state.cdp,
-        paused.request_id,
-        Math.min(
-          admission.rule.max_encoded_response_bytes,
-          state.policy.max_single_response_bytes,
-          state.policy.max_encoded_response_bytes_per_browser_task - state.responseBytes,
-        ),
-      );
-      state.responseBytes += result.byteLength;
-      return result;
-    });
-    await state.cdp.send('Fetch.fulfillRequest', {
-      requestId: paused.request_id,
-      responseCode: responseStatus,
-      responseHeaders: rewriteResponseHeaders(paused.response_headers, body.byteLength),
-      body: body.toString('base64'),
-    });
-    admission.permit.release(responseStatus >= 500 ? 'transient_failure' : 'success');
-    state.admitted.delete(paused.request_id);
-    state.activeRequests -= 1;
-    if (admission.operation !== null) {
-      admission.operation.pending_request_ids.delete(paused.request_id);
-      state.operationActivityChanged(admission.operation);
-    }
-    state.activityChanged();
-  } catch (error) {
-    await state.fail(
-      paused.request_id,
-      error instanceof PublicHttpExecutionError
-        ? error
-        : new PublicHttpExecutionError('transport_failure', asError(error).message),
-    );
-  }
 }
 
 function asError(value: unknown): Error {

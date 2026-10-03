@@ -17,6 +17,7 @@ import type { PublicReadCapabilityV1 } from '../public/contracts/package';
 import type { JsonValueV1 } from '../public/contracts/json';
 import type { PublicCallResultV1 } from './call';
 import { getConsumerOriginScheduler } from './execution/shared-scheduler';
+import { PublicHttpExecutionError, type PublicExecutionDiagnosticV1 } from './execution/node-http';
 import {
   openPublicLoginBrowser,
   type PublicLoginBrowserV1,
@@ -57,15 +58,24 @@ interface LoginSelectionV1 {
   check_capability: PublicReadCapabilityV1;
 }
 
-interface ActiveLoginInteractionV1 extends LoginSelectionV1 {
+interface LoginCompletionV1 extends LoginSelectionV1 {
   interaction_id: string;
   browser: PublicLoginBrowserV1;
+}
+
+interface ActiveLoginInteractionV1 extends LoginCompletionV1 {
   expiry: NodeJS.Timeout;
 }
 
 type LoginSelectionFailureV1 = Exclude<AuthenticationContractSelectionV1, { kind: 'selected' }>;
 
+/** A login opens and waits for the user; a consent grant is the runtime's own
+ *  work, so opening it already returns the completion result. */
 export type OpenPackageLoginResultV1 =
+  | Exclude<
+      CompletePackageLoginResultV1,
+      { kind: 'login_not_found' | 'login_expired' | 'login_closed' }
+    >
   | {
       kind: 'login_opened';
       package_id: PackageIdV1;
@@ -79,6 +89,10 @@ export type OpenPackageLoginResultV1 =
       package_id: PackageIdV1;
       authentication_contract_id: StableContractIdV1;
       session_name: SessionNameV1;
+      /** Why the login browser could not be opened, in the executor's own words. */
+      reason: string;
+      /** The executor's structural account of the refusal, when it has one. */
+      diagnostic: PublicExecutionDiagnosticV1 | null;
     };
 
 export type CompletePackageLoginResultV1 =
@@ -110,7 +124,13 @@ export type CompletePackageLoginResultV1 =
 
 export type LoginCheckResultV1 =
   | { kind: 'outcome'; outcome_id: StableContractIdV1; outcome_class: 'success' }
-  | { kind: 'failure'; code: Extract<PublicCallResultV1, { kind: 'failure' }>['code'] };
+  | {
+      kind: 'failure';
+      code: Extract<PublicCallResultV1, { kind: 'failure' }>['code'];
+      /** The executor's own account of the refusal, when the check itself
+       *  could not run to a result. */
+      reason?: string;
+    };
 
 /** Owns bounded, user-visible local login interactions and immutable session commits. */
 export class ConsumerLoginServiceV1 {
@@ -141,6 +161,24 @@ export class ConsumerLoginServiceV1 {
         scheduler: this.scheduler,
       });
       const interactionId = `login_v1_${randomUUID().replaceAll('-', '')}`;
+      if (selection.contract.grant !== null) {
+        const completed = await this.finish({
+          ...selection,
+          interaction_id: interactionId,
+          browser,
+        });
+        if (isLoginClosure(completed)) {
+          return {
+            kind: 'login_unavailable',
+            package_id: selection.package_id,
+            authentication_contract_id: selection.authentication_contract_id,
+            session_name: selection.session_name,
+            reason: 'the consent browser closed before its check completed',
+            diagnostic: null,
+          };
+        }
+        return completed;
+      }
       const expiry = setTimeout(() => {
         void this.closeExpired(interactionId);
       }, selection.contract.browser_resources.total_timeout_ms);
@@ -158,12 +196,14 @@ export class ConsumerLoginServiceV1 {
         session_name: selection.session_name,
         interaction_id: interactionId,
       };
-    } catch {
+    } catch (error) {
       return {
         kind: 'login_unavailable',
         package_id: selection.package_id,
         authentication_contract_id: selection.authentication_contract_id,
         session_name: selection.session_name,
+        reason: error instanceof Error ? error.message : String(error),
+        diagnostic: error instanceof PublicHttpExecutionError ? error.diagnostic : null,
       };
     }
   }
@@ -174,6 +214,11 @@ export class ConsumerLoginServiceV1 {
     if (!active) return this.closedResult(interactionId);
     this.active.delete(interactionId);
     clearTimeout(active.expiry);
+    return await this.finish(active);
+  }
+
+  private async finish(active: LoginCompletionV1): Promise<CompletePackageLoginResultV1> {
+    const interactionId = active.interaction_id;
     try {
       active.browser.assertHealthy();
       const completed = await active.browser.completeCheck();
@@ -196,6 +241,19 @@ export class ConsumerLoginServiceV1 {
           package_id: active.package_id,
           authentication_contract_id: active.authentication_contract_id,
           session_name: active.session_name,
+        };
+      }
+      if (error instanceof PublicHttpExecutionError) {
+        return {
+          kind: 'login_check_failed',
+          package_id: active.package_id,
+          authentication_contract_id: active.authentication_contract_id,
+          session_name: active.session_name,
+          check: {
+            kind: 'failure',
+            code: error.code === 'invalid_request' ? 'invalid_input' : error.code,
+            reason: error.message,
+          },
         };
       }
       this.rememberClosure(interactionId, 'closed');
@@ -249,7 +307,7 @@ export class ConsumerLoginServiceV1 {
   }
 
   private interpretCheck(
-    active: ActiveLoginInteractionV1,
+    active: LoginCompletionV1,
     result: PublicCallResultV1,
   ): LoginCheckResultV1 {
     if (
@@ -267,7 +325,7 @@ export class ConsumerLoginServiceV1 {
     return { kind: 'failure', code: 'session_invalid' };
   }
 
-  private commit(active: ActiveLoginInteractionV1, state: JsonValueV1): LocalSessionPointerV1 {
+  private commit(active: LoginCompletionV1, state: JsonValueV1): LocalSessionPointerV1 {
     return this.sessions.commit({
       package_id: active.package_id,
       authentication_contract_id: active.authentication_contract_id,
@@ -308,6 +366,19 @@ export class ConsumerLoginServiceV1 {
   private readonly openBrowser: NonNullable<ConsumerLoginServiceDependenciesV1['open_browser']>;
 }
 
+function isLoginClosure(
+  result: CompletePackageLoginResultV1,
+): result is Extract<
+  CompletePackageLoginResultV1,
+  { kind: 'login_not_found' | 'login_expired' | 'login_closed' }
+> {
+  return (
+    result.kind === 'login_not_found' ||
+    result.kind === 'login_expired' ||
+    result.kind === 'login_closed'
+  );
+}
+
 function parseInteractionId(value: unknown): string {
   const interactionId = parseString(value, 'complete_login.interaction_id', 48);
   if (!/^login_v1_[0-9a-f]{32}$/.test(interactionId)) {
@@ -320,7 +391,7 @@ function parseInteractionId(value: unknown): string {
 }
 
 function completedResult(
-  active: ActiveLoginInteractionV1,
+  active: LoginCompletionV1,
   pointer: LocalSessionPointerV1,
 ): Extract<CompletePackageLoginResultV1, { kind: 'login_completed' }> {
   return {

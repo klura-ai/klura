@@ -63,7 +63,7 @@ import {
   type PublicReadCapabilitySourceV1,
 } from './compiler';
 import { createExportTreeManifest, type ExportTreeManifestV1 } from './export-tree';
-import { uniformlyNullCollectionFields } from './collection-integrity';
+import { isNullableCollectionField, uniformlyNullCollectionFields } from './collection-integrity';
 
 export const PACKAGE_EXPORT_AUDIT_CODES = {
   invalidExport: 'invalid_export',
@@ -562,7 +562,20 @@ async function captureCallFixtureEvidence(
 ): Promise<{ value: unknown } | { issue: PackageExportAuditIssueV1 }> {
   const execution = await call(capability, fixture.input);
   if (execution.result.kind === 'outcome' && execution.result.outcome_class === 'success') {
-    const partial = uniformlyNullCollectionFields(execution.result.data);
+    // The smoke runs without a session. A capability that declares one may
+    // legitimately carry fields the site shows only to a session holder, so a
+    // nullable field that is empty here is a declared enhancement, not a defect.
+    const success = execution.result;
+    const partial = uniformlyNullCollectionFields(success.data).filter(
+      (entry) =>
+        capability.authentication.mode === 'none' ||
+        !isNullableCollectionField(
+          capability.outcomes,
+          success.outcome_id,
+          entry.collection,
+          entry.field,
+        ),
+    );
     if (partial.length > 0) {
       const observed = observedSmokeResponses(execution.responses, [capability]);
       return {

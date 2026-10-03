@@ -6,10 +6,14 @@ import type {
   Sha256DigestV1,
 } from '../public/contracts/common';
 import type { JsonValueV1 } from '../public/contracts/json';
-import { calculateAuthenticationContractDigest } from '../public/contracts/authentication';
+import {
+  calculateAuthenticationContractDigest,
+  type PublicAuthenticationContractV1,
+} from '../public/contracts/authentication';
 import { PublicCallerV1, type PublicCallOptionsV1, type PublicCallResultV1 } from './call';
 import { getConsumerOriginScheduler } from './execution/shared-scheduler';
 import { InstalledPackageResolverV1 } from './installed-package';
+import type { ConsumerLoginServiceV1 } from './login-service';
 import { SessionStoreError, SessionStoreV1 } from './sessions/store';
 import { PackageStoreV1 } from './store/package-store';
 
@@ -45,6 +49,9 @@ export class ConsumerCallServiceV1 {
     store: PackageStoreV1,
     runtimeVersion: PackageVersionV1 | string,
     private readonly caller = new PublicCallerV1(),
+    /** Establishes a consent realm's session on demand; without it a call to
+     *  such a capability runs cookie-less unless a session is named. */
+    private readonly logins: ConsumerLoginServiceV1 | null = null,
   ) {
     this.resolver = new InstalledPackageResolverV1(store, runtimeVersion);
     this.scheduler = getConsumerOriginScheduler(store.paths.home);
@@ -68,10 +75,10 @@ export class ConsumerCallServiceV1 {
     input: JsonValueV1,
     options: CallInstalledCapabilityOptionsV1,
   ): Promise<PublicCallResultV1> {
-    const { session_name: sessionName, ...callOptions } = options;
+    const { session_name: namedSession, ...callOptions } = options;
     const authentication = resolved.capability.authentication;
     if (authentication.mode === 'none') {
-      if (sessionName !== undefined) {
+      if (namedSession !== undefined) {
         return { kind: 'failure', code: 'session_invalid', attempts: 0 };
       }
       return await this.caller.call(resolved.capability, input, {
@@ -79,6 +86,16 @@ export class ConsumerCallServiceV1 {
         scheduler: this.scheduler,
       });
     }
+    const contractId = authentication.authentication_contract_id;
+    const authenticationContract = resolved.package.authentication_contracts[contractId];
+    // A consent realm needs nothing from the user, so a call that names no
+    // session runs under the realm's own session, established on first use.
+    const implicit =
+      namedSession === undefined &&
+      authenticationContract !== undefined &&
+      authenticationContract.grant !== null &&
+      this.logins !== null;
+    const sessionName = implicit ? contractId : namedSession;
     if (sessionName === undefined) {
       if (authentication.mode === 'required') {
         return { kind: 'failure', code: 'session_required', attempts: 0 };
@@ -88,34 +105,21 @@ export class ConsumerCallServiceV1 {
         scheduler: this.scheduler,
       });
     }
-    const authenticationContract =
-      resolved.package.authentication_contracts[authentication.authentication_contract_id];
     if (authenticationContract === undefined) {
       return { kind: 'failure', code: 'session_invalid', attempts: 0 };
     }
-    let localSession;
-    try {
-      localSession = this.sessions.read({
-        package_id: resolved.installed.package_id,
-        authentication_contract_id: authentication.authentication_contract_id,
-        session_name: sessionName,
-      });
-    } catch (error) {
-      if (error instanceof SessionStoreError) {
-        return {
-          kind: 'failure',
-          code: error.code === 'session_not_found' ? 'session_required' : 'session_invalid',
-          attempts: 0,
-        };
-      }
-      throw error;
+    const realm = {
+      package_id: resolved.installed.package_id,
+      authentication_contract_id: contractId,
+      session_name: sessionName,
+    };
+    let session = this.readSession(realm, authenticationContract);
+    if (implicit && session.kind === 'failure') {
+      const established = await this.establish(realm);
+      if (established !== null) return established;
+      session = this.readSession(realm, authenticationContract);
     }
-    if (
-      localSession.pointer.authentication_contract_digest !==
-      calculateAuthenticationContractDigest(authenticationContract)
-    ) {
-      return { kind: 'failure', code: 'session_invalid', attempts: 0 };
-    }
+    if (session.kind === 'failure') return session;
     const checkCapability = resolved.package.capabilities[authenticationContract.check.capability];
     if (checkCapability === undefined) {
       return { kind: 'failure', code: 'session_invalid', attempts: 0 };
@@ -123,7 +127,7 @@ export class ConsumerCallServiceV1 {
     const check = await this.caller.call(checkCapability, authenticationContract.check.input, {
       ...callOptions,
       scheduler: this.scheduler,
-      browser_storage_state: localSession.state,
+      browser_storage_state: session.state,
     });
     if (check.kind === 'failure') return check;
     if (
@@ -136,7 +140,52 @@ export class ConsumerCallServiceV1 {
     return await this.caller.call(resolved.capability, input, {
       ...callOptions,
       scheduler: this.scheduler,
-      browser_storage_state: localSession.state,
+      browser_storage_state: session.state,
     });
+  }
+
+  private readSession(
+    realm: { package_id: PackageIdV1; authentication_contract_id: string; session_name: string },
+    contract: PublicAuthenticationContractV1,
+  ): { kind: 'session'; state: JsonValueV1 } | Extract<PublicCallResultV1, { kind: 'failure' }> {
+    let localSession;
+    try {
+      localSession = this.sessions.read(realm);
+    } catch (error) {
+      if (error instanceof SessionStoreError) {
+        return {
+          kind: 'failure',
+          code: error.code === 'session_not_found' ? 'session_required' : 'session_invalid',
+          attempts: 0,
+        };
+      }
+      throw error;
+    }
+    if (
+      localSession.pointer.authentication_contract_digest !==
+      calculateAuthenticationContractDigest(contract)
+    ) {
+      return { kind: 'failure', code: 'session_invalid', attempts: 0 };
+    }
+    return { kind: 'session', state: localSession.state };
+  }
+
+  /** Runs the realm's consent grant and stores its session; null on success,
+   *  otherwise the failure the call reports in its place. */
+  private async establish(realm: {
+    package_id: PackageIdV1;
+    authentication_contract_id: string;
+    session_name: string;
+  }): Promise<Extract<PublicCallResultV1, { kind: 'failure' }> | null> {
+    if (this.logins === null) return { kind: 'failure', code: 'session_required', attempts: 0 };
+    const opened = await this.logins.open(realm);
+    if (opened.kind === 'login_completed') return null;
+    const detail = opened.kind === 'login_unavailable' ? `: ${opened.reason}` : '';
+    return {
+      kind: 'failure',
+      code: opened.kind === 'login_check_failed' ? 'session_invalid' : 'session_required',
+      attempts: 0,
+      reason: `consent session could not be established (${opened.kind})${detail}`,
+    };
   }
 }

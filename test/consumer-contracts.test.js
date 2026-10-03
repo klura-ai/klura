@@ -423,6 +423,8 @@ function authenticatedPackageValue() {
   };
   value.authentication_contracts = {
     account: {
+      kind: 'login',
+      grant: null,
       login_url: 'https://account.example.test/login',
       navigation_origins: ['https://account.example.test'],
       origin_traffic_policies: [
@@ -840,7 +842,12 @@ function sourceFiles(directory) {
 }
 
 function sourceImportSpecifiers(file) {
-  const source = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true);
+  const source = ts.createSourceFile(
+    file,
+    readFileSync(file, 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+  );
   const specifiers = [];
   const addSpecifier = (value) => {
     if (value && ts.isStringLiteralLike(value)) specifiers.push(value.text);
@@ -899,7 +906,9 @@ test('public and consumer source trees cannot import discovery or host modules',
       for (const specifier of sourceImportSpecifiers(file)) {
         if (!specifier.startsWith('.')) continue;
         const relative = path.relative(sourceRoot, path.resolve(path.dirname(file), specifier));
-        const forbidden = relative.split(path.sep).find((segment) => forbiddenSegments.has(segment));
+        const forbidden = relative
+          .split(path.sep)
+          .find((segment) => forbiddenSegments.has(segment));
         assert.equal(
           forbidden,
           undefined,
@@ -951,7 +960,8 @@ test('production registry authority is compiled into the consumer service', asyn
     signature: {
       algorithm: 'ed25519',
       key_id: 'registry-v1',
-      value: 'WV79TohI67t_JzNzuXfvdH7gNYIb4QshBBOMII9NP1pg3iH4gEdGsIaGwn26sGeWcod1JiQi9-ycjKZiRBO6DQ',
+      value:
+        'WV79TohI67t_JzNzuXfvdH7gNYIb4QshBBOMII9NP1pg3iH4gEdGsIaGwn26sGeWcod1JiQi9-ycjKZiRBO6DQ',
     },
   };
   const requests = [];
@@ -1487,10 +1497,7 @@ test('semantic stops accept only exact typed cutoffs and compare calendar values
   assert.ok(isoStop);
   const resolved = resolveSemanticStops([isoStop], { since: '2026-07-01' });
   assert.equal(resolved.length, 1);
-  assert.equal(
-    parseSemanticStopItemValue('2026-07-01', isoStop),
-    resolved[0].bound,
-  );
+  assert.equal(parseSemanticStopItemValue('2026-07-01', isoStop), resolved[0].bound);
   assert.deepEqual(resolveSemanticStops([isoStop], {}), []);
   assert.throws(
     () => parseSemanticStopItemValue('2026-02-30', isoStop),
@@ -1956,7 +1963,10 @@ test('JSON Schema subset is strict, bounded, and validates exact JSON shapes', (
     rating: 4.5,
     name: 'a',
   });
-  assert.throws(() => validateJsonSchema({ rating: null, name: null }, nullable), PublicContractError);
+  assert.throws(
+    () => validateJsonSchema({ rating: null, name: null }, nullable),
+    PublicContractError,
+  );
   assert.throws(() => validateJsonSchema({ rating: -1, name: 'a' }, nullable), PublicContractError);
   assert.throws(() => parseJsonSchema({ type: 'string', nullable: 'yes' }), PublicContractError);
   assert.throws(() => parseJsonSchema({ type: 'null', nullable: true }), PublicContractError);
@@ -2403,7 +2413,10 @@ test('login request-body accounting accepts only explicit bounded CDP representa
   );
   assert.equal(measureBrowserRequestBodyBytes({ hasPostData: true }, 1_024), null);
   assert.equal(measureBrowserRequestBodyBytes({ postDataEntries: [{}] }, 1_024), null);
-  assert.equal(measureBrowserRequestBodyBytes({ postDataEntries: [{ bytes: 'token' }] }, 1_024), null);
+  assert.equal(
+    measureBrowserRequestBodyBytes({ postDataEntries: [{ bytes: 'token' }] }, 1_024),
+    null,
+  );
   assert.equal(
     measureBrowserRequestBodyBytes(
       {
@@ -2426,7 +2439,10 @@ test('login request-body accounting accepts only explicit bounded CDP representa
     ),
     5,
   );
-  assert.equal(measureBrowserRequestBodyBytes({ postData: 'token', hasPostData: false }, 1_024), null);
+  assert.equal(
+    measureBrowserRequestBodyBytes({ postData: 'token', hasPostData: false }, 1_024),
+    null,
+  );
   assert.equal(measureBrowserRequestBodyBytes({ postData: '1234' }, 3), 4);
 });
 
@@ -2458,13 +2474,10 @@ test('public packages bind authentication realms to declared login sandboxes and
   );
 
   const mixedLoginResourceTypes = authenticatedPackageValue();
-  mixedLoginResourceTypes.authentication_contracts.account.browser_resources.egress_rules[0].resource_types = [
-    'document',
-    'script',
-  ];
-  mixedLoginResourceTypes.manifest_digest = calculatePublicToolPackageManifestDigest(
-    mixedLoginResourceTypes,
-  );
+  mixedLoginResourceTypes.authentication_contracts.account.browser_resources.egress_rules[0].resource_types =
+    ['document', 'script'];
+  mixedLoginResourceTypes.manifest_digest =
+    calculatePublicToolPackageManifestDigest(mixedLoginResourceTypes);
   assert.throws(() => parsePublicToolPackage(mixedLoginResourceTypes), /must not combine document/);
 
   const loginPing = authenticatedPackageValue();
@@ -2491,7 +2504,10 @@ test('public packages bind authentication realms to declared login sandboxes and
     'second_check',
   ];
   multiStrategyCheck.manifest_digest = calculatePublicToolPackageManifestDigest(multiStrategyCheck);
-  assert.throws(() => parsePublicToolPackage(multiStrategyCheck), /must declare exactly one strategy/);
+  assert.throws(
+    () => parsePublicToolPackage(multiStrategyCheck),
+    /must declare exactly one strategy/,
+  );
 
   const retryingCheck = authenticatedPackageValue();
   retryingCheck.capabilities.get_product.call_retry_policy = {
@@ -2653,13 +2669,24 @@ test('reviewed browser page scripts dispatch through structural outcomes and sig
 });
 
 test('reviewed browser page-script contracts reject auth, cross-origin egress, and stale source', () => {
-  const authenticated = browserPageScriptPackageValue();
-  authenticated.capabilities.get_product.authentication = {
+  // A page script may carry a session only when every rule it could reach is GET.
+  const writeShaped = browserPageScriptPackageValue();
+  writeShaped.capabilities.get_product.authentication = {
     mode: 'optional',
     authentication_contract_id: 'account',
   };
-  authenticated.manifest_digest = calculatePublicToolPackageManifestDigest(authenticated);
-  assert.throws(() => parsePublicToolPackage(authenticated), /must be none/);
+  writeShaped.capabilities.get_product.browser_resources.egress_rules[1].methods = ['GET', 'POST'];
+  writeShaped.manifest_digest = calculatePublicToolPackageManifestDigest(writeShaped);
+  assert.throws(() => parsePublicToolPackage(writeShaped), /GET-only/);
+
+  // Read-only, the declaration itself is admitted; only the missing contract fails.
+  const readOnly = browserPageScriptPackageValue();
+  readOnly.capabilities.get_product.authentication = {
+    mode: 'optional',
+    authentication_contract_id: 'account',
+  };
+  readOnly.manifest_digest = calculatePublicToolPackageManifestDigest(readOnly);
+  assert.throws(() => parsePublicToolPackage(readOnly), /does not name an authentication contract/);
 
   const multipleOrigins = browserPageScriptPackageValue();
   multipleOrigins.capabilities.get_product.navigation_origins.push('https://other.example.test');
@@ -2773,8 +2800,7 @@ test('reviewed browser page-script contracts reject auth, cross-origin egress, a
   );
 
   const excessiveSingleBody = browserPageScriptPackageValue();
-  excessiveSingleBody.capabilities.get_product.browser_resources
-    .max_encoded_request_body_bytes_per_browser_task = 2;
+  excessiveSingleBody.capabilities.get_product.browser_resources.max_encoded_request_body_bytes_per_browser_task = 2;
   excessiveSingleBody.capabilities.get_product.strategies[0].program.request_body_limits = {
     max_encoded_request_body_bytes_per_script: 2,
     max_single_request_body_bytes: 1,
@@ -2798,8 +2824,7 @@ test('reviewed browser page-script contracts reject auth, cross-origin egress, a
     max_single_request_body_bytes: 2,
     max_encoded_request_body_bytes_by_rule: { product_script: 2 },
   };
-  excessiveRuleBody.manifest_digest =
-    calculatePublicToolPackageManifestDigest(excessiveRuleBody);
+  excessiveRuleBody.manifest_digest = calculatePublicToolPackageManifestDigest(excessiveRuleBody);
   assert.throws(
     () => parsePublicToolPackage(excessiveRuleBody),
     /must not exceed the enclosing browser egress rule body limit/,
@@ -2819,8 +2844,7 @@ test('reviewed browser page-script contracts reject auth, cross-origin egress, a
 
   const insufficientBudget = browserPageScriptPackageValue();
   insufficientBudget.capabilities.get_product.max_target_requests_per_call = 1;
-  insufficientBudget.manifest_digest =
-    calculatePublicToolPackageManifestDigest(insufficientBudget);
+  insufficientBudget.manifest_digest = calculatePublicToolPackageManifestDigest(insufficientBudget);
   assert.throws(
     () => parsePublicToolPackage(insufficientBudget),
     /must cover navigation.*required page-script requests/,
@@ -3067,7 +3091,9 @@ test('strict local js-eval export compiles into an installable reviewed page scr
     /exactly one js-eval prerequisite/,
   );
 
-  const structuredInput = JSON.parse(canonicalJson(packageValue.capabilities.get_product.input_schema));
+  const structuredInput = JSON.parse(
+    canonicalJson(packageValue.capabilities.get_product.input_schema),
+  );
   structuredInput.properties.payload = {
     type: 'object',
     properties: { nested: { type: 'boolean' } },
@@ -3092,7 +3118,9 @@ test('strict local js-eval export compiles into an installable reviewed page scr
     /must resolve to a string, number, integer, or boolean/,
   );
 
-  const optionalInput = JSON.parse(canonicalJson(packageValue.capabilities.get_product.input_schema));
+  const optionalInput = JSON.parse(
+    canonicalJson(packageValue.capabilities.get_product.input_schema),
+  );
   optionalInput.required = [];
   assert.throws(
     () =>
@@ -3144,17 +3172,16 @@ test('compiler derives only finite inline output bounds from the item schema', (
       manifest_digest: '0'.repeat(64),
     }),
   };
-  assert.throws(
-    () => parsePublicToolPackage(rawPackage),
-    /compiler-derived finite item bound/,
-  );
+  assert.throws(() => parsePublicToolPackage(rawPackage), /compiler-derived finite item bound/);
   const compiled = compilePublicPackageSource({
     package_source_schema_version: 1,
     package: sourcePackage,
   });
   assert.deepEqual(
     compiled.package.capabilities.get_product.collection?.inline_output_bound,
-    deriveInlineOutputBound(parseJsonSchema(packageValue.capabilities.get_product.collection.item_schema)),
+    deriveInlineOutputBound(
+      parseJsonSchema(packageValue.capabilities.get_product.collection.item_schema),
+    ),
   );
   assert.throws(
     () =>
@@ -3209,7 +3236,10 @@ test('registry release entry compiler derives the signed catalog projection from
     transports: ['http_node'],
   });
   assert.deepEqual(Object.keys(compiled.registry_version.capabilities), ['get_product']);
-  assert.equal(compiled.package.package.capabilities.search_repositories_page.visibility, 'internal');
+  assert.equal(
+    compiled.package.package.capabilities.search_repositories_page.visibility,
+    'internal',
+  );
   const withdrawn = compileRegistryReleaseEntry({
     registry_origin: 'https://registry.example.test',
     package_source: {
@@ -3460,13 +3490,9 @@ test('public packages bind a finite read collection to reviewed capabilities and
     fanout: [],
     on_failure: 'continue_independent',
   });
-  mixedRealmCollection.manifest_digest = calculatePublicToolPackageManifestDigest(
-    mixedRealmCollection,
-  );
-  assert.throws(
-    () => parsePublicToolPackage(mixedRealmCollection),
-    /same authentication realm/,
-  );
+  mixedRealmCollection.manifest_digest =
+    calculatePublicToolPackageManifestDigest(mixedRealmCollection);
+  assert.throws(() => parsePublicToolPackage(mixedRealmCollection), /same authentication realm/);
   const duplicateColumnPackage = JSON.parse(JSON.stringify(value));
   duplicateColumnPackage.capabilities.get_product.collection.csv_columns = [
     { name: 'id', pointer: '/id' },
@@ -3625,9 +3651,10 @@ test('public packages bind a finite read collection to reviewed capabilities and
     });
     assert.deepEqual(storedRunMeta.session, runSession.reference);
     assert.equal(
-      readFileSync(new RunStoreV1(runHome).journalPath(run.run_id).replace(/journal\.log$/, 'meta.json'), 'utf8').includes(
-        'private-run-cookie',
-      ),
+      readFileSync(
+        new RunStoreV1(runHome).journalPath(run.run_id).replace(/journal\.log$/, 'meta.json'),
+        'utf8',
+      ).includes('private-run-cookie'),
       false,
     );
     assert.equal(readFileSync(requestedOutputPath, 'utf8'), '{"id":"42"}\n');
@@ -3649,9 +3676,9 @@ test('public packages bind a finite read collection to reviewed capabilities and
       itemPage,
     );
     const streamedItems = [];
-    for await (const event of new ConsumerRunServiceV1(
-      new PackageStoreV1(runHome),
-    ).followItems(run.run_id)) {
+    for await (const event of new ConsumerRunServiceV1(new PackageStoreV1(runHome)).followItems(
+      run.run_id,
+    )) {
       streamedItems.push(event);
     }
     assert.deepEqual(streamedItems, [
@@ -3729,20 +3756,17 @@ test('public packages bind a finite read collection to reviewed capabilities and
     }
     const rootNodeId = rootNode.node_id;
     if (typeof rootNodeId !== 'string') throw new Error('expected root node id');
-    assert.deepEqual(
-      readCommittedNodeItems(new RunStoreV1(runHome), run.run_id, rootNodeId),
-      [{ id: '42' }],
-    );
-    const nodeIds = new Set(
-      [
-        rootNodeId,
-        ...nodeEnqueueFrames.map((frame) => {
-          const event = frame.body.event;
-          if (event.kind !== 'node_enqueued') throw new Error('expected node event');
-          return event.node_id;
-        }),
-      ],
-    );
+    assert.deepEqual(readCommittedNodeItems(new RunStoreV1(runHome), run.run_id, rootNodeId), [
+      { id: '42' },
+    ]);
+    const nodeIds = new Set([
+      rootNodeId,
+      ...nodeEnqueueFrames.map((frame) => {
+        const event = frame.body.event;
+        if (event.kind !== 'node_enqueued') throw new Error('expected node event');
+        return event.node_id;
+      }),
+    ]);
     const lifecycleFrames = recoverJournalFile(
       new RunStoreV1(runHome).journalPath(run.run_id),
       run.run_id,
@@ -4122,8 +4146,7 @@ test('public packages bind a finite read collection to reviewed capabilities and
         (frame) => frame.body.event.kind === 'node_replay_authorized',
       );
       const replayAttempt = replayFrames.findIndex(
-        (frame, index) =>
-          index > replayAuthorization && frame.body.event.kind === 'attempt_intent',
+        (frame, index) => index > replayAuthorization && frame.body.event.kind === 'attempt_intent',
       );
       assert.ok(replayAuthorization > 0);
       assert.ok(replayAttempt > replayAuthorization);
@@ -4312,9 +4335,7 @@ test('public packages bind a finite read collection to reviewed capabilities and
         fanoutStore.journalPath(fanout.run_id),
         fanout.run_id,
       ).frames;
-      const childEnqueued = fanoutFrames.find(
-        (frame) => frame.body.event.kind === 'node_enqueued',
-      );
+      const childEnqueued = fanoutFrames.find((frame) => frame.body.event.kind === 'node_enqueued');
       assert.ok(childEnqueued);
       unlinkSync(fanoutOutputPath);
       writeFileSync(
@@ -4781,11 +4802,7 @@ test('inline runs require a compiler proof and fit the active adapter before run
   const collection = parsed.capabilities.get_product.collection;
   assert.ok(collection);
   assert.doesNotThrow(() =>
-    preflightInlineRunOutput(
-      { kind: 'inline' },
-      collection,
-      collection.run_policy.max_items,
-    ),
+    preflightInlineRunOutput({ kind: 'inline' }, collection, collection.run_policy.max_items),
   );
   assert.throws(
     () => preflightInlineRunOutput({ kind: 'inline' }, collection, 101),
@@ -5168,10 +5185,7 @@ test('local session storage encrypts immutable generations and protects a run le
     );
     store.releaseRunLease(selector, 'run_v1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
     store.claimRunLease(selector, 'run_v1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
-    const reclaimed = store.claimRunLease(
-      selector,
-      'run_v1_cccccccccccccccccccccccccccccccc',
-    );
+    const reclaimed = store.claimRunLease(selector, 'run_v1_cccccccccccccccccccccccccccccccc');
     assert.deepEqual(reclaimed.lease, {
       owner_kind: 'run',
       owner_id: 'run_v1_cccccccccccccccccccccccccccccccc',
@@ -5436,82 +5450,90 @@ test('consumer daemon routes validate their closed inputs and preserve request c
   let resumeSignal;
   const operationHome = mkdtempSync(path.join(os.tmpdir(), 'klura-route-operations-'));
   t.after(() => rmSync(operationHome, { recursive: true, force: true }));
-  const routes = new ConsumerDaemonRoutesV1({
-    call: async (input) => {
-      calls.push(input);
-      return {
-        package_id: 'ikea',
-        version: '1.0.0',
-        package_digest: 'a'.repeat(64),
-        capability: 'get_product',
-        result: { kind: 'failure', code: 'cancelled', attempts: 0 },
-      };
-    },
-    clearSession: (input) => {
-      clearSessions.push(input);
-      return {
-        kind: 'session_not_found',
+  const routes = new ConsumerDaemonRoutesV1(
+    {
+      call: async (input) => {
+        calls.push(input);
+        return {
+          package_id: 'ikea',
+          version: '1.0.0',
+          package_digest: 'a'.repeat(64),
+          capability: 'get_product',
+          result: { kind: 'failure', code: 'cancelled', attempts: 0 },
+        };
+      },
+      clearSession: (input) => {
+        clearSessions.push(input);
+        return {
+          kind: 'session_not_found',
+          package_id: 'ikea',
+          authentication_contract_id: 'account',
+          session_name: 'default',
+        };
+      },
+      openLogin: async () => ({
+        kind: 'login_opened',
         package_id: 'ikea',
         authentication_contract_id: 'account',
         session_name: 'default',
-      };
-    },
-    openLogin: async () => ({
-      kind: 'login_opened',
-      package_id: 'ikea',
-      authentication_contract_id: 'account',
-      session_name: 'default',
-      interaction_id: 'login_v1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-    }),
-    completeLogin: async () => ({
-      kind: 'login_completed',
-      package_id: 'ikea',
-      authentication_contract_id: 'account',
-      session_name: 'default',
-      generation: 1,
-      state_digest: 'b'.repeat(64),
-    }),
-    start: async () => {
-      throw new Error('not used');
-    },
-    startDetached: (input) => {
-      if (input.session_name === 'missing') {
-        throw new ConsumerRunSessionError('session_required', 'test session is missing');
-      }
-      detachedInputs.push(input);
-      return {
+        interaction_id: 'login_v1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      }),
+      completeLogin: async () => ({
+        kind: 'login_completed',
         package_id: 'ikea',
-        version: '1.0.0',
-        package_digest: 'a'.repeat(64),
-        capability: 'get_product',
-        run_id: 'run_v1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-        completion: new Promise((resolve) => {
-          completeDetached = resolve;
-        }),
-        cancel: (source) => {
-          detachedCancelled = true;
-          detachedCancelSource = source;
-          return true;
-        },
-      };
+        authentication_contract_id: 'account',
+        session_name: 'default',
+        generation: 1,
+        state_digest: 'b'.repeat(64),
+      }),
+      start: async () => {
+        throw new Error('not used');
+      },
+      startDetached: (input) => {
+        if (input.session_name === 'missing') {
+          throw new ConsumerRunSessionError('session_required', 'test session is missing');
+        }
+        detachedInputs.push(input);
+        return {
+          package_id: 'ikea',
+          version: '1.0.0',
+          package_digest: 'a'.repeat(64),
+          capability: 'get_product',
+          run_id: 'run_v1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          completion: new Promise((resolve) => {
+            completeDetached = resolve;
+          }),
+          cancel: (source) => {
+            detachedCancelled = true;
+            detachedCancelSource = source;
+            return true;
+          },
+        };
+      },
+      resume: async (input) => {
+        resumeSignal = input.signal;
+        return new Promise((resolve) => {
+          completeResume = resolve;
+        });
+      },
     },
-    resume: async (input) => {
-      resumeSignal = input.signal;
-      return new Promise((resolve) => {
-        completeResume = resolve;
-      });
-    },
-  }, undefined, undefined, undefined, null, undefined, new RunOperationStoreV1(operationHome));
+    undefined,
+    undefined,
+    undefined,
+    null,
+    undefined,
+    new RunOperationStoreV1(operationHome),
+  );
   const controller = new AbortController();
   const result = await routes.invoke(
     'POST',
     '/consumer/call',
     {
-        package_id: 'ikea',
-        capability: 'get_product',
-        input: { id: '42' },
-        session_name: 'default',
-        timeout_ms: 5_000,
+      package_id: 'ikea',
+      capability: 'get_product',
+      input: { id: '42' },
+      session_name: 'default',
+      timeout_ms: 5_000,
     },
     controller.signal,
   );
@@ -6114,10 +6136,10 @@ test('consumer SDK keeps selectors structural and routes execution through the l
       operation_id: 'op_v1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
     }),
     {
-    result_schema_version: 1,
-    kind: 'run_cancellation_requested',
-    operation_id: 'op_v1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-    run_id: 'run_v1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      result_schema_version: 1,
+      kind: 'run_cancellation_requested',
+      operation_id: 'op_v1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      run_id: 'run_v1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     },
   );
   assert.deepEqual(requests[5], {
@@ -6161,12 +6183,12 @@ test('consumer SDK keeps selectors structural and routes execution through the l
       operation_id: 'op_v1_cccccccccccccccccccccccccccccccc',
     }),
     {
-    result_schema_version: 1,
-    kind: 'consumer_failure',
-    operation: 'discard_run',
-    code: 'run_not_found',
-    retryable: false,
-    package_id: null,
+      result_schema_version: 1,
+      kind: 'consumer_failure',
+      operation: 'discard_run',
+      code: 'run_not_found',
+      retryable: false,
+      package_id: null,
     },
   );
   assert.deepEqual(requests[8], {
@@ -6242,18 +6264,15 @@ test('consumer SDK keeps selectors structural and routes execution through the l
       session_name: 'default',
     },
   });
-  assert.deepEqual(
-    await client.completeLogin('login_v1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
-    {
-      result_schema_version: 1,
-      kind: 'login_completed',
-      package_id: 'ikea',
-      authentication_contract_id: 'account',
-      session_name: 'default',
-      generation: 1,
-      state_digest: 'b'.repeat(64),
-    },
-  );
+  assert.deepEqual(await client.completeLogin('login_v1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'), {
+    result_schema_version: 1,
+    kind: 'login_completed',
+    package_id: 'ikea',
+    authentication_contract_id: 'account',
+    session_name: 'default',
+    generation: 1,
+    state_digest: 'b'.repeat(64),
+  });
   assert.deepEqual(requests[12], {
     route: '/consumer/login/complete',
     body: { interaction_id: 'login_v1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
@@ -6492,7 +6511,12 @@ test('consumer login commits browser state only after the declared structural ch
         completeCheck: async () => {
           checked += 1;
           return {
-            result: { kind: 'outcome', outcome_id: 'success', outcome_class: 'success', attempts: 2 },
+            result: {
+              kind: 'outcome',
+              outcome_id: 'success',
+              outcome_class: 'success',
+              attempts: 2,
+            },
             state,
           };
         },
@@ -6639,7 +6663,10 @@ test('a package cannot place a non-string input in an endpoint, query, or header
     value: { op: 'input', pointer: '/id' },
   };
   value.manifest_digest = calculatePublicToolPackageManifestDigest(value);
-  assert.equal(parsePublicToolPackage(value).capabilities.get_product.input_schema.properties.id.type, 'integer');
+  assert.equal(
+    parsePublicToolPackage(value).capabilities.get_product.input_schema.properties.id.type,
+    'integer',
+  );
   capability.strategies[0].request.headers['x-page'] = { op: 'literal', value: 2 };
   value.manifest_digest = calculatePublicToolPackageManifestDigest(value);
   assert.throws(
@@ -6682,7 +6709,10 @@ test('a collection cannot declare a journal frame budget its own ceilings would 
     44,
   );
   policy.max_items = 100;
-  policy.durable.max_journal_frames = minimumJournalFrames({ max_tasks: policy.max_tasks, max_items: 100 });
+  policy.durable.max_journal_frames = minimumJournalFrames({
+    max_tasks: policy.max_tasks,
+    max_items: 100,
+  });
   policy.durable.max_journal_bytes = 393_432;
   value.manifest_digest = calculatePublicToolPackageManifestDigest(value);
   assert.throws(
@@ -6693,12 +6723,16 @@ test('a collection cannot declare a journal frame budget its own ceilings would 
         'package.capabilities.get_product.collection.run_policy.durable.max_journal_bytes' &&
       /reserved for emergency frames/.test(error.message),
   );
-  policy.durable.max_journal_bytes = minimumJournalBytes({ max_tasks: policy.max_tasks, max_items: 100 });
+  policy.durable.max_journal_bytes = minimumJournalBytes({
+    max_tasks: policy.max_tasks,
+    max_items: 100,
+  });
   value.manifest_digest = calculatePublicToolPackageManifestDigest(value);
   assert.equal(
     parsePublicToolPackage(value).capabilities.get_product.collection.run_policy.durable
       .max_journal_bytes,
-    JOURNAL_EMERGENCY_BYTE_RESERVE_V1 + JOURNAL_ORDINARY_FRAME_BYTES_V1 * (9 + 5 * policy.max_tasks + 300),
+    JOURNAL_EMERGENCY_BYTE_RESERVE_V1 +
+      JOURNAL_ORDINARY_FRAME_BYTES_V1 * (9 + 5 * policy.max_tasks + 300),
   );
 });
 
@@ -6773,4 +6807,252 @@ test('a json_array_map projection caps the rows a call returns when it declares 
     () => contract(0),
     (error) => error instanceof PublicContractError && /limit/.test(error.field),
   );
+});
+
+test('a page script may carry a local browser session only when its egress is GET-only', () => {
+  const { validatePackageAuthentication } = require('../dist/public/contracts/authentication.js');
+  const input = parseJsonSchema({ type: 'object', additionalProperties: false });
+  const contract = {
+    kind: 'consent',
+    check: { capability: 'read', input: {}, authenticated_outcome_ids: ['ok'] },
+  };
+  const capability = (methods) => ({
+    authentication: { mode: 'optional', authentication_contract_id: 'consent' },
+    strategies: [{ kind: 'browser_page_script' }],
+    browser_resources: { egress_rules: [{ methods }] },
+    collection: null,
+    call_retry_policy: { max_retries: 0 },
+    input_schema: input,
+    outcomes: [{ class: 'success', outcome_id: 'ok' }],
+  });
+  assert.throws(
+    () =>
+      validatePackageAuthentication({ read: capability(['GET', 'POST']) }, { consent: contract }),
+    (error) => error instanceof PublicContractError && /GET-only/.test(error.message),
+  );
+  assert.doesNotThrow(() =>
+    validatePackageAuthentication({ read: capability(['GET']) }, { consent: contract }),
+  );
+});
+
+function consentPackageValue() {
+  const value = authenticatedPackageValue();
+  const contract = value.authentication_contracts.account;
+  contract.kind = 'consent';
+  contract.grant = {
+    initial: [
+      {
+        action_id: 'accept_all',
+        kind: 'click',
+        target: {
+          frame: { kind: 'main' },
+          selector: 'button[aria-label="Accept all"]',
+          visible_only: true,
+        },
+        expect: {
+          wait: null,
+          egress_rule_ids: ['login_submit'],
+          minimum_matching_requests: 1,
+          maximum_matching_requests: 1,
+        },
+      },
+    ],
+    repeat: null,
+  };
+  value.manifest_digest = calculatePublicToolPackageManifestDigest(value);
+  return value;
+}
+
+test('a consent contract carries the reviewed grant and a login contract carries none', () => {
+  const parsed = parsePublicToolPackage(consentPackageValue());
+  const contract = parsed.authentication_contracts.account;
+  assert.equal(contract.kind, 'consent');
+  assert.equal(contract.grant.initial[0].target.visible_only, true);
+  assert.equal(
+    parsePublicToolPackage(authenticatedPackageValue()).authentication_contracts.account.grant,
+    null,
+  );
+
+  const loginWithGrant = consentPackageValue();
+  loginWithGrant.authentication_contracts.account.kind = 'login';
+  loginWithGrant.manifest_digest = calculatePublicToolPackageManifestDigest(loginWithGrant);
+  assert.throws(() => parsePublicToolPackage(loginWithGrant), /must be null on a login contract/);
+
+  const consentWithoutGrant = consentPackageValue();
+  consentWithoutGrant.authentication_contracts.account.grant = null;
+  consentWithoutGrant.manifest_digest =
+    calculatePublicToolPackageManifestDigest(consentWithoutGrant);
+  assert.throws(
+    () => parsePublicToolPackage(consentWithoutGrant),
+    /must declare the consent actions/,
+  );
+
+  const unknownRule = consentPackageValue();
+  unknownRule.authentication_contracts.account.grant.initial[0].expect.egress_rule_ids = ['other'];
+  unknownRule.manifest_digest = calculatePublicToolPackageManifestDigest(unknownRule);
+  assert.throws(() => parsePublicToolPackage(unknownRule), /must reference a login egress rule/);
+
+  const repeating = consentPackageValue();
+  repeating.authentication_contracts.account.grant.repeat = {
+    actions: [
+      { ...repeating.authentication_contracts.account.grant.initial[0], action_id: 'accept_again' },
+    ],
+    continue_when: { op: 'selector_count', selector: 'a', compare: 'gte', value: 1 },
+    exhausted_when: { op: 'selector_count', selector: 'a', compare: 'eq', value: 0 },
+    maximum_rounds: 2,
+    projection_schedule: 'final_only',
+  };
+  repeating.manifest_digest = calculatePublicToolPackageManifestDigest(repeating);
+  assert.throws(() => parsePublicToolPackage(repeating), /must be null on a consent grant/);
+
+  const hiddenFlag = consentPackageValue();
+  hiddenFlag.authentication_contracts.account.grant.initial[0].target.visible_only = false;
+  hiddenFlag.manifest_digest = calculatePublicToolPackageManifestDigest(hiddenFlag);
+  assert.throws(() => parsePublicToolPackage(hiddenFlag), /must be true when present/);
+});
+
+function installConsentPackage(home) {
+  const value = consentPackageValue();
+  const bytes = Buffer.from(canonicalJson(value), 'utf8');
+  const packageDigest = sha256Digest(bytes);
+  const store = new PackageStoreV1(home);
+  store.putVerifiedPackage({
+    package_id: 'ikea',
+    version: '1.0.0',
+    package_digest: packageDigest,
+    manifest_digest: value.manifest_digest,
+    package_bytes: bytes.byteLength,
+    bytes,
+  });
+  store.activate({
+    package_id: 'ikea',
+    version: '1.0.0',
+    package_digest: packageDigest,
+    manifest_digest: value.manifest_digest,
+    provenance: { kind: 'registry', source_index_digest: 'c'.repeat(64) },
+    runtime_range: { minimum_inclusive: '0.6.0', maximum_exclusive: '1.0.0' },
+    installed_at: '2026-07-27T12:00:00Z',
+  });
+  return store;
+}
+
+function consentBrowser(counters, state) {
+  return async (input) => {
+    counters.opened += 1;
+    counters.grant = input.contract.grant;
+    return {
+      page: {},
+      assertHealthy: () => undefined,
+      completeCheck: async () => {
+        counters.checked += 1;
+        return {
+          result: { kind: 'outcome', outcome_id: 'success', outcome_class: 'success', attempts: 1 },
+          state,
+        };
+      },
+      close: async () => {
+        counters.closed += 1;
+      },
+    };
+  };
+}
+
+test('opening a consent realm runs its grant and returns the completed session', async () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), 'klura-consent-login-'));
+  try {
+    const store = installConsentPackage(home);
+    const counters = { opened: 0, checked: 0, closed: 0, grant: null };
+    const state = { cookies: [{ name: 'SOCS', value: 'accepted' }] };
+    const service = new ConsumerLoginServiceV1(store, '0.6.2', {
+      open_browser: consentBrowser(counters, state),
+    });
+    const opened = await service.open({ package_id: 'ikea', session_name: 'consent' });
+    assert.deepEqual(opened, {
+      kind: 'login_completed',
+      package_id: 'ikea',
+      authentication_contract_id: 'account',
+      session_name: 'consent',
+      generation: 1,
+      state_digest: sha256Digest(canonicalJson(state)),
+    });
+    assert.equal(counters.grant.initial[0].action_id, 'accept_all');
+    assert.deepEqual([counters.opened, counters.checked, counters.closed], [1, 1, 1]);
+    assert.deepEqual(
+      new SessionStoreV1(home).read({
+        package_id: 'ikea',
+        authentication_contract_id: 'account',
+        session_name: 'consent',
+      }).state,
+      state,
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('a call under a consent realm establishes the realm session on first use and reuses it', async () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), 'klura-consent-call-'));
+  try {
+    const store = installConsentPackage(home);
+    const counters = { opened: 0, checked: 0, closed: 0, grant: null };
+    const state = { cookies: [{ name: 'SOCS', value: 'accepted' }] };
+    const logins = new ConsumerLoginServiceV1(store, '0.6.2', {
+      open_browser: consentBrowser(counters, state),
+    });
+    const calls = [];
+    const caller = new PublicCallerV1(
+      undefined,
+      undefined,
+      undefined,
+      async (_capability, _strategy, options) => {
+        calls.push(options.storage_state);
+        return {
+          status: 200,
+          headers: {},
+          media_type: 'application/json',
+          body_kind: 'json_object',
+          body: { ok: true, item: { id: options.input.id } },
+          target_requests: 1,
+        };
+      },
+    );
+    const service = new ConsumerCallServiceV1(store, '0.6.2', caller, logins);
+    const first = await service.call({
+      package_id: 'ikea',
+      capability: 'get_product',
+      input: { id: 'desk' },
+    });
+    assert.equal(first.result.kind, 'outcome');
+    assert.equal(counters.opened, 1, 'the realm session is established once');
+    assert.deepEqual(calls, [state, state], 'the check and the read both carry the session');
+    assert.deepEqual(
+      new SessionStoreV1(home).read({
+        package_id: 'ikea',
+        authentication_contract_id: 'account',
+        session_name: 'account',
+      }).state,
+      state,
+    );
+
+    const second = await service.call({
+      package_id: 'ikea',
+      capability: 'get_product',
+      input: { id: 'lamp' },
+    });
+    assert.equal(second.result.kind, 'outcome');
+    assert.equal(counters.opened, 1, 'the stored session is reused');
+    assert.equal(calls.length, 4);
+
+    const sessionless = new ConsumerCallServiceV1(store, '0.6.2', caller);
+    calls.length = 0;
+    const plain = await sessionless.call({
+      package_id: 'ikea',
+      capability: 'get_product',
+      input: { id: 'chair' },
+    });
+    assert.equal(plain.result.kind, 'outcome');
+    assert.deepEqual(calls, [undefined], 'without a login service the call runs cookie-less');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

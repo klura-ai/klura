@@ -246,6 +246,8 @@ function projectAuthenticationContract(
   contract: PublicAuthenticationContractV1,
 ): PublicAuthenticationContractV1 {
   return {
+    kind: contract.kind,
+    grant: contract.grant,
     login_url: contract.login_url,
     navigation_origins: contract.navigation_origins,
     origin_traffic_policies: contract.origin_traffic_policies,

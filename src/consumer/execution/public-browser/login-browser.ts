@@ -12,7 +12,17 @@ import {
   type BrowserNetworkCapabilityV1,
 } from './executor';
 import { executeBrowserNavigationStrategyInBoundedPage } from './bounded-navigation';
+import { boundaryVerdictOr } from './boundary-verdict';
+import { deadlineExpired } from './deadline';
+import {
+  executeBrowserInteractionProgram,
+  BrowserInteractionExecutionError,
+} from './interaction-executor';
 import { executeBrowserHttpStrategyInBoundedPage } from './http-executor';
+import {
+  executeBrowserPageScriptStrategyInBoundedPage,
+  installReviewedPageProgramRunner,
+} from './page-script-executor';
 import {
   createPublicBrowserContextOptions,
   installPublicSinglePageGuard,
@@ -20,6 +30,10 @@ import {
   type PublicSinglePageGuardV1,
 } from './context';
 import { startPinnedEgressProxy, type PinnedEgressProxyV1 } from './pinned-proxy';
+
+/** Names the consent grant in an interaction failure, where a strategy id
+ *  would otherwise stand. */
+const GRANT_STRATEGY_ID = 'grant';
 
 export interface OpenPublicLoginBrowserInputV1 {
   contract: PublicAuthenticationContractV1;
@@ -75,11 +89,18 @@ export async function openPublicLoginBrowser(
       connect_timeout_ms: Math.min(input.contract.browser_resources.total_timeout_ms, 60_000),
       resolve_host: input.resolve_host,
     });
-    const launched = await launchPublicBrowser(proxy, { headless: false });
+    // A consent grant is the runtime's own work, so nobody needs to see it;
+    // a login is the user's, so the browser is visible.
+    const launched = await launchPublicBrowser(proxy, {
+      headless: input.contract.grant !== null,
+    });
     browser = launched.browser;
     context = await browser.newContext(
       createPublicBrowserContextOptions(undefined, launched.user_agent),
     );
+    // Installed before any target script so a page-script check capability can
+    // run in this page with pristine intrinsics, exactly as it would alone.
+    const pageProgramRunner = await installReviewedPageProgramRunner(context);
     await context.routeWebSocket('**/*', (webSocket) => webSocket.close());
     page = await context.newPage();
     pageGuard = await installPublicSinglePageGuard(context, page);
@@ -100,10 +121,62 @@ export async function openPublicLoginBrowser(
       void closeLoginBrowser();
     };
     signal?.addEventListener('abort', abort, { once: true });
-    await page.goto(input.contract.login_url, {
-      waitUntil: 'domcontentloaded',
-      timeout: input.contract.browser_resources.total_timeout_ms,
-    });
+    const deadline = new AbortController();
+    const timer = setTimeout(() => {
+      deadline.abort();
+    }, input.contract.browser_resources.total_timeout_ms);
+    try {
+      await page.goto(input.contract.login_url, {
+        waitUntil: 'domcontentloaded',
+        timeout: input.contract.browser_resources.total_timeout_ms,
+      });
+      if (input.contract.grant !== null) {
+        await executeBrowserInteractionProgram({
+          page,
+          program: input.contract.grant,
+          projection: null,
+          maximum_output_bytes: 0,
+          expression_context: { input: {}, bindings: {} },
+          strategy_id: GRANT_STRATEGY_ID,
+          network: boundary,
+          signal: signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal,
+          timeout_ms: input.contract.browser_resources.total_timeout_ms,
+        });
+      }
+    } catch (error) {
+      const targetRequests = boundary.target_requests();
+      const verdict = boundaryVerdictOr(boundary, error, targetRequests);
+      if (verdict instanceof PublicHttpExecutionError) throw verdict;
+      if (deadline.signal.aborted && !signal?.aborted) {
+        throw deadlineExpired(
+          'consent grant',
+          'interaction',
+          targetRequests,
+          boundary.denied_resources(),
+        );
+      }
+      if (error instanceof BrowserInteractionExecutionError) {
+        // A grant whose wait never came true is the deadline passing, and what
+        // the page was refused meanwhile says where the time went.
+        throw new PublicHttpExecutionError(
+          'browser_interaction_failed',
+          error.message,
+          targetRequests,
+          error.failure,
+          error.failure.code === 'wait_failed'
+            ? {
+                kind: 'deadline_expired',
+                stage: 'interaction',
+                target_requests: targetRequests,
+                denied_resources: boundary.denied_resources(),
+              }
+            : null,
+        );
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
     return {
       page,
       assertHealthy: () => {
@@ -117,6 +190,34 @@ export async function openPublicLoginBrowser(
         }
         pageGuard?.assertHealthy();
         activeBoundary.assertHealthy();
+        // The login page may still be loading; the check needs the boundary
+        // idle, so the page is parked on a blank document first and its
+        // remaining traffic allowed to drain.
+        const drain = new AbortController();
+        const drainTimer = setTimeout(() => {
+          drain.abort();
+        }, input.contract.browser_resources.total_timeout_ms);
+        try {
+          await page.goto('about:blank', {
+            timeout: input.contract.browser_resources.total_timeout_ms,
+          });
+          await activeBoundary.waitForQuiet(
+            { kind: 'network_quiet', quiet_ms: 250, maximum_in_flight: 0 },
+            signal ? AbortSignal.any([signal, drain.signal]) : drain.signal,
+          );
+        } catch (error) {
+          if (drain.signal.aborted && !signal?.aborted) {
+            throw deadlineExpired(
+              `login check drain (still in flight: ${activeBoundary.in_flight().join(', ') || 'nothing'})`,
+              'wait',
+              activeBoundary.target_requests(),
+              activeBoundary.denied_resources(),
+            );
+          }
+          throw error;
+        } finally {
+          clearTimeout(drainTimer);
+        }
         const caller = new PublicCallerV1(
           undefined,
           undefined,
@@ -132,6 +233,15 @@ export async function openPublicLoginBrowser(
             await executeBrowserHttpStrategyInBoundedPage(
               page,
               activeBoundary,
+              capability,
+              strategy,
+              options,
+            ),
+          async (capability, strategy, options) =>
+            await executeBrowserPageScriptStrategyInBoundedPage(
+              page,
+              activeBoundary,
+              pageProgramRunner,
               capability,
               strategy,
               options,
@@ -209,7 +319,7 @@ function loginNetworkCapability(
   const policy: BrowserResourcePolicyV1 = {
     egress_rules: contract.browser_resources.egress_rules.map((rule) => ({
       rule_id: rule.rule_id,
-      phase: rule.resource_types[0] === 'document' ? 'navigation' : 'resource',
+      phase: 'login',
       origin: rule.origin,
       methods: rule.methods,
       route: rule.route,

@@ -22,9 +22,26 @@ import {
   parseAuthenticationBrowserResourcePolicy,
   type AuthenticationBrowserResourcePolicyV1,
 } from '../../consumer/execution/public-browser/authentication-resource-policy';
+import {
+  parseBrowserInteractionProgram,
+  validateBrowserActionExpectationAgainstRules,
+  type BrowserActionV1,
+  type BrowserInteractionProgramV1,
+} from './browser-interaction';
 import type { PublicReadCapabilityV1 } from './package';
 
 export interface PublicAuthenticationContractV1 {
+  /** What the one-time interaction is: a `login` establishes an account
+   *  session, completed by the user in a visible browser; a `consent` records
+   *  a cookie or privacy choice the site asks of every visitor, with no
+   *  credentials involved, and the runtime completes it by itself. Both are
+   *  stored as the same kind of local session. */
+  kind: 'login' | 'consent';
+  /** The reviewed actions that record the visitor's choice on `login_url` —
+   *  the click that accepts the site's cookie dialog — run by the runtime in
+   *  a headless browser under this realm's rules. Present on a `consent`
+   *  contract and null on a `login`, where the user acts instead. */
+  grant: BrowserInteractionProgramV1 | null;
   login_url: string;
   navigation_origins: [string, ...string[]];
   origin_traffic_policies: [OriginTrafficPolicyV1, ...OriginTrafficPolicyV1[]];
@@ -108,6 +125,21 @@ export function validatePackageAuthentication(
         'must not use node HTTP when local browser authentication is declared',
       );
     }
+    // A reviewed program carrying a session may read but never write: every
+    // egress rule it could reach must be GET, so the session cannot be spent on
+    // a request that changes anything.
+    if (
+      capability.strategies.some((strategy) => strategy.kind === 'browser_page_script') &&
+      (capability.browser_resources?.egress_rules.some((rule) =>
+        rule.methods.some((method) => method !== 'GET'),
+      ) ??
+        false)
+    ) {
+      throw new PublicContractError(
+        `package.capabilities.${capabilityId}.browser_resources.egress_rules`,
+        'must be GET-only when a page script may run under a local browser session',
+      );
+    }
   }
   for (const [contractId, contract] of Object.entries(contracts)) {
     const field = `package.authentication_contracts.${contractId}.check`;
@@ -155,12 +187,17 @@ function parseAuthenticationContract(
   field: string,
 ): PublicAuthenticationContractV1 {
   const record = parseExactRecord(value, field, [
+    'kind',
+    'grant',
     'login_url',
     'navigation_origins',
     'origin_traffic_policies',
     'browser_resources',
     'check',
   ]);
+  if (record.kind !== 'login' && record.kind !== 'consent') {
+    throw new PublicContractError(`${field}.kind`, 'must be login or consent');
+  }
   const loginUrl = parseHttpsUrl(record.login_url, `${field}.login_url`);
   const navigationOrigins = parseOrigins(
     record.navigation_origins,
@@ -191,6 +228,7 @@ function parseAuthenticationContract(
       ...browserResources.egress_rules.map((rule) => rule.origin),
     ]),
   ) as [OriginTrafficPolicyV1, ...OriginTrafficPolicyV1[]];
+  const grant = parseGrant(record.kind, record.grant, browserResources, navigationOrigins, field);
   const check = parseExactRecord(record.check, `${field}.check`, [
     'capability',
     'input',
@@ -201,6 +239,8 @@ function parseAuthenticationContract(
     throw new PublicContractError(`${field}.check.input`, 'must be at most 16384 UTF-8 bytes');
   }
   return {
+    kind: record.kind,
+    grant,
     login_url: loginUrl,
     navigation_origins: navigationOrigins,
     origin_traffic_policies: policies,
@@ -214,6 +254,55 @@ function parseAuthenticationContract(
       ),
     },
   };
+}
+
+function parseGrant(
+  kind: 'login' | 'consent',
+  value: unknown,
+  browserResources: AuthenticationBrowserResourcePolicyV1,
+  navigationOrigins: readonly string[],
+  field: string,
+): BrowserInteractionProgramV1 | null {
+  if (kind === 'login') {
+    if (value !== null) {
+      throw new PublicContractError(`${field}.grant`, 'must be null on a login contract');
+    }
+    return null;
+  }
+  if (value === null) {
+    throw new PublicContractError(`${field}.grant`, 'must declare the consent actions');
+  }
+  const grant = parseBrowserInteractionProgram(value, `${field}.grant`);
+  if (grant.repeat !== null) {
+    throw new PublicContractError(`${field}.grant.repeat`, 'must be null on a consent grant');
+  }
+  const rules = new Map(browserResources.egress_rules.map((rule) => [rule.rule_id, rule]));
+  for (const [index, action] of grant.initial.entries()) {
+    const actionField = `${field}.grant.initial[${index}]`;
+    validateBrowserActionExpectationAgainstRules(
+      action.expect,
+      rules,
+      `${actionField}.expect`,
+      'login',
+    );
+    const target = grantActionTarget(action);
+    if (target?.frame.kind === 'child' && !navigationOrigins.includes(target.frame.origin)) {
+      throw new PublicContractError(
+        `${actionField}.target.frame.origin`,
+        'must be declared in navigation_origins',
+      );
+    }
+  }
+  return grant;
+}
+
+function grantActionTarget(
+  action: BrowserActionV1,
+): Extract<BrowserActionV1, { kind: 'click' }>['target'] | null {
+  if (action.kind === 'scroll') {
+    return 'kind' in action.target ? null : action.target;
+  }
+  return action.target;
 }
 
 function parseHttpsUrl(value: unknown, field: string): string {

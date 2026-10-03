@@ -1821,3 +1821,633 @@ test("a same-origin xhr a resource rule admits is the page's own, not the progra
   await boundary.finishPageScript(scope, silent, signal);
   await boundary.close();
 });
+
+test('a redirect response is followed without a body and its chain is bounded by the origin policy', async () => {
+  class FakeCdp extends EventEmitter {
+    calls = [];
+
+    async send(method, payload = {}) {
+      this.calls.push({ method, payload });
+      this.emit('send', { method, payload });
+      if (method === 'Fetch.takeResponseBodyAsStream') {
+        return { stream: `stream-${payload.requestId}` };
+      }
+      if (method === 'IO.read') {
+        return { data: '', base64Encoded: false, eof: true };
+      }
+      return {};
+    }
+
+    waitFor(method, requestId) {
+      const existing = this.calls.find(
+        (call) => call.method === method && call.payload.requestId === requestId,
+      );
+      if (existing) return Promise.resolve(existing);
+      return new Promise((resolve) => {
+        const listener = (call) => {
+          if (call.method !== method || call.payload.requestId !== requestId) return;
+          this.off('send', listener);
+          resolve(call);
+        };
+        this.on('send', listener);
+      });
+    }
+
+    async detach() {}
+  }
+  const policy = parseBrowserResourcePolicy(
+    {
+      egress_rules: [
+        {
+          rule_id: 'pages',
+          phase: 'navigation',
+          origin: 'https://example.test',
+          methods: ['GET'],
+          route: { path: { kind: 'prefix', value: '/' }, query: { kind: 'none' } },
+          resource_types: ['document'],
+          max_requests: 4,
+          max_encoded_request_body_bytes: 0,
+          max_encoded_response_bytes: 1024,
+        },
+      ],
+      max_requests_per_browser_task: 4,
+      max_encoded_request_body_bytes_per_browser_task: 0,
+      max_encoded_response_bytes_per_browser_task: 4096,
+      max_proxy_wire_bytes_per_browser_task: 8192,
+      max_single_request_body_bytes: 0,
+      max_single_response_bytes: 1024,
+      service_workers: 'block',
+      downloads: 'block',
+      popups: 'block',
+      websockets: 'block',
+      webtransport: 'block',
+      webrtc_direct_egress: 'block',
+      browser_cache: 'block',
+    },
+    'browser_resources',
+  );
+  const install = async (cdp, maxRedirectHops) =>
+    await installBrowserNetworkBoundary({
+      page: {
+        context: () => ({
+          newCDPSession: async () => cdp,
+          close: async () => undefined,
+        }),
+      },
+      capability: {
+        browser_resources: policy,
+        origin_traffic_policies: [
+          {
+            origin: 'https://example.test',
+            max_concurrency: 1,
+            requests_per_second: 100,
+            burst: 1,
+            min_delay_ms: 0,
+            max_redirect_hops: maxRedirectHops,
+            circuit_breaker: {
+              transient_failure_threshold: 2,
+              transient_window_ms: 1000,
+              cooldown_ms: 1000,
+            },
+          },
+        ],
+      },
+      options: {
+        input: {},
+        bindings: {},
+        timeout_ms: 1000,
+        max_target_requests: 4,
+        scheduler: new OriginSchedulerV1(),
+        signal: new AbortController().signal,
+      },
+    });
+  const document = (requestId, url, response) => ({
+    requestId,
+    networkId: 'chain',
+    request: { url, method: 'GET', hasPostData: false },
+    resourceType: 'Document',
+    ...(response ?? {}),
+  });
+
+  const cdp = new FakeCdp();
+  const boundary = await install(cdp, 1);
+  cdp.emit('Fetch.requestPaused', document('hop-0', 'https://example.test/start'));
+  await cdp.waitFor('Fetch.continueRequest', 'hop-0');
+  cdp.emit(
+    'Fetch.requestPaused',
+    document('hop-0', 'https://example.test/start', {
+      responseStatusCode: 302,
+      responseHeaders: [{ name: 'Location', value: 'https://example.test/landing' }],
+    }),
+  );
+  await cdp.waitFor('Fetch.continueRequest', 'hop-0');
+  assert.equal(
+    cdp.calls.filter(
+      (call) => call.method === 'Fetch.continueRequest' && call.payload.requestId === 'hop-0',
+    ).length,
+    2,
+    'the redirect response is continued as-is',
+  );
+  assert.ok(!cdp.calls.some((call) => call.method === 'Fetch.takeResponseBodyAsStream'));
+  cdp.emit('Fetch.requestPaused', document('hop-1', 'https://example.test/landing'));
+  await cdp.waitFor('Fetch.continueRequest', 'hop-1');
+  cdp.emit(
+    'Fetch.requestPaused',
+    document('hop-1', 'https://example.test/landing', {
+      responseStatusCode: 200,
+      responseHeaders: [],
+    }),
+  );
+  await cdp.waitFor('Fetch.fulfillRequest', 'hop-1');
+  assert.equal(boundary.target_requests(), 2, 'every hop is a request of its own');
+  boundary.assertHealthy();
+  await boundary.close();
+
+  const strict = new FakeCdp();
+  const bounded = await install(strict, 0);
+  strict.emit('Fetch.requestPaused', document('only', 'https://example.test/start'));
+  await strict.waitFor('Fetch.continueRequest', 'only');
+  strict.emit(
+    'Fetch.requestPaused',
+    document('only', 'https://example.test/start', {
+      responseStatusCode: 302,
+      responseHeaders: [{ name: 'Location', value: 'https://example.test/landing' }],
+    }),
+  );
+  await strict.waitFor('Fetch.failRequest', 'only');
+  assert.throws(
+    () => bounded.assertHealthy(),
+    (error) =>
+      error?.code === 'request_blocked' && /redirect limit is exhausted/.test(error.message),
+  );
+  await bounded.close();
+});
+
+test('a login-phase rule admits a request in any phase and undeclared sub-resources during an action are refused quietly', async () => {
+  class FakeCdp extends EventEmitter {
+    calls = [];
+
+    async send(method, payload = {}) {
+      this.calls.push({ method, payload });
+      this.emit('send', { method, payload });
+      return {};
+    }
+
+    waitFor(method, requestId) {
+      const existing = this.calls.find(
+        (call) => call.method === method && call.payload.requestId === requestId,
+      );
+      if (existing) return Promise.resolve(existing);
+      return new Promise((resolve) => {
+        const listener = (call) => {
+          if (call.method !== method || call.payload.requestId !== requestId) return;
+          this.off('send', listener);
+          resolve(call);
+        };
+        this.on('send', listener);
+      });
+    }
+
+    async detach() {}
+  }
+  const cdp = new FakeCdp();
+  const rule = {
+    rule_id: 'consent_save',
+    phase: 'login',
+    origin: 'https://consent.example.test',
+    methods: ['POST'],
+    route: { path: { kind: 'exact', value: '/save' }, query: { kind: 'none' } },
+    resource_types: ['document'],
+    max_requests: 2,
+    max_encoded_request_body_bytes: 1024,
+    max_encoded_response_bytes: 1024,
+  };
+  const boundary = await installBrowserNetworkBoundary({
+    page: {
+      context: () => ({
+        newCDPSession: async () => cdp,
+        close: async () => undefined,
+      }),
+    },
+    capability: {
+      browser_resources: {
+        egress_rules: [rule],
+        max_requests_per_browser_task: 4,
+        max_encoded_request_body_bytes_per_browser_task: 1024,
+        max_encoded_response_bytes_per_browser_task: 4096,
+        max_proxy_wire_bytes_per_browser_task: 8192,
+        max_single_request_body_bytes: 1024,
+        max_single_response_bytes: 1024,
+        service_workers: 'block',
+        downloads: 'block',
+        popups: 'block',
+        websockets: 'block',
+        webtransport: 'block',
+        webrtc_direct_egress: 'block',
+        browser_cache: 'block',
+      },
+      origin_traffic_policies: [
+        {
+          origin: 'https://consent.example.test',
+          max_concurrency: 2,
+          requests_per_second: 100,
+          burst: 2,
+          min_delay_ms: 0,
+          max_redirect_hops: 0,
+          circuit_breaker: {
+            transient_failure_threshold: 2,
+            transient_window_ms: 1000,
+            cooldown_ms: 1000,
+          },
+        },
+      ],
+    },
+    options: {
+      input: {},
+      bindings: {},
+      timeout_ms: 1000,
+      max_target_requests: 4,
+      scheduler: new OriginSchedulerV1(),
+      signal: new AbortController().signal,
+    },
+  });
+  const scope = boundary.beginAction({
+    action_id: 'accept',
+    kind: 'click',
+    target: { frame: { kind: 'main' }, selector: 'button', visible_only: true },
+    expect: {
+      wait: null,
+      egress_rule_ids: ['consent_save'],
+      minimum_matching_requests: 1,
+      maximum_matching_requests: 1,
+    },
+  });
+  cdp.emit('Fetch.requestPaused', {
+    requestId: 'save',
+    request: {
+      url: 'https://consent.example.test/save',
+      method: 'POST',
+      headers: {},
+      hasPostData: true,
+      postData: 'set=1',
+    },
+    resourceType: 'Document',
+  });
+  await cdp.waitFor('Fetch.continueRequest', 'save');
+  cdp.emit('Fetch.requestPaused', {
+    requestId: 'beacon',
+    request: {
+      url: 'https://consent.example.test/log',
+      method: 'GET',
+      headers: {},
+      hasPostData: false,
+    },
+    resourceType: 'Image',
+  });
+  const refused = await cdp.waitFor('Fetch.failRequest', 'beacon');
+  assert.equal(refused.payload.errorReason, 'BlockedByClient');
+  boundary.assertHealthy();
+  assert.deepEqual(
+    boundary.denied_resources().map((resource) => resource.url),
+    ['https://consent.example.test/log'],
+  );
+  assert.equal(boundary.target_requests(), 1);
+  boundary.abortAction(scope);
+  await boundary.close();
+});
+
+test('a request still awaiting admission when its action is aborted is refused quietly', async () => {
+  let resolveFailed;
+  const failed = new Promise((resolve) => {
+    resolveFailed = resolve;
+  });
+  class FakeCdp extends EventEmitter {
+    async send(method, payload = {}) {
+      if (method === 'Fetch.failRequest') resolveFailed(payload);
+      return {};
+    }
+
+    async detach() {}
+  }
+  class HeldScheduler {
+    release = null;
+
+    async acquire() {
+      return new Promise((resolve) => {
+        this.release = () => resolve({ release: () => undefined });
+      });
+    }
+  }
+  const cdp = new FakeCdp();
+  const scheduler = new HeldScheduler();
+  const boundary = await installBrowserNetworkBoundary({
+    page: {
+      context: () => ({
+        newCDPSession: async () => cdp,
+        close: async () => undefined,
+      }),
+    },
+    capability: {
+      browser_resources: {
+        egress_rules: [
+          {
+            rule_id: 'submit',
+            phase: 'interaction',
+            origin: 'https://example.test',
+            methods: ['GET'],
+            route: { path: { kind: 'exact', value: '/submit' }, query: { kind: 'none' } },
+            resource_types: ['fetch'],
+            max_requests: 1,
+            max_encoded_request_body_bytes: 0,
+            max_encoded_response_bytes: 1024,
+          },
+        ],
+        max_requests_per_browser_task: 1,
+        max_encoded_request_body_bytes_per_browser_task: 0,
+        max_encoded_response_bytes_per_browser_task: 1024,
+        max_proxy_wire_bytes_per_browser_task: 2048,
+        max_single_request_body_bytes: 0,
+        max_single_response_bytes: 1024,
+        service_workers: 'block',
+        downloads: 'block',
+        popups: 'block',
+        websockets: 'block',
+        webtransport: 'block',
+        webrtc_direct_egress: 'block',
+        browser_cache: 'block',
+      },
+      origin_traffic_policies: [
+        {
+          origin: 'https://example.test',
+          max_concurrency: 1,
+          requests_per_second: 1,
+          burst: 1,
+          min_delay_ms: 0,
+          max_redirect_hops: 0,
+          circuit_breaker: {
+            transient_failure_threshold: 1,
+            transient_window_ms: 1000,
+            cooldown_ms: 1000,
+          },
+        },
+      ],
+    },
+    options: {
+      input: {},
+      bindings: {},
+      timeout_ms: 1000,
+      max_target_requests: 1,
+      scheduler,
+      signal: new AbortController().signal,
+    },
+  });
+  const scope = boundary.beginAction({
+    action_id: 'submit',
+    kind: 'click',
+    target: { frame: { kind: 'main' }, selector: 'button', visible_only: false },
+    expect: {
+      wait: null,
+      egress_rule_ids: ['submit'],
+      minimum_matching_requests: 0,
+      maximum_matching_requests: 1,
+    },
+  });
+  cdp.emit('Fetch.requestPaused', {
+    requestId: 'late',
+    request: { url: 'https://example.test/submit', method: 'GET', hasPostData: false },
+    resourceType: 'Fetch',
+  });
+  while (scheduler.release === null) await new Promise((resolve) => setImmediate(resolve));
+  boundary.abortAction(scope);
+  scheduler.release();
+  assert.deepEqual(await failed, { requestId: 'late', errorReason: 'BlockedByClient' });
+  boundary.assertHealthy();
+  assert.equal(boundary.target_requests(), 0);
+  await boundary.close();
+});
+
+test('an action with a declared wait completes without waiting for the page to settle', async () => {
+  const continued = [];
+  let resolveContinued;
+  const firstContinue = new Promise((resolve) => {
+    resolveContinued = resolve;
+  });
+  class FakeCdp extends EventEmitter {
+    async send(method, payload = {}) {
+      if (method === 'Fetch.continueRequest') {
+        continued.push(payload.requestId);
+        resolveContinued(payload);
+      }
+      return {};
+    }
+
+    async detach() {}
+  }
+  class HeldScheduler {
+    release = null;
+
+    async acquire() {
+      return new Promise((resolve) => {
+        this.release = () => resolve({ release: () => undefined });
+      });
+    }
+  }
+  const cdp = new FakeCdp();
+  const scheduler = new HeldScheduler();
+  const boundary = await installBrowserNetworkBoundary({
+    page: {
+      context: () => ({
+        newCDPSession: async () => cdp,
+        close: async () => undefined,
+      }),
+    },
+    capability: {
+      browser_resources: {
+        egress_rules: [
+          {
+            rule_id: 'pages',
+            phase: 'login',
+            origin: 'https://example.test',
+            methods: ['GET'],
+            route: { path: { kind: 'prefix', value: '/' }, query: { kind: 'none' } },
+            resource_types: ['fetch'],
+            max_requests: 4,
+            max_encoded_request_body_bytes: 0,
+            max_encoded_response_bytes: 1024,
+          },
+        ],
+        max_requests_per_browser_task: 4,
+        max_encoded_request_body_bytes_per_browser_task: 0,
+        max_encoded_response_bytes_per_browser_task: 4096,
+        max_proxy_wire_bytes_per_browser_task: 8192,
+        max_single_request_body_bytes: 0,
+        max_single_response_bytes: 1024,
+        service_workers: 'block',
+        downloads: 'block',
+        popups: 'block',
+        websockets: 'block',
+        webtransport: 'block',
+        webrtc_direct_egress: 'block',
+        browser_cache: 'block',
+      },
+      origin_traffic_policies: [
+        {
+          origin: 'https://example.test',
+          max_concurrency: 1,
+          requests_per_second: 1,
+          burst: 1,
+          min_delay_ms: 0,
+          max_redirect_hops: 0,
+          circuit_breaker: {
+            transient_failure_threshold: 1,
+            transient_window_ms: 1000,
+            cooldown_ms: 1000,
+          },
+        },
+      ],
+    },
+    options: {
+      input: {},
+      bindings: {},
+      timeout_ms: 1000,
+      max_target_requests: 4,
+      scheduler,
+      signal: new AbortController().signal,
+    },
+  });
+  const expect = {
+    wait: { kind: 'selector', selector: 'main', state: 'attached', minimum_count: 1 },
+    egress_rule_ids: ['pages'],
+    minimum_matching_requests: 0,
+    maximum_matching_requests: 4,
+  };
+  const scope = boundary.beginAction({
+    action_id: 'accept',
+    kind: 'click',
+    target: { frame: { kind: 'main' }, selector: 'button', visible_only: false },
+    expect,
+  });
+  cdp.emit('Fetch.requestPaused', {
+    requestId: 'trailing',
+    request: { url: 'https://example.test/data', method: 'GET', hasPostData: false },
+    resourceType: 'Fetch',
+  });
+  while (scheduler.release === null) await new Promise((resolve) => setImmediate(resolve));
+  await boundary.finishAction(scope, expect, new AbortController().signal);
+  scheduler.release();
+  await firstContinue;
+  assert.deepEqual(continued, ['trailing'], 'traffic still in flight proceeds as the page’s own');
+  boundary.assertHealthy();
+  assert.equal(boundary.target_requests(), 1);
+  await boundary.close();
+});
+
+test('a load Chromium cancels settles its admission so the boundary can go quiet', async () => {
+  class FakeCdp extends EventEmitter {
+    calls = [];
+
+    async send(method, payload = {}) {
+      this.calls.push({ method, payload });
+      this.emit('send', { method, payload });
+      return {};
+    }
+
+    waitFor(method, requestId) {
+      const existing = this.calls.find(
+        (call) => call.method === method && call.payload.requestId === requestId,
+      );
+      if (existing) return Promise.resolve(existing);
+      return new Promise((resolve) => {
+        const listener = (call) => {
+          if (call.method !== method || call.payload.requestId !== requestId) return;
+          this.off('send', listener);
+          resolve(call);
+        };
+        this.on('send', listener);
+      });
+    }
+
+    async detach() {}
+  }
+  const cdp = new FakeCdp();
+  const boundary = await installBrowserNetworkBoundary({
+    page: {
+      context: () => ({
+        newCDPSession: async () => cdp,
+        close: async () => undefined,
+      }),
+    },
+    capability: {
+      browser_resources: {
+        egress_rules: [
+          {
+            rule_id: 'pages',
+            phase: 'navigation',
+            origin: 'https://example.test',
+            methods: ['GET'],
+            route: { path: { kind: 'prefix', value: '/' }, query: { kind: 'none' } },
+            resource_types: ['document'],
+            max_requests: 2,
+            max_encoded_request_body_bytes: 0,
+            max_encoded_response_bytes: 1024,
+          },
+        ],
+        max_requests_per_browser_task: 2,
+        max_encoded_request_body_bytes_per_browser_task: 0,
+        max_encoded_response_bytes_per_browser_task: 2048,
+        max_proxy_wire_bytes_per_browser_task: 4096,
+        max_single_request_body_bytes: 0,
+        max_single_response_bytes: 1024,
+        service_workers: 'block',
+        downloads: 'block',
+        popups: 'block',
+        websockets: 'block',
+        webtransport: 'block',
+        webrtc_direct_egress: 'block',
+        browser_cache: 'block',
+      },
+      origin_traffic_policies: [
+        {
+          origin: 'https://example.test',
+          max_concurrency: 2,
+          requests_per_second: 100,
+          burst: 2,
+          min_delay_ms: 0,
+          max_redirect_hops: 0,
+          circuit_breaker: {
+            transient_failure_threshold: 2,
+            transient_window_ms: 1000,
+            cooldown_ms: 1000,
+          },
+        },
+      ],
+    },
+    options: {
+      input: {},
+      bindings: {},
+      timeout_ms: 1000,
+      max_target_requests: 2,
+      scheduler: new OriginSchedulerV1(),
+      signal: new AbortController().signal,
+    },
+  });
+  cdp.emit('Fetch.requestPaused', {
+    requestId: 'interception-1',
+    networkId: 'network-1',
+    request: { url: 'https://example.test/slow', method: 'GET', hasPostData: false },
+    resourceType: 'Document',
+  });
+  await cdp.waitFor('Fetch.continueRequest', 'interception-1');
+  cdp.emit('Network.loadingFailed', {
+    requestId: 'network-1',
+    errorText: 'net::ERR_ABORTED',
+    canceled: true,
+  });
+  await boundary.waitForQuiet(
+    { kind: 'network_quiet', quiet_ms: 10, maximum_in_flight: 0 },
+    AbortSignal.timeout(1000),
+  );
+  boundary.assertHealthy();
+  assert.equal(boundary.target_requests(), 1, 'the request was sent and counts');
+  await boundary.close();
+});

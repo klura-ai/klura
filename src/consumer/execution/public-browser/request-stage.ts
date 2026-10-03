@@ -23,6 +23,13 @@ export async function handleBrowserRequestStage(
   paused: BrowserFetchPausedV1,
   state: FetchHandlerStateV1,
 ): Promise<void> {
+  if (paused.redirected_from !== null) {
+    const refused = followRedirectHop(paused, state);
+    if (refused !== null) {
+      await state.fail(paused.request_id, refused);
+      return;
+    }
+  }
   const action = state.activeAction();
   const pageScript = state.activePageScript();
   const runtimeRequest = state.activeRuntimeRequest();
@@ -102,10 +109,13 @@ export async function handleBrowserRequestStage(
       });
   const originPolicy = findOriginPolicy(state.capability.origin_traffic_policies, paused.url);
   if (!rule || !originPolicy) {
-    // A sub-resource the page fetched on its own is refused and the page
-    // carries on without it; only the task's own traffic — navigation,
-    // interaction, runtime and page-script requests — is bound to be declared.
-    if (phase === 'resource') {
+    // Traffic the page issues on its own — a sub-resource, a beacon, a fetch
+    // the application makes while a navigation or an action is in flight —
+    // is refused and the page carries on without it. Only the task's own
+    // traffic is bound to be declared: a main-frame document, a runtime
+    // request, and a reviewed program's own requests.
+    const own = mainFrameDocument || runtimeRequest !== null || (pageScript !== null && program);
+    if (!own) {
       await state.deny(paused.request_id, denied);
       return;
     }
@@ -162,6 +172,18 @@ export async function handleBrowserRequestStage(
     await state.fail(paused.request_id, new PublicHttpExecutionError(code, asError(error).message));
     return;
   }
+  // An action that ended while this request waited for admission leaves the
+  // request as the page's own traffic: refused quietly, never the task's fault.
+  if (
+    operation?.phase === 'interaction' &&
+    !operation.released &&
+    state.activeAction() !== operation
+  ) {
+    permit.release('neutral');
+    untrackPendingOperationRequest(operation, paused.request_id, state);
+    await state.deny(paused.request_id, denied);
+    return;
+  }
   const postAcquireError = validatePostAcquireState(
     state,
     operation,
@@ -196,16 +218,59 @@ export async function handleBrowserRequestStage(
     request_id: paused.request_id,
     permit,
     rule,
+    network_id: paused.network_id,
+    description: describeRequest(paused, phase),
+    reading_response: false,
+    origin_policy: originPolicy,
     operation,
   });
   try {
     await state.cdp.send('Fetch.continueRequest', { requestId: paused.request_id });
-  } catch (error) {
-    await state.fail(
-      paused.request_id,
-      new PublicHttpExecutionError('transport_failure', asError(error).message),
+  } catch {
+    // The browser no longer holds this interception — the page navigated away
+    // while the request waited for admission — so there is nothing to send and
+    // nothing the task did wrong.
+    releaseVanishedRequest(paused.request_id, state);
+  }
+}
+
+/** A redirect Chromium reports as a new request supersedes the admission it
+ *  came from; the hop is counted against that admission's origin policy and
+ *  the superseded request settles. */
+function followRedirectHop(
+  paused: BrowserFetchPausedV1,
+  state: FetchHandlerStateV1,
+): PublicHttpExecutionError | null {
+  const from = paused.redirected_from;
+  if (from === null) return null;
+  const admission = state.admitted.get(from);
+  releaseVanishedRequest(from, state);
+  if (admission === undefined) return null;
+  const chain = paused.network_id ?? from;
+  const hops = (state.redirectHops.get(chain) ?? 0) + 1;
+  if (hops > admission.origin_policy.max_redirect_hops) {
+    state.redirectHops.delete(chain);
+    return new PublicHttpExecutionError(
+      'request_blocked',
+      `redirect limit is exhausted: ${admission.description} would be hop ${hops} of at most ${admission.origin_policy.max_redirect_hops}`,
     );
   }
+  state.redirectHops.set(chain, hops);
+  return null;
+}
+
+/** Settles an admitted request the browser dropped before it completed. */
+export function releaseVanishedRequest(requestId: string, state: FetchHandlerStateV1): void {
+  const admission = state.admitted.get(requestId);
+  if (admission === undefined) return;
+  state.admitted.delete(requestId);
+  admission.permit.release('neutral');
+  state.activeRequests -= 1;
+  if (admission.operation !== null) {
+    admission.operation.pending_request_ids.delete(requestId);
+    state.operationActivityChanged(admission.operation);
+  }
+  state.activityChanged();
 }
 
 const PROGRAM_RESOURCE_TYPES = new Set(['fetch', 'xhr']);
@@ -247,7 +312,10 @@ function isMainFrameDocument(paused: BrowserFetchPausedV1, mainFrameId: string |
 
 /** Names a request structurally — method, origin, path, phase — without
  *  echoing its query string or body. */
-function describeRequest(paused: BrowserFetchPausedV1, phase: BrowserRequestPhaseV1): string {
+export function describeRequest(
+  paused: BrowserFetchPausedV1,
+  phase: BrowserRequestPhaseV1,
+): string {
   try {
     const url = new URL(paused.url);
     return `${paused.method} ${url.origin}${url.pathname} (${phase})`;
@@ -354,13 +422,11 @@ function browserRequestScopeChanged(
 ): boolean {
   if (state.pageScriptNetworkSealed()) return true;
   if (operation?.phase === 'page_script') return state.activePageScript() !== operation;
-  if (operation !== null) return state.activeAction() !== operation;
+  if (operation !== null) return !operation.released && state.activeAction() !== operation;
   if (runtimeRequest !== null) return state.activeRuntimeRequest() !== runtimeRequest;
-  return (
-    state.activeAction() !== null ||
-    state.activePageScript() !== null ||
-    state.activeRuntimeRequest() !== null
-  );
+  // A request the page issued under no scope is its own loading; a scope that
+  // opened while it waited for admission has no claim on it.
+  return false;
 }
 
 function browserRequestBudgetExhausted(

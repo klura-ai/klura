@@ -66,7 +66,8 @@ export interface BrowserInteractionNetworkBoundaryV1 {
 export interface BrowserInteractionExecutionInputV1 {
   page: Page;
   program: BrowserInteractionProgramV1;
-  projection: DomProjectionV1;
+  /** Read after each repeat round; a program without a repeat needs none. */
+  projection: DomProjectionV1 | null;
   maximum_output_bytes: number;
   expression_context: ValueExpressionContextV1;
   strategy_id: string;
@@ -81,13 +82,14 @@ export async function executeBrowserInteractionProgram(
   await executeActions(input, input.program.initial, 0);
   const repeat = input.program.repeat;
   if (repeat === null) return null;
+  const projection = requireProjection(input);
 
   const aggregate = createAggregate(repeat.projection_schedule);
   let previousDigest: string | null = null;
   if (repeat.projection_schedule === 'initial_and_each_round') {
     const initialProjection = await projectBrowserDom(
       input.page,
-      input.projection,
+      projection,
       input.maximum_output_bytes,
     );
     previousDigest = sha256Digest(canonicalJson(initialProjection));
@@ -103,12 +105,12 @@ export async function executeBrowserInteractionProgram(
 
   for (let round = 1; round <= repeat.maximum_rounds; round += 1) {
     await executeActions(input, repeat.actions, round);
-    const projection = await projectBrowserDom(
+    const roundProjection = await projectBrowserDom(
       input.page,
-      input.projection,
+      projection,
       input.maximum_output_bytes,
     );
-    const digest = sha256Digest(canonicalJson(projection));
+    const digest = sha256Digest(canonicalJson(roundProjection));
     if (digest === previousDigest) {
       throw interactionError(input.strategy_id, 'interaction_stalled', null, round);
     }
@@ -116,7 +118,7 @@ export async function executeBrowserInteractionProgram(
     if (repeat.projection_schedule === 'initial_and_each_round') {
       appendProjection(
         aggregate,
-        projection,
+        roundProjection,
         input.maximum_output_bytes,
         input.strategy_id,
         null,
@@ -129,7 +131,7 @@ export async function executeBrowserInteractionProgram(
       throw interactionError(input.strategy_id, 'interaction_indeterminate', null, round);
     }
     if (exhausted) {
-      return repeat.projection_schedule === 'final_only' ? projection : aggregate.items;
+      return repeat.projection_schedule === 'final_only' ? roundProjection : aggregate.items;
     }
   }
   throw interactionError(
@@ -246,14 +248,26 @@ async function resolveActionTarget(
       action.action_id,
       round,
     );
-    const locator = frame.locator(action.target.selector);
+    const locator = targetLocator(frame, action.target);
     await assertTargetCardinality(locator, action, strategyId, round);
     return locator;
   }
   const target = action.target;
   const frame = await resolveTargetFrame(page, target, strategyId, action.action_id, round);
-  const locator = frame.locator(target.selector);
+  const locator = targetLocator(frame, target);
   return (await assertTargetCardinality(locator, action, strategyId, round)) ? locator : null;
+}
+
+function targetLocator(frame: Page | Frame, target: BrowserTargetV1): Locator {
+  const locator = frame.locator(target.selector);
+  return target.visible_only ? locator.filter({ visible: true }) : locator;
+}
+
+function requireProjection(input: BrowserInteractionExecutionInputV1): DomProjectionV1 {
+  if (input.projection === null) {
+    throw new Error('a browser interaction program with a repeat requires a DOM projection');
+  }
+  return input.projection;
 }
 
 async function assertTargetCardinality(

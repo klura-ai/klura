@@ -885,10 +885,10 @@ export class ConsumerDaemonRoutesV1 {
 function createServices(): ConsumerDaemonExecutionServicesV1 {
   const store = new PackageStoreV1();
   const runtimeVersion = readConsumerRuntimeVersion();
-  const calls = new ConsumerCallServiceV1(store, runtimeVersion);
+  const logins = new ConsumerLoginServiceV1(store, runtimeVersion);
+  const calls = new ConsumerCallServiceV1(store, runtimeVersion, undefined, logins);
   const runs = new ConsumerScrapeRunServiceV1(store, runtimeVersion);
   const sessions = new ConsumerSessionServiceV1(store, runtimeVersion);
-  const logins = new ConsumerLoginServiceV1(store, runtimeVersion);
   return {
     call: calls.call.bind(calls),
     clearSession: sessions.clear.bind(sessions),

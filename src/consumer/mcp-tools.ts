@@ -146,7 +146,7 @@ export function createConsumerMcpTools(
     ),
     definition(
       TOOL_NAMES.openPackageLogin,
-      "Open one package realm's signed local login browser. After the user finishes, call complete_package_login.",
+      "Open one package realm's signed local login browser. After the user finishes, call complete_package_login. A consent realm needs no user and returns its completion directly.",
       CONSUMER_TOOL_CONTRACTS[TOOL_NAMES.openPackageLogin],
       { openWorldHint: true },
       'open_login',

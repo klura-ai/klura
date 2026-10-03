@@ -27,6 +27,10 @@ export type BrowserWaitV1 =
 export type BrowserTargetV1 = {
   frame: { kind: 'main' } | { kind: 'child'; frame_selector: string; origin: string };
   selector: string;
+  /** Match only elements the visitor can see, so a selector that also hits a
+   *  hidden duplicate — a second layout's copy of the same control — still
+   *  names exactly one element. */
+  visible_only: boolean;
 };
 
 export interface BrowserActionExpectationV1 {
@@ -205,7 +209,7 @@ export function validateBrowserActionExpectationAgainstRules(
   expectation: BrowserActionExpectationV1,
   rules: ReadonlyMap<StableContractIdV1, { max_requests: number }>,
   field: string,
-  phase: 'interaction' | 'page_script',
+  phase: 'interaction' | 'page_script' | 'login',
 ): void {
   for (const ruleId of expectation.egress_rule_ids) {
     if (!rules.has(ruleId)) {
@@ -361,12 +365,22 @@ function parseBrowserAction(value: unknown, field: string): BrowserActionV1 {
 }
 
 function parseBrowserTarget(value: unknown, field: string): BrowserTargetV1 {
-  const record = parseExactRecord(value, field, ['frame', 'selector']);
+  const declaresVisibility = value !== null && typeof value === 'object' && 'visible_only' in value;
+  const record = parseExactRecord(
+    value,
+    field,
+    declaresVisibility ? ['frame', 'selector', 'visible_only'] : ['frame', 'selector'],
+  );
+  if (declaresVisibility && record.visible_only !== true) {
+    throw new PublicContractError(`${field}.visible_only`, 'must be true when present');
+  }
+  const visibleOnly = declaresVisibility;
   const frame = parseBoundedRecord(record.frame, `${field}.frame`, 3);
   if (frame.kind === 'main' && Object.keys(frame).length === 1) {
     return {
       frame: { kind: 'main' },
       selector: parseCssSelector(record.selector, `${field}.selector`),
+      visible_only: visibleOnly,
     };
   }
   const child = parseExactRecord(frame, `${field}.frame`, ['kind', 'frame_selector', 'origin']);
@@ -380,6 +394,7 @@ function parseBrowserTarget(value: unknown, field: string): BrowserTargetV1 {
       origin: parseHttpsOrigin(child.origin, `${field}.frame.origin`),
     },
     selector: parseCssSelector(record.selector, `${field}.selector`),
+    visible_only: visibleOnly,
   };
 }
 
