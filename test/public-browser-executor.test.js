@@ -1720,3 +1720,104 @@ test('a browser deadline names the running stage and the resources the page was 
   });
   assert.notStrictEqual(error.diagnostic.denied_resources, denied, 'the diagnostic owns its copy');
 });
+
+test('the public browser launches as Chrome when installed and always names its identity', async () => {
+  const {
+    launchPublicBrowser,
+    PUBLIC_BROWSER_PROFILE_V1,
+  } = require('../dist/consumer/execution/public-browser/context.js');
+  const {
+    startPinnedEgressProxy,
+  } = require('../dist/consumer/execution/public-browser/pinned-proxy.js');
+  const proxy = await startPinnedEgressProxy({
+    allowed_origins: ['https://example.test'],
+    max_wire_bytes: 1024,
+    connect_timeout_ms: 1000,
+  });
+  const launched = await launchPublicBrowser(proxy);
+  try {
+    assert.ok(['chrome', 'chromium'].includes(launched.identity), launched.identity);
+    const context = await launched.browser.newContext(
+      require('../dist/consumer/execution/public-browser/context.js').createPublicBrowserContextOptions(
+        undefined,
+        launched.user_agent,
+      ),
+    );
+    const page = await context.newPage();
+    assert.deepEqual(page.viewportSize(), PUBLIC_BROWSER_PROFILE_V1.viewport);
+    const agent = await page.evaluate(() => navigator.userAgent);
+    assert.match(agent, /Chrome\//, 'the public browser presents a Chrome engine');
+    assert.doesNotMatch(agent, /HeadlessChrome/, 'the hidden window is not a product');
+    assert.equal(
+      await page.evaluate('navigator.webdriver'),
+      false,
+      'an ordinary Chrome does not announce automation',
+    );
+    await context.close();
+  } finally {
+    await launched.browser.close();
+    await proxy.close();
+  }
+});
+
+test("a same-origin xhr a resource rule admits is the page's own, not the program's", async () => {
+  const cdp = new RecordingCdp();
+  const base = pageScriptWithResourcesCapability();
+  const policy = parseBrowserResourcePolicy(
+    {
+      ...base.browser_resources,
+      egress_rules: [
+        ...base.browser_resources.egress_rules,
+        {
+          rule_id: 'app_data',
+          phase: 'resource',
+          origin: 'https://example.test',
+          methods: ['GET'],
+          route: { path: { kind: 'prefix', value: '/data/' }, query: { kind: 'none' } },
+          resource_types: ['fetch', 'xhr'],
+          max_requests: 2,
+          max_encoded_request_body_bytes: 0,
+          max_encoded_response_bytes: 1024,
+        },
+      ],
+    },
+    'browser_resources',
+  );
+  const signal = new AbortController().signal;
+  const boundary = await installBrowserNetworkBoundary({
+    page: { context: () => ({ newCDPSession: async () => cdp, close: async () => undefined }) },
+    capability: { ...base, browser_resources: policy },
+    options: {
+      input: {},
+      bindings: {},
+      timeout_ms: 1000,
+      max_target_requests: 4,
+      scheduler: new OriginSchedulerV1(),
+      signal,
+    },
+  });
+  // The program declares that it issues nothing at all.
+  const silent = {
+    wait: null,
+    egress_rule_ids: [],
+    minimum_matching_requests: 0,
+    maximum_matching_requests: 0,
+  };
+  const limits = {
+    max_encoded_request_body_bytes_per_script: 0,
+    max_single_request_body_bytes: 0,
+    max_encoded_request_body_bytes_by_rule: {},
+  };
+  const scope = boundary.beginPageScript('program', silent, limits, 'https://example.test');
+  cdp.emit('Fetch.requestPaused', {
+    requestId: 'tiles',
+    frameId: 'main',
+    request: { url: 'https://example.test/data/tiles.json', method: 'GET', hasPostData: false },
+    resourceType: 'XHR',
+  });
+  assert.deepEqual(await cdp.waitFor('Fetch.continueRequest', 'tiles'), { requestId: 'tiles' });
+  boundary.assertHealthy();
+  // Admitted under the resource rule, so the silent program's expectation still holds.
+  await boundary.finishPageScript(scope, silent, signal);
+  await boundary.close();
+});

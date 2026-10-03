@@ -75,8 +75,11 @@ export async function openPublicLoginBrowser(
       connect_timeout_ms: Math.min(input.contract.browser_resources.total_timeout_ms, 60_000),
       resolve_host: input.resolve_host,
     });
-    browser = await launchPublicBrowser(proxy, { headless: false });
-    context = await browser.newContext(createPublicBrowserContextOptions(undefined));
+    const launched = await launchPublicBrowser(proxy, { headless: false });
+    browser = launched.browser;
+    context = await browser.newContext(
+      createPublicBrowserContextOptions(undefined, launched.user_agent),
+    );
     await context.routeWebSocket('**/*', (webSocket) => webSocket.close());
     page = await context.newPage();
     pageGuard = await installPublicSinglePageGuard(context, page);

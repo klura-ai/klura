@@ -32,6 +32,7 @@ import type { PublicHttpResponseV1 } from '../../consumer/execution/node-http';
 import {
   PublicHttpExecutionError,
   executeNodeHttpStrategy,
+  type PublicBrowserIdentityV1,
   type PublicDeniedResourceV1,
   type PublicExecutionDiagnosticV1,
 } from '../../consumer/execution/node-http';
@@ -90,6 +91,7 @@ export interface ObservedSmokeResponseV1 {
   denied_resources?: PublicDeniedResourceV1[];
   /** Which of the capability's declared selectors matched the responding page. */
   selector_matches?: Record<string, boolean>;
+  browser_identity?: PublicBrowserIdentityV1;
 }
 
 export interface PackageExportAuditIssueV1 {
@@ -123,6 +125,9 @@ function observedSmokeResponses(
         ? {}
         : { denied_resources: response.denied_resources }),
       ...(selectorMatches === undefined ? {} : { selector_matches: selectorMatches }),
+      ...(response.browser_identity === undefined
+        ? {}
+        : { browser_identity: response.browser_identity }),
     };
   });
 }

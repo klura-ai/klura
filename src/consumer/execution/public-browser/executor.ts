@@ -194,9 +194,10 @@ export async function executeBrowserNavigationStrategy(
       connect_timeout_ms: Math.min(options.timeout_ms, 60_000),
       resolve_host: options.resolve_host,
     });
-    browser = await launchPublicBrowser(proxy);
+    const launched = await launchPublicBrowser(proxy);
+    browser = launched.browser;
     const context = await browser.newContext(
-      createPublicBrowserContextOptions(options.storage_state),
+      createPublicBrowserContextOptions(options.storage_state, launched.user_agent),
     );
     await context.routeWebSocket('**/*', (webSocket) => webSocket.close());
     const page = await context.newPage();
@@ -252,6 +253,7 @@ export async function executeBrowserNavigationStrategy(
         body,
         target_requests: boundary.target_requests(),
         denied_resources: boundary.denied_resources(),
+        browser_identity: launched.identity,
         html_selector_exists: (selector: string) => selectorMatches.get(selector) ?? false,
       };
     } finally {

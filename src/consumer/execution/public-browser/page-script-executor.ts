@@ -134,8 +134,11 @@ export async function executeBrowserPageScriptStrategy(
       connect_timeout_ms: Math.min(options.timeout_ms, 60_000),
       resolve_host: options.resolve_host,
     });
-    browser = await launchPublicBrowser(proxy);
-    const context = await browser.newContext(createPublicBrowserContextOptions(undefined));
+    const launched = await launchPublicBrowser(proxy);
+    browser = launched.browser;
+    const context = await browser.newContext(
+      createPublicBrowserContextOptions(undefined, launched.user_agent),
+    );
     const pageProgramRunner = await installReviewedPageProgramRunner(context);
     await context.routeWebSocket('**/*', (webSocket) => webSocket.close());
     const page = await context.newPage();
@@ -224,6 +227,7 @@ export async function executeBrowserPageScriptStrategy(
         body,
         target_requests: boundary.target_requests(),
         denied_resources: boundary.denied_resources(),
+        browser_identity: launched.identity,
         html_selector_exists: (selector: string) => selectorMatches.get(selector) ?? false,
       };
     } finally {

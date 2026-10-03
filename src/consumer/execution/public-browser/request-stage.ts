@@ -35,12 +35,15 @@ export async function handleBrowserRequestStage(
   // A reviewed program issues fetch and xhr to its own origin — exactly what a
   // page_script rule may admit — so inside its scope everything else the page
   // requests is the site loading itself: scripts, styles, images, beacons,
-  // child frames, and anything cross-origin. That
+  // child frames, and anything cross-origin. A same-origin fetch or xhr that a
+  // declared resource rule admits is the page's own too: the reviewer has named
+  // it as such, and that rule's budgets bound it. That
   // traffic is judged as a resource, exactly as it is outside the scope, so a
   // live application that keeps loading while the program runs neither fails
   // the task nor widens what the program may send. A main-frame document is
   // the program navigating away and is never admitted.
-  const program = isProgramTraffic(paused, state.programOrigin());
+  const program =
+    isProgramTraffic(paused, state.programOrigin()) && !coveredByResourceRule(paused, state);
   const ambient = pageScript !== null && !program && !mainFrameDocument;
   if (state.pageScriptNetworkSealed()) {
     if (!program && !mainFrameDocument) {
@@ -206,6 +209,18 @@ export async function handleBrowserRequestStage(
 }
 
 const PROGRAM_RESOURCE_TYPES = new Set(['fetch', 'xhr']);
+
+/** Whether a declared resource rule admits this request as the page's own. */
+function coveredByResourceRule(paused: BrowserFetchPausedV1, state: FetchHandlerStateV1): boolean {
+  return (
+    matchBrowserEgressRule(state.policy, {
+      phase: 'resource',
+      url: paused.url,
+      method: paused.method,
+      resource_type: paused.resource_type,
+    }) !== null
+  );
+}
 
 /** Whether a request is one a page_script rule could admit — fetch or xhr to
  *  the reviewed program's own origin — and so is the program's traffic rather

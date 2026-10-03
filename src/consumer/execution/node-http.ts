@@ -38,6 +38,10 @@ export function outgoingRequestHeaders(
   };
 }
 
+/** Which browser a public task rendered in: the installed Google Chrome, or
+ *  Playwright's bundled Chromium when no Chrome is present. */
+export type PublicBrowserIdentityV1 = 'chrome' | 'chromium';
+
 /** A page request the browser policy refused while a task ran. */
 export interface PublicDeniedResourceV1 {
   url: string;
@@ -56,6 +60,8 @@ export interface PublicHttpResponseV1 {
   /** Page sub-resources a browser strategy's policy refused while producing
    *  this response; what a page that rendered incompletely was missing. */
   denied_resources?: PublicDeniedResourceV1[];
+  /** The browser identity a browser task rendered in. */
+  browser_identity?: PublicBrowserIdentityV1;
 }
 
 export interface PublicHttpExecutionOptionsV1 {
