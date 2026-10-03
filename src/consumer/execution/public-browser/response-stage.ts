@@ -105,8 +105,12 @@ async function continueRedirect(
     );
   }
   state.redirectHops.set(chain, hops);
-  await state.cdp.send('Fetch.continueRequest', { requestId: paused.request_id });
+  // The next hop is paused under this same interception id as soon as the
+  // redirect is released, so this admission is settled first: settled after,
+  // it would remove the hop's own admission and hold its origin permit while
+  // the hop waits for one.
   settleAdmission(paused, admission, state, 'success');
+  await state.cdp.send('Fetch.continueRequest', { requestId: paused.request_id });
 }
 
 function describeRedirect(paused: BrowserFetchPausedV1): string {

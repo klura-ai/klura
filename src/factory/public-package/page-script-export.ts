@@ -137,7 +137,7 @@ export function exportReviewedLocalPageScriptStrategySource(
   );
   assertAllowedKeys(
     returnShape,
-    ['kind', 'min_length', 'max_length', 'required_keys'],
+    ['kind', 'min_length', 'max_length', 'min_items', 'max_items', 'required_keys'],
     'page_script_export.local_strategy.prerequisites[0].return_shape',
   );
   // A local js-eval hands its value to `response.from`, which reads an object
@@ -158,6 +158,18 @@ export function exportReviewedLocalPageScriptStrategySource(
     throw new PublicContractError(
       'page_script_export.local_strategy.prerequisites[0].return_shape',
       `cannot declare string length limits when kind is ${returnKind}`,
+    );
+  }
+  // Item-count bounds are the local runtime's check on an array result. The
+  // public program signs only its result kind and required keys; how many
+  // rows a call returns is bounded by the reviewed outcome schema instead.
+  if (
+    returnKind !== 'array' &&
+    (returnShape.min_items !== undefined || returnShape.max_items !== undefined)
+  ) {
+    throw new PublicContractError(
+      'page_script_export.local_strategy.prerequisites[0].return_shape',
+      `cannot declare item-count limits when kind is ${returnKind}`,
     );
   }
   if (returnKind === 'string' && !declaresResultKind) {

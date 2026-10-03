@@ -23,6 +23,7 @@ export async function handleBrowserRequestStage(
   paused: BrowserFetchPausedV1,
   state: FetchHandlerStateV1,
 ): Promise<void> {
+  supersedeEarlierAttempts(paused, state);
   if (paused.redirected_from !== null) {
     const refused = followRedirectHop(paused, state);
     if (refused !== null) {
@@ -241,6 +242,24 @@ export async function handleBrowserRequestStage(
     // while the request waited for admission — so there is nothing to send and
     // nothing the task did wrong.
     releaseVanishedRequest(paused.request_id, state);
+  }
+}
+
+/**
+ * A request Chromium issues again under the network id of one already
+ * admitted replaces it: a navigation restarted to send the client hints the
+ * server asked for, or any other retry the network stack performs by itself.
+ * The earlier attempt receives no response of its own, so nothing else would
+ * settle its admission — and under an origin policy of one concurrent request
+ * the attempt that replaced it would wait on it for ever. Each attempt was
+ * sent, so each stays counted against the request budgets.
+ */
+function supersedeEarlierAttempts(paused: BrowserFetchPausedV1, state: FetchHandlerStateV1): void {
+  if (paused.network_id === null) return;
+  for (const admission of [...state.admitted.values()]) {
+    if (admission.network_id === paused.network_id && admission.request_id !== paused.request_id) {
+      releaseVanishedRequest(admission.request_id, state);
+    }
   }
 }
 

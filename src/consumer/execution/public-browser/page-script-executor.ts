@@ -287,6 +287,10 @@ export async function executeBrowserPageScriptStrategyInBoundedPage(
         timeout_ms: options.timeout_ms,
       });
     }
+    // A navigation the boundary refused leaves the page on the browser's own
+    // error document, whose origin is not the reviewed one. The boundary's
+    // verdict names the request that was refused, so it is read first.
+    boundary.assertHealthy();
     assertPageScriptOrigin(page.url(), capability.navigation_origins[0] as string);
     stage = 'program';
     const scriptScope = boundary.beginPageScript(
