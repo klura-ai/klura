@@ -190,6 +190,8 @@ import { execute as executeCore } from './execution';
 import type { ExecuteResult } from './execution/types';
 import { collectExecutionDiagnosticEvidence } from './execution/diagnostic-evidence';
 import { pool as runtimePool, tokenCache as runtimeTokenCache } from './runtime-state';
+import { loadStrategies } from './strategies/skills';
+import type { StrategyTier } from './vocab';
 
 export async function execute(
   platform: string,
@@ -197,14 +199,28 @@ export async function execute(
   args: Record<string, unknown> = {},
   opts: {
     identity?: string;
+    /** Run only the strategy saved at this tier, skipping the cascade. A
+     *  capability can hold several tiers that answer in different shapes; a
+     *  caller comparing or packaging one of them needs that one's answer,
+     *  not whichever the cascade reaches first. */
+    tier?: StrategyTier;
     _suppressStrategyState?: boolean;
     _collectDiagnosticEvidence?: boolean;
   } = {},
 ): Promise<ExecuteResult> {
+  const tier = opts.tier;
+  const only =
+    tier === undefined
+      ? undefined
+      : loadStrategies(platform, capability).filter((strategy) => strategy.strategy === tier);
+  if (only !== undefined && only.length === 0) {
+    throw new Error(`no active ${tier} strategy is saved for ${platform}/${capability}`);
+  }
   const invoke = (): Promise<ExecuteResult> =>
     executeCore(platform, capability, args, runtimePool, runtimeTokenCache, {
       identity: opts.identity,
       _suppressStrategyState: opts._suppressStrategyState,
+      ...(only === undefined ? {} : { _strategyOverride: only }),
     });
   if (!opts._collectDiagnosticEvidence) return invoke();
   const { result, evidence } = await collectExecutionDiagnosticEvidence(invoke);
