@@ -22,7 +22,14 @@ import * as cheerio from 'cheerio';
 import type { ConnectConfig } from '../config/handler';
 import { getKluraHome } from '../paths';
 import { BrowserDriver, Capability, PageOpts } from './interface';
-import { readProfileLockHolder } from './profile-lock';
+import {
+  acquireProfileLease,
+  assessProfileChrome,
+  otherProfileLeases,
+  readProfileLockHolder,
+  recordProfileChrome,
+  releaseProfileLease,
+} from './profile-lock';
 import { writeTextUnderFileLock } from '../utils/owner-file-lock';
 import type { InterceptedRequest, LoadedScript } from './types/network';
 import type { WebSocketFrame, WebSocketFrameStream } from './types/websocket';
@@ -90,6 +97,13 @@ function isKluraOwnedProfile(profileDir: string): boolean {
   return resolved === home || resolved.startsWith(home + path.sep);
 }
 
+// How long a process waits for a Chrome another process is still launching to
+// open its DevTools port, before concluding there is none to share.
+const SHARED_CHROME_LAUNCH_WAIT_MS = 20_000;
+// How long it waits for a process that has leased a profile to put a Chrome on
+// it at all. A lessee that never does is alive without a browser.
+const SHARED_CHROME_START_WAIT_MS = 5_000;
+
 // Reserve an ephemeral TCP port for the spawned Chrome's DevTools endpoint.
 function freeTcpPort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -110,10 +124,18 @@ function freeTcpPort(): Promise<number> {
 // DevTools endpoint. The retry IS the readiness signal — Chrome exposes no
 // pre-open event, so a bounded connect-retry at this launch barrier is the
 // correct primitive (not a steady-state poll).
-async function connectOverCdpWithRetry(url: string, timeoutMs: number): Promise<Browser> {
+//
+// `gaveUp` ends the retry early when the Chrome being waited for is known to be
+// gone: one launched onto a profile another Chrome holds hands its command line
+// over and exits, and no amount of waiting opens its port.
+async function connectOverCdpWithRetry(
+  url: string,
+  timeoutMs: number,
+  gaveUp: () => boolean = () => false,
+): Promise<Browser> {
   const deadline = Date.now() + timeoutMs;
   let lastErr: unknown;
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && !gaveUp()) {
     try {
       return await defaultChromium.connectOverCDP(url);
     } catch (err) {
@@ -121,7 +143,7 @@ async function connectOverCdpWithRetry(url: string, timeoutMs: number): Promise<
       await new Promise((r) => setTimeout(r, 200));
     }
   }
-  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  throw lastErr instanceof Error ? lastErr : new Error(`Chrome exited before opening ${url}`);
 }
 
 interface SessionExtras {
@@ -765,8 +787,12 @@ export class PlaywrightDriver extends BrowserDriver {
   protected readonly channel: 'auto' | 'chrome' | 'chromium';
   protected readonly config: Record<string, unknown>;
   protected readonly connect?: ConnectConfig;
-  /** Child process for a spawned connect-mode Chrome; killed on closeBrowser. */
+  /** Child process for a spawned connect-mode Chrome. Killed on closeBrowser
+   *  unless another process is still using it. */
   private _connectChild: ChildProcess | null = null;
+  /** The klura-owned profile this driver holds a lease on, whether it spawned
+   *  that profile's Chrome or attached to one another process spawned. */
+  private _leasedProfileDir: string | null = null;
 
   constructor(opts: PlaywrightDriverOptions = {}) {
     super();
@@ -882,6 +908,8 @@ export class PlaywrightDriver extends BrowserDriver {
     if (!isKluraOwnedProfile(profileDir)) return;
     const holder = readProfileLockHolder(profileDir);
     if (!holder) return;
+    // A Chrome another live process is leasing is in use, not left behind.
+    if (otherProfileLeases(profileDir).length > 0) return;
     // A child this driver still tracks isn't an orphan — leave it be.
     if (this._connectChild && this._connectChild.pid === holder.pid) return;
     try {
@@ -933,12 +961,23 @@ export class PlaywrightDriver extends BrowserDriver {
     }
     const profileDir = cfg.profileDir ?? path.join(getKluraHome(), 'connect-profile');
     fs.mkdirSync(profileDir, { recursive: true });
+    // A profile holds one Chrome. When another live klura process is already
+    // driving it, this one attaches to that Chrome and works in its own
+    // contexts beside it, rather than taking the profile away.
+    const shared = await this._attachToSharedProfileChrome(profileDir);
+    if (shared) return shared;
     // Reap a connect-Chrome orphaned by a previous run before spawning. Without
     // this, the orphan still holds the profile's singleton lock and our fresh
     // launch hands its command line off to the orphan and exits without opening
     // the debug port — the exact "failed to attach" wedge.
     this._reapOwnedProfileOrphan(profileDir);
     const port = await freeTcpPort();
+    // Leased before the launch, so a process starting beside this one finds a
+    // live user and waits for the port instead of launching a second Chrome.
+    if (isKluraOwnedProfile(profileDir)) {
+      acquireProfileLease(profileDir);
+      this._leasedProfileDir = profileDir;
+    }
 
     // A normal Chrome launch: real profile, no --enable-automation, no
     // Playwright default-arg soup. Only the DevTools port + the flags a normal
@@ -962,7 +1001,17 @@ export class PlaywrightDriver extends BrowserDriver {
 
     let browser: Browser;
     try {
-      browser = await connectOverCdpWithRetry(`http://127.0.0.1:${port}`, 20000);
+      browser = await connectOverCdpWithRetry(
+        `http://127.0.0.1:${port}`,
+        20000,
+        () => child.exitCode !== null || child.signalCode !== null,
+      );
+      // Published only once this Chrome is known to be the one on the profile:
+      // a launch that lost the profile to another must not overwrite the
+      // record of the Chrome that won it.
+      if (this._leasedProfileDir !== null && child.pid !== undefined) {
+        recordProfileChrome(profileDir, child.pid, `http://127.0.0.1:${port}`);
+      }
     } catch (err) {
       try {
         child.kill('SIGKILL');
@@ -970,6 +1019,12 @@ export class PlaywrightDriver extends BrowserDriver {
         /* already gone */
       }
       this._connectChild = null;
+      // Two processes that both found the profile free both launch; the
+      // second Chrome hands off to the first and exits. That is the other
+      // process's Chrome now, and it is shared like any other.
+      const raced = await this._attachToSharedProfileChrome(profileDir);
+      if (raced) return raced;
+      this._releaseProfileLease();
       const holder = readProfileLockHolder(profileDir);
       const hint = holder
         ? ` — another Chrome (pid ${holder.pid}) is holding the connect profile at ${profileDir}. ` +
@@ -988,6 +1043,56 @@ export class PlaywrightDriver extends BrowserDriver {
       if (this._browser === browser) this._browser = null;
     });
     return browser;
+  }
+
+  /**
+   * Attaches to the Chrome another live klura process is driving on
+   * `profileDir`, or returns null when there is none to share.
+   *
+   * A process that has leased the profile but whose Chrome has not opened its
+   * port yet is mid-launch, so the endpoint is awaited for the length of a
+   * launch. If no Chrome ever takes the profile in that time, the lease is a
+   * process that is alive without a browser, and this one launches its own.
+   */
+  private async _attachToSharedProfileChrome(profileDir: string): Promise<Browser | null> {
+    if (!isKluraOwnedProfile(profileDir)) return null;
+    const started = Date.now();
+    for (;;) {
+      const state = assessProfileChrome(profileDir);
+      if (state.kind !== 'shared') return null;
+      // A lessee with a Chrome on the profile is given a launch's worth of
+      // time to open its port; one with no Chrome there yet only long enough
+      // to start it.
+      const deadline =
+        started + (state.pid === null ? SHARED_CHROME_START_WAIT_MS : SHARED_CHROME_LAUNCH_WAIT_MS);
+      if (state.pid !== null && this._connectChild?.pid === state.pid) return null;
+      if (state.endpoint !== null) {
+        try {
+          const browser = await defaultChromium.connectOverCDP(state.endpoint);
+          acquireProfileLease(profileDir);
+          this._leasedProfileDir = profileDir;
+          if (process.env.KLURA_VERBOSE) {
+            console.warn(
+              `[klura] connect: sharing Chrome (pid ${state.pid}) on ${profileDir} with ${state.lessees.join(', ')}`,
+            );
+          }
+          browser.on('disconnected', () => {
+            if (this._browser === browser) this._browser = null;
+          });
+          return browser;
+        } catch {
+          /* the port is not accepting yet, or belongs to a Chrome that has gone */
+        }
+      }
+      if (Date.now() >= deadline) return null;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
+  private _releaseProfileLease(): void {
+    if (this._leasedProfileDir === null) return;
+    releaseProfileLease(this._leasedProfileDir);
+    this._leasedProfileDir = null;
   }
 
   protected _page(session: Session, handle: string = MAIN_PAGE): Page {
@@ -4266,16 +4371,30 @@ export class PlaywrightDriver extends BrowserDriver {
       this._browser = null;
     }
     // In connect-mode 'spawn', browser.close() only disconnects the CDP
-    // session — the Chrome process is ours, so kill it. 'attach' mode leaves
-    // no child (the operator owns that Chrome).
-    if (this._connectChild) {
-      try {
-        this._connectChild.kill('SIGKILL');
-      } catch {
-        /* already exited */
+    // session — the Chrome process is ours to end. 'attach' mode leaves no
+    // child (the operator owns that Chrome). A Chrome another klura process is
+    // still using is left running, whoever launched it; the last process to
+    // let go of the profile is the one that ends it.
+    const leasedProfileDir = this._leasedProfileDir;
+    this._releaseProfileLease();
+    const stillShared =
+      leasedProfileDir !== null && otherProfileLeases(leasedProfileDir).length > 0;
+    if (!stillShared) {
+      if (this._connectChild) {
+        try {
+          this._connectChild.kill('SIGKILL');
+        } catch {
+          /* already exited */
+        }
+      } else if (leasedProfileDir !== null) {
+        this._reapOwnedProfileOrphan(leasedProfileDir);
       }
-      this._connectChild = null;
+    } else if (this._connectChild) {
+      // Left running for the processes still using it. Unreferenced so this
+      // process can exit without waiting for a Chrome it no longer owns.
+      this._connectChild.unref();
     }
+    this._connectChild = null;
   }
 }
 
