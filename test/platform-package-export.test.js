@@ -1060,3 +1060,78 @@ test('a consent realm is established for the smoke and its session-gated fields 
     /could not establish the site_consent consent realm: realm check ended in failure request_timeout/,
   );
 });
+
+function smokeSuccess() {
+  return {
+    result: {
+      kind: 'outcome',
+      outcome_id: 'success',
+      outcome_class: 'success',
+      case_id: 'success_case',
+      data: { id: 'desk' },
+      retry_after_ms: null,
+      attempts: 1,
+    },
+    responses: [
+      {
+        strategy_id: 'product_script',
+        response: {
+          status: 200,
+          headers: {},
+          media_type: 'application/json',
+          body_kind: 'json_object',
+          body: { ok: true, item: { id: 'desk' } },
+          target_requests: 2,
+        },
+      },
+    ],
+    diagnostics: [],
+  };
+}
+
+test('an executed transport-only proof exports, and a smoke success with no rows does not', async () => {
+  const { emptyCollections } = require('../dist/factory/public-package/collection-integrity.js');
+  assert.deepEqual(emptyCollections([]), ['items']);
+  assert.deepEqual(emptyCollections({ page: 1, items: [], related: [] }), ['items', 'related']);
+  assert.deepEqual(emptyCollections({ items: [{ id: 'a' }], related: [] }), []);
+  assert.deepEqual(emptyCollections({ title: 'x' }), []);
+
+  const transportOnly = () => {
+    const strategy = localStrategy();
+    strategy.runtime_meta = {
+      post_save_validation: 'transport_passed',
+      post_save_verification: createPostSaveVerificationProof(
+        'shop-example',
+        'get_product',
+        strategy,
+      ),
+    };
+    return strategy;
+  };
+  const repository = fs.mkdtempSync(path.join(os.tmpdir(), 'klura-tools-export-transport-'));
+  fs.mkdirSync(path.join(repository, 'tools'));
+  const exported = await exportPlatformPackageToTools(
+    { platform: 'shop-example', tools_repository_path: repository, review: review() },
+    {
+      load_platform_capabilities: () => ['get_product'],
+      load_strategies: () => [transportOnly()],
+      smoke_call: async () => smokeSuccess(),
+    },
+  );
+  assert.equal(exported.kind, 'package_exported');
+
+  const unexecuted = fs.mkdtempSync(path.join(os.tmpdir(), 'klura-tools-export-unexecuted-'));
+  fs.mkdirSync(path.join(unexecuted, 'tools'));
+  const declined = await exportPlatformPackageToTools(
+    { platform: 'shop-example', tools_repository_path: unexecuted, review: review() },
+    {
+      load_platform_capabilities: () => ['get_product'],
+      load_strategies: () => [
+        { ...localStrategy(), runtime_meta: { post_save_validation: 'declined' } },
+      ],
+      smoke_call: async () => smokeSuccess(),
+    },
+  );
+  assert.equal(declined.kind, 'export_audit_failed');
+  assert.equal(declined.issues[0].code, 'strategy_not_verified');
+});

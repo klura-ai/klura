@@ -32,6 +32,8 @@ export type PublicBrowserPageScriptStrategySourceV1 = Omit<
 export function exportReviewedLocalPageScriptStrategySource(
   value: unknown,
 ): PublicBrowserPageScriptStrategySourceV1 {
+  const declaresResultKind =
+    value !== null && typeof value === 'object' && Object.hasOwn(value, 'result_kind');
   const input = parseExactRecord(value, 'page_script_export', [
     'local_strategy',
     'input_schema',
@@ -41,7 +43,11 @@ export function exportReviewedLocalPageScriptStrategySource(
     'expect',
     'request_body_limits',
     'replay',
+    ...(declaresResultKind ? ['result_kind'] : []),
   ]);
+  if (declaresResultKind && input.result_kind !== 'object' && input.result_kind !== 'array') {
+    throw new PublicContractError('page_script_export.result_kind', 'must be object or array');
+  }
   const inputSchema = parseJsonSchema(input.input_schema, 'page_script_export.input_schema');
   const local = parseBoundedRecord(input.local_strategy, 'page_script_export.local_strategy', 40);
   if (local.strategy !== 'page-script') {
@@ -134,18 +140,34 @@ export function exportReviewedLocalPageScriptStrategySource(
     ['kind', 'min_length', 'max_length', 'required_keys'],
     'page_script_export.local_strategy.prerequisites[0].return_shape',
   );
-  if (returnShape.kind !== 'object') {
+  // A local js-eval hands its value to `response.from`, which reads an object
+  // or array as-is and parses a string as JSON. All three are a structural
+  // JSON body; the string form is exported as the same program with the parse
+  // the local runtime performs made part of the reviewed source.
+  const returnKind = returnShape.kind;
+  if (returnKind !== 'object' && returnKind !== 'array' && returnKind !== 'string') {
     throw new PublicContractError(
       'page_script_export.local_strategy.prerequisites[0].return_shape.kind',
-      'must be object so the public response has a structural JSON body kind',
+      'must be object, array, or a string holding JSON, so the public response has a structural JSON body kind',
     );
   }
-  if (returnShape.min_length !== undefined || returnShape.max_length !== undefined) {
+  if (
+    returnKind !== 'string' &&
+    (returnShape.min_length !== undefined || returnShape.max_length !== undefined)
+  ) {
     throw new PublicContractError(
       'page_script_export.local_strategy.prerequisites[0].return_shape',
-      'cannot declare string length limits when kind is object',
+      `cannot declare string length limits when kind is ${returnKind}`,
     );
   }
+  if (returnKind === 'string' && !declaresResultKind) {
+    throw new PublicContractError(
+      'page_script_export.result_kind',
+      'must say whether the JSON string holds an object or an array',
+    );
+  }
+  const resultKind =
+    returnKind === 'string' ? (input.result_kind as 'object' | 'array') : returnKind;
   if (
     returnShape.required_keys !== undefined &&
     (!Array.isArray(returnShape.required_keys) || returnShape.required_keys.length > 64)
@@ -175,8 +197,10 @@ export function exportReviewedLocalPageScriptStrategySource(
     'page_script_export.local_strategy.prerequisites[0].expression',
     8_192,
   );
+  // A program that reads no caller input declares no argument template; its
+  // arguments are the empty object.
   const argumentTemplate = parseBoundedRecord(
-    prerequisite.args_template,
+    prerequisite.args_template ?? {},
     'page_script_export.local_strategy.prerequisites[0].args_template',
     64,
   );
@@ -188,9 +212,11 @@ export function exportReviewedLocalPageScriptStrategySource(
     state,
     0,
   );
-  const source = needsBlockBodyWrap(expression)
+  const evaluated = needsBlockBodyWrap(expression)
     ? `async (args) => { ${expression} }`
     : `async (args) => await (${expression})`;
+  const source =
+    returnKind === 'string' ? `async (args) => JSON.parse(await (${evaluated})(args))` : evaluated;
   const candidate = parseBrowserPageScriptStrategy(
     {
       kind: 'browser_page_script',
@@ -206,7 +232,10 @@ export function exportReviewedLocalPageScriptStrategySource(
         source,
         source_digest: sha256Digest(source),
         arguments: argumentExpression,
-        result_shape: { kind: 'object', required_keys: requiredKeys },
+        result_shape: {
+          kind: resultKind,
+          required_keys: resultKind === 'object' ? requiredKeys : [],
+        },
         expect: input.expect,
         request_body_limits: input.request_body_limits,
       },

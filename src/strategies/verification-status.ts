@@ -22,6 +22,21 @@ import {
 } from './post-save-verification-proof';
 import type { Strategy } from './skills';
 
+/**
+ * Stamps the runtime writes only after executing the exact strategy bytes.
+ *
+ * `passed` adds the local convention's semantic signal — a boolean `body.ok`,
+ * or a reviewed verdict on the recorded evidence. `transport_passed` is the
+ * same execution without it. Both establish that the strategy ran and was
+ * accepted; which of them is enough depends on what the reader verifies next.
+ */
+export const EXECUTED_POST_SAVE_STAMPS = ['passed', 'transport_passed'] as const;
+
+export function hasExecutedPostSaveStamp(strategy: Strategy): boolean {
+  const stamp = strategy.runtime_meta?.post_save_validation;
+  return (EXECUTED_POST_SAVE_STAMPS as readonly (string | undefined)[]).includes(stamp);
+}
+
 /** How much weight a stamp carries, given the proof standing behind it. */
 export interface VerificationStatus {
   /** The stamp as stored: `passed`, `transport_passed`, or absent. */

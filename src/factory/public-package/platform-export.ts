@@ -48,7 +48,12 @@ import {
   type PublicReadCapabilitySourceV1,
 } from './compiler';
 import { createExportTreeManifest, type ExportTreeManifestV1 } from './export-tree';
-import { isNullableCollectionField, uniformlyNullCollectionFields } from './collection-integrity';
+import {
+  emptyCollections,
+  isNullableCollectionField,
+  uniformlyNullCollectionFields,
+} from './collection-integrity';
+import { hasExecutedPostSaveStamp } from '../../strategies/verification-status';
 import {
   consentRealm,
   smokeSession,
@@ -210,6 +215,7 @@ export async function exportPlatformPackageToTools(
       review,
       dependencies.load_strategies ?? loadStrategies,
     );
+    if ('issues' in built) return auditFailure(platform, packageId, built.issues);
     const fixtures = await runSmokeFixtures(
       review,
       built.compiled,
@@ -304,18 +310,23 @@ function auditPlatformExport(
       });
       continue;
     }
-    if (selected.runtime_meta?.post_save_validation !== 'passed') {
+    // The local `body.ok` convention is how a factory strategy, which carries
+    // no outcome contract, signals semantic success. A package does carry one:
+    // the reviewed outcomes classify the live smoke response below, and that is
+    // the semantic verification a published capability is held to. What the
+    // export needs from the local stamp is that these exact bytes were executed.
+    if (!hasExecutedPostSaveStamp(selected)) {
       issues.push({
         code: PACKAGE_EXPORT_AUDIT_CODES.strategyNotVerified,
         path: `skills.${platform}.${capability}.runtime_meta.post_save_validation`,
-        message: `The selected ${reviewedTier} has not passed post-save semantic verification.`,
+        message: `The selected ${reviewedTier} has not been executed by post-save verification.`,
         remedy:
           'Run the saved capability with grounded sample input and complete its validation checkpoint.',
       });
     } else {
       const proofAssessment = assessPostSaveVerificationProof(
         selected,
-        selected.runtime_meta.post_save_verification,
+        selected.runtime_meta?.post_save_verification,
         { platform, capability },
       );
       if (proofAssessment.kind === POST_SAVE_PROOF_ASSESSMENT_KINDS.current) continue;
@@ -372,8 +383,14 @@ function buildPackageSource(
   platform: string,
   review: ParsedExportReviewV1,
   loadLocalStrategies: (platform: string, capability: string) => Strategy[],
-): { source: PublicPackageSourceV1; compiled: CompiledPublicPackageV1 } {
+):
+  | { source: PublicPackageSourceV1; compiled: CompiledPublicPackageV1 }
+  | { issues: PackageExportAuditIssueV1[] } {
   const capabilities: Record<string, PublicReadCapabilitySourceV1> = {};
+  // A saved strategy the public profile cannot express is that capability's
+  // finding, not the package's: each is reported under its own review path,
+  // all of them at once, so one retry can address every one.
+  const issues: PackageExportAuditIssueV1[] = [];
   for (const [capabilityId, capabilityReview] of Object.entries(review.capabilities)) {
     const tier = capabilityReview.http ? 'fetch' : 'page-script';
     const local = loadLocalStrategies(platform, capabilityId).find(
@@ -385,8 +402,20 @@ function buildPackageSource(
         `${tier} disappeared after export audit`,
       );
     }
-    capabilities[capabilityId] = buildCapabilitySource(local, capabilityReview);
+    try {
+      capabilities[capabilityId] = buildCapabilitySource(local, capabilityReview);
+    } catch (error) {
+      if (!(error instanceof PublicContractError)) throw error;
+      issues.push({
+        code: PACKAGE_EXPORT_AUDIT_CODES.invalidExport,
+        path: `platform_export.review.capabilities.${capabilityId}`,
+        message: error.message,
+        remedy:
+          'Correct this capability at the named field, or leave it out of the review so it stays local; the other reviewed capabilities are unaffected.',
+      });
+    }
   }
+  if (issues.length > 0) return { issues };
   const source: PublicPackageSourceV1 = {
     package_source_schema_version: 1,
     package: {
@@ -583,6 +612,18 @@ async function captureCallFixtureEvidence(
           entry.field,
         ),
     );
+    const empty = emptyCollections(success.data);
+    if (empty.length > 0) {
+      return {
+        issue: {
+          code: PACKAGE_EXPORT_AUDIT_CODES.smokeFailed,
+          path: fixturePath,
+          message: `Consumer smoke returned a success with no rows in ${empty.join(', ')}; a fixture that returns nothing cannot show the outcome contract describes real data.`,
+          remedy:
+            'Give the fixture an input whose result has rows. An empty listing is a legitimate answer for a caller, but it proves nothing about the extractor at export.',
+        },
+      };
+    }
     if (partial.length > 0) {
       const observed = observedSmokeResponses(execution.responses, [capability]);
       return {

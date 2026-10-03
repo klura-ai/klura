@@ -44,6 +44,18 @@ export function uniformlyNullCollectionFields(data: JsonValueV1 | null): Uniform
   return found;
 }
 
+/** The collections of a result when none of them carries a row: the result's
+ *  own array, or every array among its top-level fields. A result with rows in
+ *  any collection, or with no collection at all, returns nothing here. */
+export function emptyCollections(data: JsonValueV1 | null): string[] {
+  if (Array.isArray(data)) return data.length === 0 ? ['items'] : [];
+  if (data === null || typeof data !== 'object') return [];
+  const collections = Object.entries(data).filter(([, value]) => Array.isArray(value));
+  if (collections.length === 0) return [];
+  if (collections.some(([, value]) => (value as JsonValueV1[]).length > 0)) return [];
+  return collections.map(([name]) => name);
+}
+
 /** Whether the outcome named by `outcomeId` declares `field` nullable inside the
  *  collection named by `collection` (or at the top level when the outcome's
  *  data is itself the array). */

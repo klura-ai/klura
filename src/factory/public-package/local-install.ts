@@ -42,6 +42,7 @@ import {
   assessPostSaveVerificationProof,
   POST_SAVE_PROOF_ASSESSMENT_KINDS,
 } from '../../strategies/post-save-verification-proof';
+import { hasExecutedPostSaveStamp } from '../../strategies/verification-status';
 import { asPlatformSlug, ValidationError } from '../../validators';
 import { TOOL_NAMES } from '../../vocab';
 import {
@@ -359,12 +360,12 @@ function auditLocalInstall(
 }
 
 function verificationNotice(platform: string, capability: string, strategy: Strategy): string[] {
-  if (strategy.runtime_meta?.post_save_validation !== 'passed') {
-    return [`${capability} has not passed post-save semantic verification`];
+  if (!hasExecutedPostSaveStamp(strategy)) {
+    return [`${capability} has not been executed by post-save verification`];
   }
   const assessment = assessPostSaveVerificationProof(
     strategy,
-    strategy.runtime_meta.post_save_verification,
+    strategy.runtime_meta?.post_save_verification,
     { platform, capability },
   );
   if (assessment.kind === POST_SAVE_PROOF_ASSESSMENT_KINDS.current) return [];

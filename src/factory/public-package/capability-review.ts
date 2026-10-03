@@ -272,11 +272,38 @@ export function buildCapabilitySource(
     expect: pageScript.expect,
     request_body_limits: pageScript.request_body_limits,
     replay: pageScript.replay,
+    result_kind: declaredResultKind(capabilityReview.contract.outcomes),
   });
   return {
     ...capabilityReview.contract,
     strategies: [publicStrategy],
   };
+}
+
+/**
+ * The body kind the reviewed success outcomes match. A program whose local
+ * result is a JSON string does not say whether it holds an object or an array;
+ * the outcome contract reviewed beside it does, so the program's signed result
+ * kind is read from there rather than declared a second time.
+ */
+function declaredResultKind(outcomes: unknown): 'object' | 'array' {
+  const kinds = new Set<string>();
+  const visit = (matcher: unknown): void => {
+    if (!matcher || typeof matcher !== 'object') return;
+    const record = matcher as Record<string, unknown>;
+    if (record.op === 'body_kind' && typeof record.value === 'string') kinds.add(record.value);
+    if (Array.isArray(record.items)) record.items.forEach(visit);
+    if (record.item !== undefined) visit(record.item);
+  };
+  if (Array.isArray(outcomes)) {
+    for (const outcome of outcomes as Array<Record<string, unknown>>) {
+      if (outcome.class !== 'success' || !Array.isArray(outcome.cases)) continue;
+      for (const outcomeCase of outcome.cases as Array<Record<string, unknown>>) {
+        visit(outcomeCase.matcher);
+      }
+    }
+  }
+  return kinds.has('json_array') && !kinds.has('json_object') ? 'array' : 'object';
 }
 
 function parseFixtureReview(

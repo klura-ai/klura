@@ -7056,3 +7056,61 @@ test('a call under a consent realm establishes the realm session on first use an
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('a local js-eval returning an array or a JSON string exports as the same program', () => {
+  const packageValue = browserPageScriptPackageValue();
+  const publicStrategy = packageValue.capabilities.get_product.strategies[0];
+  const local = (returnShape, expression) => ({
+    strategy: 'page-script',
+    prerequisites: [
+      {
+        name: 'rows',
+        kind: 'js-eval',
+        url: 'https://shop.example.test/product?id={{id}}',
+        expression,
+        binds: 'rows',
+        args_template: { id: '{{id}}' },
+        return_shape: returnShape,
+      },
+    ],
+    response: { from: 'rows' },
+  });
+  const exportWith = (localStrategy, extra = {}) =>
+    exportReviewedLocalPageScriptStrategySource({
+      local_strategy: localStrategy,
+      input_schema: packageValue.capabilities.get_product.input_schema,
+      strategy_id: publicStrategy.strategy_id,
+      wait: publicStrategy.wait,
+      interaction: publicStrategy.interaction,
+      expect: publicStrategy.program.expect,
+      request_body_limits: publicStrategy.program.request_body_limits,
+      replay: publicStrategy.replay,
+      ...extra,
+    });
+
+  const array = exportWith(local({ kind: 'array' }, '[{ id: args.id }]'));
+  assert.deepEqual(array.program.result_shape, { kind: 'array', required_keys: [] });
+  assert.equal(array.program.source, 'async (args) => await ([{ id: args.id }])');
+
+  // The local runtime parses a string binding as JSON; the exported program
+  // carries that parse in its reviewed source, and the kind comes from the
+  // outcome contract reviewed beside it.
+  const text = exportWith(
+    local({ kind: 'string', min_length: 2 }, 'JSON.stringify([{ id: args.id }])'),
+    { result_kind: 'array' },
+  );
+  assert.deepEqual(text.program.result_shape, { kind: 'array', required_keys: [] });
+  assert.equal(
+    text.program.source,
+    'async (args) => JSON.parse(await (async (args) => await (JSON.stringify([{ id: args.id }])))(args))',
+  );
+
+  assert.throws(
+    () => exportWith(local({ kind: 'string' }, 'JSON.stringify({})')),
+    /must say whether the JSON string holds an object or an array/,
+  );
+  assert.throws(
+    () => exportWith(local({ kind: 'number' }, '1')),
+    /must be object, array, or a string holding JSON/,
+  );
+});
