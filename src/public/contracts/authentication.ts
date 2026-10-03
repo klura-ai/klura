@@ -125,10 +125,16 @@ export function validatePackageAuthentication(
         'must not use node HTTP when local browser authentication is declared',
       );
     }
-    // A reviewed program carrying a session may read but never write: every
-    // egress rule it could reach must be GET, so the session cannot be spent on
-    // a request that changes anything.
+    // What a reviewed program may send under a session follows from what the
+    // session can be spent on, not from the verb. A login session is an
+    // account: a program holding one is kept to GET, so nothing it sends can
+    // act as that person. A consent session is a visitor's cookie choice and
+    // nothing more — there is no account in it to act as — and many sites
+    // serve their reads over POST, so a program under one may send what its
+    // rules admit.
+    const realm = contracts[capability.authentication.authentication_contract_id];
     if (
+      realm?.kind === 'login' &&
       capability.strategies.some((strategy) => strategy.kind === 'browser_page_script') &&
       (capability.browser_resources?.egress_rules.some((rule) =>
         rule.methods.some((method) => method !== 'GET'),
@@ -137,7 +143,7 @@ export function validatePackageAuthentication(
     ) {
       throw new PublicContractError(
         `package.capabilities.${capabilityId}.browser_resources.egress_rules`,
-        'must be GET-only when a page script may run under a local browser session',
+        'must be GET-only when a page script may run under a login session',
       );
     }
   }

@@ -2669,17 +2669,8 @@ test('reviewed browser page scripts dispatch through structural outcomes and sig
 });
 
 test('reviewed browser page-script contracts reject auth, cross-origin egress, and stale source', () => {
-  // A page script may carry a session only when every rule it could reach is GET.
-  const writeShaped = browserPageScriptPackageValue();
-  writeShaped.capabilities.get_product.authentication = {
-    mode: 'optional',
-    authentication_contract_id: 'account',
-  };
-  writeShaped.capabilities.get_product.browser_resources.egress_rules[1].methods = ['GET', 'POST'];
-  writeShaped.manifest_digest = calculatePublicToolPackageManifestDigest(writeShaped);
-  assert.throws(() => parsePublicToolPackage(writeShaped), /GET-only/);
-
-  // Read-only, the declaration itself is admitted; only the missing contract fails.
+  // A page script that names a realm the package does not declare is refused
+  // for that, whatever it sends.
   const readOnly = browserPageScriptPackageValue();
   readOnly.capabilities.get_product.authentication = {
     mode: 'optional',
@@ -6809,15 +6800,15 @@ test('a json_array_map projection caps the rows a call returns when it declares 
   );
 });
 
-test('a page script may carry a local browser session only when its egress is GET-only', () => {
+test('a page script under a login session is GET-only; under a consent session it may send what its rules admit', () => {
   const { validatePackageAuthentication } = require('../dist/public/contracts/authentication.js');
   const input = parseJsonSchema({ type: 'object', additionalProperties: false });
-  const contract = {
-    kind: 'consent',
+  const realm = (kind) => ({
+    kind,
     check: { capability: 'read', input: {}, authenticated_outcome_ids: ['ok'] },
-  };
+  });
   const capability = (methods) => ({
-    authentication: { mode: 'optional', authentication_contract_id: 'consent' },
+    authentication: { mode: 'optional', authentication_contract_id: 'realm' },
     strategies: [{ kind: 'browser_page_script' }],
     browser_resources: { egress_rules: [{ methods }] },
     collection: null,
@@ -6825,13 +6816,25 @@ test('a page script may carry a local browser session only when its egress is GE
     input_schema: input,
     outcomes: [{ class: 'success', outcome_id: 'ok' }],
   });
+  // An account can be acted as, so a program holding one sends only GET.
   assert.throws(
     () =>
-      validatePackageAuthentication({ read: capability(['GET', 'POST']) }, { consent: contract }),
-    (error) => error instanceof PublicContractError && /GET-only/.test(error.message),
+      validatePackageAuthentication(
+        { read: capability(['GET', 'POST']) },
+        { realm: realm('login') },
+      ),
+    (error) =>
+      error instanceof PublicContractError && /GET-only.*login session/.test(error.message),
   );
   assert.doesNotThrow(() =>
-    validatePackageAuthentication({ read: capability(['GET']) }, { consent: contract }),
+    validatePackageAuthentication({ read: capability(['GET']) }, { realm: realm('login') }),
+  );
+  // A consent session holds no account; a read a site serves over POST is still a read.
+  assert.doesNotThrow(() =>
+    validatePackageAuthentication(
+      { read: capability(['GET', 'POST']) },
+      { realm: realm('consent') },
+    ),
   );
 });
 

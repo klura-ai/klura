@@ -364,20 +364,6 @@ function parsePublicReadCapability(value: unknown, field: string): PublicReadCap
     );
   }
   if (browserPageScripts.length > 0) {
-    // A reviewed program may run under a local browser session only when it
-    // can read and never write: every egress rule it could reach must be GET.
-    if (
-      authentication.mode !== 'none' &&
-      (browserResources?.egress_rules.some((rule) =>
-        rule.methods.some((method) => method !== 'GET'),
-      ) ??
-        false)
-    ) {
-      throw new PublicContractError(
-        `${field}.browser_resources.egress_rules`,
-        'must be GET-only when a reviewed page script declares an authentication contract',
-      );
-    }
     if (navigationOrigins.length !== 1) {
       throw new PublicContractError(
         `${field}.navigation_origins`,

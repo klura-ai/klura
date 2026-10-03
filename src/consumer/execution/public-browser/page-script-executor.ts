@@ -81,18 +81,6 @@ function preparePageScriptRequest(
       'browser page-script execution admits browser state only under a declared authentication contract',
     );
   }
-  if (
-    options.storage_state !== undefined &&
-    (capability.browser_resources?.egress_rules.some((rule) =>
-      rule.methods.some((method) => method !== 'GET'),
-    ) ??
-      false)
-  ) {
-    throw new PublicHttpExecutionError(
-      'invalid_request',
-      'browser page-script execution under browser state requires GET-only egress rules',
-    );
-  }
   if (capability.browser_resources === null) {
     throw new PublicHttpExecutionError(
       'invalid_request',
