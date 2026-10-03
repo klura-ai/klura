@@ -9,7 +9,12 @@ import type {
   PublicReadCapabilityV1,
 } from '../../../public/contracts/package';
 import { evaluateValueExpression } from '../../../public/contracts/value-expression';
-import { PublicHttpExecutionError, type PublicHttpResponseV1 } from '../node-http';
+import {
+  PublicHttpExecutionError,
+  type PublicExecutionStageV1,
+  type PublicHttpResponseV1,
+} from '../node-http';
+import { deadlineExpired } from './deadline';
 import {
   BrowserInteractionExecutionError,
   executeBrowserInteractionProgram,
@@ -106,6 +111,7 @@ export async function executeBrowserPageScriptStrategy(
   );
   const deadline = new AbortController();
   const deadlineState = { timed_out: false };
+  let stage: PublicExecutionStageV1 = 'navigation';
   const timer = setTimeout(() => {
     deadlineState.timed_out = true;
     deadline.abort();
@@ -156,8 +162,10 @@ export async function executeBrowserPageScriptStrategy(
           boundary.target_requests(),
         );
       }
+      stage = 'wait';
       await waitForBrowserStrategy(page, boundary, strategy.wait, signal, options.timeout_ms);
       if (strategy.interaction !== null) {
+        stage = 'interaction';
         await executeBrowserInteractionProgram({
           page,
           program: strategy.interaction,
@@ -171,10 +179,12 @@ export async function executeBrowserPageScriptStrategy(
         });
       }
       assertPageScriptOrigin(page.url(), capability.navigation_origins[0] as string);
+      stage = 'program';
       const scriptScope = boundary.beginPageScript(
         strategy.strategy_id,
         strategy.program.expect,
         strategy.program.request_body_limits,
+        capability.navigation_origins[0] as string,
       );
       let body: JsonValueV1;
       try {
@@ -187,6 +197,7 @@ export async function executeBrowserPageScriptStrategy(
           capability.max_encoded_outcome_bytes,
         );
         if (strategy.program.expect.wait !== null) {
+          stage = 'wait';
           await waitForBrowserStrategy(
             page,
             boundary,
@@ -195,11 +206,13 @@ export async function executeBrowserPageScriptStrategy(
             options.timeout_ms,
           );
         }
+        stage = 'program';
         await boundary.finishPageScript(scriptScope, strategy.program.expect, signal);
       } catch (error) {
         boundary.abortPageScript(scriptScope);
         throw error;
       }
+      stage = 'projection';
       const selectorMatches = await evaluateOutcomeSelectors(page, capability, strategy);
       pageGuard.assertHealthy();
       boundary.assertHealthy();
@@ -220,10 +233,11 @@ export async function executeBrowserPageScriptStrategy(
   } catch (error) {
     const targetRequests = boundary?.target_requests() ?? 0;
     if (deadlineState.timed_out) {
-      throw new PublicHttpExecutionError(
-        'request_timeout',
-        'browser page-script deadline expired',
+      throw deadlineExpired(
+        'browser page-script',
+        stage,
         targetRequests,
+        boundary?.denied_resources() ?? [],
       );
     }
     if (signal.aborted) {

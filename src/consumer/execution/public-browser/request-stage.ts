@@ -26,20 +26,56 @@ export async function handleBrowserRequestStage(
   const action = state.activeAction();
   const pageScript = state.activePageScript();
   const runtimeRequest = state.activeRuntimeRequest();
+  const mainFrameDocument = isMainFrameDocument(paused, state.mainFrameId());
+  const denied = {
+    url: paused.url,
+    resource_type: paused.resource_type,
+    cdp_resource_type: paused.cdp_resource_type,
+  };
+  // A reviewed program issues fetch and xhr to its own origin — exactly what a
+  // page_script rule may admit — so inside its scope everything else the page
+  // requests is the site loading itself: scripts, styles, images, beacons,
+  // child frames, and anything cross-origin. That
+  // traffic is judged as a resource, exactly as it is outside the scope, so a
+  // live application that keeps loading while the program runs neither fails
+  // the task nor widens what the program may send. A main-frame document is
+  // the program navigating away and is never admitted.
+  const program = isProgramTraffic(paused, state.programOrigin());
+  const ambient = pageScript !== null && !program && !mainFrameDocument;
   if (state.pageScriptNetworkSealed()) {
+    if (!program && !mainFrameDocument) {
+      await state.deny(paused.request_id, denied);
+      return;
+    }
     await state.fail(
       paused.request_id,
       new PublicHttpExecutionError(
         'request_blocked',
         'browser page-script emitted network traffic after its signed scope closed',
+        0,
+        null,
+        egressDiagnostic(paused, 'page_script'),
       ),
     );
     return;
   }
-  const operation = pageScript ?? action;
+  if (pageScript !== null && mainFrameDocument) {
+    await state.fail(
+      paused.request_id,
+      new PublicHttpExecutionError(
+        'request_blocked',
+        'browser page-script triggered a main-frame navigation while its scope was open',
+        0,
+        null,
+        egressDiagnostic(paused, 'page_script'),
+      ),
+    );
+    return;
+  }
+  const operation = ambient ? null : (pageScript ?? action);
   let phase: BrowserRequestPhaseV1 = operation?.phase ?? 'interaction';
   if (operation === null && runtimeRequest === null) {
-    phase = isMainFrameDocument(paused, state.mainFrameId()) ? 'navigation' : 'resource';
+    phase = mainFrameDocument ? 'navigation' : 'resource';
   }
   if (runtimeRequest !== null) phase = 'runtime_request';
   // A runtime request is the runtime's own fetch call; the label the browser
@@ -67,10 +103,7 @@ export async function handleBrowserRequestStage(
     // carries on without it; only the task's own traffic — navigation,
     // interaction, runtime and page-script requests — is bound to be declared.
     if (phase === 'resource') {
-      await state.deny(paused.request_id, {
-        url: paused.url,
-        resource_type: paused.resource_type,
-      });
+      await state.deny(paused.request_id, denied);
       return;
     }
     await state.fail(
@@ -130,6 +163,7 @@ export async function handleBrowserRequestStage(
     state,
     operation,
     runtimeRequest,
+    ambient,
     rule,
     bodies.task.bytes,
     bodies.operation?.bytes ?? null,
@@ -168,6 +202,21 @@ export async function handleBrowserRequestStage(
       paused.request_id,
       new PublicHttpExecutionError('transport_failure', asError(error).message),
     );
+  }
+}
+
+const PROGRAM_RESOURCE_TYPES = new Set(['fetch', 'xhr']);
+
+/** Whether a request is one a page_script rule could admit — fetch or xhr to
+ *  the reviewed program's own origin — and so is the program's traffic rather
+ *  than the page loading itself. A URL that does not parse is read strictly. */
+function isProgramTraffic(paused: BrowserFetchPausedV1, programOrigin: string | null): boolean {
+  if (!PROGRAM_RESOURCE_TYPES.has(paused.resource_type)) return false;
+  if (programOrigin === null) return true;
+  try {
+    return new URL(paused.url).origin === programOrigin;
+  } catch {
+    return true;
   }
 }
 
@@ -228,6 +277,7 @@ function validatePostAcquireState(
   state: FetchHandlerStateV1,
   operation: ActiveBrowserOperationV1 | null,
   runtimeRequest: ActiveBrowserRuntimeRequestV1 | null,
+  ambient: boolean,
   rule: BrowserEgressRuleV1,
   taskBodyBytes: number,
   operationBodyBytes: number | null,
@@ -237,7 +287,10 @@ function validatePostAcquireState(
   }
   const fatal = state.fatal();
   if (fatal !== null) return fatal;
-  if (browserRequestScopeChanged(state, operation, runtimeRequest)) {
+  // The page's own loading is judged as a resource whatever the program scope
+  // did while this request waited for admission; only the task's own traffic
+  // is bound to the scope it was issued under.
+  if (!ambient && browserRequestScopeChanged(state, operation, runtimeRequest)) {
     return new PublicHttpExecutionError(
       'request_blocked',
       'browser request scope changed while awaiting scheduler admission',

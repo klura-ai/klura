@@ -10,7 +10,11 @@ import type {
   PublicReadCapabilityV1,
 } from '../../../public/contracts/package';
 import { OriginSchedulerV1, type OriginSchedulerPermitV1 } from '../origin-scheduler';
-import { PublicHttpExecutionError, type PublicHttpResponseV1 } from '../node-http';
+import {
+  PublicHttpExecutionError,
+  type PublicDeniedResourceV1,
+  type PublicHttpResponseV1,
+} from '../node-http';
 import { projectBrowserDom, BrowserProjectionError } from './dom-projection';
 import { AsyncSerialQueueV1 } from './async-serial-queue';
 import {
@@ -88,6 +92,7 @@ export interface BrowserNetworkBoundaryV1 extends BrowserInteractionNetworkBound
     strategyId: string,
     expect: BrowserActionExpectationV1,
     requestBodyLimits: PublicBrowserPageScriptRequestBodyLimitsV1,
+    programOrigin: string,
   ): BrowserPageScriptScopeV1;
   finishPageScript(
     scope: BrowserPageScriptScopeV1,
@@ -307,10 +312,7 @@ export async function executeBrowserNavigationStrategy(
   }
 }
 
-export interface BrowserDeniedResourceV1 {
-  url: string;
-  resource_type: string;
-}
+export type BrowserDeniedResourceV1 = PublicDeniedResourceV1;
 
 export const MAX_RECORDED_DENIED_RESOURCES_V1 = 32;
 
@@ -390,6 +392,7 @@ export async function installBrowserNetworkBoundary(input: {
   let activeAction: ActiveBrowserOperationV1 | null = null;
   let activePageScript: ActiveBrowserOperationV1 | null = null;
   let pageScriptNetworkSealed = false;
+  let programOrigin: string | null = null;
   let activeRuntimeRequest: ActiveBrowserRuntimeRequestV1 | null = null;
 
   const finishQuietWaiter = (waiter: QuietWaiterV1): void => {
@@ -534,6 +537,7 @@ export async function installBrowserNetworkBoundary(input: {
       activeAction: () => activeAction,
       activePageScript: () => activePageScript,
       pageScriptNetworkSealed: () => pageScriptNetworkSealed,
+      programOrigin: () => programOrigin,
       activeRuntimeRequest: () => activeRuntimeRequest,
       operationActivityChanged: notifyOperationSettled,
     }).catch((error: unknown) => {
@@ -584,6 +588,7 @@ export async function installBrowserNetworkBoundary(input: {
       responseBytes = 0;
       requestBodyBytes = 0;
       pageScriptNetworkSealed = false;
+      programOrigin = null;
     },
     beginRuntimeRequest: () => {
       if (activeAction !== null || activePageScript !== null || activeRuntimeRequest !== null) {
@@ -665,7 +670,7 @@ export async function installBrowserNetworkBoundary(input: {
       );
       activeAction = null;
     },
-    beginPageScript: (strategyId, expect, requestBodyLimits) => {
+    beginPageScript: (strategyId, expect, requestBodyLimits, origin) => {
       if (
         activeAction !== null ||
         activePageScript !== null ||
@@ -678,6 +683,7 @@ export async function installBrowserNetworkBoundary(input: {
         );
       }
       const scope = { kind: 'page_script', strategy_id: strategyId } as const;
+      programOrigin = origin;
       activePageScript = {
         scope,
         phase: 'page_script',
@@ -812,6 +818,9 @@ export interface FetchHandlerStateV1 {
   activeAction(): ActiveBrowserOperationV1 | null;
   activePageScript(): ActiveBrowserOperationV1 | null;
   pageScriptNetworkSealed(): boolean;
+  /** The reviewed program's origin from the moment its scope opens, kept while
+   *  the scope is sealed; null when no program has run on this boundary. */
+  programOrigin(): string | null;
   activeRuntimeRequest(): ActiveBrowserRuntimeRequestV1 | null;
   operationActivityChanged(operation: ActiveBrowserOperationV1): void;
 }

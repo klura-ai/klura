@@ -809,3 +809,29 @@ test('platform export captures a replayable run fixture for a collection capabil
   assert.deepEqual(runFixture.expected.result.stop, { kind: 'source_exhausted' });
   assert.deepEqual(runFixture.expected.items, [{ id: 'desk' }]);
 });
+
+test('an export refuses a success whose rows never carry a field, unless a sibling shows meaningful nulls', () => {
+  const { uniformlyNullCollectionFields } = require('../dist/factory/public-package/collection-integrity.js');
+  const row = (over) => ({ id: 'x', rating: 4.5, review_count: null, image_url: null, ...over });
+  // Every row null for two fields, no field that varies: both are flagged.
+  assert.deepEqual(
+    uniformlyNullCollectionFields({ page: 1, items: [row({ id: 'a' }), row({ id: 'b' }), row({ id: 'c' })] }),
+    [
+      { collection: 'items', field: 'review_count', rows: 3 },
+      { collection: 'items', field: 'image_url', rows: 3 },
+    ],
+  );
+  // A sibling that is null on only some rows vouches for the extractor.
+  assert.deepEqual(
+    uniformlyNullCollectionFields({ items: [row({ id: 'a', rating: null }), row({ id: 'b' })] }),
+    [],
+  );
+  // One row proves nothing; a top-level array is read as the collection.
+  assert.deepEqual(uniformlyNullCollectionFields({ items: [row({})] }), []);
+  assert.deepEqual(uniformlyNullCollectionFields([row({ id: 'a' }), row({ id: 'b' })]), [
+    { collection: 'items', field: 'review_count', rows: 2 },
+    { collection: 'items', field: 'image_url', rows: 2 },
+  ]);
+  assert.deepEqual(uniformlyNullCollectionFields({ ok: true, count: 3 }), []);
+  assert.deepEqual(uniformlyNullCollectionFields(null), []);
+});

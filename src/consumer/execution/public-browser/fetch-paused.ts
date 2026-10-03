@@ -8,6 +8,9 @@ export interface BrowserFetchPausedV1 {
   url: string;
   method: string;
   resource_type: string;
+  /** Chromium's own label for the request, kept beside the normalized type so a
+   *  kind the public policy cannot name is still reported by what it was. */
+  cdp_resource_type: string;
   /** The frame that issued the request; null when Chromium reports none. */
   frame_id: string | null;
   response_status: number | null;
@@ -55,6 +58,7 @@ export function parseBrowserFetchPaused(value: unknown): BrowserFetchPausedV1 | 
     url: requestRecord.url,
     method: requestRecord.method,
     resource_type: normalizeResourceType(record.resourceType),
+    cdp_resource_type: record.resourceType,
     frame_id: typeof record.frameId === 'string' ? record.frameId : null,
     response_status: status === undefined ? null : status,
     response_error:

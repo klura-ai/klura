@@ -43,10 +43,10 @@ test('CDP Ping normalizes to ping while Other and unknown beacon labels remain b
     'ping',
   );
   for (const resourceType of ['Other', 'Beacon']) {
-    assert.equal(
-      parseBrowserFetchPaused(pausedRequest({ ...request, resourceType }))?.resource_type,
-      '',
-    );
+    const parsed = parseBrowserFetchPaused(pausedRequest({ ...request, resourceType }));
+    assert.equal(parsed?.resource_type, '');
+    // The policy cannot name the kind, but the report still says what it was.
+    assert.equal(parsed?.cdp_resource_type, resourceType);
   }
 });
 

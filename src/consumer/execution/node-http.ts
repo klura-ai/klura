@@ -38,6 +38,13 @@ export function outgoingRequestHeaders(
   };
 }
 
+/** A page request the browser policy refused while a task ran. */
+export interface PublicDeniedResourceV1 {
+  url: string;
+  resource_type: string;
+  cdp_resource_type: string;
+}
+
 export interface PublicHttpResponseV1 {
   status: number;
   headers: Record<string, string>;
@@ -48,7 +55,7 @@ export interface PublicHttpResponseV1 {
   html_selector_exists?: (selector: string) => boolean;
   /** Page sub-resources a browser strategy's policy refused while producing
    *  this response; what a page that rendered incompletely was missing. */
-  denied_resources?: Array<{ url: string; resource_type: string }>;
+  denied_resources?: PublicDeniedResourceV1[];
 }
 
 export interface PublicHttpExecutionOptionsV1 {
@@ -86,16 +93,36 @@ export class PublicHttpExecutionError extends PublicContractError {
   }
 }
 
-export interface PublicExecutionDiagnosticV1 {
-  kind: 'egress_rejected';
-  phase: 'navigation' | 'resource' | 'interaction' | 'runtime_request' | 'page_script';
-  origin: string | null;
-  path: string | null;
-  query_keys: string[];
-  method: string;
-  resource_type: string;
-  requested_method: string | null;
-}
+/** The step of a browser task that was running when its deadline passed. */
+export type PublicExecutionStageV1 =
+  | 'navigation'
+  | 'wait'
+  | 'interaction'
+  | 'program'
+  | 'projection'
+  | 'bootstrap'
+  | 'request';
+
+export type PublicExecutionDiagnosticV1 =
+  | {
+      kind: 'egress_rejected';
+      phase: 'navigation' | 'resource' | 'interaction' | 'runtime_request' | 'page_script';
+      origin: string | null;
+      path: string | null;
+      query_keys: string[];
+      method: string;
+      resource_type: string;
+      requested_method: string | null;
+    }
+  | {
+      /** The deadline passed: `stage` names the step that was running and
+       *  `denied_resources` what the page had asked for and been refused —
+       *  together, where the time went and what the page was still missing. */
+      kind: 'deadline_expired';
+      stage: PublicExecutionStageV1;
+      target_requests: number;
+      denied_resources: PublicDeniedResourceV1[];
+    };
 
 export async function executeNodeHttpStrategy(
   capability: PublicReadCapabilityV1,

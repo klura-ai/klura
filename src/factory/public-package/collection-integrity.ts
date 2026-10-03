@@ -1,0 +1,43 @@
+import type { JsonValueV1 } from '../../public/contracts/json';
+
+export interface UniformlyNullFieldV1 {
+  collection: string;
+  field: string;
+  rows: number;
+}
+
+/** Fields that are null in every row of a returned collection while no sibling
+ *  field is null in only some rows. A field that fires on some rows and not
+ *  others is principled absence; one that never fires, with no such sibling to
+ *  vouch for the extractor, is a broken path wearing the same face. A top-level
+ *  array is read as the collection itself. */
+export function uniformlyNullCollectionFields(data: JsonValueV1 | null): UniformlyNullFieldV1[] {
+  let collections: Array<[string, JsonValueV1]> = [];
+  if (Array.isArray(data)) collections = [['items', data]];
+  else if (data !== null && typeof data === 'object') collections = Object.entries(data);
+  const found: UniformlyNullFieldV1[] = [];
+  for (const [name, value] of collections) {
+    if (!Array.isArray(value) || value.length < 2) continue;
+    const rows = value.filter(
+      (row): row is Record<string, JsonValueV1> =>
+        row !== null && typeof row === 'object' && !Array.isArray(row),
+    );
+    if (rows.length !== value.length) continue;
+    const fields = Object.keys(rows[0] ?? {}).filter((field) =>
+      rows.every((row) => Object.hasOwn(row, field)),
+    );
+    const nullCounts = new Map(
+      fields.map((field) => [field, rows.filter((row) => row[field] === null).length]),
+    );
+    const mixedSibling = fields.some((field) => {
+      const count = nullCounts.get(field) ?? 0;
+      return count > 0 && count < rows.length;
+    });
+    if (mixedSibling) continue;
+    for (const field of fields) {
+      if (nullCounts.get(field) === rows.length)
+        found.push({ collection: name, field, rows: rows.length });
+    }
+  }
+  return found;
+}

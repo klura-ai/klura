@@ -11,6 +11,8 @@ import {
   PublicHttpExecutionError,
   type PublicHttpResponseV1,
 } from '../node-http';
+import type { PublicExecutionStageV1 } from '../node-http';
+import { deadlineExpired } from './deadline';
 import { startPinnedEgressProxy, type PinnedEgressProxyV1 } from './pinned-proxy';
 import {
   installBrowserNetworkBoundary,
@@ -75,6 +77,7 @@ export async function executeBrowserHttpStrategy(
   });
   const deadline = new AbortController();
   const deadlineState = { timed_out: false };
+  let stage: PublicExecutionStageV1 = 'bootstrap';
   const timer = setTimeout(() => {
     deadlineState.timed_out = true;
     deadline.abort();
@@ -119,6 +122,7 @@ export async function executeBrowserHttpStrategy(
         waitUntil: 'domcontentloaded',
         timeout: options.timeout_ms,
       });
+      stage = 'request';
       const scope = boundary.beginRuntimeRequest();
       let fetched: BrowserFetchResultV1;
       try {
@@ -172,10 +176,11 @@ export async function executeBrowserHttpStrategy(
   } catch (error) {
     const targetRequests = boundary?.target_requests() ?? 0;
     if (deadlineState.timed_out) {
-      throw new PublicHttpExecutionError(
-        'request_timeout',
-        'browser HTTP deadline expired',
+      throw deadlineExpired(
+        'browser HTTP',
+        stage,
         targetRequests,
+        boundary?.denied_resources() ?? [],
       );
     }
     if (signal.aborted) {
@@ -246,6 +251,7 @@ export async function executeBrowserHttpStrategyInBoundedPage(
   });
   const deadline = new AbortController();
   const deadlineState = { timed_out: false };
+  let stage: PublicExecutionStageV1 = 'bootstrap';
   const timer = setTimeout(() => {
     deadlineState.timed_out = true;
     deadline.abort();
@@ -268,6 +274,7 @@ export async function executeBrowserHttpStrategyInBoundedPage(
       waitUntil: 'domcontentloaded',
       timeout: options.timeout_ms,
     });
+    stage = 'request';
     const scope = boundary.beginRuntimeRequest();
     let fetched: BrowserFetchResultV1;
     try {
@@ -315,11 +322,7 @@ export async function executeBrowserHttpStrategyInBoundedPage(
   } catch (error) {
     const targetRequests = boundary.target_requests();
     if (deadlineState.timed_out) {
-      throw new PublicHttpExecutionError(
-        'request_timeout',
-        'browser HTTP deadline expired',
-        targetRequests,
-      );
+      throw deadlineExpired('browser HTTP', stage, targetRequests, boundary.denied_resources());
     }
     if (signal.aborted) {
       throw new PublicHttpExecutionError(

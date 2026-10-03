@@ -5,6 +5,8 @@ import type {
   PublicReadCapabilityV1,
 } from '../../../public/contracts/package';
 import { PublicHttpExecutionError, type PublicHttpResponseV1 } from '../node-http';
+import type { PublicExecutionStageV1 } from '../node-http';
+import { deadlineExpired } from './deadline';
 import { projectBrowserDom, BrowserProjectionError } from './dom-projection';
 import {
   executeBrowserInteractionProgram,
@@ -57,6 +59,7 @@ export async function executeBrowserNavigationStrategyInBoundedPage(
   );
   const deadline = new AbortController();
   const deadlineState = { timed_out: false };
+  let stage: PublicExecutionStageV1 = 'navigation';
   const timer = setTimeout(() => {
     deadlineState.timed_out = true;
     deadline.abort();
@@ -86,7 +89,9 @@ export async function executeBrowserNavigationStrategyInBoundedPage(
         boundary.target_requests(),
       );
     }
+    stage = 'wait';
     await waitForBrowserStrategy(page, boundary, strategy.wait, signal, options.timeout_ms);
+    stage = 'interaction';
     const interactionBody =
       strategy.interaction === null
         ? null
@@ -101,6 +106,7 @@ export async function executeBrowserNavigationStrategyInBoundedPage(
             signal,
             timeout_ms: options.timeout_ms,
           });
+    stage = 'projection';
     const body =
       interactionBody ??
       (await projectBrowserDom(page, strategy.projection, capability.max_encoded_outcome_bytes));
@@ -118,10 +124,11 @@ export async function executeBrowserNavigationStrategyInBoundedPage(
   } catch (error) {
     const targetRequests = boundary.target_requests();
     if (deadlineState.timed_out) {
-      throw new PublicHttpExecutionError(
-        'request_timeout',
-        'browser navigation deadline expired',
+      throw deadlineExpired(
+        'browser navigation',
+        stage,
         targetRequests,
+        boundary.denied_resources(),
       );
     }
     if (signal.aborted) {

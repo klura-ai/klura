@@ -210,11 +210,16 @@ test('a completed reviewed page script seals browser egress against deferred req
     minimum_matching_requests: 0,
     maximum_matching_requests: 1,
   };
-  const scope = boundary.beginPageScript('script', expectation, {
-    max_encoded_request_body_bytes_per_script: 0,
-    max_single_request_body_bytes: 0,
-    max_encoded_request_body_bytes_by_rule: { script_request: 0 },
-  });
+  const scope = boundary.beginPageScript(
+    'script',
+    expectation,
+    {
+      max_encoded_request_body_bytes_per_script: 0,
+      max_single_request_body_bytes: 0,
+      max_encoded_request_body_bytes_by_rule: { script_request: 0 },
+    },
+    'https://example.test',
+  );
   await boundary.finishPageScript(scope, expectation, signal);
   cdp.emit('Fetch.requestPaused', {
     requestId: 'deferred',
@@ -660,10 +665,10 @@ test('concurrent browser requests cannot oversubscribe signed request budgets', 
     });
   }
   await settled;
-  assert.deepEqual(
-    results.map(({ method }) => method).sort(),
-    ['Fetch.continueRequest', 'Fetch.failRequest'],
-  );
+  assert.deepEqual(results.map(({ method }) => method).sort(), [
+    'Fetch.continueRequest',
+    'Fetch.failRequest',
+  ]);
   assert.equal(boundary.target_requests(), 1);
   assert.throws(
     () => boundary.assertHealthy(),
@@ -744,11 +749,16 @@ test('scheduler-queued page-script traffic holds its scope and boundary policy',
     minimum_matching_requests: 1,
     maximum_matching_requests: 1,
   };
-  const scope = boundary.beginPageScript('script', expectation, {
-    max_encoded_request_body_bytes_per_script: 0,
-    max_single_request_body_bytes: 0,
-    max_encoded_request_body_bytes_by_rule: { script_get: 0 },
-  });
+  const scope = boundary.beginPageScript(
+    'script',
+    expectation,
+    {
+      max_encoded_request_body_bytes_per_script: 0,
+      max_single_request_body_bytes: 0,
+      max_encoded_request_body_bytes_by_rule: { script_get: 0 },
+    },
+    origin,
+  );
   cdp.emit('Fetch.requestPaused', {
     requestId: 'queued',
     request: {
@@ -846,11 +856,16 @@ test('aborted page-script traffic cannot resume after scheduler admission', asyn
     minimum_matching_requests: 0,
     maximum_matching_requests: 1,
   };
-  const scope = boundary.beginPageScript('script', expectation, {
-    max_encoded_request_body_bytes_per_script: 0,
-    max_single_request_body_bytes: 0,
-    max_encoded_request_body_bytes_by_rule: { script_get: 0 },
-  });
+  const scope = boundary.beginPageScript(
+    'script',
+    expectation,
+    {
+      max_encoded_request_body_bytes_per_script: 0,
+      max_single_request_body_bytes: 0,
+      max_encoded_request_body_bytes_by_rule: { script_get: 0 },
+    },
+    origin,
+  );
   cdp.emit('Fetch.requestPaused', {
     requestId: 'aborted',
     request: {
@@ -866,8 +881,7 @@ test('aborted page-script traffic cannot resume after scheduler admission', asyn
   await terminal;
   assert.equal(
     cdp.calls.some(
-      (call) =>
-        call.method === 'Fetch.continueRequest' && call.payload.requestId === 'aborted',
+      (call) => call.method === 'Fetch.continueRequest' && call.payload.requestId === 'aborted',
     ),
     false,
   );
@@ -1267,7 +1281,7 @@ test('an undeclared page sub-resource is refused without failing the task', asyn
   await boundary.close();
 });
 
-test('the boundary answers only the pinned proxy\'s authentication challenge', async () => {
+test("the boundary answers only the pinned proxy's authentication challenge", async () => {
   const sent = [];
   class FakeCdp extends EventEmitter {
     async send(method, payload) {
@@ -1451,7 +1465,11 @@ test('a document loaded by a sub-frame is a page resource, not a navigation', as
   await new Promise((resolve) => setImmediate(resolve));
   boundary.assertHealthy();
   assert.deepEqual(boundary.denied_resources(), [
-    { url: 'https://ads.example.test/frame.html', resource_type: 'document' },
+    {
+      url: 'https://ads.example.test/frame.html',
+      resource_type: 'document',
+      cdp_resource_type: 'Document',
+    },
   ]);
   cdp.emit('Fetch.requestPaused', {
     requestId: 'top',
@@ -1465,4 +1483,240 @@ test('a document loaded by a sub-frame is a page resource, not a navigation', as
     (error) => error?.code === 'request_blocked' && error.diagnostic?.phase === 'navigation',
   );
   await boundary.close();
+});
+
+// A fake CDP session that records every command and lets a test await the
+// verdict on one request id, so admission (continueRequest) and refusal
+// (failRequest) are both observable without timing assumptions.
+class RecordingCdp extends EventEmitter {
+  constructor() {
+    super();
+    this.sent = [];
+    this.waiters = [];
+  }
+
+  async send(method, payload) {
+    this.sent.push({ method, payload });
+    for (const waiter of [...this.waiters]) {
+      if (waiter.method === method && waiter.id === payload?.requestId) {
+        this.waiters.splice(this.waiters.indexOf(waiter), 1);
+        waiter.resolve(payload);
+      }
+    }
+    if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main' } } };
+    return {};
+  }
+
+  waitFor(method, id) {
+    const hit = this.sent.find((call) => call.method === method && call.payload?.requestId === id);
+    if (hit) return Promise.resolve(hit.payload);
+    return new Promise((resolve) => this.waiters.push({ method, id, resolve }));
+  }
+
+  async detach() {}
+}
+
+function pageScriptWithResourcesCapability() {
+  const policy = parseBrowserResourcePolicy(
+    {
+      egress_rules: [
+        {
+          rule_id: 'program_api',
+          phase: 'page_script',
+          origin: 'https://example.test',
+          methods: ['GET'],
+          route: { path: { kind: 'exact', value: '/api' }, query: { kind: 'none' } },
+          resource_types: ['fetch', 'xhr'],
+          max_requests: 1,
+          max_encoded_request_body_bytes: 0,
+          max_encoded_response_bytes: 1024,
+        },
+        {
+          rule_id: 'app_scripts',
+          phase: 'resource',
+          origin: 'https://example.test',
+          methods: ['GET'],
+          route: { path: { kind: 'prefix', value: '/static/' }, query: { kind: 'none' } },
+          resource_types: ['script'],
+          max_requests: 2,
+          max_encoded_request_body_bytes: 0,
+          max_encoded_response_bytes: 1024,
+        },
+      ],
+      max_requests_per_browser_task: 4,
+      max_encoded_request_body_bytes_per_browser_task: 0,
+      max_encoded_response_bytes_per_browser_task: 4096,
+      max_proxy_wire_bytes_per_browser_task: 8192,
+      max_single_request_body_bytes: 0,
+      max_single_response_bytes: 1024,
+      service_workers: 'block',
+      downloads: 'block',
+      popups: 'block',
+      websockets: 'block',
+      webtransport: 'block',
+      webrtc_direct_egress: 'block',
+      browser_cache: 'block',
+    },
+    'browser_resources',
+  );
+  return { ...navigationOnlyCapability(), browser_resources: policy };
+}
+
+const PROGRAM_EXPECTATION = {
+  wait: null,
+  egress_rule_ids: ['program_api'],
+  minimum_matching_requests: 0,
+  maximum_matching_requests: 1,
+};
+const PROGRAM_BODY_LIMITS = {
+  max_encoded_request_body_bytes_per_script: 0,
+  max_single_request_body_bytes: 0,
+  max_encoded_request_body_bytes_by_rule: { program_api: 0 },
+};
+
+async function boundaryWithProgram(cdp) {
+  const signal = new AbortController().signal;
+  const boundary = await installBrowserNetworkBoundary({
+    page: { context: () => ({ newCDPSession: async () => cdp, close: async () => undefined }) },
+    capability: pageScriptWithResourcesCapability(),
+    options: {
+      input: {},
+      bindings: {},
+      timeout_ms: 1000,
+      max_target_requests: 4,
+      scheduler: new OriginSchedulerV1(),
+      signal,
+    },
+  });
+  return { boundary, signal };
+}
+
+test('the page loading itself during a reviewed program is judged as a resource, not as the program', async () => {
+  const cdp = new RecordingCdp();
+  const { boundary, signal } = await boundaryWithProgram(cdp);
+  const scope = boundary.beginPageScript(
+    'program',
+    PROGRAM_EXPECTATION,
+    PROGRAM_BODY_LIMITS,
+    'https://example.test',
+  );
+  // A same-origin script the app loads while the program runs matches the
+  // resource rule and is admitted.
+  cdp.emit('Fetch.requestPaused', {
+    requestId: 'app-js',
+    frameId: 'main',
+    request: { url: 'https://example.test/static/app.js', method: 'GET', hasPostData: false },
+    resourceType: 'Script',
+  });
+  assert.deepEqual(await cdp.waitFor('Fetch.continueRequest', 'app-js'), { requestId: 'app-js' });
+  boundary.assertHealthy();
+  // An undeclared image is refused and recorded with the label Chromium gave it.
+  cdp.emit('Fetch.requestPaused', {
+    requestId: 'hero',
+    frameId: 'main',
+    request: { url: 'https://example.test/img/hero.png', method: 'GET', hasPostData: false },
+    resourceType: 'Image',
+  });
+  assert.deepEqual(await cdp.waitFor('Fetch.failRequest', 'hero'), {
+    requestId: 'hero',
+    errorReason: 'BlockedByClient',
+  });
+  boundary.assertHealthy();
+  assert.deepEqual(boundary.denied_resources(), [
+    {
+      url: 'https://example.test/img/hero.png',
+      resource_type: 'image',
+      cdp_resource_type: 'Image',
+    },
+  ]);
+  // A cross-origin xhr the app makes for a sprite is nothing a page_script rule
+  // could admit, so it is the page's own loading too — refused quietly.
+  cdp.emit('Fetch.requestPaused', {
+    requestId: 'legend',
+    frameId: 'main',
+    request: { url: 'https://static.example.test/legend.png', method: 'GET', hasPostData: false },
+    resourceType: 'XHR',
+  });
+  await cdp.waitFor('Fetch.failRequest', 'legend');
+  boundary.assertHealthy();
+  assert.equal(boundary.denied_resources().length, 2);
+  // Neither request was the program's: the scope closes with zero matching
+  // requests, inside its signed expectation.
+  await boundary.finishPageScript(scope, PROGRAM_EXPECTATION, signal);
+  // After the scope seals, the app's own loading is still refused quietly…
+  cdp.emit('Fetch.requestPaused', {
+    requestId: 'late-js',
+    frameId: 'main',
+    request: { url: 'https://example.test/static/late.js', method: 'GET', hasPostData: false },
+    resourceType: 'Script',
+  });
+  await cdp.waitFor('Fetch.failRequest', 'late-js');
+  boundary.assertHealthy();
+  assert.equal(boundary.denied_resources().length, 3);
+  // …while a fetch — the program's own kind of traffic — is a sealed-scope
+  // violation that fails the task.
+  cdp.emit('Fetch.requestPaused', {
+    requestId: 'deferred',
+    frameId: 'main',
+    request: { url: 'https://example.test/api', method: 'GET', hasPostData: false },
+    resourceType: 'Fetch',
+  });
+  await cdp.waitFor('Fetch.failRequest', 'deferred');
+  assert.throws(
+    () => boundary.assertHealthy(),
+    (error) => error?.code === 'request_blocked' && error.diagnostic?.phase === 'page_script',
+  );
+  await boundary.close();
+});
+
+test('a reviewed program may not navigate its page or fetch outside its expectation', async () => {
+  for (const [requestId, resourceType, url] of [
+    ['navigate', 'Document', 'https://example.test/elsewhere'],
+    ['sneak', 'Fetch', 'https://example.test/other'],
+  ]) {
+    const cdp = new RecordingCdp();
+    const { boundary } = await boundaryWithProgram(cdp);
+    boundary.beginPageScript(
+      'program',
+      PROGRAM_EXPECTATION,
+      PROGRAM_BODY_LIMITS,
+      'https://example.test',
+    );
+    cdp.emit('Fetch.requestPaused', {
+      requestId,
+      frameId: 'main',
+      request: { url, method: 'GET', hasPostData: false },
+      resourceType,
+    });
+    await cdp.waitFor('Fetch.failRequest', requestId);
+    assert.throws(
+      () => boundary.assertHealthy(),
+      (error) =>
+        error?.code === 'request_blocked' &&
+        error.diagnostic?.kind === 'egress_rejected' &&
+        error.diagnostic.phase === 'page_script',
+      `${resourceType} during the program must fail the task`,
+    );
+    assert.deepEqual(boundary.denied_resources(), []);
+    await boundary.close();
+  }
+});
+
+test('a browser deadline names the running stage and the resources the page was refused', () => {
+  const { deadlineExpired } = require('../dist/consumer/execution/public-browser/deadline.js');
+  const denied = [
+    { url: 'https://example.test/x.js', resource_type: 'script', cdp_resource_type: 'Script' },
+    { url: 'https://example.test/search?tbm=map', resource_type: '', cdp_resource_type: 'Other' },
+  ];
+  const error = deadlineExpired('browser page-script', 'program', 3, denied);
+  assert.equal(error.code, 'request_timeout');
+  assert.match(error.message, /deadline expired during program$/);
+  assert.equal(error.target_requests, 3);
+  assert.deepEqual(error.diagnostic, {
+    kind: 'deadline_expired',
+    stage: 'program',
+    target_requests: 3,
+    denied_resources: denied,
+  });
+  assert.notStrictEqual(error.diagnostic.denied_resources, denied, 'the diagnostic owns its copy');
 });

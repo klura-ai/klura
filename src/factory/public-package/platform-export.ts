@@ -32,6 +32,7 @@ import type { PublicHttpResponseV1 } from '../../consumer/execution/node-http';
 import {
   PublicHttpExecutionError,
   executeNodeHttpStrategy,
+  type PublicDeniedResourceV1,
   type PublicExecutionDiagnosticV1,
 } from '../../consumer/execution/node-http';
 import { executeBrowserNavigationStrategy } from '../../consumer/execution/public-browser/executor';
@@ -61,6 +62,7 @@ import {
   type PublicReadCapabilitySourceV1,
 } from './compiler';
 import { createExportTreeManifest, type ExportTreeManifestV1 } from './export-tree';
+import { uniformlyNullCollectionFields } from './collection-integrity';
 
 export const PACKAGE_EXPORT_AUDIT_CODES = {
   invalidExport: 'invalid_export',
@@ -85,7 +87,9 @@ export interface ObservedSmokeResponseV1 {
   media_type: string | null;
   body_kind: PublicHttpResponseV1['body_kind'];
   body_preview: string;
-  denied_resources?: Array<{ url: string; resource_type: string }>;
+  denied_resources?: PublicDeniedResourceV1[];
+  /** Which of the capability's declared selectors matched the responding page. */
+  selector_matches?: Record<string, boolean>;
 }
 
 export interface PackageExportAuditIssueV1 {
@@ -101,9 +105,11 @@ const OBSERVED_BODY_PREVIEW_BYTES = 800;
 
 function observedSmokeResponses(
   responses: ReadonlyArray<{ strategy_id: StableContractIdV1; response: PublicHttpResponseV1 }>,
+  capabilities: readonly PublicReadCapabilityV1[],
 ): ObservedSmokeResponseV1[] {
   return responses.map(({ strategy_id, response }) => {
     const body = canonicalJson(response.body);
+    const selectorMatches = recordedSelectorMatches({ strategy_id, response }, capabilities);
     return {
       strategy_id,
       status: response.status,
@@ -116,6 +122,7 @@ function observedSmokeResponses(
       ...(response.denied_resources === undefined || response.denied_resources.length === 0
         ? {}
         : { denied_resources: response.denied_resources }),
+      ...(selectorMatches === undefined ? {} : { selector_matches: selectorMatches }),
     };
   });
 }
@@ -536,7 +543,7 @@ async function proveCollectionCeilings(
     ...(execution.diagnostics[0] === undefined ? {} : { diagnostic: execution.diagnostics[0] }),
     ...(execution.responses.length === 0
       ? {}
-      : { observed: observedSmokeResponses(execution.responses) }),
+      : { observed: observedSmokeResponses(execution.responses, [capability]) }),
   };
 }
 
@@ -549,6 +556,26 @@ async function captureCallFixtureEvidence(
   fixturePath: string,
 ): Promise<{ value: unknown } | { issue: PackageExportAuditIssueV1 }> {
   const execution = await call(capability, fixture.input);
+  if (execution.result.kind === 'outcome' && execution.result.outcome_class === 'success') {
+    const partial = uniformlyNullCollectionFields(execution.result.data);
+    if (partial.length > 0) {
+      const observed = observedSmokeResponses(execution.responses, [capability]);
+      return {
+        issue: {
+          code: PACKAGE_EXPORT_AUDIT_CODES.smokeFailed,
+          path: fixturePath,
+          message: `Consumer smoke returned a success whose rows never carry ${partial
+            .map((entry) => `${entry.collection}.${entry.field} (null in all ${entry.rows} rows)`)
+            .join(
+              ', ',
+            )}; no sibling field is null in only some rows, so nothing shows the extractor emits meaningful nulls.`,
+          remedy:
+            'Make the extractor read the field from what the public browser renders, or remove the field from the contract: a column that is null for every public caller must not be signed.',
+          ...(observed.length === 0 ? {} : { observed }),
+        },
+      };
+    }
+  }
   if (execution.result.kind !== 'outcome' || execution.result.outcome_class !== 'success') {
     return {
       issue: smokeFailedIssue(
@@ -556,6 +583,7 @@ async function captureCallFixtureEvidence(
         execution.result,
         execution.diagnostics[0],
         execution.responses,
+        [capability],
       ),
     };
   }
@@ -608,6 +636,7 @@ async function captureRunFixtureEvidence(
         execution.result,
         execution.diagnostics[0],
         execution.responses,
+        [capability],
       ),
     };
   }
@@ -636,18 +665,29 @@ function smokeFailedIssue(
   result: unknown,
   diagnostic: PublicExecutionDiagnosticV1 | undefined,
   responses: ReadonlyArray<{ strategy_id: StableContractIdV1; response: PublicHttpResponseV1 }>,
+  capabilities: readonly PublicReadCapabilityV1[],
 ): PackageExportAuditIssueV1 {
-  const observed = observedSmokeResponses(responses);
+  const observed = observedSmokeResponses(responses, capabilities);
   return {
     code: PACKAGE_EXPORT_AUDIT_CODES.smokeFailed,
     path: fixturePath,
     message: `Consumer smoke returned ${JSON.stringify(result)}.`,
-    remedy: diagnostic
-      ? 'Add or correct the exact reviewed egress rule described by diagnostic, then retry.'
-      : 'Correct the typed outcome, request budget, or saved strategy so it accepts the observed response, then retry.',
+    remedy: smokeRemedy(diagnostic),
     ...(diagnostic === undefined ? {} : { diagnostic }),
     ...(observed.length === 0 ? {} : { observed }),
   };
+}
+
+/** The next step a smoke failure points at, chosen by what the executor
+ *  itself reported rather than by whether anything was reported. */
+function smokeRemedy(diagnostic: PublicExecutionDiagnosticV1 | undefined): string {
+  if (diagnostic === undefined) {
+    return 'Correct the typed outcome, request budget, or saved strategy so it accepts the observed response, then retry.';
+  }
+  if (diagnostic.kind === 'deadline_expired') {
+    return `The call ran out of time during ${diagnostic.stage}. Declare the denied resources the page was still waiting for, loosen the origin traffic policy if it serialises the page's own loading, or raise call_timeouts, then retry.`;
+  }
+  return 'Add or correct the exact reviewed egress rule described by diagnostic, then retry.';
 }
 
 function canonicalSmokeResponses(
