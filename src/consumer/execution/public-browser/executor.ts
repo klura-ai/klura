@@ -333,7 +333,16 @@ export async function executeBrowserNavigationStrategy(
 
 export type BrowserDeniedResourceV1 = PublicDeniedResourceV1;
 
-export const MAX_RECORDED_DENIED_RESOURCES_V1 = 32;
+export const MAX_RECORDED_DENIED_RESOURCES_V1 = 64;
+export const MAX_RECORDED_DENIED_RESOURCES_PER_KIND_V1 = 4;
+
+function deniedOrigin(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return 'invalid-url';
+  }
+}
 
 export interface BrowserProxyCredentialsV1 {
   username: string;
@@ -480,9 +489,21 @@ export async function installBrowserNetworkBoundary(input: {
 
   let deniedRequests = 0;
   const deniedResources: BrowserDeniedResourceV1[] = [];
+  // A page that floods one kind of refusal — a map's tiles, a feed's images —
+  // must not crowd every other refusal out of the record, so each origin and
+  // type keeps a few examples and the record as a whole stays bounded.
+  const deniedByKind = new Map<string, number>();
   const deny = async (requestId: string, resource: BrowserDeniedResourceV1): Promise<void> => {
     deniedRequests += 1;
-    if (deniedResources.length < MAX_RECORDED_DENIED_RESOURCES_V1) deniedResources.push(resource);
+    const kind = `${deniedOrigin(resource.url)} ${resource.resource_type}`;
+    const seen = deniedByKind.get(kind) ?? 0;
+    if (
+      seen < MAX_RECORDED_DENIED_RESOURCES_PER_KIND_V1 &&
+      deniedResources.length < MAX_RECORDED_DENIED_RESOURCES_V1
+    ) {
+      deniedByKind.set(kind, seen + 1);
+      deniedResources.push(resource);
+    }
     try {
       await cdp.send('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' });
     } catch {

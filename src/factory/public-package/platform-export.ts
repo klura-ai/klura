@@ -1,5 +1,4 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import {
   parseExactRecord,
@@ -29,27 +28,13 @@ import {
 } from './export-review';
 import { buildCapabilitySource, type ParsedFixtureReviewV1 } from './capability-review';
 import type { PublicHttpResponseV1 } from '../../consumer/execution/node-http';
-import {
-  PublicHttpExecutionError,
-  executeNodeHttpStrategy,
-  type PublicBrowserIdentityV1,
-  type PublicDeniedResourceV1,
-  type PublicExecutionDiagnosticV1,
-} from '../../consumer/execution/node-http';
-import { executeBrowserNavigationStrategy } from '../../consumer/execution/public-browser/executor';
-import { executeBrowserHttpStrategy } from '../../consumer/execution/public-browser/http-executor';
-import { collectStrategyOutcomeSelectors } from '../../consumer/execution/public-browser/outcome-selectors';
-import { executeBrowserPageScriptStrategy } from '../../consumer/execution/public-browser/page-script-executor';
-import { PublicCallerV1, type PublicCallResultV1 } from '../../consumer/call';
 import type {
-  PublicHttpStrategyV1,
-  PublicBrowserPageScriptStrategyV1,
-  PublicReadCapabilityV1,
-  PublicToolPackageV1,
-} from '../../public/contracts/package';
-import { RunStoreV1, type RunArtifactRefV1 } from '../../consumer/scrape/run-store';
-import { ScrapeRunServiceV1, type LocalScrapeRunResultV1 } from '../../consumer/scrape/run-service';
-import { readCommittedRunItems } from '../../consumer/scrape/result-reader';
+  PublicBrowserIdentityV1,
+  PublicDeniedResourceV1,
+  PublicExecutionDiagnosticV1,
+} from '../../consumer/execution/node-http';
+import { collectStrategyOutcomeSelectors } from '../../consumer/execution/public-browser/outcome-selectors';
+import type { PublicReadCapabilityV1 } from '../../public/contracts/package';
 import { validateJsonSchema } from '../../public/contracts/json-schema';
 import { listPlatformSkills, loadStrategies, type Strategy } from '../../strategies/skills';
 import {
@@ -64,6 +49,20 @@ import {
 } from './compiler';
 import { createExportTreeManifest, type ExportTreeManifestV1 } from './export-tree';
 import { isNullableCollectionField, uniformlyNullCollectionFields } from './collection-integrity';
+import {
+  consentRealm,
+  smokeSession,
+  SmokeRealmsV1,
+  type SmokeSessionProviderV1,
+} from './smoke-session';
+import {
+  smokeCall,
+  smokeRun,
+  type SmokeExecutionV1,
+  type SmokeRunContextV1,
+  type SmokeRunExecutionV1,
+  type SmokeRunFixtureV1,
+} from './smoke-executors';
 
 export const PACKAGE_EXPORT_AUDIT_CODES = {
   invalidExport: 'invalid_export',
@@ -159,37 +158,17 @@ export type PlatformPackageExportResultV1 =
       published: false;
     };
 
-interface SmokeExecutionV1 {
-  result: PublicCallResultV1;
-  responses: Array<{ strategy_id: StableContractIdV1; response: PublicHttpResponseV1 }>;
-  diagnostics: PublicExecutionDiagnosticV1[];
-}
-
-interface SmokeRunExecutionV1 {
-  result: LocalScrapeRunResultV1;
-  items: JsonValueV1[];
-  responses: Array<{ strategy_id: StableContractIdV1; response: PublicHttpResponseV1 }>;
-  diagnostics: PublicExecutionDiagnosticV1[];
-}
-
-interface SmokeRunFixtureV1 {
-  input: JsonValueV1;
-  caller_bounds: JsonValueV1;
-  input_mode_id: StableContractIdV1 | null;
-}
-
-interface SmokeRunContextV1 {
-  capabilities: PublicToolPackageV1['capabilities'];
-  artifact: Omit<RunArtifactRefV1, 'collection_contract_digest'>;
-}
-
 export interface PlatformPackageExportDependenciesV1 {
   load_platform_capabilities?: (platform: string) => string[];
   load_strategies?: (platform: string, capability: string) => Strategy[];
   smoke_call?: (
     capability: PublicReadCapabilityV1,
     input: JsonValueV1,
+    session?: JsonValueV1,
   ) => Promise<SmokeExecutionV1>;
+  /** Establishes a consent realm's session for the smoke; the default runs
+   *  the realm's grant in a headless kernel browser. */
+  smoke_session?: SmokeSessionProviderV1;
   smoke_run?: (
     capability: PublicReadCapabilityV1,
     fixture: SmokeRunFixtureV1,
@@ -236,6 +215,7 @@ export async function exportPlatformPackageToTools(
       built.compiled,
       dependencies.smoke_call ?? smokeCall,
       dependencies.smoke_run ?? smokeRun,
+      new SmokeRealmsV1(dependencies.smoke_session ?? smokeSession),
     );
     if (fixtures.issues.length > 0) {
       return auditFailure(platform, packageId, fixtures.issues);
@@ -426,6 +406,7 @@ async function runSmokeFixtures(
   compiled: CompiledPublicPackageV1,
   call: NonNullable<PlatformPackageExportDependenciesV1['smoke_call']>,
   run: NonNullable<PlatformPackageExportDependenciesV1['smoke_run']>,
+  realms: SmokeRealmsV1,
 ): Promise<{
   issues: PackageExportAuditIssueV1[];
   files: Array<{ name: string; value: unknown }>;
@@ -453,7 +434,9 @@ async function runSmokeFixtures(
               capabilityId,
               fixture,
               review,
+              compiled,
               call,
+              realms,
               fixturePath,
             )
           : await captureRunFixtureEvidence(
@@ -557,18 +540,42 @@ async function captureCallFixtureEvidence(
   capabilityId: string,
   fixture: Extract<ParsedFixtureReviewV1, { kind: typeof PACKAGE_FIXTURE_KINDS.call }>,
   review: ParsedExportReviewV1,
+  compiled: CompiledPublicPackageV1,
   call: NonNullable<PlatformPackageExportDependenciesV1['smoke_call']>,
+  realms: SmokeRealmsV1,
   fixturePath: string,
 ): Promise<{ value: unknown } | { issue: PackageExportAuditIssueV1 }> {
-  const execution = await call(capability, fixture.input);
+  // A consent realm is the exporter's to establish, exactly as a consumer's
+  // first call does; a login realm needs the user, so its smoke runs without
+  // a session.
+  const realm = consentRealm(compiled.package, capability);
+  const contractId =
+    capability.authentication.mode === 'none'
+      ? null
+      : capability.authentication.authentication_contract_id;
+  const session =
+    realm === null || contractId === null ? null : await realms.session(contractId, realm);
+  if (session?.kind === 'unavailable') {
+    return {
+      issue: {
+        code: PACKAGE_EXPORT_AUDIT_CODES.smokeFailed,
+        path: fixturePath,
+        message: `Consumer smoke could not establish the ${contractId} consent realm: ${session.reason}`,
+        remedy:
+          'Make the realm grant record the choice on login_url under the realm rules and let its check land on an authenticated outcome; the first consumer call runs exactly this.',
+      },
+    };
+  }
+  const execution = await call(capability, fixture.input, session?.state);
   if (execution.result.kind === 'outcome' && execution.result.outcome_class === 'success') {
-    // The smoke runs without a session. A capability that declares one may
-    // legitimately carry fields the site shows only to a session holder, so a
-    // nullable field that is empty here is a declared enhancement, not a defect.
+    // A nullable field empty in every row is a declared enhancement only when
+    // the smoke could not hold the session that would fill it; under the
+    // realm's own session, or with no realm at all, it is a broken extractor.
     const success = execution.result;
     const partial = uniformlyNullCollectionFields(success.data).filter(
       (entry) =>
         capability.authentication.mode === 'none' ||
+        session !== null ||
         !isNullableCollectionField(
           capability.outcomes,
           success.outcome_id,
@@ -759,145 +766,6 @@ function recordedSelectorMatches(
     matches[selector] = evaluate(selector);
   }
   return matches;
-}
-
-async function smokeCall(
-  capability: PublicReadCapabilityV1,
-  input: JsonValueV1,
-): Promise<SmokeExecutionV1> {
-  const responses: SmokeExecutionV1['responses'] = [];
-  const diagnostics: PublicExecutionDiagnosticV1[] = [];
-  const pageScriptExecutor = async (
-    target: PublicReadCapabilityV1,
-    strategy: PublicBrowserPageScriptStrategyV1,
-    options: Parameters<typeof executeBrowserPageScriptStrategy>[2],
-  ): Promise<PublicHttpResponseV1> => {
-    try {
-      const response = await executeBrowserPageScriptStrategy(target, strategy, options);
-      responses.push({ strategy_id: strategy.strategy_id, response });
-      return response;
-    } catch (error) {
-      if (error instanceof PublicHttpExecutionError && error.diagnostic !== null) {
-        diagnostics.push(error.diagnostic);
-      }
-      throw error;
-    }
-  };
-  const caller = new PublicCallerV1(
-    recordingHttpExecutor(executeNodeHttpStrategy, responses, diagnostics),
-    Math.random,
-    executeBrowserNavigationStrategy,
-    recordingHttpExecutor(executeBrowserHttpStrategy, responses, diagnostics),
-    pageScriptExecutor,
-  );
-  return { result: await caller.call(capability, input), responses, diagnostics };
-}
-
-/** Wraps an http executor so every response it produces — projected exactly as
- *  the outcome contracts will see it — is captured as fixture evidence. */
-function recordingHttpExecutor<Options>(
-  execute: (
-    target: PublicReadCapabilityV1,
-    strategy: PublicHttpStrategyV1,
-    options: Options,
-  ) => Promise<PublicHttpResponseV1>,
-  responses: Array<{ strategy_id: StableContractIdV1; response: PublicHttpResponseV1 }>,
-  diagnostics: PublicExecutionDiagnosticV1[],
-): (
-  target: PublicReadCapabilityV1,
-  strategy: PublicHttpStrategyV1,
-  options: Options,
-) => Promise<PublicHttpResponseV1> {
-  return async (target, strategy, options) => {
-    try {
-      const response = await execute(target, strategy, options);
-      responses.push({ strategy_id: strategy.request.strategy_id, response });
-      return response;
-    } catch (error) {
-      if (error instanceof PublicHttpExecutionError && error.diagnostic !== null) {
-        diagnostics.push(error.diagnostic);
-      }
-      throw error;
-    }
-  };
-}
-
-async function smokeRun(
-  capability: PublicReadCapabilityV1,
-  fixture: SmokeRunFixtureV1,
-  context: SmokeRunContextV1,
-): Promise<SmokeRunExecutionV1> {
-  const responses: SmokeRunExecutionV1['responses'] = [];
-  const diagnostics: PublicExecutionDiagnosticV1[] = [];
-  // Target executions are serialized so the recorded response order replays
-  // deterministically through the tools repository's order-sensitive queue.
-  let chain: Promise<unknown> = Promise.resolve();
-  const serialize = <T>(task: () => Promise<T>): Promise<T> => {
-    const next = chain.then(task, task);
-    chain = next.then(
-      () => undefined,
-      () => undefined,
-    );
-    return next;
-  };
-  const pageScriptExecutor = (
-    target: PublicReadCapabilityV1,
-    strategy: PublicBrowserPageScriptStrategyV1,
-    options: Parameters<typeof executeBrowserPageScriptStrategy>[2],
-  ): Promise<PublicHttpResponseV1> =>
-    serialize(async () => {
-      try {
-        const response = await executeBrowserPageScriptStrategy(target, strategy, options);
-        responses.push({ strategy_id: strategy.strategy_id, response });
-        return response;
-      } catch (error) {
-        if (error instanceof PublicHttpExecutionError && error.diagnostic !== null) {
-          diagnostics.push(error.diagnostic);
-        }
-        throw error;
-      }
-    });
-  const serializedHttp = <Options>(
-    execute: (
-      target: PublicReadCapabilityV1,
-      strategy: PublicHttpStrategyV1,
-      options: Options,
-    ) => Promise<PublicHttpResponseV1>,
-  ) => {
-    const recording = recordingHttpExecutor(execute, responses, diagnostics);
-    return (target: PublicReadCapabilityV1, strategy: PublicHttpStrategyV1, options: Options) =>
-      serialize(() => recording(target, strategy, options));
-  };
-  const caller = new PublicCallerV1(
-    serializedHttp(executeNodeHttpStrategy),
-    Math.random,
-    executeBrowserNavigationStrategy,
-    serializedHttp(executeBrowserHttpStrategy),
-    pageScriptExecutor,
-  );
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'klura-export-run-smoke-'));
-  try {
-    const store = new RunStoreV1(home);
-    const service = new ScrapeRunServiceV1(store, caller);
-    const result = await service.start({
-      artifact: context.artifact,
-      owner: capability,
-      capabilities: context.capabilities,
-      input: fixture.input,
-      caller_bounds: fixture.caller_bounds,
-      ...(fixture.input_mode_id === null ? {} : { input_mode_id: fixture.input_mode_id }),
-      output: {
-        kind: 'file',
-        requested_path: path.join(home, 'smoke-output.ndjson'),
-        format: 'ndjson',
-      },
-    });
-    const items =
-      result.kind === 'scrape_outcome' ? readCommittedRunItems(store, result.run_id) : [];
-    return { result, items, responses, diagnostics };
-  } finally {
-    fs.rmSync(home, { recursive: true, force: true });
-  }
 }
 
 function writeToolsPackage(

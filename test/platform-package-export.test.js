@@ -811,11 +811,16 @@ test('platform export captures a replayable run fixture for a collection capabil
 });
 
 test('an export refuses a success whose rows never carry a field, unless a sibling shows meaningful nulls', () => {
-  const { uniformlyNullCollectionFields } = require('../dist/factory/public-package/collection-integrity.js');
+  const {
+    uniformlyNullCollectionFields,
+  } = require('../dist/factory/public-package/collection-integrity.js');
   const row = (over) => ({ id: 'x', rating: 4.5, review_count: null, image_url: null, ...over });
   // Every row null for two fields, no field that varies: both are flagged.
   assert.deepEqual(
-    uniformlyNullCollectionFields({ page: 1, items: [row({ id: 'a' }), row({ id: 'b' }), row({ id: 'c' })] }),
+    uniformlyNullCollectionFields({
+      page: 1,
+      items: [row({ id: 'a' }), row({ id: 'b' }), row({ id: 'c' })],
+    }),
     [
       { collection: 'items', field: 'review_count', rows: 3 },
       { collection: 'items', field: 'image_url', rows: 3 },
@@ -834,4 +839,224 @@ test('an export refuses a success whose rows never carry a field, unless a sibli
   ]);
   assert.deepEqual(uniformlyNullCollectionFields({ ok: true, count: 3 }), []);
   assert.deepEqual(uniformlyNullCollectionFields(null), []);
+});
+
+function consentReview() {
+  const value = review();
+  value.capabilities.get_product.contract.authentication = {
+    mode: 'optional',
+    authentication_contract_id: 'site_consent',
+  };
+  value.capabilities.get_product.contract.outcomes[0].output_schema = {
+    type: 'object',
+    properties: {
+      ok: { type: 'boolean' },
+      items: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', minLength: 1 },
+            review_count: { type: 'integer', nullable: true, minimum: 0 },
+          },
+          required: ['id', 'review_count'],
+          additionalProperties: false,
+        },
+        minItems: 1,
+        maxItems: 10,
+      },
+    },
+    required: ['ok', 'items'],
+    additionalProperties: false,
+  };
+  value.capabilities.get_product.contract.outcomes[0].cases[0].projection = {
+    kind: 'json_object',
+    entries: {
+      ok: { kind: 'json_pointer', pointer: '/ok' },
+      items: {
+        kind: 'json_array_map',
+        items_pointer: '/items',
+        include_when: null,
+        projection: {
+          op: 'object',
+          entries: {
+            id: { op: 'get', from: 'raw_item', pointer: '/id' },
+            review_count: { op: 'get', from: 'raw_item', pointer: '/review_count' },
+          },
+        },
+      },
+    },
+  };
+  value.authentication_contracts = {
+    site_consent: {
+      kind: 'consent',
+      grant: {
+        initial: [
+          {
+            action_id: 'accept_all',
+            kind: 'click',
+            target: {
+              frame: { kind: 'main' },
+              selector: 'button[aria-label="Accept all"]',
+              visible_only: true,
+            },
+            expect: {
+              wait: null,
+              egress_rule_ids: ['consent_page'],
+              minimum_matching_requests: 0,
+              maximum_matching_requests: 1,
+            },
+          },
+        ],
+        repeat: null,
+      },
+      login_url: 'https://shop.example.test/consent',
+      navigation_origins: ['https://shop.example.test'],
+      origin_traffic_policies: [
+        {
+          origin: 'https://shop.example.test',
+          max_concurrency: 1,
+          requests_per_second: 1,
+          burst: 1,
+          min_delay_ms: 0,
+          max_redirect_hops: 2,
+          circuit_breaker: {
+            transient_failure_threshold: 2,
+            transient_window_ms: 30_000,
+            cooldown_ms: 60_000,
+          },
+        },
+      ],
+      browser_resources: {
+        egress_rules: [
+          {
+            rule_id: 'consent_page',
+            phase: 'login',
+            origin: 'https://shop.example.test',
+            methods: ['GET'],
+            route: { path: { kind: 'prefix', value: '/' }, query: { kind: 'none' } },
+            resource_types: ['document'],
+            max_requests: 2,
+            max_encoded_request_body_bytes: 0,
+            max_encoded_response_bytes: 65_536,
+          },
+        ],
+        max_requests_per_login: 2,
+        max_encoded_request_body_bytes_per_login: 0,
+        max_encoded_response_bytes_per_login: 131_072,
+        max_proxy_wire_bytes_per_login: 262_144,
+        max_single_request_body_bytes: 0,
+        max_single_response_bytes: 65_536,
+        total_timeout_ms: 60_000,
+        service_workers: 'block',
+        downloads: 'block',
+        popups: 'block',
+        websockets: 'block',
+        webtransport: 'block',
+        webrtc_direct_egress: 'block',
+        browser_cache: 'block',
+      },
+      check: {
+        capability: 'get_product',
+        input: { id: 'desk' },
+        authenticated_outcome_ids: ['success'],
+      },
+    },
+  };
+  return value;
+}
+
+function consentSmokeExecution(rows) {
+  const body = { ok: true, items: rows };
+  return {
+    result: {
+      kind: 'outcome',
+      outcome_id: 'success',
+      outcome_class: 'success',
+      attempts: 1,
+      data: body,
+    },
+    responses: [
+      {
+        strategy_id: 'product_script',
+        response: {
+          status: 200,
+          headers: {},
+          media_type: 'application/json',
+          body_kind: 'json_object',
+          body,
+          target_requests: 1,
+        },
+      },
+    ],
+    diagnostics: [],
+  };
+}
+
+test('a consent realm is established for the smoke and its session-gated fields are then proven, not tolerated', async () => {
+  const repository = fs.mkdtempSync(path.join(os.tmpdir(), 'klura-tools-export-consent-'));
+  fs.mkdirSync(path.join(repository, 'tools'));
+  const state = { cookies: [{ name: 'SOCS', value: 'accepted' }] };
+  const sessions = [];
+  const realms = [];
+  const refused = await exportPlatformPackageToTools(
+    { platform: 'shop-example', tools_repository_path: repository, review: consentReview() },
+    {
+      load_platform_capabilities: () => ['get_product'],
+      load_strategies: () => [localStrategy()],
+      smoke_session: async (realm) => {
+        realms.push(realm.contract.kind);
+        return { kind: 'session', state };
+      },
+      smoke_call: async (_capability, _input, session) => {
+        sessions.push(session);
+        return consentSmokeExecution([
+          { id: 'a', review_count: null },
+          { id: 'b', review_count: null },
+        ]);
+      },
+    },
+  );
+  assert.equal(refused.kind, 'export_audit_failed');
+  assert.deepEqual(realms, ['consent']);
+  assert.deepEqual(sessions, [state], 'the smoke call carries the realm session');
+  assert.match(refused.issues[0].message, /rows never carry items\.review_count/);
+
+  const accepted = await exportPlatformPackageToTools(
+    { platform: 'shop-example', tools_repository_path: repository, review: consentReview() },
+    {
+      load_platform_capabilities: () => ['get_product'],
+      load_strategies: () => [localStrategy()],
+      smoke_session: async () => ({ kind: 'session', state }),
+      smoke_call: async () =>
+        consentSmokeExecution([
+          { id: 'a', review_count: 12 },
+          { id: 'b', review_count: 3 },
+        ]),
+    },
+  );
+  assert.equal(accepted.kind, 'package_exported');
+
+  const second = fs.mkdtempSync(path.join(os.tmpdir(), 'klura-tools-export-consent-2-'));
+  fs.mkdirSync(path.join(second, 'tools'));
+  const unavailable = await exportPlatformPackageToTools(
+    { platform: 'shop-example', tools_repository_path: second, review: consentReview() },
+    {
+      load_platform_capabilities: () => ['get_product'],
+      load_strategies: () => [localStrategy()],
+      smoke_session: async () => ({
+        kind: 'unavailable',
+        reason: 'realm check ended in failure request_timeout',
+      }),
+      smoke_call: async () => {
+        throw new Error('the smoke must not run without the realm session');
+      },
+    },
+  );
+  assert.equal(unavailable.kind, 'export_audit_failed');
+  assert.equal(unavailable.issues[0].code, 'smoke_failed');
+  assert.match(
+    unavailable.issues[0].message,
+    /could not establish the site_consent consent realm: realm check ended in failure request_timeout/,
+  );
 });
