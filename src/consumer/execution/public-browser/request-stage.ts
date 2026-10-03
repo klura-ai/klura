@@ -51,7 +51,14 @@ export async function handleBrowserRequestStage(
   // the program navigating away and is never admitted.
   const program =
     isProgramTraffic(paused, state.programOrigin()) && !coveredByResourceRule(paused, state);
-  const ambient = pageScript !== null && !program && !mainFrameDocument;
+  // The runtime's own request is a fetch; whatever else the page asks for
+  // while that request is open — a favicon, a beacon, an image — is the
+  // page's own and is judged as a resource.
+  const ambient =
+    (pageScript !== null && !program && !mainFrameDocument) ||
+    (runtimeRequest !== null &&
+      !PROGRAM_RESOURCE_TYPES.has(paused.resource_type) &&
+      !mainFrameDocument);
   if (state.pageScriptNetworkSealed()) {
     if (!program && !mainFrameDocument) {
       await state.deny(paused.request_id, denied);
@@ -84,10 +91,10 @@ export async function handleBrowserRequestStage(
   }
   const operation = ambient ? null : (pageScript ?? action);
   let phase: BrowserRequestPhaseV1 = operation?.phase ?? 'interaction';
-  if (operation === null && runtimeRequest === null) {
+  if (operation === null && (runtimeRequest === null || ambient)) {
     phase = mainFrameDocument ? 'navigation' : 'resource';
   }
-  if (runtimeRequest !== null) phase = 'runtime_request';
+  if (runtimeRequest !== null && !ambient) phase = 'runtime_request';
   // A runtime request is the runtime's own fetch call; the label the browser
   // attaches to it (fetch or xhr) carries no information about what was sent,
   // so it is matched as the fetch its rule declares.
@@ -114,7 +121,10 @@ export async function handleBrowserRequestStage(
     // is refused and the page carries on without it. Only the task's own
     // traffic is bound to be declared: a main-frame document, a runtime
     // request, and a reviewed program's own requests.
-    const own = mainFrameDocument || runtimeRequest !== null || (pageScript !== null && program);
+    const own =
+      mainFrameDocument ||
+      (runtimeRequest !== null && !ambient) ||
+      (pageScript !== null && program);
     if (!own) {
       await state.deny(paused.request_id, denied);
       return;
@@ -187,7 +197,7 @@ export async function handleBrowserRequestStage(
   const postAcquireError = validatePostAcquireState(
     state,
     operation,
-    runtimeRequest,
+    ambient ? null : runtimeRequest,
     ambient,
     rule,
     bodies.task.bytes,

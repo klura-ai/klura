@@ -2451,3 +2451,116 @@ test('a load Chromium cancels settles its admission so the boundary can go quiet
   assert.equal(boundary.target_requests(), 1, 'the request was sent and counts');
   await boundary.close();
 });
+
+test('traffic the page issues while a runtime request is open is refused quietly, not charged to the request', async () => {
+  class FakeCdp extends EventEmitter {
+    calls = [];
+
+    async send(method, payload = {}) {
+      this.calls.push({ method, payload });
+      this.emit('send', { method, payload });
+      return {};
+    }
+
+    waitFor(method, requestId) {
+      const existing = this.calls.find(
+        (call) => call.method === method && call.payload.requestId === requestId,
+      );
+      if (existing) return Promise.resolve(existing);
+      return new Promise((resolve) => {
+        const listener = (call) => {
+          if (call.method !== method || call.payload.requestId !== requestId) return;
+          this.off('send', listener);
+          resolve(call);
+        };
+        this.on('send', listener);
+      });
+    }
+
+    async detach() {}
+  }
+  const cdp = new FakeCdp();
+  const boundary = await installBrowserNetworkBoundary({
+    page: {
+      context: () => ({
+        newCDPSession: async () => cdp,
+        close: async () => undefined,
+      }),
+    },
+    capability: {
+      browser_resources: {
+        egress_rules: [
+          {
+            rule_id: 'product_page',
+            phase: 'runtime_request',
+            origin: 'https://shop.example.test',
+            methods: ['GET'],
+            route: { path: { kind: 'prefix', value: '/dp/' }, query: { kind: 'none' } },
+            resource_types: ['fetch'],
+            max_requests: 1,
+            max_encoded_request_body_bytes: 0,
+            max_encoded_response_bytes: 1024,
+          },
+        ],
+        max_requests_per_browser_task: 2,
+        max_encoded_request_body_bytes_per_browser_task: 0,
+        max_encoded_response_bytes_per_browser_task: 2048,
+        max_proxy_wire_bytes_per_browser_task: 4096,
+        max_single_request_body_bytes: 0,
+        max_single_response_bytes: 1024,
+        service_workers: 'block',
+        downloads: 'block',
+        popups: 'block',
+        websockets: 'block',
+        webtransport: 'block',
+        webrtc_direct_egress: 'block',
+        browser_cache: 'block',
+      },
+      origin_traffic_policies: [
+        {
+          origin: 'https://shop.example.test',
+          max_concurrency: 2,
+          requests_per_second: 100,
+          burst: 2,
+          min_delay_ms: 0,
+          max_redirect_hops: 0,
+          circuit_breaker: {
+            transient_failure_threshold: 2,
+            transient_window_ms: 1000,
+            cooldown_ms: 1000,
+          },
+        },
+      ],
+    },
+    options: {
+      input: {},
+      bindings: {},
+      timeout_ms: 1000,
+      max_target_requests: 2,
+      scheduler: new OriginSchedulerV1(),
+      signal: new AbortController().signal,
+    },
+  });
+  const scope = boundary.beginRuntimeRequest();
+  cdp.emit('Fetch.requestPaused', {
+    requestId: 'favicon',
+    request: { url: 'https://shop.example.test/favicon.ico', method: 'GET', hasPostData: false },
+    resourceType: 'Other',
+  });
+  const refused = await cdp.waitFor('Fetch.failRequest', 'favicon');
+  assert.equal(refused.payload.errorReason, 'BlockedByClient');
+  boundary.assertHealthy();
+  cdp.emit('Fetch.requestPaused', {
+    requestId: 'product',
+    request: { url: 'https://shop.example.test/dp/B000', method: 'GET', hasPostData: false },
+    resourceType: 'Fetch',
+  });
+  await cdp.waitFor('Fetch.continueRequest', 'product');
+  assert.equal(boundary.target_requests(), 1, 'only the runtime request counts');
+  assert.deepEqual(
+    boundary.denied_resources().map((resource) => resource.url),
+    ['https://shop.example.test/favicon.ico'],
+  );
+  boundary.abortRuntimeRequest(scope);
+  await boundary.close();
+});

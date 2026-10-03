@@ -22,6 +22,7 @@ import {
   type PublicHttpExecutionOptionsV1,
   type PublicHttpResponseV1,
 } from './execution/node-http';
+import type { PublicExecutionDiagnosticV1 } from './execution/node-http';
 import { OriginSchedulerV1 } from './execution/origin-scheduler';
 import type { BrowserInteractionFailureV1 } from './execution/public-browser/interaction-executor';
 
@@ -47,6 +48,10 @@ export type PublicCallResultV1 =
       /** What the executor reported when it gave up, for the author reading
        *  a failed call; absent when the failure is a caller-side precondition. */
       reason?: string;
+      /** The executor's structural account of the refusal — the rejected
+       *  request's phase, origin and path, or the stage a deadline passed in —
+       *  when it has one. */
+      diagnostic?: PublicExecutionDiagnosticV1;
     }
   | {
       kind: 'failure';
@@ -252,7 +257,13 @@ function mapExecutionError(
       }
       return { kind: 'failure', code: 'transport_failure', attempts, reason: error.message };
     }
-    return { kind: 'failure', code: error.code, attempts, reason: error.message };
+    return {
+      kind: 'failure',
+      code: error.code,
+      attempts,
+      reason: error.message,
+      ...(error.diagnostic === null ? {} : { diagnostic: error.diagnostic }),
+    };
   }
   if (error instanceof PublicContractError)
     return { kind: 'failure', code: 'invalid_input', attempts, reason: error.message };

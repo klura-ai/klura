@@ -346,6 +346,12 @@ export type {
 export { ConsumerSessionServiceV1 } from './session-service';
 export type { ClearPackageSessionInputV1, ClearPackageSessionResultV1 } from './session-service';
 export { ConsumerLoginServiceV1 } from './login-service';
+export { consentRealm, smokeSession } from '../factory/public-package/smoke-session';
+export type {
+  SmokeRealmV1,
+  SmokeSessionProviderV1,
+  SmokeSessionV1,
+} from '../factory/public-package/smoke-session';
 export type {
   CompletePackageLoginInputV1,
   CompletePackageLoginResultV1,
