@@ -37,6 +37,7 @@ export async function handleBrowserRequestStage(
   const mainFrameDocument = isMainFrameDocument(paused, state.mainFrameId());
   const denied = {
     url: paused.url,
+    method: paused.method,
     resource_type: paused.resource_type,
     cdp_resource_type: paused.cdp_resource_type,
   };

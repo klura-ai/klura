@@ -45,6 +45,7 @@ export type PublicBrowserIdentityV1 = 'chrome' | 'chromium';
 /** A page request the browser policy refused while a task ran. */
 export interface PublicDeniedResourceV1 {
   url: string;
+  method: string;
   resource_type: string;
   cdp_resource_type: string;
 }
@@ -126,6 +127,28 @@ export type PublicExecutionDiagnosticV1 =
        *  together, where the time went and what the page was still missing. */
       kind: 'deadline_expired';
       stage: PublicExecutionStageV1;
+      target_requests: number;
+      denied_resources: PublicDeniedResourceV1[];
+    }
+  | {
+      /** An admitted response was larger than its rule signs for. `rule_id`
+       *  names the rule whose bound was passed, so a reviewer can tell a
+       *  capability's own answer outgrowing its contract from a file the page
+       *  loads for itself that the task never needed. */
+      kind: 'response_limit_exceeded';
+      rule_id: string;
+      phase: 'navigation' | 'resource' | 'interaction' | 'runtime_request' | 'page_script';
+      origin: string | null;
+      path: string | null;
+      method: string;
+      limit_bytes: number;
+    }
+  | {
+      /** A reviewed page program ran and its result was refused. A program
+       *  that reads the page finds nothing to return when the page never
+       *  finished loading, so `denied_resources` names what the page had
+       *  asked for and been refused before the program read it. */
+      kind: 'page_program_rejected';
       target_requests: number;
       denied_resources: PublicDeniedResourceV1[];
     };

@@ -753,6 +753,12 @@ function smokeRemedy(diagnostic: PublicExecutionDiagnosticV1 | undefined): strin
   if (diagnostic.kind === 'deadline_expired') {
     return `The call ran out of time during ${diagnostic.stage}. Declare the denied resources the page was still waiting for, loosen the origin traffic policy if it serialises the page's own loading, or raise call_timeouts, then retry.`;
   }
+  if (diagnostic.kind === 'response_limit_exceeded') {
+    return `A response admitted by rule ${diagnostic.rule_id} was larger than the ${diagnostic.limit_bytes} bytes it may carry. Raise the rule's response bound if the task reads that response, or remove the rule if the page only loads it for itself, then retry.`;
+  }
+  if (diagnostic.kind === 'page_program_rejected') {
+    return 'The page program returned a result its signed contract refuses. If the program reads what the page renders, declare the denied resources the page needs to render it; otherwise correct the program or its result shape, then retry.';
+  }
   return 'Add or correct the exact reviewed egress rule described by diagnostic, then retry.';
 }
 

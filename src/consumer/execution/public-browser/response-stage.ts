@@ -46,9 +46,20 @@ export async function handleResponseStage(
         result = await readPausedResponseBody(state.cdp, paused.request_id, limit);
       } catch (error) {
         if (error instanceof PublicHttpExecutionError && error.code === 'response_too_large') {
+          const phase = admission.rule.phase === 'login' ? 'navigation' : admission.rule.phase;
           throw new PublicHttpExecutionError(
             'response_too_large',
-            `${error.message}: ${describeRequest(paused, admission.rule.phase === 'login' ? 'navigation' : admission.rule.phase)} may carry at most ${limit} bytes (rule ${admission.rule.rule_id} ${admission.rule.max_encoded_response_bytes}, single response ${state.policy.max_single_response_bytes}, task remaining ${remaining})`,
+            `${error.message}: ${describeRequest(paused, phase)} may carry at most ${limit} bytes (rule ${admission.rule.rule_id} ${admission.rule.max_encoded_response_bytes}, single response ${state.policy.max_single_response_bytes}, task remaining ${remaining})`,
+            0,
+            null,
+            {
+              kind: 'response_limit_exceeded',
+              rule_id: admission.rule.rule_id,
+              phase,
+              ...requestLocation(paused.url),
+              method: paused.method,
+              limit_bytes: limit,
+            },
           );
         }
         throw error;
@@ -136,4 +147,14 @@ function settleAdmission(
     state.operationActivityChanged(admission.operation);
   }
   state.activityChanged();
+}
+
+/** Origin and path of a request URL, without its query or raw bytes. */
+function requestLocation(value: string): { origin: string | null; path: string | null } {
+  try {
+    const url = new URL(value);
+    return { origin: url.origin, path: url.pathname };
+  } catch {
+    return { origin: null, path: null };
+  }
 }

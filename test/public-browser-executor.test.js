@@ -12,6 +12,7 @@ const {
   installBrowserNetworkBoundary,
 } = require('../dist/consumer/execution/public-browser/executor.js');
 const {
+  executeBrowserPageScriptStrategyInBoundedPage,
   executeReviewedPageProgram,
   installReviewedPageProgramRunner,
 } = require('../dist/consumer/execution/public-browser/page-script-executor.js');
@@ -986,9 +987,23 @@ test('parallel browser responses serialize against the whole-task byte budget', 
   reads[1]({ data: '1234', base64Encoded: false, eof: true });
   await cdp.waitForCount('terminal', terminals, 2);
   assert.deepEqual(terminals.sort(), ['Fetch.failRequest', 'Fetch.fulfillRequest']);
+  // The refusal names the rule whose bound was passed, structurally, so a
+  // reviewer need not read it out of the message.
   assert.throws(
     () => boundary.assertHealthy(),
-    (error) => error?.code === 'response_too_large',
+    (error) => {
+      assert.equal(error?.code, 'response_too_large');
+      assert.deepEqual(error.diagnostic, {
+        kind: 'response_limit_exceeded',
+        rule_id: 'items',
+        phase: 'resource',
+        origin,
+        path: '/items',
+        method: 'GET',
+        limit_bytes: 1,
+      });
+      return true;
+    },
   );
   await boundary.close();
 });
@@ -1467,6 +1482,7 @@ test('a document loaded by a sub-frame is a page resource, not a navigation', as
   assert.deepEqual(boundary.denied_resources(), [
     {
       url: 'https://ads.example.test/frame.html',
+      method: 'GET',
       resource_type: 'document',
       cdp_resource_type: 'Document',
     },
@@ -1625,6 +1641,7 @@ test('the page loading itself during a reviewed program is judged as a resource,
   assert.deepEqual(boundary.denied_resources(), [
     {
       url: 'https://example.test/img/hero.png',
+      method: 'GET',
       resource_type: 'image',
       cdp_resource_type: 'Image',
     },
@@ -1702,11 +1719,92 @@ test('a reviewed program may not navigate its page or fetch outside its expectat
   }
 });
 
+test('a rejected page program result names what the page was refused before it was read', async () => {
+  const denied = [
+    {
+      url: 'https://example.test/_/app.js',
+      method: 'GET',
+      resource_type: 'script',
+      cdp_resource_type: 'Script',
+    },
+  ];
+  const strategy = {
+    strategy_id: 'program',
+    url: { op: 'literal', value: 'https://example.test/item' },
+    wait: { kind: 'dom_content_loaded' },
+    interaction: null,
+    program: {
+      source: 'async () => ({})',
+      arguments: { op: 'literal', value: null },
+      result_shape: { kind: 'object', required_keys: ['title'] },
+      expect: { wait: null, egress_rule_ids: [], minimum_matching_requests: 0, maximum_matching_requests: 0 },
+      request_body_limits: {},
+    },
+  };
+  const capability = {
+    strategies: [strategy],
+    authentication: { mode: 'none' },
+    browser_resources: {},
+    origin_traffic_policies: [],
+    max_target_requests_per_call: 4,
+    max_encoded_outcome_bytes: 1024,
+    input_schema: parseJsonSchema({
+      type: 'object',
+      properties: {},
+      required: [],
+      additionalProperties: false,
+    }),
+    navigation_origins: ['https://example.test'],
+  };
+  // The page rendered nothing because its own code was refused, so the
+  // program's result lacks the key its signed shape requires.
+  const page = {
+    goto: async () => ({}),
+    url: () => 'https://example.test/item',
+    evaluate: async () => ({ kind: 'failure', code: 'result_contract_mismatch' }),
+  };
+  const boundary = {
+    transition: () => undefined,
+    assertHealthy: () => undefined,
+    beginPageScript: () => ({}),
+    abortPageScript: () => undefined,
+    target_requests: () => 1,
+    denied_resources: () => denied,
+  };
+  await assert.rejects(
+    executeBrowserPageScriptStrategyInBoundedPage(page, boundary, 'runner', capability, strategy, {
+      input: {},
+      bindings: {},
+      timeout_ms: 1000,
+      max_target_requests: 4,
+    }),
+    (error) => {
+      assert.equal(error?.code, 'response_contract_mismatch', String(error?.stack ?? error));
+      assert.deepEqual(error.diagnostic, {
+        kind: 'page_program_rejected',
+        target_requests: 1,
+        denied_resources: denied,
+      });
+      return true;
+    },
+  );
+});
+
 test('a browser deadline names the running stage and the resources the page was refused', () => {
   const { deadlineExpired } = require('../dist/consumer/execution/public-browser/deadline.js');
   const denied = [
-    { url: 'https://example.test/x.js', resource_type: 'script', cdp_resource_type: 'Script' },
-    { url: 'https://example.test/search?tbm=map', resource_type: '', cdp_resource_type: 'Other' },
+    {
+      url: 'https://example.test/x.js',
+      method: 'GET',
+      resource_type: 'script',
+      cdp_resource_type: 'Script',
+    },
+    {
+      url: 'https://example.test/search?tbm=map',
+      method: 'GET',
+      resource_type: '',
+      cdp_resource_type: 'Other',
+    },
   ];
   const error = deadlineExpired('browser page-script', 'program', 3, denied);
   assert.equal(error.code, 'request_timeout');

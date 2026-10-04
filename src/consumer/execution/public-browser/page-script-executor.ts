@@ -355,7 +355,11 @@ export async function executeBrowserPageScriptStrategyInBoundedPage(
       );
     }
     if (error instanceof ReviewedPageProgramExecutionError) {
-      throw new PublicHttpExecutionError(error.code, error.message, targetRequests);
+      throw new PublicHttpExecutionError(error.code, error.message, targetRequests, null, {
+        kind: 'page_program_rejected',
+        target_requests: targetRequests,
+        denied_resources: boundary.denied_resources(),
+      });
     }
     throw new PublicHttpExecutionError('transport_failure', errorMessage(error), targetRequests);
   } finally {
