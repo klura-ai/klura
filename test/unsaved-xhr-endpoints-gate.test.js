@@ -163,6 +163,29 @@ test('unsavedHotXhrEndpoints: validateAck accepts reason that names at least one
   }
 });
 
+test('unsavedHotXhrEndpoints: a truncated path is acked by quoting the real path', () => {
+  __resetStore();
+  // A path longer than the checklist carries is listed cut short with a
+  // length marker. The agent quoting the endpoint from its network log has
+  // the real path, which contains the kept characters and no marker.
+  const realPath = `/tiles/pb=${'!1m8!3m7!1u18458880'.repeat(16)}`;
+  const listed = `${realPath.slice(0, 200)}…[${realPath.length} chars]`;
+  const endpoints = [{ method: 'GET', urlPath: listed, sampleUrl: `https://x.test${realPath}` }];
+  const accepted = (reason) => {
+    __resetStore();
+    const result = endDriveAudit.process(
+      makePayload({ unsavedHotXhrEndpoints: endpoints }),
+      {},
+      { acks: { unsaved_xhr_endpoints: reason } },
+    );
+    if (result.status !== 'rejected') return true;
+    return !(result.rejection.ack_issues ?? []).some((s) => s.includes('unsaved_xhr_endpoints'));
+  };
+  assert.equal(accepted(`noise: ${realPath} is a map tile, not data`), true);
+  assert.equal(accepted(`noise: ${listed} is a map tile, not data`), true);
+  assert.equal(accepted('noise: the tile request is a map tile, not data'), false);
+});
+
 test('unsavedHotXhrEndpoints: third-attempt force-tear-down releases', () => {
   __resetStore();
   const result = endDriveAudit.process(

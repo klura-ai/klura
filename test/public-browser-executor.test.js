@@ -1788,6 +1788,18 @@ test('a rejected page program result names what the page was refused before it w
       return true;
     },
   );
+  // A result that is too large is about the program, not about what the page
+  // had loaded, and carries no such list.
+  page.evaluate = async () => ({ kind: 'failure', code: 'output_too_large' });
+  await assert.rejects(
+    executeBrowserPageScriptStrategyInBoundedPage(page, boundary, 'runner', capability, strategy, {
+      input: {},
+      bindings: {},
+      timeout_ms: 1000,
+      max_target_requests: 4,
+    }),
+    (error) => error?.code === 'response_too_large' && error.diagnostic === null,
+  );
 });
 
 test('a browser deadline names the running stage and the resources the page was refused', () => {

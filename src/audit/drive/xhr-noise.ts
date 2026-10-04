@@ -204,9 +204,25 @@ export function collectUnsavedHotXhrEndpoints(
  *  before its 200th character. */
 const MAX_ENDPOINT_PATH_CHARS = 200;
 
+const TRUNCATION_MARK = '…[';
+
 function truncateEndpointPath(urlPath: string): string {
   if (urlPath.length <= MAX_ENDPOINT_PATH_CHARS) return urlPath;
-  return `${urlPath.slice(0, MAX_ENDPOINT_PATH_CHARS)}…[${urlPath.length} chars]`;
+  return `${urlPath.slice(0, MAX_ENDPOINT_PATH_CHARS)}${TRUNCATION_MARK}${urlPath.length} chars]`;
+}
+
+/**
+ * The part of a checklist path that is the path itself.
+ *
+ * A truncated entry ends in a length marker the endpoint never carried. An
+ * ack that quotes the real path — copied from the network log rather than
+ * from the checklist — contains the kept characters and not the marker, so
+ * the marker is left out of what an ack is matched against.
+ */
+export function endpointPathStem(listedPath: string): string {
+  const at = listedPath.lastIndexOf(TRUNCATION_MARK);
+  if (at !== MAX_ENDPOINT_PATH_CHARS || !listedPath.endsWith(' chars]')) return listedPath;
+  return listedPath.slice(0, at);
 }
 
 /** Minimum same-endpoint read count in one session before the recurring-read

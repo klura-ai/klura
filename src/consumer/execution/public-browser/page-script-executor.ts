@@ -355,11 +355,22 @@ export async function executeBrowserPageScriptStrategyInBoundedPage(
       );
     }
     if (error instanceof ReviewedPageProgramExecutionError) {
-      throw new PublicHttpExecutionError(error.code, error.message, targetRequests, null, {
-        kind: 'page_program_rejected',
-        target_requests: targetRequests,
-        denied_resources: boundary.denied_resources(),
-      });
+      // Only a result of the wrong shape says anything about what the page
+      // had loaded. One that is too large, or a program that threw, is about
+      // the program itself.
+      throw new PublicHttpExecutionError(
+        error.code,
+        error.message,
+        targetRequests,
+        null,
+        error.code === 'response_contract_mismatch'
+          ? {
+              kind: 'page_program_rejected',
+              target_requests: targetRequests,
+              denied_resources: boundary.denied_resources(),
+            }
+          : null,
+      );
     }
     throw new PublicHttpExecutionError('transport_failure', errorMessage(error), targetRequests);
   } finally {

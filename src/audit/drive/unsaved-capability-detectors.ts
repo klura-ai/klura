@@ -8,6 +8,7 @@
 import type { Detector } from '../index';
 import type { EndDrivePayload, EndDriveCtx } from './end-drive';
 import { readPlatformSkillInfo } from '../../strategies/skills-list-helpers';
+import { endpointPathStem } from './xhr-noise';
 
 // ---------- Detector: observed_capabilities_not_lifted ----------
 //
@@ -236,7 +237,7 @@ export const unsavedXhrEndpointsDetector: Detector<EndDrivePayload, EndDriveCtx>
       }
     }
     if (paths.length === 0) return [];
-    const mentioned = paths.filter((p) => ack.reason.includes(p));
+    const mentioned = paths.filter((p) => ack.reason.includes(endpointPathStem(p)));
     if (mentioned.length === 0) {
       return [
         `ack reason must name at least one URL path verbatim from the emitted list ` +
