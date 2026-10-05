@@ -1788,6 +1788,19 @@ test('a rejected page program result names what the page was refused before it w
       return true;
     },
   );
+  // A program that threw may have read what the page's refused code was
+  // meant to put there, so it carries the same list.
+  page.evaluate = async () => ({ kind: 'failure', code: 'execution_failed' });
+  await assert.rejects(
+    executeBrowserPageScriptStrategyInBoundedPage(page, boundary, 'runner', capability, strategy, {
+      input: {},
+      bindings: {},
+      timeout_ms: 1000,
+      max_target_requests: 4,
+    }),
+    (error) =>
+      error?.code === 'transport_failure' && error.diagnostic?.kind === 'page_program_rejected',
+  );
   // A result that is too large is about the program, not about what the page
   // had loaded, and carries no such list.
   page.evaluate = async () => ({ kind: 'failure', code: 'output_too_large' });

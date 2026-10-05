@@ -355,15 +355,16 @@ export async function executeBrowserPageScriptStrategyInBoundedPage(
       );
     }
     if (error instanceof ReviewedPageProgramExecutionError) {
-      // Only a result of the wrong shape says anything about what the page
-      // had loaded. One that is too large, or a program that threw, is about
-      // the program itself.
+      // A result of the wrong shape and a program that threw are both what a
+      // page that never finished loading looks like from inside: the program
+      // read something the page's own code was meant to put there. A result
+      // that is too large is about the program alone.
       throw new PublicHttpExecutionError(
         error.code,
         error.message,
         targetRequests,
         null,
-        error.code === 'response_contract_mismatch'
+        error.code !== 'response_too_large'
           ? {
               kind: 'page_program_rejected',
               target_requests: targetRequests,

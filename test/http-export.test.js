@@ -10,6 +10,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert';
+import { evaluateValueExpression } from '../dist/public/contracts/value-expression.js';
 
 import {
   exportReviewedLocalFetchStrategySource,
@@ -43,8 +44,20 @@ test('a caller placeholder compiles to an input read, not a literal', () => {
   const expr = compileTemplateExpression('/search/{{query}}', props, 'f');
   assert.equal(expr.op, 'concat');
   assert.deepEqual(expr.values[0], { op: 'literal', value: '/search/' });
-  assert.equal(expr.values[1].op, 'input');
-  assert.equal(expr.values[1].pointer, '/query');
+  // Joined to other text it is sent as text: a numeric id declared a number
+  // reaches the URL as its digits rather than failing the join.
+  assert.deepEqual(expr.values[1], {
+    op: 'to_string',
+    value: { op: 'input', pointer: '/query' },
+  });
+});
+
+test('a numeric input joined into a URL evaluates to its digits', () => {
+  const expr = compileTemplateExpression('/book/show/{{page}}', props, 'f');
+  assert.equal(
+    evaluateValueExpression(expr, { input: { page: 6493208 }, bindings: {} }),
+    '/book/show/6493208',
+  );
 });
 
 test('a template with no placeholders is a single literal', () => {
@@ -148,7 +161,11 @@ test('a POST body compiles with its caller placeholders', () => {
     base({ method: 'POST', body: '{"q":"{{query}}"}' }),
   );
   assert.equal(out.request.body.op, 'concat');
-  assert.ok(out.request.body.values.some((v) => v.op === 'input' && v.pointer === '/query'));
+  assert.ok(
+    out.request.body.values.some(
+      (v) => v.op === 'to_string' && v.value.op === 'input' && v.value.pointer === '/query',
+    ),
+  );
 });
 
 test('headers compile the same way as query params', () => {

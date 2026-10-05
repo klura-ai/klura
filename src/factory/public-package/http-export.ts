@@ -85,8 +85,14 @@ export function compileTemplateExpression(
   }
   const [only] = parts;
   if (only === undefined) return { op: 'literal', value: '' };
+  // A placeholder that is the whole value keeps the caller's type. One joined
+  // to other text becomes text, as it did when the local runtime interpolated
+  // it: a numeric id in a URL path is declared a number and sent as its digits.
   if (parts.length === 1) return only;
-  return { op: 'concat', values: parts };
+  return {
+    op: 'concat',
+    values: parts.map((part) => (part.op === 'input' ? { op: 'to_string', value: part } : part)),
+  };
 }
 
 /** HTTP field names are case-insensitive on the wire; the public request

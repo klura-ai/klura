@@ -144,10 +144,10 @@ export type PublicExecutionDiagnosticV1 =
       limit_bytes: number;
     }
   | {
-      /** A reviewed page program ran and its result was refused. A program
-       *  that reads the page finds nothing to return when the page never
-       *  finished loading, so `denied_resources` names what the page had
-       *  asked for and been refused before the program read it. */
+      /** A reviewed page program threw or its result was refused. A program
+       *  that reads the page finds nothing there when the page never finished
+       *  loading, so `denied_resources` names what the page had asked for and
+       *  been refused before the program read it. */
       kind: 'page_program_rejected';
       target_requests: number;
       denied_resources: PublicDeniedResourceV1[];
