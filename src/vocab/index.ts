@@ -196,6 +196,7 @@ export const AUDIT_KINDS = {
   literalProvenance: 'literal_provenance',
   noSelectorSelfReference: 'no_selector_self_reference',
   noCircularPrereqBinding: 'no_circular_prereq_binding',
+  packageStructure: 'package_structure',
   unobservedUrl: 'unobserved_url',
   surfaceTriageMissing: 'surface_triage_missing',
   tierBelowTriageVerdict: 'tier_below_triage_verdict',

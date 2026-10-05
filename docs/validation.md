@@ -91,6 +91,23 @@ Check D asks whether the caller receives the rows at all. A body larger than EXE
 | `audit.verifyCollectionStability` | Run the second identical execution (default `true`) |
 | `audit.verifyPaginationDisjointness` | Run the page-2 execution for paginating strategies (default `true`) |
 
+### Whether a package can carry it
+
+A strategy that works here is not yet one a public package can carry. The public profile admits one static request or one page program, a literal origin, and an outcome inside fixed bounds: 16,384 encoded bytes, 64 keys per object, 12 levels, 256 schema nodes, one type per field, and no list whose rows were never seen. A package compiled long after the save discovers the mismatch when nobody can act on it, and the only remedy is a second authoring session.
+
+`audit.packageReadiness: "require"` asks the exporter's question inside the save instead, in the two places its two halves can be answered:
+
+- **Structure, before anything is committed.** The `package_structure` Stage 0 check compiles the strategy through the exporter's own tier compilers (`factory/public-package/package-readiness.ts`) with the settings a first export starts from. A second prerequisite, a generated value, a response construct the public profile has no equivalent for, or a URL with no literal origin is an `invalid_strategy` rejection carrying the compiler's own reason. Nothing was saved; the agent re-saves in the session that still has the page open.
+- **The response, once verification has one.** Post-save verification derives the outcome schema from the body its run returned (`factory/public-package/outcome-shape.ts`, the same bounds the contract parser enforces) and reports what stands in the way as `package_readiness` on the result, with `post_save_validation_not_packagable` in the message. The run is stamped `transport_passed`, never `passed`, exactly as a collection-integrity finding is. A candidate carrying such a finding is not promotable by verdict: `review_strategy_candidate` answers `strategy_candidate_not_packagable`, because a verdict decides whether data is right, not whether a package can hold it.
+
+Both apply only to a strategy that reads. One that changes something on the site is never packaged and is saved as it always was. An oversized listing on the `fetch` tier passes when cutting it to whole rows makes it fit, since the package signs that cut; a page program's result is bounded before any cut and has to arrive inside the bound.
+
+What this does not cover is the part only the package's own browser can answer — whether the page loads there, whether the site serves it at all. That stays with the export's live call.
+
+| Config field | Effect |
+| --- | --- |
+| `audit.packageReadiness` | `"off"` (default) saves whatever works locally; `"require"` holds every read strategy to what a package can carry |
+
 `js-eval` prerequisites can declare `return_shape.kind:"array"` with an optional `min_items`. An empty array satisfies the shape unless `min_items` says otherwise, so zero rows reaches the review gate rather than failing as a prerequisite transport error.
 
 ### Reaching the page at all

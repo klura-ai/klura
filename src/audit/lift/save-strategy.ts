@@ -8,6 +8,7 @@ import { AUDIT_KINDS, WARNING_KINDS } from '../../vocab';
 import { TIER_RANK } from '../concerns/tier-rank';
 import { findTriageVerdict } from '../concerns/triage-verdict';
 import type { Strategy } from '../../strategies/skills';
+import { packageStructureCheck } from './package-readiness-check';
 import {
   loadStrategies as loadStrategiesForPlatformAndCapability,
   listPlatformSkills as listAllSkills,
@@ -889,6 +890,7 @@ export const saveStrategyAudit = new Audit<Strategy, SaveStrategyCtx>({
     capabilityPrereqsCheck,
     noSelectorSelfReferenceCheck,
     noCircularPrereqBindingCheck,
+    packageStructureCheck,
   ],
   detectors: [
     surfaceTriageMissingDetector,

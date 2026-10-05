@@ -50,6 +50,8 @@ A successful export writes only:
 
 Fixture responses, expected typed results, and expected run items come from the successful smoke executions rather than hand-authored examples, and every captured fixture file is validated against the public fixture contract before it is written. The export never signs, installs, publishes, stages Git changes, creates a branch, or opens a pull request. An existing target directory is rejected instead of overwritten; updates require a separately reviewed version-update workflow.
 
+A strategy saved under `audit.packageReadiness: "require"` has already been held to this at save time: its structure is compiled before it is committed and its verified response is checked against the outcome bounds, so what export can still refuse is only what its live call finds.
+
 Export is for a package a maintainer will publish. To run a skill you authored yourself — durably, with resume and dedup — install it locally instead; see [local package](klura://reference#local-package).
 
 ## local package

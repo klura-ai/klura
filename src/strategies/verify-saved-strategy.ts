@@ -65,6 +65,10 @@ import { markHealed } from './health';
 import { withFreshVerificationPool } from '../pool/fresh-context-pool';
 import { navigationReachMissFrom, type NavigationReachMiss } from '../execution/navigation-reach';
 import { EXECUTE_RESULT_BODY_INLINE_BUDGET } from '../response/response-size';
+import {
+  isPackageCandidate,
+  packageResultIssues,
+} from '../factory/public-package/package-readiness';
 
 export interface VerifySavedStrategyResult {
   /** True only when the local strategy explicitly returned `body.ok:true`. */
@@ -89,6 +93,10 @@ export interface VerifySavedStrategyResult {
   collection_keys?: string[];
   /** Every collection-integrity finding that routed this run to semantic review. */
   collection_integrity?: CollectionIntegrityFinding[];
+  /** Why the response this run returned cannot be signed as a package outcome.
+   *  Present only under `audit.packageReadiness: "require"`, and only when
+   *  something stands in the way. */
+  package_readiness?: string[];
 }
 
 export interface VerifyStrategyCandidateResult extends VerifySavedStrategyResult {
@@ -147,6 +155,9 @@ interface VerificationRun {
   emptiness: DeclaredCollectionEmptiness | null;
   /** Emptiness, when present, is the sole finding — the later checks need rows. */
   integrity: CollectionIntegrityFinding[];
+  /** What stops this run's response from being a package outcome; empty when
+   *  nothing does or the question was not asked. */
+  packageIssues: string[];
   /**
    * Set when a prereq navigation resolved somewhere other than its target, so
    * the strategy never ran against the page it reads. Distinct from every
@@ -228,6 +239,39 @@ async function runVerification(
   return primedStillGated ? fresh : primed;
 }
 
+/**
+ * What stops a run's response from being signed as a package outcome.
+ *
+ * Asked only under `audit.packageReadiness: "require"`, of a read strategy
+ * whose run returned data: a failed run has nothing to describe, and a
+ * strategy that changes something on the site is never packaged.
+ */
+function packageIssuesFor(
+  strategy: Strategy,
+  classification: FactoryExecutionClassification,
+  body: unknown,
+  args: Record<string, unknown>,
+): string[] {
+  if (loadConfig().audit.packageReadiness !== 'require') return [];
+  if (classification !== 'explicit_success' && classification !== 'transport_accepted') return [];
+  if (!isPackageCandidate(strategy)) return [];
+  return packageResultIssues(strategy, body, args);
+}
+
+/**
+ * Agent-facing prose for a run that returned data a package cannot carry. The
+ * strategy works; what has to change is what it returns, and the session that
+ * can change it is the one reading this.
+ */
+function packageReadinessMessage(capability: string, issues: string[]): string {
+  return (
+    `post_save_validation_not_packagable: the saved \`${capability}\` strategy runs, but what it ` +
+    `returned cannot ship in a package:` +
+    issues.map((issue) => `\n  - ${issue}`).join('') +
+    `\n  Change what the strategy returns and re-save this session. See ${refUrl(REF_LINKS.packageExport)}.`
+  );
+}
+
 async function runVerificationIn(
   platform: string,
   capability: string,
@@ -264,17 +308,20 @@ async function runVerificationIn(
         classification: 'not_run',
         emptiness: null,
         integrity: [],
+        packageIssues: [],
         reachMiss: miss,
         sessionContext,
       };
     }
     const classification = classifyFactoryExecutionResult(result);
+    const packageIssues = packageIssuesFor(strategy, classification, result.body, args);
     if (classification !== 'explicit_success') {
       return {
         result,
         classification,
         emptiness: null,
         integrity: [],
+        packageIssues,
         reachMiss: null,
         sessionContext,
       };
@@ -286,6 +333,7 @@ async function runVerificationIn(
         classification,
         emptiness,
         integrity: [emptiness],
+        packageIssues,
         reachMiss: null,
         sessionContext,
       };
@@ -302,7 +350,15 @@ async function runVerificationIn(
       // own caller never receives.
       deliveryBudgetChars: EXECUTE_RESULT_BODY_INLINE_BUDGET,
     });
-    return { result, classification, emptiness: null, integrity, reachMiss: null, sessionContext };
+    return {
+      result,
+      classification,
+      emptiness: null,
+      integrity,
+      packageIssues,
+      reachMiss: null,
+      sessionContext,
+    };
   };
 
   // The fresh pool is what strips browser storage; the platform-session attempt
@@ -515,6 +571,7 @@ export async function verifySavedStrategy(
   let classification: FactoryExecutionClassification = 'transport_failure';
   let emptiness: DeclaredCollectionEmptiness | null = null;
   let integrity: CollectionIntegrityFinding[] = [];
+  let packageIssues: string[] = [];
   let reachMiss: NavigationReachMiss | null = null;
   let sessionContext: 'fresh' | 'platform_session' = 'fresh';
   try {
@@ -524,13 +581,19 @@ export async function verifySavedStrategy(
     classification = run.classification;
     emptiness = run.emptiness;
     integrity = run.integrity;
+    packageIssues = run.packageIssues;
     reachMiss = run.reachMiss;
     sessionContext = run.sessionContext;
     // An explicit ok:true whose declared collection is empty, or carries rows
     // that fail a structural integrity check, carries exactly the strength of a
     // bare 2xx: transport worked, the semantic outcome is unproven. Route it
-    // down the transport branch so it is never stamped "passed".
-    if (classification === 'explicit_success' && integrity.length > 0) {
+    // down the transport branch so it is never stamped "passed". A response a
+    // package cannot carry is routed the same way: the strategy ran, and what
+    // it was saved to do is not yet done.
+    if (
+      classification === 'explicit_success' &&
+      (integrity.length > 0 || packageIssues.length > 0)
+    ) {
       classification = 'transport_accepted';
     }
   } catch (err) {
@@ -592,6 +655,10 @@ export async function verifySavedStrategy(
     } else if (integrity.length > 0) {
       message = integrityMessage(capability, status, integrity, bodyPreview, strategy);
     }
+    if (proofCurrent && packageIssues.length > 0) {
+      const packaging = packageReadinessMessage(capability, packageIssues);
+      message = message ? `${message}\n${packaging}` : packaging;
+    }
     return {
       ok: false,
       classification,
@@ -607,6 +674,7 @@ export async function verifySavedStrategy(
             collection_integrity: integrity,
           }
         : {}),
+      ...(packageIssues.length > 0 ? { package_readiness: packageIssues } : {}),
       ...(message ? { message } : {}),
     };
   }
@@ -726,6 +794,7 @@ export async function verifyStrategyCandidate(
   let classification: FactoryExecutionClassification = 'transport_failure';
   let emptiness: DeclaredCollectionEmptiness | null = null;
   let integrity: CollectionIntegrityFinding[] = [];
+  let packageIssues: string[] = [];
   let reachMiss: NavigationReachMiss | null = null;
   let sessionContext: 'fresh' | 'platform_session' = 'fresh';
   try {
@@ -739,10 +808,14 @@ export async function verifyStrategyCandidate(
     classification = run.classification;
     emptiness = run.emptiness;
     integrity = run.integrity;
+    packageIssues = run.packageIssues;
     // Same downgrade as the active twin — plus it keeps the candidate inactive
     // and routes it to `review_strategy_candidate`, which is where "are these
     // the right rows?" can actually be answered.
-    if (classification === 'explicit_success' && integrity.length > 0) {
+    if (
+      classification === 'explicit_success' &&
+      (integrity.length > 0 || packageIssues.length > 0)
+    ) {
       classification = 'transport_accepted';
     }
   } catch (err) {
@@ -847,6 +920,8 @@ export async function verifyStrategyCandidate(
       unproven =
         `returned rows that failed ${integrity.length} structural check${plural} over the collection ` +
         `contract:${integrityEvidence(integrity)}`;
+    } else if (packageIssues.length > 0) {
+      unproven = 'returned data a package cannot carry';
     } else {
       unproven = 'returned no explicit boolean body.ok';
     }
@@ -858,6 +933,9 @@ export async function verifyStrategyCandidate(
         : `Its exact result exceeded the review artifact bound, so there is nothing reviewable to ` +
           `submit a verdict against — the candidate cannot be promoted until the result is smaller. ` +
           narrowResultRemedy(candidate));
+    if (packageIssues.length > 0) {
+      message = `${message}\n${packageReadinessMessage(ref.capability, packageIssues)}`;
+    }
   } else if (classification === 'not_run') {
     message = `strategy_candidate_not_run: ${ref.capability} was not sent. The candidate remains inactive.`;
   } else if (classification === 'delivery_unknown') {
@@ -909,6 +987,7 @@ export async function verifyStrategyCandidate(
           collection_integrity: integrity,
         }
       : {}),
+    ...(packageIssues.length > 0 ? { package_readiness: packageIssues } : {}),
     message,
   };
 }

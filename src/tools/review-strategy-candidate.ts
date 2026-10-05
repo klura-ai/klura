@@ -19,6 +19,11 @@ import {
   type CollectionIntegrityFinding,
 } from '../execution/collection-emptiness';
 import { markHealed } from '../strategies/health';
+import { loadConfig } from '../config/handler';
+import {
+  isPackageCandidate,
+  packageResultIssues,
+} from '../factory/public-package/package-readiness';
 import { DECISION_VALUES, REF_LINKS, TOOL_NAMES, refUrl } from '../vocab';
 import type { ToolDef } from './types';
 
@@ -142,6 +147,24 @@ function collectionIntegrityFindings(
   return findings;
 }
 
+/**
+ * What stops this candidate's evidence from being a package outcome, derived
+ * from the same digest-bound evidence body the reviewer is looking at.
+ */
+function candidatePackageIssues(context: StrategyCandidateReviewContext): string[] {
+  if (loadConfig().audit.packageReadiness !== 'require') return [];
+  if (context.evidence.body_kind !== 'json' || context.evidence.body_text === undefined) return [];
+  const candidate = loadStrategyCandidate(context.ref);
+  if (candidate === null || !isPackageCandidate(candidate)) return [];
+  let body: unknown;
+  try {
+    body = JSON.parse(context.evidence.body_text);
+  } catch {
+    return [];
+  }
+  return packageResultIssues(candidate, body, {});
+}
+
 /** Why this candidate needs a verdict, in the shape the review response carries. */
 function semanticReviewReason(
   context: StrategyCandidateReviewContext,
@@ -224,6 +247,26 @@ export function reviewStrategyCandidate(
       _hint:
         'The exact result exceeded the local review artifact bound or could not be serialized. ' +
         'Narrow the sample response or add structural extraction, then re-save.',
+    };
+  }
+
+  // A verdict answers "is this the right data"; it cannot answer "can a
+  // package carry it". Under `audit.packageReadiness: "require"` a candidate
+  // whose evidence a package cannot carry stays a candidate whatever the
+  // verdict, and is told what to change instead of being asked to judge.
+  const packaging = candidatePackageIssues(context);
+  if (packaging.length > 0) {
+    return {
+      ok: false,
+      state: 'candidate',
+      active: false,
+      candidate_id: args.candidate_id,
+      evidence_digest: context.evidence.evidence_digest,
+      reason: 'strategy_candidate_not_packagable',
+      package_readiness: packaging,
+      _hint:
+        'This candidate runs, but what it returned cannot ship in a package, so no verdict ' +
+        'promotes it. Change what the strategy returns and re-save.',
     };
   }
 

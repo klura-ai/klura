@@ -219,6 +219,17 @@ export interface AuditConfig {
    * param returns, so nothing else distinguishes the two.
    */
   verifyPaginationDisjointness: boolean;
+  /**
+   * Hold every read strategy to what a public package can carry, at the moment
+   * it is saved. `'off'` saves whatever works locally. `'require'` runs the
+   * exporter's own checks inside the save: a strategy whose structure the
+   * public profile cannot express is refused before it is committed, and one
+   * whose verified response cannot be signed as an outcome is not stamped
+   * passed — in both cases with the reason, while the session that can fix it
+   * is still open. Strategies that change something on the site are never
+   * candidates and are unaffected.
+   */
+  packageReadiness: 'off' | 'require';
 }
 
 export interface RuntimeBootConfig {
@@ -311,6 +322,7 @@ export const CONFIG_DEFAULTS: DaemonConfig = {
     triageAckAsDetector: true,
     verifyCollectionStability: true,
     verifyPaginationDisjointness: true,
+    packageReadiness: 'off',
   },
 };
 
@@ -743,6 +755,20 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
       'caller param (`notes.params.<name>.paginates: true`) and route an overlap between the two ' +
       'pages to semantic review. Only fires for such strategies, and only when the argument is an ' +
       'integer that can be advanced. One extra execution, once per capability lifetime. Default true.',
+    needsRestart: false,
+  },
+  {
+    path: 'audit.packageReadiness',
+    type: 'enum',
+    enum: ['off', 'require'] as const,
+    default: CONFIG_DEFAULTS.audit.packageReadiness,
+    description:
+      'Hold every read strategy to what a public package can carry, when it is saved. "off" ' +
+      '(default) saves whatever works locally. "require" runs the exporter\'s own checks inside ' +
+      'the save: a strategy whose structure the public profile cannot express is refused before ' +
+      'it is committed, and one whose verified response cannot be signed as an outcome is not ' +
+      'stamped passed — both with the reason, while the session can still fix it. Strategies ' +
+      'that change something on the site are unaffected.',
     needsRestart: false,
   },
   {
