@@ -154,7 +154,7 @@ export async function handleBrowserRequestStage(
     return;
   }
   if (browserRequestBudgetExhausted(state, rule)) {
-    await failRequestBudget(paused, phase, state);
+    await failRequestBudget(paused, phase, state, rule);
     return;
   }
   const bodies = validateBrowserRequestBodiesForRule(
@@ -418,6 +418,9 @@ function validatePostAcquireState(
         state.options.max_target_requests,
         state.policy.max_requests_per_browser_task,
       )}`,
+      0,
+      null,
+      budgetDiagnostic(state, rule),
     );
   }
   if (
@@ -474,6 +477,7 @@ async function failRequestBudget(
   paused: BrowserFetchPausedV1,
   phase: BrowserRequestPhaseV1,
   state: FetchHandlerStateV1,
+  rule: BrowserEgressRuleV1,
 ): Promise<void> {
   await state.fail(
     paused.request_id,
@@ -482,8 +486,29 @@ async function failRequestBudget(
       `browser request budget is exhausted: ${describeRequest(paused, phase)} would be target request ${
         state.targetRequests + 1
       } of ${Math.min(state.options.max_target_requests, state.policy.max_requests_per_browser_task)}`,
+      0,
+      null,
+      budgetDiagnostic(state, rule),
     ),
   );
+}
+
+function budgetDiagnostic(
+  state: FetchHandlerStateV1,
+  rule: BrowserEgressRuleV1,
+): import('../node-http').PublicExecutionDiagnosticV1 {
+  return {
+    kind: 'request_budget_exhausted',
+    rule_id: rule.rule_id,
+    phase: rule.phase === 'login' ? 'navigation' : rule.phase,
+    rule_requests: state.ruleRequests.get(rule.rule_id) ?? 0,
+    rule_limit: rule.max_requests,
+    task_requests: state.targetRequests,
+    task_limit: Math.min(
+      state.options.max_target_requests,
+      state.policy.max_requests_per_browser_task,
+    ),
+  };
 }
 
 function trackPendingOperationRequest(

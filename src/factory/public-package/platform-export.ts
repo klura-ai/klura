@@ -92,6 +92,10 @@ export interface ObservedSmokeResponseV1 {
   media_type: string | null;
   body_kind: PublicHttpResponseV1['body_kind'];
   body_preview: string;
+  /** The whole body, when it is small enough to carry. A reviewer widening a
+   *  schema to what the package's own call returned needs the answer itself,
+   *  not its first few hundred characters. */
+  body?: PublicHttpResponseV1['body'];
   denied_resources?: PublicDeniedResourceV1[];
   /** Which of the capability's declared selectors matched the responding page. */
   selector_matches?: Record<string, boolean>;
@@ -108,6 +112,7 @@ export interface PackageExportAuditIssueV1 {
 }
 
 const OBSERVED_BODY_PREVIEW_BYTES = 800;
+const OBSERVED_BODY_BYTES = 64 * 1024;
 
 function observedSmokeResponses(
   responses: ReadonlyArray<{ strategy_id: StableContractIdV1; response: PublicHttpResponseV1 }>,
@@ -125,6 +130,7 @@ function observedSmokeResponses(
         body.length > OBSERVED_BODY_PREVIEW_BYTES
           ? `${body.slice(0, OBSERVED_BODY_PREVIEW_BYTES)}… (${body.length} chars)`
           : body,
+      ...(body.length > OBSERVED_BODY_BYTES ? {} : { body: response.body }),
       ...(response.denied_resources === undefined || response.denied_resources.length === 0
         ? {}
         : { denied_resources: response.denied_resources }),
@@ -752,6 +758,9 @@ function smokeRemedy(diagnostic: PublicExecutionDiagnosticV1 | undefined): strin
   }
   if (diagnostic.kind === 'deadline_expired') {
     return `The call ran out of time during ${diagnostic.stage}. Declare the denied resources the page was still waiting for, loosen the origin traffic policy if it serialises the page's own loading, or raise call_timeouts, then retry.`;
+  }
+  if (diagnostic.kind === 'request_budget_exhausted') {
+    return `Rule ${diagnostic.rule_id} had used ${diagnostic.rule_requests} of ${diagnostic.rule_limit} requests and the task ${diagnostic.task_requests} of ${diagnostic.task_limit}. Raise the bound that ran out if the task needs that traffic, or remove the rule if the page only loads it for itself, then retry.`;
   }
   if (diagnostic.kind === 'response_limit_exceeded') {
     return `A response admitted by rule ${diagnostic.rule_id} was larger than the ${diagnostic.limit_bytes} bytes it may carry. Raise the rule's response bound if the task reads that response, or remove the rule if the page only loads it for itself, then retry.`;

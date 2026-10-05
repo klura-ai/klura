@@ -144,6 +144,19 @@ export type PublicExecutionDiagnosticV1 =
       limit_bytes: number;
     }
   | {
+      /** A request a rule admits arrived after the budget ran out. `rule_id`
+       *  and its counts say whether that rule's own allowance was spent or the
+       *  task's; a rule that spent its own names the bound a reviewer would
+       *  raise or the traffic they would leave refused. */
+      kind: 'request_budget_exhausted';
+      rule_id: string;
+      phase: 'navigation' | 'resource' | 'interaction' | 'runtime_request' | 'page_script';
+      rule_requests: number;
+      rule_limit: number;
+      task_requests: number;
+      task_limit: number;
+    }
+  | {
       /** A reviewed page program threw or its result was refused. A program
        *  that reads the page finds nothing there when the page never finished
        *  loading, so `denied_resources` names what the page had asked for and

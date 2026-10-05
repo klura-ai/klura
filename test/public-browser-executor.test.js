@@ -444,7 +444,18 @@ test('a signed CORS preflight uses the exact resource rule and wire budgets', as
   await limitedCdp.waitFor('Fetch.failRequest', 'limited-actual');
   assert.throws(
     () => limitedBoundary.assertHealthy(),
-    (error) => error?.code === 'request_budget_exhausted',
+    (error) => {
+      assert.equal(error?.code, 'request_budget_exhausted');
+      // The refusal says which rule's allowance was spent and how far the
+      // task had got, structurally.
+      assert.equal(error.diagnostic?.kind, 'request_budget_exhausted');
+      assert.equal(typeof error.diagnostic.rule_id, 'string');
+      assert.ok(
+        error.diagnostic.rule_requests >= error.diagnostic.rule_limit ||
+          error.diagnostic.task_requests >= error.diagnostic.task_limit,
+      );
+      return true;
+    },
   );
   await limitedBoundary.close();
 
