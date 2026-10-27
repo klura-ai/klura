@@ -66,10 +66,22 @@ function runnerArguments() {
   ];
 }
 
+// A test run never sees the developer's own klura home. A test that sets
+// KLURA_HOME itself still wins; one that does not would otherwise read the
+// real ~/.klura/config.json, so its verdict depended on the machine, and write
+// into the real skill store. The run gets a fresh home of its own, removed
+// when it ends. A KLURA_HOME already set by the caller is respected.
+const ownHome = process.env.KLURA_HOME
+  ? null
+  : fs.mkdtempSync(path.join(require('os').tmpdir(), 'klura-test-home-'));
+
 const result = childProcess.spawnSync(process.execPath, runnerArguments(), {
   cwd: runtimeRoot,
   stdio: 'inherit',
+  env: ownHome ? { ...process.env, KLURA_HOME: ownHome } : process.env,
 });
+
+if (ownHome) fs.rmSync(ownHome, { recursive: true, force: true });
 
 if (result.error) {
   process.stderr.write(`\nCould not start the test runner: ${result.error.message}\n`);
